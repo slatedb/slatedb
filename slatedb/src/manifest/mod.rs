@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
+use crate::clone::CloneSource;
 use crate::rand::DbRand;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
@@ -360,64 +361,78 @@ impl Manifest {
         filtered_handles
     }
 
-    pub(crate) fn cloned_from_union(manifests: Vec<Manifest>) -> Manifest {
-        if manifests.len() == 1 {
-            manifests[0].clone()
-        } else {
-            let mut ranges = vec![];
-            for manifest in &manifests {
-                let range = manifest.range();
-                if let Some(range) = range {
-                    ranges.push((manifest, range));
-                } else {
-                    warn!("manifest has no SST files [manifest={:?}]", manifest);
+    pub(crate) fn cloned_from_union(sources: Vec<CloneSource>, rand: Arc<DbRand>) -> Manifest {
+        let mut ranges = vec![];
+        for source in &sources {
+            let range = source.manifest.range();
+            if let Some(range) = range {
+                ranges.push((source, range));
+            } else {
+                warn!("manifest has no SST files [manifest={:?}]", source.manifest);
+            }
+        }
+        ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
+
+        // Ensure manifests are non-overlapping
+        let mut previous_range = None;
+        for (_, range) in ranges.iter() {
+            if let Some(previous_range) = previous_range {
+                if range.intersect(previous_range).is_some() {
+                    unreachable!("overlapping ranges found");
                 }
             }
-            ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
+            previous_range = Some(range);
+        }
 
-            // Ensure manifests are non-overlapping
-            let mut previous_range = None;
-            for (_, range) in ranges.iter() {
-                if let Some(previous_range) = previous_range {
-                    if range.intersect(previous_range).is_some() {
-                        unreachable!("overlapping ranges found");
-                    }
-                }
-                previous_range = Some(range);
+        // Now we can zip the manifests together
+        let mut external_dbs = vec![];
+        let mut core = ManifestCore::new();
+
+        for (source, _) in ranges {
+            let manifest = &source.manifest;
+
+            // First, we need to add all the external dbs
+            for parent_external_db in &manifest.external_dbs {
+                external_dbs.push(ExternalDb {
+                    path: parent_external_db.path.clone(),
+                    source_checkpoint_id: parent_external_db.source_checkpoint_id,
+                    final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                    sst_ids: parent_external_db.sst_ids.clone(),
+                });
+            }
+            // Then, we can add all the l0 ssts
+            for sst in &manifest.core.l0 {
+                core.l0.push_back(sst.clone());
+            }
+            // Finally, we can add all the sorted runs
+            for sorted_run in &manifest.core.compacted {
+                core.compacted.push(sorted_run.clone());
             }
 
-            // Now we can zip the manifests together
-            let mut external_dbs = vec![];
-            let mut core = ManifestCore::new();
-
-            for (manifest, _) in ranges {
-                // First, we need to add all the external dbs
-                external_dbs.extend_from_slice(&manifest.external_dbs);
-                // Then, we can add all the l0 ssts
-                for sst in &manifest.core.l0 {
-                    core.l0.push_back(sst.clone());
-                }
-                // Finally, we can add all the sorted runs
-                for sorted_run in &manifest.core.compacted {
-                    core.compacted.push(sorted_run.clone());
-                }
+            let owned_ssts = manifest.owned_ssts();
+            if !owned_ssts.is_empty() {
+                external_dbs.push(ExternalDb {
+                    path: source.path.clone().into(),
+                    source_checkpoint_id: source.checkpoint.id,
+                    final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                    sst_ids: owned_ssts,
+                });
             }
+        }
 
-            // Renumber sorted runs to ensure sequential IDs without duplicates
-            for (idx, sorted_run) in core.compacted.iter_mut().enumerate() {
-                sorted_run.id = idx as u32;
-            }
+        // Renumber sorted runs to ensure sequential IDs without duplicates
+        for (idx, sorted_run) in core.compacted.iter_mut().enumerate() {
+            sorted_run.id = idx as u32;
+        }
 
-            for manifest in &manifests {
-                core.last_l0_seq = max(core.last_l0_seq, manifest.core.last_l0_seq);
-            }
-
-            Self {
-                external_dbs,
-                core,
-                writer_epoch: 0,
-                compactor_epoch: 0,
-            }
+        for source in &sources {
+            core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
+        }
+        Self {
+            external_dbs,
+            core,
+            writer_epoch: 0,
+            compactor_epoch: 0,
         }
     }
 
@@ -470,8 +485,44 @@ impl Manifest {
         external_ssts
     }
 
+    pub(crate) fn owned_ssts(&self) -> Vec<SsTableId> {
+        // SST IDs already tracked by the source's own external_dbs
+        let source_external_sst_ids: HashSet<SsTableId> = self
+            .external_dbs
+            .iter()
+            .flat_map(|db| db.sst_ids.iter().copied())
+            .collect();
+        // Owned SSTs = SSTs in core not already delegated to an external_db
+        let owned_sst_ids: Vec<SsTableId> = self
+            .core
+            .compacted
+            .iter()
+            .flat_map(|sr| sr.sst_views.iter().map(|s| s.sst.id))
+            .chain(self.core.l0.iter().map(|s| s.sst.id))
+            .filter(|id| !source_external_sst_ids.contains(id))
+            .collect();
+        owned_sst_ids
+    }
+
     pub(crate) fn has_wal_sst_reference(&self, wal_sst_id: u64) -> bool {
         wal_sst_id > self.core.replay_after_wal_id && wal_sst_id < self.core.next_wal_sst_id
+    }
+
+    /// Shrinks each `ExternalDb.sst_ids` to only IDs still referenced by this manifest's
+    /// L0 and compacted sorted runs. `ExternalDb` entries are retained even when their
+    /// `sst_ids` becomes empty — detaching a clone from its parent is done by the GC,
+    /// not here, because it also requires that no live checkpoint references those IDs.
+    pub(crate) fn prune_external_sst_ids(&mut self) {
+        let used_sst_ids: HashSet<SsTableId> = self
+            .core
+            .compacted
+            .iter()
+            .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
+            .chain(self.core.l0.iter().map(|v| v.sst.id))
+            .collect();
+        for external_db in self.external_dbs.iter_mut() {
+            external_db.sst_ids.retain(|id| used_sst_ids.contains(id));
+        }
     }
 }
 
@@ -482,11 +533,13 @@ mod tests {
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     use super::{ExternalDb, Manifest};
+    use crate::clone::CloneSource;
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::ManifestCore;
     use crate::rand::DbRand;
+    use crate::Checkpoint;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -821,11 +874,13 @@ mod tests {
     })]
     fn test_union(#[case] test_case: UnionTestCase) {
         let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
-        let manifests: Vec<Manifest> = test_case
+        let rand = Arc::new(DbRand::default());
+        let sources: Vec<crate::clone::CloneSource> = test_case
             .manifests
             .iter()
-            .map(|m| {
-                build_manifest(m, |alias| {
+            .enumerate()
+            .map(|(i, m)| {
+                let manifest = build_manifest(m, |alias| {
                     if let Some(sst_id) = sst_ids.get(alias) {
                         *sst_id
                     } else {
@@ -833,14 +888,19 @@ mod tests {
                         sst_ids.insert(alias.to_string(), sst_id);
                         sst_id
                     }
-                })
+                });
+                CloneSource {
+                    manifest,
+                    path: Path::from(format!("/tmp/db{}", i)),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                }
             })
             .collect();
 
         let expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
-        let union = Manifest::cloned_from_union(manifests);
+        let union = Manifest::cloned_from_union(sources, rand);
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
@@ -872,7 +932,22 @@ mod tests {
             |_| SsTableId::Compacted(Ulid::new()),
         );
 
-        let union = Manifest::cloned_from_union(vec![manifest1, manifest2]);
+        let rand = Arc::new(DbRand::default());
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: manifest1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: manifest2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            rand,
+        );
 
         // After union, we should have 5 SRs with IDs 0, 1, 2, 3, 4
         assert_eq!(union.core.compacted.len(), 5);
@@ -907,9 +982,141 @@ mod tests {
         );
         manifest2.core.last_l0_seq = 200;
 
-        let union = Manifest::cloned_from_union(vec![manifest1, manifest2]);
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: manifest1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: manifest2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
 
         assert_eq!(union.core.last_l0_seq, 200);
+    }
+
+    #[test]
+    fn test_union_external_dbs() {
+        // manifest1 is clone-like: owns own_sst in core and inherits grandparent_sst
+        // via an existing external_db entry. manifest2 is a plain source.
+        // The union must: add each source as an ExternalDb (owned SSTs only),
+        // carry over inherited chains, and resolve all SSTs to the correct paths.
+        let rand = Arc::new(DbRand::default());
+
+        let parent1_sst1 = SsTableId::Compacted(Ulid::new());
+        let parent2_sst1 = SsTableId::Compacted(Ulid::new());
+        let grandparent_sst = SsTableId::Compacted(Ulid::new());
+        let grandparent_source_cp = Uuid::new_v4();
+        let grandparent_final_cp = Uuid::new_v4();
+
+        let mut manifest1 = build_manifest(
+            &SimpleManifest {
+                l0: vec![SstEntry::projected("own", "a", "a".."m")],
+                sorted_runs: vec![],
+            },
+            |_| parent1_sst1,
+        );
+        manifest1.external_dbs.push(ExternalDb {
+            path: "/tmp/grandparent".to_string(),
+            source_checkpoint_id: grandparent_source_cp,
+            final_checkpoint_id: Some(grandparent_final_cp),
+            sst_ids: vec![grandparent_sst],
+        });
+
+        let manifest2 = build_manifest(
+            &SimpleManifest {
+                l0: vec![SstEntry::projected("sst2", "m", "m"..)],
+                sorted_runs: vec![],
+            },
+            |_| parent2_sst1,
+        );
+
+        let cp1 = Uuid::new_v4();
+        let cp2 = Uuid::new_v4();
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: manifest1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(cp1),
+                },
+                CloneSource {
+                    manifest: manifest2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(cp2),
+                },
+            ],
+            rand,
+        );
+
+        // db1 (owned SSTs only), grandparent (carried over), db2
+        assert_eq!(union.external_dbs.len(), 3);
+
+        let db1 = union
+            .external_dbs
+            .iter()
+            .find(|e| e.path == "tmp/db1")
+            .unwrap();
+        assert_eq!(db1.source_checkpoint_id, cp1);
+        assert!(db1.final_checkpoint_id.is_some());
+        assert_eq!(db1.sst_ids, vec![parent1_sst1]); // grandparent_sst must not leak in
+
+        let db2 = union
+            .external_dbs
+            .iter()
+            .find(|e| e.path == "tmp/db2")
+            .unwrap();
+        assert_eq!(db2.source_checkpoint_id, cp2);
+        assert!(db2.final_checkpoint_id.is_some());
+        assert_eq!(db2.sst_ids, vec![parent2_sst1]);
+
+        let grandparent = union
+            .external_dbs
+            .iter()
+            .find(|e| e.path == "/tmp/grandparent")
+            .unwrap();
+        // source_checkpoint_id is preserved so the union still depends on the
+        // same checkpoint on grandparent that the parent's clone depends on.
+        assert_eq!(grandparent.source_checkpoint_id, grandparent_source_cp);
+        // final_checkpoint_id must be regenerated — the union clone owns its own
+        // checkpoint and must not claim ownership over the parent's.
+        assert!(grandparent.final_checkpoint_id.is_some());
+        assert_ne!(
+            grandparent.final_checkpoint_id,
+            Some(grandparent_final_cp),
+            "inherited final_checkpoint_id must be regenerated"
+        );
+
+        // All three SSTs must resolve to their correct source paths
+        let external_ssts = union.external_ssts();
+        assert_eq!(
+            external_ssts.get(&parent1_sst1),
+            Some(&Path::from("/tmp/db1"))
+        );
+        assert_eq!(
+            external_ssts.get(&parent2_sst1),
+            Some(&Path::from("/tmp/db2"))
+        );
+        assert_eq!(
+            external_ssts.get(&grandparent_sst),
+            Some(&Path::from("/tmp/grandparent"))
+        );
+    }
+
+    fn new_checkpoint(id: Uuid) -> Checkpoint {
+        Checkpoint {
+            id,
+            manifest_id: 1,
+            create_time: DefaultSystemClock::new().now(),
+            expire_time: None,
+            name: None,
+        }
     }
 
     #[test]
@@ -1121,6 +1328,50 @@ mod tests {
 
         assert_eq!(projected.external_dbs.len(), 1);
         assert_eq!(projected.external_dbs[0].path, "/path/to/db1");
+    }
+
+    #[test]
+    fn test_prune_external_sst_ids_shrinks_and_keeps_entries() {
+        let live_l0 = SsTableId::Compacted(Ulid::new());
+        let live_compacted = SsTableId::Compacted(Ulid::new());
+        let stale_a = SsTableId::Compacted(Ulid::new());
+        let stale_b = SsTableId::Compacted(Ulid::new());
+
+        let mut core = ManifestCore::new();
+        core.l0.push_back(create_sst_view(live_l0, b"a"));
+        core.compacted.push(SortedRun {
+            id: 0,
+            sst_views: vec![create_sst_view(live_compacted, b"b")],
+        });
+
+        let mut manifest = Manifest::initial(core);
+        manifest.external_dbs = vec![
+            // Mix of live and stale IDs: stale ones should be pruned, live kept.
+            ExternalDb {
+                path: "/path/to/partially_referenced".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![live_l0, stale_a, live_compacted],
+            },
+            // No live IDs: entry must be retained (with empty sst_ids) so that GC can
+            // later detach using the final_checkpoint_id.
+            ExternalDb {
+                path: "/path/to/fully_compacted".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![stale_a, stale_b],
+            },
+        ];
+
+        manifest.prune_external_sst_ids();
+
+        assert_eq!(manifest.external_dbs.len(), 2);
+        assert_eq!(
+            manifest.external_dbs[0].sst_ids,
+            vec![live_l0, live_compacted]
+        );
+        assert!(manifest.external_dbs[1].sst_ids.is_empty());
+        assert!(manifest.external_dbs[1].final_checkpoint_id.is_some());
     }
 
     fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8; 1]) -> SsTableView {

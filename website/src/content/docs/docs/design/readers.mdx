@@ -3,7 +3,7 @@ title: Readers
 description: How DbReader serves read-only traffic from a checkpointed manifest
 ---
 
-[`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) is SlateDB's read-only handle. It implements the same [`DbRead`](https://docs.rs/slatedb/latest/slatedb/trait.DbRead.html) operations as [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html), but it does not own a mutable memtable and it does not write WAL records. It reads from a [checkpointed](/docs/design/checkpoints) manifest, the SSTs referenced by that manifest. When WAL replay is enabled, it also updates reader-local immutable memtables from newer WAL SSTs.
+[`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) is SlateDB's read-only handle. It implements the same [`DbReadOps`](https://docs.rs/slatedb/latest/slatedb/trait.DbReadOps.html) operations as [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html), but it does not own a mutable memtable and it does not write WAL records. It reads from a [checkpointed](/docs/design/checkpoints) manifest, the SSTs referenced by that manifest. When WAL replay is enabled, it also updates reader-local immutable memtables from newer WAL SSTs.
 
 ## Opening
 

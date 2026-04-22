@@ -555,10 +555,11 @@ mod tests {
     use proptest::prelude::Just;
     use proptest::strategy::Strategy;
     use proptest::test_runner::Config;
-    use proptest::{prop_oneof, proptest};
+    use proptest::{prop_assume, prop_oneof, proptest};
     use rstest::rstest;
     use slatedb_common::clock::DefaultSystemClock;
     use std::cmp::Ordering;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     async fn write_sst(
@@ -595,6 +596,18 @@ mod tests {
 
         output_ssts.push(writer.close().await.unwrap());
         output_ssts
+    }
+
+    fn has_duplicate_key_seq_specs(
+        l0_specs: &[Vec<(Bytes, u64, ValueDeletable)>],
+        sr_specs: &[Vec<(Bytes, u64, ValueDeletable)>],
+    ) -> bool {
+        let mut seen = HashSet::new();
+        l0_specs
+            .iter()
+            .chain(sr_specs.iter())
+            .flatten()
+            .any(|(key, seq, _value)| !seen.insert((key.clone(), *seq)))
     }
 
     #[rstest]
@@ -1145,6 +1158,7 @@ mod tests {
                 RESUME_POINTS_MIN..=RESUME_POINTS_MAX,
             ),
         )| {
+            prop_assume!(!has_duplicate_key_seq_specs(&l0_specs, &sr_specs));
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let l0_entry_sets = l0_specs

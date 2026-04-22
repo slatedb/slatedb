@@ -2,7 +2,8 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
-use crate::db_read::DbRead;
+use crate::db_metadata::DbMetadataOps;
+use crate::db_read::DbReadOps;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -1055,36 +1056,10 @@ impl DbReader {
 
         Ok(())
     }
-
-    /// Subscribe to database status changes.
-    ///
-    /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
-    /// deadlock warnings. The `durable_seq` and `current_manifest` fields are
-    /// updated whenever the reader's current checkpoint/manifest view changes
-    /// or it replays additional durable WAL data.
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_manager.subscribe()
-    }
-
-    /// Returns the latest reader status snapshot.
-    ///
-    /// See [`Db::status`](crate::Db::status) for full semantics.
-    pub fn status(&self) -> DbStatus {
-        self.inner.status()
-    }
-
-    /// Get the current manifest state.
-    ///
-    /// This returns the reader's current manifest snapshot, paired with its
-    /// manifest version ID.
-    pub fn manifest(&self) -> VersionedManifest {
-        let state = Arc::clone(&self.inner.state.read());
-        VersionedManifest::from(state.as_ref())
-    }
 }
 
 #[async_trait::async_trait]
-impl DbRead for DbReader {
+impl DbReadOps for DbReader {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
@@ -1111,6 +1086,38 @@ impl DbRead for DbReader {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+}
+
+impl DbMetadataOps for DbReader {
+    fn manifest(&self) -> VersionedManifest {
+        let state = Arc::clone(&self.inner.state.read());
+        VersionedManifest::from(state.as_ref())
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.inner.status_manager.subscribe()
+    }
+
+    fn status(&self) -> DbStatus {
+        self.inner.status()
+    }
+}
+
+impl DbReader {
+    /// See [`DbMetadataOps::manifest`].
+    pub fn manifest(&self) -> VersionedManifest {
+        <Self as DbMetadataOps>::manifest(self)
+    }
+
+    /// See [`DbMetadataOps::subscribe`].
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        <Self as DbMetadataOps>::subscribe(self)
+    }
+
+    /// See [`DbMetadataOps::status`].
+    pub fn status(&self) -> DbStatus {
+        <Self as DbMetadataOps>::status(self)
     }
 }
 

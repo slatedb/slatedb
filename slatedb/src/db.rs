@@ -22,6 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
+use crate::db_metadata::DbMetadataOps;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -51,7 +52,7 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_read::DbRead;
+use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -1303,9 +1304,13 @@ impl Db {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        let mut batch = WriteBatch::new();
-        batch.merge(key, value);
-        self.write(batch).await
+        self.merge_with_options(
+            key,
+            value,
+            &MergeOptions::default(),
+            &WriteOptions::default(),
+        )
+        .await
     }
 
     /// Merge a value into the database with custom `MergeOptions` and `WriteOptions`.
@@ -1368,6 +1373,10 @@ impl Db {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        if self.inner.flush_merge_operator.is_none() {
+            return Err(SlateDBError::MergeOperatorMissing.into());
+        }
+
         let mut batch = WriteBatch::new();
         batch.merge_with_options(key, value, merge_opts);
         self.write_with_options(batch, write_opts).await
@@ -1530,14 +1539,6 @@ impl Db {
         self.inner.flush(options, true).await.map_err(Into::into)
     }
 
-    /// Get the current manifest state.
-    ///
-    /// This returns the in-memory manifest snapshot currently held by the `Db`,
-    /// paired with its manifest version ID.
-    pub fn manifest(&self) -> VersionedManifest {
-        self.inner.manifest()
-    }
-
     /// Refresh the manifest immediately and wait for it to complete.
     ///
     /// The database normally refreshes its manifest on a background timer
@@ -1560,50 +1561,6 @@ impl Db {
             .refresh_manifest()
             .await
             .map_err(Into::into)
-    }
-
-    /// Subscribe to database state changes.
-    ///
-    /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
-    /// reflects the latest database status. The status includes the latest
-    /// durable sequence number and the current in-memory manifest snapshot
-    /// observed by this handle. For example, you can wait for a specific
-    /// sequence number to become durable:
-    ///
-    /// ```ignore
-    /// let seq = 42; // sequence number from a write operation
-    /// let mut rx = db.subscribe();
-    /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("db dropped");
-    /// ```
-    ///
-    /// # Deadlock risk
-    ///
-    /// The returned receiver holds a read lock on the current value while
-    /// borrowed (via [`borrow`](tokio::sync::watch::Receiver::borrow),
-    /// [`borrow_and_update`](tokio::sync::watch::Receiver::borrow_and_update),
-    /// or the guard returned by [`wait_for`](tokio::sync::watch::Receiver::wait_for)).
-    /// The database must acquire a write lock to publish new status updates.
-    /// Holding the read guard for an extended period will block all database
-    /// status updates and may cause a deadlock. See the [deadlock warning in
-    /// `Receiver::borrow`](https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.borrow)
-    /// for details. Always clone or copy the data you need:
-    ///
-    /// ```ignore
-    /// // Good: clone the status and release the lock immediately.
-    /// let status = rx.borrow().clone();
-    /// some_async_fn(status.durable_seq).await;
-    /// some_other_async_fn(status.current_manifest.clone()).await;
-    ///
-    /// // Good: copy the durable seq and releate the lock immediately.
-    /// let durable_seq = rx.borrow().durable_seq; // uses Copy trait
-    /// some_async_fn(durable_seq).await;
-    ///
-    /// // Bad: holding the status across an await blocks all senders.
-    /// let status = rx.borrow();
-    /// some_async_fn(status.durable_seq).await; // deadlock!
-    /// ```
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_manager.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -1664,18 +1621,10 @@ impl Db {
         };
         Ok(object_store)
     }
-
-    /// Returns the latest database status.
-    ///
-    /// This is a snapshot of the current state and will not update automatically.
-    /// Use [`subscribe`](Db::subscribe) to receive real-time updates.
-    pub fn status(&self) -> DbStatus {
-        self.inner.status()
-    }
 }
 
 #[async_trait::async_trait]
-impl DbRead for Db {
+impl DbReadOps for Db {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
@@ -1702,6 +1651,37 @@ impl DbRead for Db {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+}
+
+impl DbMetadataOps for Db {
+    fn manifest(&self) -> VersionedManifest {
+        self.inner.manifest()
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.inner.status_manager.subscribe()
+    }
+
+    fn status(&self) -> DbStatus {
+        self.inner.status()
+    }
+}
+
+impl Db {
+    /// See [`DbMetadataOps::manifest`].
+    pub fn manifest(&self) -> VersionedManifest {
+        <Self as DbMetadataOps>::manifest(self)
+    }
+
+    /// See [`DbMetadataOps::subscribe`].
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        <Self as DbMetadataOps>::subscribe(self)
+    }
+
+    /// See [`DbMetadataOps::status`].
+    pub fn status(&self) -> DbStatus {
+        <Self as DbMetadataOps>::status(self)
     }
 }
 
@@ -6177,40 +6157,66 @@ mod tests {
 
     #[tokio::test]
     async fn should_error_when_merging_without_merge_operator() {
-        // Given: Database without merge operator configured
+        // Given: Database with merge operator, merge operands written
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_merge_4", object_store.clone())
+        let path = "/tmp/test_merge_4";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        db.merge(b"key1", b"value1").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // When: Reopening the DB without a merge operator and then reading
+        let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
             .build()
             .await
             .unwrap();
 
-        // When: Attempting to merge and then reading
-        // Note: Merge writes succeed, but reads will fail to merge operands
-        db.merge(b"key1", b"value1").await.unwrap();
+        // Then: Reading should fail because merge operands require a merge operator
+        let err = db.get(b"key1").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+    }
 
-        // Then: Reading should fail because merge operator is required at read time
-        // The merge operand is stored but can't be merged without an operator
-        let result = db.get(b"key1").await;
+    #[tokio::test]
+    async fn should_error_when_writing_merge_without_merge_operator() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_4_write_fails", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
 
-        // Verify that reading fails with MergeOperatorMissing error
-        assert!(
-            result.is_err(),
-            "Reading merge operand without merge operator should error"
-        );
-        match result {
-            Err(e) => {
-                // Expected: reading merge operands without a merge operator should error with MergeOperatorMissing
-                let error_string = format!("{}", e);
-                assert!(
-                    error_string.contains("merge operator missing")
-                        || error_string.contains("MergeOperatorMissing"),
-                    "Error should be MergeOperatorMissing, got: {:?}",
-                    e
-                );
-            }
-            Ok(_) => unreachable!("Should have errored"),
-        }
+        let err = db.merge(b"key1", b"value1").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn should_error_when_writing_batch_with_merge_without_merge_operator() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_4_batch_write_fails", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.merge(b"key2", b"value2");
+
+        let err = db.write(batch).await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+
+        assert_eq!(db.get(b"key1").await.unwrap(), None);
+        assert_eq!(db.get(b"key2").await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -6344,6 +6350,7 @@ mod tests {
                 interval: None,
                 min_age: Duration::from_millis(0),
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())

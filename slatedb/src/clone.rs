@@ -135,9 +135,7 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                     ),
                     [..] => {
                         validate_no_wal(&sources)?;
-                        Manifest::cloned_from_union(
-                            sources.iter().map(|s| s.manifest.clone()).collect(),
-                        )
+                        Manifest::cloned_from_union(sources, rand)
                     }
                 };
 
@@ -200,7 +198,7 @@ fn to_byte_range<T: RangeBounds<Bytes> + Clone>(bounds: &T) -> BytesRange {
 }
 
 #[derive(Clone)]
-struct CloneSource {
+pub(crate) struct CloneSource {
     pub path: Path,
     pub manifest: Manifest,
     pub checkpoint: Checkpoint,

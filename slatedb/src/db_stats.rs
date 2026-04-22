@@ -29,9 +29,7 @@ pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_fals
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
 pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_count");
 
-#[non_exhaustive]
-#[derive(Clone)]
-pub(crate) struct DbStats {
+pub(crate) struct DbStatsInner {
     pub(crate) immutable_memtable_flushes: Arc<dyn CounterFn>,
     pub(crate) wal_buffer_estimated_bytes: Arc<dyn GaugeFn>,
     pub(crate) wal_buffer_flushes: Arc<dyn CounterFn>,
@@ -52,9 +50,23 @@ pub(crate) struct DbStats {
     pub(crate) merge_operator_flush_operands: Arc<dyn CounterFn>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DbStats {
+    inner: Arc<DbStatsInner>,
+}
+
+impl std::ops::Deref for DbStats {
+    type Target = DbStatsInner;
+
+    #[inline]
+    fn deref(&self) -> &DbStatsInner {
+        &self.inner
+    }
+}
+
 impl DbStats {
     pub(crate) fn new(recorder: &MetricsRecorderHelper) -> DbStats {
-        DbStats {
+        let inner = DbStatsInner {
             immutable_memtable_flushes: recorder.counter(IMMUTABLE_MEMTABLE_FLUSHES).register(),
             wal_buffer_estimated_bytes: recorder.gauge(WAL_BUFFER_ESTIMATED_BYTES).register(),
             wal_buffer_flushes: recorder.counter(WAL_BUFFER_FLUSHES).register(),
@@ -92,6 +104,9 @@ impl DbStats {
                 .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_FLUSH_PATH)])
                 .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
                 .register(),
+        };
+        DbStats {
+            inner: Arc::new(inner),
         }
     }
 }
