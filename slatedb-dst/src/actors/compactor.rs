@@ -20,7 +20,7 @@ use rand::RngCore;
 use slatedb::config::CompactorOptions;
 use slatedb::{CloseReason, CompactorBuilder, Error, ErrorKind};
 use tokio::task::JoinHandle;
-use tracing::instrument;
+use tracing::{instrument, Instrument, Span};
 
 use crate::ActorCtx;
 
@@ -78,5 +78,5 @@ fn spawn_compactor(
         .with_system_clock(ctx.system_clock())
         .with_seed(compactor_seed)
         .build();
-    tokio::spawn(async move { compactor.run().await })
+    tokio::spawn(async move { compactor.run().await }.instrument(Span::current()))
 }
