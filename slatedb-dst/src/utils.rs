@@ -4,13 +4,12 @@ use std::time::Duration;
 
 use rand::Rng;
 use slatedb::config::{
-    CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions, WriteOptions,
+    CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
 use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
-const KEY_COUNT: usize = 32;
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
 const GIB_2: usize = 2048 * MIB_1;
@@ -90,15 +89,9 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     settings
 }
 
-pub(crate) fn workload_key(rand_value: u64) -> String {
-    let key_index = ((rand_value >> 8) as usize) % KEY_COUNT;
-    format!("key-{key_index}")
-}
-
-pub(crate) fn nondurable_write_options() -> WriteOptions {
-    let mut write_options = WriteOptions::default();
-    write_options.await_durable = false;
-    write_options
+pub(crate) fn workload_key_with_prefix(prefix: &str, rand_value: u64, key_count: usize) -> String {
+    let key_index = ((rand_value >> 8) as usize) % key_count;
+    format!("{prefix}-{key_index}")
 }
 
 // A flag so we only initialize logging once.

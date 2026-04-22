@@ -104,9 +104,9 @@ use rand::RngCore;
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
-    actors::{clock, shutdown, writer}, utils::build_settings, DeterministicLocalFilesystem,
-    FailingObjectStore, FailingObjectStoreController, Harness, Operation, StreamDirection, Toxic,
-    ToxicKind,
+    actors::{clock, shutdown, writer, WorkloadKeyspace}, utils::build_settings,
+    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
+    Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -143,6 +143,7 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         system_clock.clone(),
     ));
     let shutdown_at_millis = 10u64;
+    let workload_keyspace = WorkloadKeyspace::default();
 
     Harness::new("smoke", 7, move |ctx| async move {
         let db_seed = ctx.rand().rng().next_u64();
@@ -163,7 +164,7 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         .with_system_clock(system_clock)
         .with_main_object_store(main_store)
         .with_wal_object_store(wal_store)
-        .actor("writer", 1, writer)
+        .actor_with_state("writer", 1, workload_keyspace, writer)
         .actor("clock", 1, clock)
         .actor_with_state("shutdown", 1, shutdown_at_millis, shutdown)
         .run()?;

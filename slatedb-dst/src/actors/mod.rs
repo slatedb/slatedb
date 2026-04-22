@@ -29,3 +29,22 @@ pub use self::writer::writer;
 
 /// Emit one progress log line every N completed steps for the looping actors.
 const PROGRESS_LOG_INTERVAL: u64 = 10;
+
+/// Shared keyspace configuration for workload actors that map random samples
+/// onto a fixed logical key range.
+#[derive(Clone, Debug)]
+pub struct WorkloadKeyspace {
+    /// Prefix applied to all generated workload keys.
+    pub prefix: String,
+    /// Number of logical keys to map random samples onto.
+    pub key_count: usize,
+}
+
+impl Default for WorkloadKeyspace {
+    fn default() -> Self {
+        Self {
+            prefix: "key".to_string(),
+            key_count: 32,
+        }
+    }
+}

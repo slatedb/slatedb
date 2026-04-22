@@ -27,20 +27,16 @@ use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    actors::{clock, compactor, deleter, flusher, shutdown, writer, CompactorActorOptions},
+    actors::{
+        clock, compactor, deleter, flusher, shutdown, writer, CompactorActorOptions,
+        WorkloadKeyspace,
+    },
     utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 use tracing::instrument;
-
-/// Split actor counts that preserve the old relative workload mix of roughly
-/// 50% writes, 20% deletes, and 5% memtable flushes.
-const WRITER_COUNT: usize = 10;
-const DELETER_COUNT: usize = 4;
-const FLUSHER_COUNT: usize = 1;
-const SHUTDOWN_AT_MILLIS: i64 = 100;
 
 #[test]
 fn test_dst_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
@@ -119,6 +115,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
+    let workload_keyspace = WorkloadKeyspace::default();
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(10),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
@@ -156,9 +153,10 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
-    .actor("writer", WRITER_COUNT, writer)
-    .actor("deleter", DELETER_COUNT, deleter)
-    .actor("flusher", FLUSHER_COUNT, flusher)
+    // Split actor to roughly 70% writes, 20% deletes, and 10% flushes.
+    .actor_with_state("writer", 7, workload_keyspace.clone(), writer)
+    .actor_with_state("deleter", 2, workload_keyspace, deleter)
+    .actor("flusher", 1, flusher)
     .actor_with_state(
         "compactor",
         1,
@@ -169,7 +167,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         compactor,
     )
     .actor("clock", 1, clock)
-    .actor_with_state("shutdown", 1, SHUTDOWN_AT_MILLIS, shutdown)
+    .actor_with_state("shutdown", 1, 100, shutdown)
     .run()?;
 
     let next_u64 = rand.rng().next_u64();
