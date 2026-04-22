@@ -93,7 +93,7 @@ impl<B: BlockLike> AscendingState<B> {
     }
 
     fn decode_entry_at_current_offset(&self) -> Result<(RowEntry, usize), SlateDBError> {
-        let mut data = &self.block.data()[self.offset_in_block..];
+        let mut data = self.block.data().slice(self.offset_in_block..);
         let codec = SstRowCodecV2::new();
         let entry = codec.decode(&mut data)?;
         let bytes_consumed = self.block.data().len() - self.offset_in_block - data.len();
@@ -216,7 +216,7 @@ impl<B: BlockLike> AscendingState<B> {
     }
 
     fn advance_past_current_entry(&mut self) -> Result<(), SlateDBError> {
-        let mut data = &self.block.data()[self.offset_in_block..];
+        let mut data = self.block.data().slice(self.offset_in_block..);
         let codec = SstRowCodecV2::new();
         codec.decode(&mut data)?;
         let bytes_consumed = self.block.data().len() - self.offset_in_block - data.len();
