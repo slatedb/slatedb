@@ -6,6 +6,7 @@ use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorDirectoryOptions;
 use slatedb::config::GarbageCollectorOptions;
+use slatedb::config::GarbageCollectorScheduleOptions;
 use slatedb::config::SizeTieredCompactionSchedulerOptions;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -161,11 +162,10 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
                 ),
                 min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
-            detach_options: Some(GarbageCollectorDirectoryOptions {
+            detach_options: Some(GarbageCollectorScheduleOptions {
                 interval: Some(
                     rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
                 ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
         }),
         compactor_options: None,

@@ -1188,8 +1188,8 @@ pub struct GarbageCollectorOptions {
     /// manifest or any live checkpoint), the detach pass removes the pinning
     /// checkpoint from the parent and drops the external DB entry from the clone.
     ///
-    /// None means detach is disabled. `min_age` is currently ignored.
-    pub detach_options: Option<GarbageCollectorDirectoryOptions>,
+    /// None means detach is disabled.
+    pub detach_options: Option<GarbageCollectorScheduleOptions>,
 }
 
 impl GarbageCollectorOptions {
@@ -1234,6 +1234,27 @@ pub struct GarbageCollectorDirectoryOptions {
     pub min_age: Duration,
 }
 
+/// Schedule options for a GC task that has no file-age threshold.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct GarbageCollectorScheduleOptions {
+    /// The interval at which the task will run in the background thread.
+    ///
+    /// If set to None, recurring execution is disabled, but a one-time pass
+    /// can still be triggered via
+    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
+    #[serde(deserialize_with = "deserialize_option_duration")]
+    #[serde(serialize_with = "serialize_option_duration")]
+    pub interval: Option<Duration>,
+}
+
+impl Default for GarbageCollectorScheduleOptions {
+    fn default() -> Self {
+        Self {
+            interval: Some(DEFAULT_INTERVAL),
+        }
+    }
+}
+
 /// Default options for the garbage collector.
 ///
 /// By default, garbage collection is enabled for all managed directories
@@ -1249,7 +1270,7 @@ impl Default for GarbageCollectorOptions {
             wal_options: Some(GarbageCollectorDirectoryOptions::default()),
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
-            detach_options: Some(GarbageCollectorDirectoryOptions::default()),
+            detach_options: Some(GarbageCollectorScheduleOptions::default()),
         }
     }
 }

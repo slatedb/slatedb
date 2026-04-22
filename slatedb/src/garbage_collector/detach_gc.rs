@@ -1,5 +1,5 @@
 use crate::{
-    config::GarbageCollectorDirectoryOptions,
+    config::GarbageCollectorScheduleOptions,
     error::SlateDBError,
     manifest::{
         store::{ManifestStore, StoredManifest},
@@ -43,7 +43,7 @@ pub(crate) struct DetachGcTask {
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
     stats: Arc<GcStats>,
-    detach_options: GarbageCollectorDirectoryOptions,
+    detach_options: GarbageCollectorScheduleOptions,
 }
 
 impl std::fmt::Debug for DetachGcTask {
@@ -60,7 +60,7 @@ impl DetachGcTask {
         object_store: Arc<dyn ObjectStore>,
         system_clock: Arc<dyn SystemClock>,
         stats: Arc<GcStats>,
-        detach_options: GarbageCollectorDirectoryOptions,
+        detach_options: GarbageCollectorScheduleOptions,
     ) -> Self {
         Self {
             manifest_store,
@@ -301,10 +301,7 @@ mod tests {
             object_store,
             clock(),
             new_stats(),
-            GarbageCollectorDirectoryOptions {
-                interval: None,
-                min_age: std::time::Duration::from_secs(0),
-            },
+            GarbageCollectorScheduleOptions { interval: None },
         )
     }
 
