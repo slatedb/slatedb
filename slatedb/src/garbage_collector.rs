@@ -26,9 +26,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
 use compactions_gc::CompactionsGcTask;
+use detach_gc::DetachGcTask;
 use futures::stream::BoxStream;
 use log::{error, info};
 use manifest_gc::ManifestGcTask;
+use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
@@ -39,6 +41,7 @@ use wal_gc::WalGcTask;
 
 mod compacted_gc;
 mod compactions_gc;
+mod detach_gc;
 mod manifest_gc;
 pub mod stats;
 mod wal_gc;
@@ -58,6 +61,7 @@ pub(crate) enum GcMessage {
     Compacted,
     Compactions,
     Manifest,
+    Detach,
 }
 
 /// SlateDB's garbage collector.
@@ -85,6 +89,7 @@ pub struct GarbageCollector {
     wal_gc_task: Option<WalGcTask>,
     compacted_gc_task: Option<CompactedGcTask>,
     compactions_gc_task: Option<CompactionsGcTask>,
+    detach_gc_task: Option<DetachGcTask>,
 }
 
 #[async_trait]
@@ -114,6 +119,12 @@ impl MessageHandler<GcMessage> for GarbageCollector {
             tickers.push((
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Compactions),
+            ));
+        }
+        if let Some(opts) = self.options.detach_options {
+            tickers.push((
+                opts.interval.unwrap_or(DEFAULT_INTERVAL),
+                Box::new(|| GcMessage::Detach),
             ));
         }
 
@@ -150,6 +161,13 @@ impl MessageHandler<GcMessage> for GarbageCollector {
                     .expect("got compactions tick with unconfigured compactions task");
                 self.run_gc_task(task).await;
             }
+            GcMessage::Detach => {
+                let task = self
+                    .detach_gc_task
+                    .as_ref()
+                    .expect("got detach tick with unconfigured detach task");
+                self.run_gc_task(task).await;
+            }
         }
         Ok(())
     }
@@ -183,6 +201,7 @@ impl GarbageCollector {
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
+        object_store: Arc<dyn ObjectStore>,
         options: GarbageCollectorOptions,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
@@ -215,6 +234,15 @@ impl GarbageCollector {
         let manifest_gc_task = options.manifest_options.map(|manifest_options| {
             ManifestGcTask::new(manifest_store.clone(), stats.clone(), manifest_options)
         });
+        let detach_gc_task = options.detach_options.map(|detach_options| {
+            DetachGcTask::new(
+                manifest_store.clone(),
+                object_store,
+                system_clock.clone(),
+                stats.clone(),
+                detach_options,
+            )
+        });
         Self {
             manifest_store,
             options,
@@ -224,6 +252,7 @@ impl GarbageCollector {
             wal_gc_task,
             compacted_gc_task,
             compactions_gc_task,
+            detach_gc_task,
         }
     }
 
@@ -234,6 +263,7 @@ impl GarbageCollector {
     /// - WAL SST garbage collection
     /// - Compacted SST garbage collection
     /// - Manifest garbage collection
+    /// - Detach clone from parent garbage
     pub async fn run_gc_once(&self) {
         if let Some(task) = &self.manifest_gc_task {
             self.run_gc_task(task).await;
@@ -245,6 +275,9 @@ impl GarbageCollector {
             self.run_gc_task(task).await;
         }
         if let Some(task) = &self.compactions_gc_task {
+            self.run_gc_task(task).await;
+        }
+        if let Some(task) = &self.detach_gc_task {
             self.run_gc_task(task).await;
         }
 
@@ -1388,12 +1421,14 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1454,12 +1489,14 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            detach_options: None,
         };
 
         let mut gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1516,12 +1553,14 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1554,12 +1593,14 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(17)),
             }),
+            detach_options: None,
         };
 
         let mut gc = GarbageCollector::new(
             manifest_store,
             compactions_store,
             table_store,
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1598,12 +1639,14 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),

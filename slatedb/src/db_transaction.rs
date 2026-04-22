@@ -15,7 +15,7 @@ use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
-use crate::DbRead;
+use crate::DbReadOps;
 
 /// A database transaction that provides atomic read-write operations with
 /// configurable isolation levels. This is the main interface for transactional
@@ -59,7 +59,7 @@ pub struct DbTransaction {
     ///
     /// DbTransaction is not intended for concurrent use; we use `RwLock` (not `RefCell`) for
     /// interior mutability to preserve `Sync` in async contexts. `RefCell` is `!Sync` and would
-    /// make `DbTransaction` `!Sync`, which is incompatible with async code using the `DbRead`
+    /// make `DbTransaction` `!Sync`, which is incompatible with async code using the `DbReadOps`
     /// trait.
     write_batch: RwLock<WriteBatch>,
     /// Reference to the database
@@ -586,7 +586,7 @@ impl DbTransaction {
 }
 
 #[async_trait::async_trait]
-impl DbRead for DbTransaction {
+impl DbReadOps for DbTransaction {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
