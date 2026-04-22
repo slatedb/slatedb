@@ -270,8 +270,12 @@ impl DbIterator {
                 // there need to be merged with the entries from the other iterators.
                 None,
             ));
-        } else {
-            // When no merge operator is configured, wrap with iterator that errors on merge operands
+        } else if range.as_point().is_none() {
+            // For scans, wrap with an iterator that errors on merge operands when no merge
+            // operator is configured. For point-gets we skip this wrapper entirely — the
+            // GetIterator returns at most one entry and the merge-operand check is performed
+            // directly in get_key_value_with_options after the single next_entry() call,
+            // avoiding one layer of dynamic dispatch on every get.
             iter = Box::new(MergeOperatorRequiredIterator::new(iter));
         }
 
@@ -391,11 +395,19 @@ pub(crate) fn apply_filters<T>(
 where
     T: RowEntryIterator + 'static,
 {
-    iters
-        .into_iter()
-        .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
-        .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
-        .collect::<Vec<Box<dyn RowEntryIterator>>>()
+    match max_seq {
+        None => iters
+            .into_iter()
+            .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
+            .collect(),
+        Some(max_seq) => iters
+            .into_iter()
+            .map(|iter| {
+                Box::new(FilterIterator::new_with_max_seq(iter, Some(max_seq)))
+                    as Box<dyn RowEntryIterator + 'static>
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]

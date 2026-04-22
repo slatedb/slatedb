@@ -219,6 +219,29 @@ impl SsTableView {
         }
     }
 
+    /// Check whether a point key falls within this view's effective range.
+    ///
+    /// This is a zero-allocation check that uses the pre-computed `effective_range`
+    /// bounds to decide whether the SST could possibly contain the key, without
+    /// needing to clone anything.  Use this to skip iterator construction entirely
+    /// for SSTs that are guaranteed not to contain the key.
+    pub(crate) fn contains_key(&self, key: &[u8]) -> bool {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let start_ok = match self.effective_range.start_bound() {
+            Included(k) => key >= k.as_ref(),
+            Excluded(k) => key > k.as_ref(),
+            Unbounded => true,
+        };
+        if !start_ok {
+            return false;
+        }
+        match self.effective_range.end_bound() {
+            Included(k) => key <= k.as_ref(),
+            Excluded(k) => key < k.as_ref(),
+            Unbounded => true,
+        }
+    }
+
     /// Calculate the view range for the given range.
     ///
     /// This method determines the effective range that can be accessed within an SST by:

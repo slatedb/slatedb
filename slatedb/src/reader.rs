@@ -132,6 +132,7 @@ impl Reader {
         let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point() {
             let l0 = self.build_point_l0_iters(
                 range,
+                point_key.as_ref(),
                 db_state,
                 sst_iter_options,
                 point_lookup_stats.clone(),
@@ -164,12 +165,19 @@ impl Reader {
     fn build_point_l0_iters<'a>(
         &self,
         range: &BytesRange,
+        key: &[u8],
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sst in &db_state.core().l0 {
+            // Cheap zero-allocation check against the pre-computed effective_range.
+            // Skips all cloning and iterator construction for SSTs that cannot
+            // possibly contain the key.
+            if !sst.contains_key(key) {
+                continue;
+            }
             let iterator = SstIterator::new_owned_with_stats(
                 range.clone(),
                 sst.clone(),
@@ -195,6 +203,12 @@ impl Reader {
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
             for handle in sr.tables_covering_point_key(key) {
+                // Cheap zero-allocation check against the pre-computed effective_range.
+                // Skips all cloning and iterator construction for SSTs that cannot
+                // possibly contain the key.
+                if !handle.contains_key(key) {
+                    continue;
+                }
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
                     handle.clone(),
@@ -310,7 +324,14 @@ impl Reader {
 
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: options.cache_blocks,
-            eager_spawn: true,
+            // Do not eagerly spawn block fetch tasks for point-gets. With eager_spawn:true,
+            // a block fetch tokio::spawn fires as soon as the SST index is loaded (inside
+            // ensure_metadata_loaded), which happens *before* the seek confirms the key is
+            // actually present. On a bloom filter false positive or an SST with no filter,
+            // that spawned task fetches a block that is immediately discarded. For a true
+            // positive the block is needed anyway and will be fetched synchronously by the
+            // seek, so there is no meaningful latency benefit to pre-spawning it here.
+            eager_spawn: false,
             ..SstIteratorOptions::default()
         };
 
@@ -348,6 +369,13 @@ impl Reader {
             .map(|entry| {
                 if entry.value.is_tombstone() {
                     Err(SlateDBError::UnexpectedTombstone)
+                } else if matches!(entry.value, crate::types::ValueDeletable::Merge(_))
+                    && self.read_merge_operator.is_none()
+                {
+                    // The MergeOperatorRequiredIterator wrapper is skipped for point-gets
+                    // (see DbIterator::new), so we must enforce the same invariant here:
+                    // a merge operand without a merge operator is an error.
+                    Err(SlateDBError::MergeOperatorMissing)
                 } else {
                     Ok(KeyValue::from(entry))
                 }
