@@ -6350,6 +6350,7 @@ mod tests {
                 interval: None,
                 min_age: Duration::from_millis(0),
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())
