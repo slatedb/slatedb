@@ -6157,41 +6157,43 @@ mod tests {
 
     #[tokio::test]
     async fn should_error_when_merging_without_merge_operator() {
-        // Given: Database without merge operator configured
+        // Given: Database with merge operator, merge operands written
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_merge_4", object_store.clone())
+        let path = "/tmp/test_merge_4";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        db.merge(b"key1", b"value1").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // When: Reopening the DB without a merge operator and then reading
+        let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
             .build()
             .await
             .unwrap();
 
-        // When: Attempting to merge without a configured merge operator
-        let result = db
-            .merge_with_options(
-                b"key1",
-                b"value1",
-                &MergeOptions::default(),
-                &WriteOptions::default(),
-            )
-            .await;
+        // Then: Reading should fail because merge operands require a merge operator
+        let err = db.get(b"key1").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+    }
 
-        // Then: The write should fail immediately and no value should be persisted
-        assert!(
-            result.is_err(),
-            "Merging without a merge operator should error"
-        );
-        match result {
-            Err(e) => {
-                let error_string = format!("{}", e);
-                assert!(
-                    error_string.contains("merge operator missing")
-                        || error_string.contains("MergeOperatorMissing"),
-                    "Error should be MergeOperatorMissing, got: {:?}",
-                    e
-                );
-            }
-            Ok(_) => unreachable!("Should have errored"),
-        }
+    #[tokio::test]
+    async fn should_error_when_writing_merge_without_merge_operator() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_4_write_fails", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        let err = db.merge(b"key1", b"value1").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
 
         let result = db.get(b"key1").await.unwrap();
         assert_eq!(result, None);

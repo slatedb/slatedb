@@ -1700,13 +1700,7 @@ mod tests {
         let err = txn
             .merge_with_options(b"counter", 1u64.to_le_bytes(), &MergeOptions::default())
             .unwrap_err();
-        let error_string = format!("{}", err);
-        assert!(
-            error_string.contains("merge operator missing")
-                || error_string.contains("MergeOperatorMissing"),
-            "Error should be MergeOperatorMissing, got: {:?}",
-            err
-        );
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
 
         txn.commit().await.unwrap();
         assert_eq!(db.get(b"counter").await.unwrap(), None);
