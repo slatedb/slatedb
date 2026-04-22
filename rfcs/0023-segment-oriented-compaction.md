@@ -391,6 +391,14 @@ This RFC focuses on segment-oriented planning and explicit drop semantics. Natur
 
 This staged model gives a clean source-selection boundary for day rollups and avoids mixing unrelated segment data, reducing unnecessary write amplification. Implementing it requires key-rewriting transforms (to relabel hourly keys into daily keys), which are out of scope for this RFC.
 
+A concrete edge case for the rewriting design: once `hour=00..23` have been rolled up into `day=1` and the hourly segments dropped, a late backfill write for `hour=04` would re-create the `hour=04` segment rather than landing in `day=1`. Two approaches look viable and both remain open:
+
+- **Writer-side routing.** The writer detects backfill-age writes and rewrites their keys on ingest so they target the current rolled-up segment (e.g. an `hour=04` backfill becomes a `day=1` write at write time). Reads stay simple — every key lives in exactly one segment at any moment — but the write path has to carry rollup state and know the mapping rules.
+
+- **Compactor-side routing.** The writer stays oblivious. A late `hour=04` backfill lands in a re-created `hour=04` segment, and a subsequent compactor pass detects the orphan and merges it into `day=1`. This fits naturally with the compactor's existing rollup work and keeps the write path uninvolved. The tradeoff is on the read side: until the compactor catches up, data for `hour=04` may live in both the re-created `hour=04` segment and `day=1`, so the query planner has to know about the "rolled up into" relationship and consult both. The merge iterator machinery already handles multi-segment reads, so this is mechanically tractable; the complexity is in tracking the relationship.
+
+The choice hinges on how much rollup state we are willing to push into the write path versus the read path.
+
 ## Alternatives
 
 ### Time-Window Compaction Strategy (TWCS)
@@ -439,6 +447,10 @@ This approach is more flexible — the caller can assign segments based on exter
 - **Loss of scan pruning.** Because segment membership is not derivable from the key, the reader cannot prune segments based on a scan range — every scan must consider every segment.
 
 This RFC uses the deterministic extractor approach because it avoids WAL changes, provides unconditionally safe retention, simplifies tombstone handling, and enables automatic scan pruning. The `WriteOptions` approach could be revisited if use cases emerge that require segment assignment independent of key structure.
+
+### One memtable per segment
+
+An alternative to the single shared memtable is to maintain one memtable per segment, so flush output is already segment-aligned and no flush-time grouping is needed. In principle, this would enable independent segment flushing to L0. This would mean that a slow flush for segment A could complete without waiting for segment B, so A's data becomes visible sooner. This is possible, but it means tracking a per-segment cursor within the WAL so that replay does not introduce duplicates. Since our initial effort is aimed at uses cases which primarily write to a single active segment (with occasional backfills), the benefit may be marginal. This can be revisited in [Future Work](#future-work).
 
 ### Default segment-aware scheduler
 
