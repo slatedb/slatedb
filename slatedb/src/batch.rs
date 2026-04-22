@@ -56,6 +56,7 @@ pub struct WriteBatch {
     /// batch (unrelated to the sequence number of the batch, which is assigned
     /// atomically by the oracle when the batch is committed).
     pub(crate) write_idx: u64,
+    pub(crate) merge_op_count: usize,
 }
 
 impl Default for WriteBatch {
@@ -146,6 +147,7 @@ impl WriteBatch {
             ops: BTreeMap::new(),
             txn_id: None,
             write_idx: 0,
+            merge_op_count: 0,
         }
     }
 
@@ -164,7 +166,9 @@ impl WriteBatch {
 
         // Remove them
         for k in keys_to_remove {
-            self.ops.remove(&k);
+            if let Some(WriteOp::Merge(..)) = self.ops.remove(&k) {
+                self.merge_op_count -= 1
+            }
         }
     }
 
@@ -173,6 +177,7 @@ impl WriteBatch {
             ops: self.ops,
             txn_id: Some(txn_id),
             write_idx: self.write_idx,
+            merge_op_count: self.merge_op_count,
         }
     }
 
@@ -286,6 +291,7 @@ impl WriteBatch {
             WriteOp::Merge(key, Bytes::copy_from_slice(value.as_ref()), options.clone()),
         );
 
+        self.merge_op_count += 1;
         self.write_idx += 1;
     }
 
@@ -310,6 +316,10 @@ impl WriteBatch {
         self.ops.is_empty()
     }
 
+    pub(crate) fn has_merge_ops(&self) -> bool {
+        self.merge_op_count > 0
+    }
+
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
         self.ops.keys().map(|key| key.user_key.clone()).collect()
     }
@@ -323,6 +333,10 @@ impl WriteBatch {
         default_ttl: Option<u64>,
         merger: Option<MergeOperatorType>,
     ) -> Result<Vec<RowEntry>, SlateDBError> {
+        if merger.is_none() && self.has_merge_ops() {
+            return Err(SlateDBError::MergeOperatorMissing);
+        }
+
         let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new_with_seq_and_ttl(
             self,
             ..,
@@ -885,6 +899,44 @@ mod tests {
     }
 
     #[test]
+    fn should_track_merge_presence() {
+        let mut batch = WriteBatch::new();
+        assert!(!batch.has_merge_ops());
+
+        batch.merge(b"key1", b"value1");
+
+        assert!(batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 1);
+    }
+
+    #[test]
+    fn should_clear_merge_presence_when_put_overwrites_merge_ops() {
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"value1");
+        batch.merge(b"key1", b"value2");
+        assert!(batch.has_merge_ops());
+
+        batch.put(b"key1", b"final");
+
+        assert!(!batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 0);
+    }
+
+    #[test]
+    fn should_preserve_merge_presence_when_removing_only_one_keys_merges() {
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"value1");
+        batch.merge(b"key2", b"value2");
+        assert!(batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 2);
+
+        batch.delete(b"key1");
+
+        assert!(batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 1);
+    }
+
+    #[test]
     fn should_preserve_both_put_and_merge_when_merge_comes_after_put() {
         // Given: a WriteBatch with a put operation
         let mut batch = WriteBatch::new();
@@ -1238,6 +1290,19 @@ mod tests {
         );
         assert_eq!(entries[2].key, Bytes::from_static(b"key3"));
         assert_eq!(entries[2].value, ValueDeletable::Tombstone);
+    }
+
+    #[tokio::test]
+    async fn should_error_extracting_entries_with_merges_without_merge_operator() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.merge(b"key2", b"merge1");
+
+        let err = batch
+            .extract_entries(100, 1000, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::MergeOperatorMissing));
     }
 
     #[tokio::test]
