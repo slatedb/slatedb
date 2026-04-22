@@ -5,21 +5,23 @@
 //! its behavior is driven entirely by the harness-provided seeded RNG, shared
 //! database handle, and shared mock clock.
 //!
-//! The `writer`, `deleter`, `flusher`, and `clock` actors are unbounded loops.
-//! Register them alongside a separate shutdown actor to build deterministic,
-//! time-bounded scenarios.
+//! The `writer`, `deleter`, `flusher`, `clock`, and `compactor` actors are
+//! unbounded loops. Register them alongside a separate shutdown actor to build
+//! deterministic, time-bounded scenarios.
 //!
 //! Registering `writer`/`deleter`/`flusher` with counts `10/4/1` preserves the
 //! same relative workload mix as the old bounded scenario, but the total number
 //! of operations now depends on when the scenario requests shutdown.
 
 pub mod clock;
+pub mod compactor;
 pub mod deleter;
 pub mod flusher;
 pub mod shutdown;
 pub mod writer;
 
 pub use self::clock::clock;
+pub use self::compactor::{compactor, CompactorActorOptions};
 pub use self::deleter::deleter;
 pub use self::flusher::flusher;
 pub use self::shutdown::shutdown;

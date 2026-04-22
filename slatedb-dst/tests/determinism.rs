@@ -27,7 +27,7 @@ use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    actors::{clock, deleter, flusher, shutdown, writer},
+    actors::{clock, compactor, deleter, flusher, shutdown, writer, CompactorActorOptions},
     utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     Operation, StreamDirection, Toxic, ToxicKind,
@@ -128,18 +128,8 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         settings.l0_sst_size_bytes = 1024;
         settings.l0_max_ssts = 4;
         settings.manifest_poll_interval = Duration::from_millis(10);
-
-        let compactor_options = settings
-            .compactor_options
-            .get_or_insert_with(CompactorOptions::default);
-        compactor_options.poll_interval = Duration::from_millis(100);
-        compactor_options.max_concurrent_compactions = 1;
-        compactor_options.scheduler_options = SizeTieredCompactionSchedulerOptions {
-            min_compaction_sources: 2,
-            max_compaction_sources: 999,
-            include_size_threshold: 4.0,
-        }
-        .into();
+        // Disable since we're using the standalone compactor actor.
+        settings.compactor_options = None;
 
         let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
             .with_wal_object_store(ctx.wal_object_store().expect("configured"))
@@ -159,6 +149,14 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     .actor("writer", WRITER_COUNT, writer)
     .actor("deleter", DELETER_COUNT, deleter)
     .actor("flusher", FLUSHER_COUNT, flusher)
+    .actor_with_state(
+        "compactor",
+        1,
+        CompactorActorOptions {
+            restart_interval: Duration::from_millis(25),
+        },
+        compactor,
+    )
     .actor("clock", 1, clock)
     .actor_with_state("shutdown", 1, SHUTDOWN_AT_MILLIS, shutdown)
     .run()?;
