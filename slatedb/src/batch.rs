@@ -166,7 +166,9 @@ impl WriteBatch {
 
         // Remove them
         for k in keys_to_remove {
-            if let Some(WriteOp::Merge(..)) = self.ops.remove(&k) { self.merge_op_count -= 1 }
+            if let Some(WriteOp::Merge(..)) = self.ops.remove(&k) {
+                self.merge_op_count -= 1
+            }
         }
     }
 
