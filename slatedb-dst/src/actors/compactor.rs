@@ -1,18 +1,3 @@
-//! Deterministic actor for exercising standalone compactor fencing.
-//!
-//! This actor repeatedly starts a standalone SlateDB compactor against the
-//! shared harness database path. After each configured restart interval, it
-//! starts a replacement compactor and verifies that the previous one exits with
-//! a fencing error.
-//!
-//! Register the actor with [`crate::Harness::actor_with_state`] and pass
-//! [`CompactorActorOptions`] to control the restart cadence and standalone
-//! compactor configuration. Scenarios that use this actor should disable the
-//! main database client's embedded compactor so the actor is the only compactor
-//! intentionally competing for the compactor epoch. Because the cadence is
-//! driven by the shared mock clock, the scenario must also include an actor
-//! that advances logical time, such as [`crate::actors::clock`].
-
 use std::time::Duration;
 
 use log::info;
@@ -34,8 +19,20 @@ pub struct CompactorActorOptions {
     pub compactor_options: CompactorOptions,
 }
 
-/// Same as [`compactor`], but allows callers to control the restart cadence by
-/// registering the actor with [`crate::Harness::actor_with_state`].
+/// Exercises standalone compactor fencing with deterministic restarts.
+///
+/// This actor repeatedly starts a standalone SlateDB compactor against the
+/// shared harness database path. After each configured restart interval, it
+/// starts a replacement compactor and verifies that the previous one exits with
+/// a fencing error.
+///
+/// Register the actor with [`crate::Harness::actor_with_state`] and pass
+/// [`CompactorActorOptions`] to control the restart cadence and standalone
+/// compactor configuration. Scenarios that use this actor should disable the
+/// main database client's embedded compactor so the actor is the only
+/// compactor intentionally competing for the compactor epoch. Because the
+/// cadence is driven by the shared mock clock, the scenario must also include
+/// an actor that advances logical time, such as [`crate::actors::clock`].
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> Result<(), Error> {
     let shutdown_token = ctx.shutdown_token();
