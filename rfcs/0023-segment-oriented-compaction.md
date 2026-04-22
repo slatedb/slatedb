@@ -180,7 +180,9 @@ The trait's single extraction method takes a `FilterTarget` (either `Point(key)`
 Two properties follow directly from the trait contract:
 
 - **Determinism.** `prefix_len` is a pure function of the target. For `Point(k)`, the invariant that `prefix_len(Point(k)) = Some(n)` implies `prefix_len(Point(k')) = Some(n)` for every `k'` sharing the first `n` bytes with `k` means a given key always maps to the same segment across flushes, compactions, and restarts.
-- **Disjoint key spaces.** Because the extracted prefix is always a prefix of the key, each segment prefix `p` owns exactly the key interval `[p, p++)` (where `p++` is the lexicographic successor of `p`). Two distinct segment prefixes cannot share any key, so dropping a segment is unconditionally safe — it cannot affect keys in other segments.
+- **Disjoint, non-nesting segment intervals.** Because the extracted prefix is always a prefix of the key, each segment prefix `p` owns exactly the key interval `[p, p++)` (where `p++` is the lexicographic successor of `p`). The Point-variant invariant further prevents nested prefixes: a single extractor cannot simultaneously assign some `users:*` keys to a segment `users` and others to `users:foo`. If any key in `[p, p++)` maps to segment `p`, every key in that interval must. The extractor therefore picks one consistent prefix structure, and segment intervals sit side-by-side in the key space.
+
+Together these give the active segments a natural total order by prefix, with pairwise disjoint key intervals. The [Scans](#scans) design leverages this to iterate segment-by-segment in prefix order without any key-wise merging across segments. The RFC does not constrain how unsegmented data relates to segment intervals; the unsegmented tree is treated as an independent iteration branch.
 
 The extractor's `name()` is persisted in the manifest. On restart, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. Reconfiguring the extractor is therefore treated as a one-way, offline operation — in general, changing segmentation on existing data requires a rewrite, which is out of scope for this RFC.
 
@@ -232,10 +234,9 @@ segment_extractor_name: string;
 
 Within each segment, `l0` and `compacted` follow today's semantics exactly: `l0` is the set of L0 SSTs above `l0_last_compacted`, and `compacted` is an ordered list of sorted runs where list position determines read precedence. Sorted run `u32` IDs remain globally unique across the database — a single shared counter allocates IDs monotonically regardless of which segment (or the unsegmented tree) a run belongs to. Within a segment, list position and ID order agree (newer runs have higher IDs), so list-position reads and ID-based debugging align.
 
-This scoping has three consequences:
+This scoping has two consequences:
 
 - **No cross-segment ordering.** Because the extractor guarantees disjoint key spaces, two sorted runs in different segments cannot contain overlapping keys and therefore need no ordering relationship. Each segment's read path is identical to today's single-tree read path.
-- **No new sequence bookkeeping.** Read precedence within a segment is determined by list position, as today. The manifest does not need `min_seq`/`max_seq` annotations on SSTs or sorted runs.
 - **Parallel compaction across segments is safe.** Two compactions in different segments each draw a distinct destination ID from the shared counter and apply their manifest updates to disjoint `Segment` entries (or to disjoint lists within the unsegmented tree vs. a segment), so their commits do not conflict. Parallel compaction *within* a single segment remains constrained by the existing `l0_last_compacted` watermark design and is out of scope for this RFC.
 
 #### Migration
@@ -270,7 +271,7 @@ SlateDB has two backpressure mechanisms today: a memory-based one driven by `max
 
 ### Read Path
 
-Because each named segment is its own LSM tree with its own ordered `compacted` list, read-path logic within a segment is identical to today's single-tree read path. The only new behavior is routing: for a given query, determining which trees need to be consulted. Routing falls out of the extractor with no user-visible segment filter — there is no `segment_filter` predicate on `ReadOptions`.
+Because each named segment is its own LSM tree with its own ordered `compacted` list, read-path logic within a segment is identical to today's single-tree read path. The only new behavior is routing: for a given query, the reader uses the extractor to determine which trees need to be consulted. Routing is automatic and requires no changes to `ReadOptions` or the query APIs.
 
 **Point lookups.** For `get(key)`, the reader applies the extractor:
 
@@ -281,20 +282,25 @@ Point lookups never need to fan out across multiple trees because a given key be
 
 **Range scans.** See [Scans](#scans) below.
 
-Within each consulted tree, the reader builds a merge iterator from that tree's `l0` and `compacted` lists using list-position precedence, exactly as today. Across trees (for scans that touch multiple), per-tree streams are merged by key — but because trees have disjoint key spaces, no two trees can contribute entries for the same key, so the "merge" is simply a concatenation ordered by key.
+Within each consulted tree, the reader builds a merge iterator from that tree's `l0` and `compacted` lists using list-position precedence, exactly as today. For scans that touch multiple trees, per-tree streams are merged by key; the details are described in [Scans](#scans).
 
 ### Scans
 
-A range scan `scan(lo..hi)` touches a tree if and only if the tree's key interval intersects `[lo, hi)`. For named segments, the key interval is `[prefix, prefix++)` where `prefix++` is the lexicographic successor of the segment prefix. The reader computes the set of overlapping segments from the manifest's `segments` list and spins up a per-segment merge iterator for each, plus (conservatively) an iterator over the unsegmented tree.
+A range scan `scan(lo..hi)` decomposes into two branches:
 
-Pruning the unsegmented tree requires knowing whether any key in `[lo, hi)` could have `prefix_len(Point(key)) == None`. In the general case the reader cannot decide this without examining keys, so by default the unsegmented tree is consulted for every scan. The `Prefix` variant of `prefix_len` gives us the optimization lever we need: the trait's contract says `prefix_len(Prefix(p)) = Some(n)` holds *only if* every extension `q` of `p` satisfies `prefix_len(Point(q)) = Some(n)` and `q[..n] == p[..n]`. That is exactly the guarantee needed to confine a scan to a single segment.
+1. **Segment branch.** A chained iterator over the segments whose intervals `[prefix, prefix++)` overlap `[lo, hi)`, stepping from one segment to the next in prefix order. Within each segment the existing merge iterator runs against that segment's `l0` and `compacted` lists using list-position precedence. Because segment intervals are pairwise disjoint (see [Segment Extractor](#segment-extractor)), this chain produces a single key-ordered stream with no per-key merging across segments.
+2. **Unsegmented branch.** An iterator over the unsegmented tree's `l0` and `compacted` lists.
 
-- **`scan_prefix(p)` that maps to one segment.** If `prefix_len(Prefix(p))` returns `Some(n)` with `n <= p.len()`, every key extending `p` is in the segment identified by `p[..n]`, and the scan collapses to that segment. If it returns `None`, the reader falls back to the general case (consult all overlapping segments plus unsegmented).
-- **Range scans confined to one segment.** For `scan(lo..hi)`, if `prefix_len(Prefix(lo))` and `prefix_len(Prefix(hi_exclusive_floor))` both return `Some(n)` with `lo[..n] == hi[..n]`, the range lies entirely within the segment identified by that prefix — again skip the unsegmented tree. Ranges whose endpoints straddle segments or fall outside the extractor's domain consult overlapping segments plus unsegmented as usual.
+The outer merge is a key-ordered merge of the two branches.
 
-Databases that use the extractor consistently (i.e. all keys segmented) can configure the scan path to assume an empty unsegmented tree, skipping that iterator entirely. The default is conservative: include the unsegmented tree unless pruning is provably safe.
+Pruning the unsegmented branch requires knowing whether any key in `[lo, hi)` could have `prefix_len(Point(key)) == None`. In the general case the reader cannot decide this without examining keys, so by default the unsegmented branch is consulted for every scan. The `Prefix` variant of `prefix_len` provides the optimization lever: the trait's contract says `prefix_len(Prefix(p)) = Some(n)` holds only if every extension `q` of `p` satisfies `prefix_len(Point(q)) = Some(n)` and `q[..n] == p[..n]`. That is exactly the guarantee needed to confine a scan to a single segment.
 
-**Implications for existing APIs.** `scan`, `scan_prefix`, `scan_with_options`, and `scan_prefix_with_options` on `Db`, `DbReader`, `DbSnapshot`, and `DbTransaction` pick up segment-aware pruning automatically — they all resolve to a range scan internally, and the pruning logic lives beneath that. No API additions are required for scan pruning.
+- **`scan_prefix(p)` that maps to one segment.** If `prefix_len(Prefix(p))` returns `Some(n)` with `n <= p.len()`, every key extending `p` belongs to the segment identified by `p[..n]`, so the scan collapses to that segment and the unsegmented branch can be skipped. If it returns `None`, the reader falls back to the general two-branch case.
+- **Range scans confined to one segment.** For `scan(lo..hi)`, if `prefix_len(Prefix(lo))` and `prefix_len(Prefix(hi_exclusive_floor))` both return `Some(n)` with `lo[..n] == hi[..n]`, the range lies entirely within one segment — skip the unsegmented branch.
+
+Databases that use the extractor consistently (i.e. all keys segmented) can configure the scan path to assume an empty unsegmented tree and skip that branch entirely. The default is conservative: include the unsegmented branch unless pruning is provably safe.
+
+**Implications for existing APIs.** `scan`, `scan_prefix`, `scan_with_options`, and `scan_prefix_with_options` on `Db`, `DbReader`, `DbSnapshot`, and `DbTransaction` pick up segment-aware routing automatically — they all resolve to a range scan internally, and the two-branch logic lives beneath that. No API additions are required.
 
 ### Compaction
 
@@ -409,7 +415,7 @@ This RFC opts for a more general approach: opaque segment identifiers defined by
 
 ### Arbitrary-function segment mapper
 
-An earlier draft of this RFC used an arbitrary `Fn(&[u8]) -> Option<Bytes>` mapper instead of a `PrefixExtractor`. This gave the application free rein to derive a segment tag from a key in any way it chose.
+An alternative to the deterministic prefix extractor is an arbitrary `Fn(&[u8]) -> Option<Bytes>` mapper. This would give the application free rein to derive a segment tag from a key in any way it chose — including tags that are not prefixes of the key.
 
 The prefix-extractor approach was chosen instead because:
 
@@ -421,15 +427,15 @@ The arbitrary-function mapper remains viable for use cases that genuinely need s
 
 ### Sequence-range bookkeeping and unordered sorted run bag
 
-An earlier draft of this RFC annotated every L0 SST and sorted run with explicit `min_seq`/`max_seq` ranges in the manifest, treated the sorted run list as an unordered "bag" identified by `Ulid`, and determined read precedence from sequence ranges rather than list position. This was motivated by the need to coordinate IDs across parallel segment compactions without a shared counter.
+An alternative manifest layout would annotate every L0 SST and sorted run with explicit `min_seq`/`max_seq` ranges, identify sorted runs by `Ulid` rather than the existing `u32` counter, and treat the sorted run list as an unordered bag — determining read precedence from sequence ranges rather than list position. The attraction is that parallel segment compactions could produce sorted runs with uncoordinated identity (Ulids) and still be correctly ordered on reads via sequence ranges.
 
-With the tree-per-segment manifest layout, each segment has its own independent `u32` counter and its own ordered `compacted` list, so:
+The tree-per-segment layout in this RFC does not need any of that:
 
-- Parallel compactions in different segments draw from separate counters — no coordination needed.
-- Within a segment, list-position ordering (as today) is sufficient; sequence ranges would be redundant bookkeeping.
+- Each segment has its own ordered `compacted` list, so list-position ordering within a segment is sufficient to establish precedence — sequence ranges would be redundant bookkeeping.
+- Parallel compactions in different segments commit to disjoint `Segment` entries with distinct destination IDs drawn from the shared `u32` counter, so Ulid-based identity is not needed to avoid collision.
 - Across segments, disjoint key spaces eliminate any need for cross-tree ordering.
 
-Dropping this bookkeeping also eliminates the most expensive part of the migration (reading SST index metadata to backfill sequence ranges for existing runs) and reduces manifest size. This RFC therefore preserves the existing `u32`-based list ordering and does not introduce per-run sequence ranges.
+Avoiding sequence-range bookkeeping also keeps migration trivial: it does not require reading SST index metadata to backfill seq ranges for existing runs, and the manifest does not grow to carry per-SST seq data.
 
 ### Unifying L0 and sorted runs
 
