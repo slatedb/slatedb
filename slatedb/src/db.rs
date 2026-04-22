@@ -1304,9 +1304,13 @@ impl Db {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        let mut batch = WriteBatch::new();
-        batch.merge(key, value);
-        self.write(batch).await
+        self.merge_with_options(
+            key,
+            value,
+            &MergeOptions::default(),
+            &WriteOptions::default(),
+        )
+        .await
     }
 
     /// Merge a value into the database with custom `MergeOptions` and `WriteOptions`.
@@ -1369,6 +1373,10 @@ impl Db {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        if self.inner.flush_merge_operator.is_none() {
+            return Err(SlateDBError::MergeOperatorMissing.into());
+        }
+
         let mut batch = WriteBatch::new();
         batch.merge_with_options(key, value, merge_opts);
         self.write_with_options(batch, write_opts).await
@@ -6157,22 +6165,23 @@ mod tests {
             .await
             .unwrap();
 
-        // When: Attempting to merge and then reading
-        // Note: Merge writes succeed, but reads will fail to merge operands
-        db.merge(b"key1", b"value1").await.unwrap();
+        // When: Attempting to merge without a configured merge operator
+        let result = db
+            .merge_with_options(
+                b"key1",
+                b"value1",
+                &MergeOptions::default(),
+                &WriteOptions::default(),
+            )
+            .await;
 
-        // Then: Reading should fail because merge operator is required at read time
-        // The merge operand is stored but can't be merged without an operator
-        let result = db.get(b"key1").await;
-
-        // Verify that reading fails with MergeOperatorMissing error
+        // Then: The write should fail immediately and no value should be persisted
         assert!(
             result.is_err(),
-            "Reading merge operand without merge operator should error"
+            "Merging without a merge operator should error"
         );
         match result {
             Err(e) => {
-                // Expected: reading merge operands without a merge operator should error with MergeOperatorMissing
                 let error_string = format!("{}", e);
                 assert!(
                     error_string.contains("merge operator missing")
@@ -6183,6 +6192,9 @@ mod tests {
             }
             Ok(_) => unreachable!("Should have errored"),
         }
+
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, None);
     }
 
     #[tokio::test]
