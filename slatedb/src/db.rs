@@ -6200,6 +6200,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_error_when_writing_batch_with_merge_without_merge_operator() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_4_batch_write_fails", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.merge(b"key2", b"value2");
+
+        let err = db.write(batch).await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+
+        assert_eq!(db.get(b"key1").await.unwrap(), None);
+        assert_eq!(db.get(b"key2").await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn should_merge_operands_after_reopen() {
         // Given: Database with merge operator, merge operands written
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

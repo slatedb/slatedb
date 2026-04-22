@@ -334,6 +334,10 @@ impl WriteBatch {
         default_ttl: Option<u64>,
         merger: Option<MergeOperatorType>,
     ) -> Result<Vec<RowEntry>, SlateDBError> {
+        if merger.is_none() && self.has_merge_ops() {
+            return Err(SlateDBError::MergeOperatorMissing);
+        }
+
         let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new_with_seq_and_ttl(
             self,
             ..,
@@ -1287,6 +1291,19 @@ mod tests {
         );
         assert_eq!(entries[2].key, Bytes::from_static(b"key3"));
         assert_eq!(entries[2].value, ValueDeletable::Tombstone);
+    }
+
+    #[tokio::test]
+    async fn should_error_extracting_entries_with_merges_without_merge_operator() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.merge(b"key2", b"merge1");
+
+        let err = batch
+            .extract_entries(100, 1000, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::MergeOperatorMissing));
     }
 
     #[tokio::test]
