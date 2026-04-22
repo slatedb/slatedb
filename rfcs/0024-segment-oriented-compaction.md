@@ -186,6 +186,18 @@ Together these give the active segments a natural total order by prefix, with pa
 
 The extractor's `name()` is persisted in the manifest. On restart, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. Reconfiguring the extractor is therefore treated as a one-way, offline operation — in general, changing segmentation on existing data requires a rewrite, which is out of scope for this RFC.
 
+#### Validation
+
+The `name()` check is soft: a user can keep the name and change the logic, and new routing decisions would diverge silently. Three structural checks add defense against changes that slip past the name. None of them prove the extractor is unchanged, but each fails fast when a changed extractor would produce a manifest the rest of the system could not rely on.
+
+- **Per-segment acknowledgment on open.** For each existing segment with prefix `p`, the writer checks `prefix_len(Prefix(p)) == Some(p.len())`. If the current extractor no longer treats `p` as a valid segment prefix — it returns `None`, or a different length — the database refuses to open. Catches changes that reshape extraction length or drop an existing prefix from the extractor's domain.
+
+- **Antichain invariant on segment prefixes.** The manifest maintains the invariant that no segment prefix is a proper prefix of another. Any manifest update that would introduce a nested prefix is rejected. Catches changes that would produce overlapping segmentation — the structural violation that would otherwise force cross-segment key-wise merging on reads.
+
+- **Route-consistency at flush.** When the memtable flusher routes a key to a (possibly new) segment, the resulting prefix is checked against the antichain invariant against the current segment set. This is the antichain check applied incrementally at flush time, surfacing violations at the write that introduces them rather than on a later read.
+
+These do not cover every kind of extractor change — for example, a swap that preserves the antichain and acknowledges existing prefixes, but routes future keys differently, will still slip through. The checks above narrow the surface to changes that cannot produce an inconsistent manifest undetected.
+
 ### WAL
 
 The WAL requires no format changes to support segments. Because the extractor is deterministic and configured at database open time, segment membership can be recomputed from keys during WAL replay. The extractor is applied at memtable flush time to group entries by segment — there is no need to persist segment information in the WAL.
