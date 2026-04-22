@@ -175,12 +175,12 @@ pub struct DbOptions {
 }
 ```
 
-Keys for which `extract` returns `None` are unsegmented and stored in the shared unsegmented LSM state (see [Manifest](#manifest)). Keys for which `extract` returns `Some(prefix)` belong to the segment identified by that prefix. The application defines the key encoding such that segment boundaries are represented in the key itself — for a timeseries database, the prefix encodes a time bucket; for a log, a segment identifier chosen by the writer when advancing to the next segment.
+The trait's single extraction method takes a `FilterTarget` (either `Point(key)` for a stored or looked-up key, or `Prefix(p)` for a scan prefix) and returns `Option<usize>`. On the write and point-read paths, we call `prefix_len(FilterTarget::Point(key))`: if it returns `Some(n)`, the key belongs to the segment identified by `key[..n]`; if it returns `None`, the key is unsegmented and lands in the shared unsegmented LSM state (see [Manifest](#manifest)). The application defines the key encoding such that segment boundaries are represented in the key itself — for a timeseries database, the prefix encodes a time bucket; for a log, a segment identifier chosen by the writer when advancing to the next segment.
 
 Two properties follow directly from the trait contract:
 
-- **Determinism.** `extract` is a pure function of the key. A given key always maps to the same segment across flushes, compactions, and restarts.
-- **Disjoint key spaces.** Because the output of `extract` is a prefix of the input, each segment prefix `p` owns exactly the key interval `[p, p++)` (where `p++` is the lexicographic successor of `p`). Two distinct segment prefixes cannot share any key, so dropping a segment is unconditionally safe — it cannot affect keys in other segments.
+- **Determinism.** `prefix_len` is a pure function of the target. For `Point(k)`, the invariant that `prefix_len(Point(k)) = Some(n)` implies `prefix_len(Point(k')) = Some(n)` for every `k'` sharing the first `n` bytes with `k` means a given key always maps to the same segment across flushes, compactions, and restarts.
+- **Disjoint key spaces.** Because the extracted prefix is always a prefix of the key, each segment prefix `p` owns exactly the key interval `[p, p++)` (where `p++` is the lexicographic successor of `p`). Two distinct segment prefixes cannot share any key, so dropping a segment is unconditionally safe — it cannot affect keys in other segments.
 
 The extractor's `name()` is persisted in the manifest. On restart, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. Reconfiguring the extractor is therefore treated as a one-way, offline operation — in general, changing segmentation on existing data requires a rewrite, which is out of scope for this RFC.
 
@@ -248,7 +248,7 @@ Because the change is purely additive, migration is a one-step schema bump. The 
 
 The manifest decoder is updated to handle both V2 and V3. The standalone compactor reads whichever version the writer has published and does not independently upgrade. Because no field changes require backfill, there is no decoder-first/encoder-later rollout phase.
 
-When an extractor is configured for the first time on an existing database, the existing unsegmented data remains in the top-level fields. New writes are routed through the extractor: keys for which `extract` returns `Some(prefix)` flow into the segment identified by that prefix, and keys for which it returns `None` continue to flow into the top-level fields. Existing unsegmented data is not automatically migrated into segments — if the application wants old data segmented, it must rewrite it (out of scope for this RFC).
+When an extractor is configured for the first time on an existing database, the existing unsegmented data remains in the top-level fields. New writes are routed through the extractor: a key whose `prefix_len(Point(key))` returns `Some(n)` flows into the segment identified by `key[..n]`, and a key whose `prefix_len` returns `None` continues to flow into the top-level fields. Existing unsegmented data is not automatically migrated into segments — if the application wants old data segmented, it must rewrite it (out of scope for this RFC).
 
 ### Write Path
 
@@ -274,8 +274,8 @@ Because each named segment is its own LSM tree with its own ordered `compacted` 
 
 **Point lookups.** For `get(key)`, the reader applies the extractor:
 
-- If `extract(key)` returns `Some(prefix)`, the reader consults only the segment with that prefix. If no segment with that prefix exists, the key is not present.
-- If `extract(key)` returns `None`, the reader consults only the unsegmented tree.
+- If `prefix_len(Point(key))` returns `Some(n)`, the reader consults only the segment identified by `key[..n]`. If no segment with that prefix exists, the key is not present.
+- If `prefix_len(Point(key))` returns `None`, the reader consults only the unsegmented tree.
 
 Point lookups never need to fan out across multiple trees because a given key belongs to exactly one tree by construction.
 
@@ -287,10 +287,10 @@ Within each consulted tree, the reader builds a merge iterator from that tree's 
 
 A range scan `scan(lo..hi)` touches a tree if and only if the tree's key interval intersects `[lo, hi)`. For named segments, the key interval is `[prefix, prefix++)` where `prefix++` is the lexicographic successor of the segment prefix. The reader computes the set of overlapping segments from the manifest's `segments` list and spins up a per-segment merge iterator for each, plus (conservatively) an iterator over the unsegmented tree.
 
-Pruning the unsegmented tree requires knowing whether any key in `[lo, hi)` could have `extract(key) == None`. In the general case the reader cannot decide this without examining keys, so by default the unsegmented tree is consulted for every scan. Two common-case optimizations fall out of the extractor's contract:
+Pruning the unsegmented tree requires knowing whether any key in `[lo, hi)` could have `prefix_len(Point(key)) == None`. In the general case the reader cannot decide this without examining keys, so by default the unsegmented tree is consulted for every scan. The `Prefix` variant of `prefix_len` gives us the optimization lever we need: the trait's contract says `prefix_len(Prefix(p)) = Some(n)` holds *only if* every extension `q` of `p` satisfies `prefix_len(Point(q)) = Some(n)` and `q[..n] == p[..n]`. That is exactly the guarantee needed to confine a scan to a single segment.
 
-- **Fully-in-domain scans.** If `in_domain(lo)` and `in_domain(hi)` both hold and `lo`/`hi` agree on a single segment prefix — e.g. `scan(b"hour=10/".."hour=10/\xff")` under an extractor that emits `hour=NN/` as the segment prefix — the scan lies entirely within one segment and the unsegmented tree can be skipped.
-- **`scan_prefix(p)` with `in_domain(p)`.** When `p` itself is a valid segment prefix, the scan collapses to a single segment. The extractor already exposes `in_domain` for exactly this kind of check in RFC 22's filter path; reusing it for scan routing is natural.
+- **`scan_prefix(p)` that maps to one segment.** If `prefix_len(Prefix(p))` returns `Some(n)` with `n <= p.len()`, every key extending `p` is in the segment identified by `p[..n]`, and the scan collapses to that segment. If it returns `None`, the reader falls back to the general case (consult all overlapping segments plus unsegmented).
+- **Range scans confined to one segment.** For `scan(lo..hi)`, if `prefix_len(Prefix(lo))` and `prefix_len(Prefix(hi_exclusive_floor))` both return `Some(n)` with `lo[..n] == hi[..n]`, the range lies entirely within the segment identified by that prefix — again skip the unsegmented tree. Ranges whose endpoints straddle segments or fall outside the extractor's domain consult overlapping segments plus unsegmented as usual.
 
 Databases that use the extractor consistently (i.e. all keys segmented) can configure the scan path to assume an empty unsegmented tree, skipping that iterator entirely. The default is conservative: include the unsegmented tree unless pruning is provably safe.
 
@@ -414,7 +414,7 @@ An earlier draft of this RFC used an arbitrary `Fn(&[u8]) -> Option<Bytes>` mapp
 The prefix-extractor approach was chosen instead because:
 
 - **Scan pruning falls out automatically.** With an arbitrary function, the reader cannot map a scan range to a segment set without enumerating keys. A prefix extractor means each segment owns a contiguous key interval `[tag, tag++)`, so scan pruning is a straightforward range intersection against the manifest's `segments` list.
-- **Determinism is structurally enforced.** `PrefixExtractor`'s `in_domain`/`name()` contract gives the read path a way to validate scan prefixes and the manifest a way to detect accidental reconfiguration. An arbitrary function has no such hooks.
+- **Determinism is structurally enforced.** `PrefixExtractor`'s `prefix_len`/`name()` contract — in particular the `Prefix`-variant invariant — gives the read path a way to validate scan prefixes and the manifest a way to detect accidental reconfiguration. An arbitrary function has no such hooks.
 - **Trait reuse with RFC 22.** The same extractor can power prefix bloom filters and segment routing, with no duplication of concepts or versioning logic.
 
 The arbitrary-function mapper remains viable for use cases that genuinely need segment identity to depend on non-prefix key structure, but none of the target use cases (timeseries time buckets, log segment IDs) require it.
