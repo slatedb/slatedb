@@ -20,7 +20,7 @@ an internal path dependency rather than from crates.io.
 
 - `Harness`: builder and executor for deterministic simulations
 - `StartupCtx`: context passed to the database factory configured with
-  `Harness::with_db`
+  `Harness::new`
 - `ActorCtx`: per-actor context with deterministic RNG, DB access, shared
   clock, failpoint registry, and harness object stores
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
@@ -38,7 +38,7 @@ an internal path dependency rather than from crates.io.
 
 The harness is built around one root seed:
 
-1. `Harness::new(name, seed)` creates the root `DbRand`.
+1. `Harness::new(name, seed, factory)` creates the root `DbRand`.
 2. The harness derives a Tokio runtime seed from that root seed and runs the
    simulation on a current-thread runtime.
 3. The harness derives additional deterministic seeds for:
@@ -85,7 +85,7 @@ paths that avoid known sources of non-determinism during simulation.
 At a high level, a simulation has three parts:
 
 1. Configure the harness seed, path, clock, and object stores.
-2. Provide a startup factory with `with_db(...)` that opens the `Db`.
+2. Provide a startup factory to `Harness::new(...)` that opens the `Db`.
 3. Register one or more actors and call `run()`.
 
 ### End-to-end example
@@ -144,26 +144,25 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let shutdown_at_millis = 10u64;
 
-    Harness::new("smoke", 7)
+    Harness::new("smoke", 7, move |ctx| async move {
+        let db_seed = ctx.rand().rng().next_u64();
+        let settings = build_settings(ctx.rand()).await;
+
+        let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+            .with_wal_object_store(ctx.wal_object_store().expect("configured"))
+            .with_system_clock(ctx.system_clock())
+            .with_fp_registry(ctx.fp_registry())
+            .with_seed(db_seed)
+            .with_settings(settings)
+            .build()
+            .await?;
+
+        Ok(Arc::new(db))
+    })
         .with_path(Path::from("dst/smoke"))
         .with_system_clock(system_clock)
         .with_main_object_store(main_store)
         .with_wal_object_store(wal_store)
-        .with_db(move |ctx| async move {
-            let db_seed = ctx.rand().rng().next_u64();
-            let settings = build_settings(ctx.rand()).await;
-
-            let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
-                .with_wal_object_store(ctx.wal_object_store().expect("configured"))
-                .with_system_clock(ctx.system_clock())
-                .with_fp_registry(ctx.fp_registry())
-                .with_seed(db_seed)
-                .with_settings(settings)
-                .build()
-                .await?;
-
-            Ok(Arc::new(db))
-        })
         .actor("writer", 1, writer)
         .actor("clock", 1, clock)
         .actor_with_state("shutdown", 1, shutdown_at_millis, shutdown)
@@ -177,13 +176,13 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
 `Harness` is the main entry point.
 
-- `Harness::new(name, seed)`: creates a new simulation builder
+- `Harness::new(name, seed, factory)`: creates a new simulation builder and
+  registers the startup factory that opens the database
 - `with_path(path)`: overrides the default DB path
 - `with_rand(rand)`: replaces the root RNG
 - `with_system_clock(clock)`: injects a shared `MockSystemClock`
 - `with_main_object_store(store)`: replaces the default in-memory main store
 - `with_wal_object_store(store)`: configures a separate WAL store
-- `with_db(factory)`: registers the startup factory that opens the database
 - `actor(role, count, actor_fn)`: registers `count` actors for the same role
 - `actor_with_state(role, count, state, actor_fn)`: same as `actor`, but
   clones the supplied state into each actor
@@ -199,7 +198,7 @@ dst/<name>/seed-<seed-hex>
 
 ### `StartupCtx`
 
-The `with_db(...)` factory receives a `StartupCtx`. It is the right place to
+The `Harness::new(...)` factory receives a `StartupCtx`. It is the right place to
 open the initial `Db`, construct settings, and attach any shared infrastructure
 to the database builder.
 

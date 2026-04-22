@@ -119,50 +119,49 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
-    Harness::new("determinism", seed)
-        .with_rand(Arc::clone(&rand))
-        .with_system_clock(Arc::clone(&system_clock))
-        .with_path(Path::from("determinism"))
-        .with_main_object_store(main_store)
-        .with_wal_object_store(wal_store)
-        .with_db(move |ctx| async move {
-            let db_seed = ctx.rand().rng().next_u64();
-            let mut settings = build_settings(ctx.rand()).await;
+    Harness::new("determinism", seed, move |ctx| async move {
+        let db_seed = ctx.rand().rng().next_u64();
+        let mut settings = build_settings(ctx.rand()).await;
 
-            // Keep L0 tiny and compactor polling aggressive so a small number of
-            // explicit memtable flushes will trigger real compaction during the run.
-            settings.l0_sst_size_bytes = 1024;
-            settings.l0_max_ssts = 4;
-            settings.manifest_poll_interval = Duration::from_millis(10);
+        // Keep L0 tiny and compactor polling aggressive so a small number of
+        // explicit memtable flushes will trigger real compaction during the run.
+        settings.l0_sst_size_bytes = 1024;
+        settings.l0_max_ssts = 4;
+        settings.manifest_poll_interval = Duration::from_millis(10);
 
-            let compactor_options = settings
-                .compactor_options
-                .get_or_insert_with(CompactorOptions::default);
-            compactor_options.poll_interval = Duration::from_millis(100);
-            compactor_options.max_concurrent_compactions = 1;
-            compactor_options.scheduler_options = SizeTieredCompactionSchedulerOptions {
-                min_compaction_sources: 2,
-                max_compaction_sources: 999,
-                include_size_threshold: 4.0,
-            }
-            .into();
+        let compactor_options = settings
+            .compactor_options
+            .get_or_insert_with(CompactorOptions::default);
+        compactor_options.poll_interval = Duration::from_millis(100);
+        compactor_options.max_concurrent_compactions = 1;
+        compactor_options.scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
 
-            let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
-                .with_wal_object_store(ctx.wal_object_store().expect("configured"))
-                .with_system_clock(ctx.system_clock())
-                .with_fp_registry(ctx.fp_registry())
-                .with_seed(db_seed)
-                .with_settings(settings)
-                .build()
-                .await?;
-            Ok(Arc::new(db))
-        })
-        .actor("writer", WRITER_COUNT, writer)
-        .actor("deleter", DELETER_COUNT, deleter)
-        .actor("flusher", FLUSHER_COUNT, flusher)
-        .actor("clock", 1, clock)
-        .actor_with_state("shutdown", 1, SHUTDOWN_AT_MILLIS, shutdown)
-        .run()?;
+        let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+            .with_wal_object_store(ctx.wal_object_store().expect("configured"))
+            .with_system_clock(ctx.system_clock())
+            .with_fp_registry(ctx.fp_registry())
+            .with_seed(db_seed)
+            .with_settings(settings)
+            .build()
+            .await?;
+        Ok(Arc::new(db))
+    })
+    .with_rand(Arc::clone(&rand))
+    .with_system_clock(Arc::clone(&system_clock))
+    .with_path(Path::from("determinism"))
+    .with_main_object_store(main_store)
+    .with_wal_object_store(wal_store)
+    .actor("writer", WRITER_COUNT, writer)
+    .actor("deleter", DELETER_COUNT, deleter)
+    .actor("flusher", FLUSHER_COUNT, flusher)
+    .actor("clock", 1, clock)
+    .actor_with_state("shutdown", 1, SHUTDOWN_AT_MILLIS, shutdown)
+    .run()?;
 
     let next_u64 = rand.rng().next_u64();
     let next_time = system_clock.now();

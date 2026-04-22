@@ -154,7 +154,7 @@ impl ActorCtx {
 
 #[derive(Clone)]
 /// Startup context passed to the database factory configured with
-/// [`Harness::with_db`].
+/// [`Harness::new`].
 ///
 /// The startup context exposes clock-wrapped object stores and shared
 /// infrastructure before actors begin running.
@@ -244,7 +244,7 @@ pub struct Harness {
     path: Option<Path>,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
-    startup_factory: Option<StartupFactory>,
+    startup_factory: StartupFactory,
     actors: Vec<ActorRegistration>,
 }
 
@@ -255,11 +255,17 @@ impl Harness {
     /// - `name`: Scenario name used when deriving the default database path.
     /// - `seed`: Root seed used to derive deterministic randomness for startup
     ///   and actor-local RNGs.
+    /// - `factory`: A function that receives a [`StartupCtx`] and returns the
+    ///   database handle that actors should share.
     ///
     /// ## Returns
     /// - `Harness`: A harness builder with an in-memory main object store and no
     ///   WAL object store configured.
-    pub fn new(name: impl Into<String>, seed: u64) -> Self {
+    pub fn new<F, Fut>(name: impl Into<String>, seed: u64, factory: F) -> Self
+    where
+        F: FnOnce(StartupCtx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Arc<Db>, Error>> + Send + 'static,
+    {
         Self {
             name: name.into(),
             rand: Arc::new(DbRand::new(seed)),
@@ -267,7 +273,7 @@ impl Harness {
             path: None,
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
-            startup_factory: None,
+            startup_factory: Box::new(move |ctx| Box::pin(factory(ctx))),
             actors: Vec::new(),
         }
     }
@@ -331,23 +337,6 @@ impl Harness {
     /// - `Harness`: The updated harness builder.
     pub fn with_wal_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(store);
-        self
-    }
-
-    /// Installs the database startup factory executed before actors begin running.
-    ///
-    /// ## Arguments
-    /// - `factory`: A function that receives a [`StartupCtx`] and returns the
-    ///   database handle that actors should share.
-    ///
-    /// ## Returns
-    /// - `Harness`: The updated harness builder.
-    pub fn with_db<F, Fut>(mut self, factory: F) -> Self
-    where
-        F: FnOnce(StartupCtx) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<Arc<Db>, Error>> + Send + 'static,
-    {
-        self.startup_factory = Some(Box::new(move |ctx| Box::pin(factory(ctx))));
         self
     }
 
@@ -416,13 +405,8 @@ impl Harness {
     ///   an actor returned or joined with an error.
     ///
     /// # Panics
-    /// Panics if [`Harness::with_db`] was not configured or if the runtime
-    /// cannot be created.
+    /// Panics if the runtime cannot be created.
     pub fn run(self) -> Result<(), Error> {
-        assert!(
-            self.startup_factory.is_some(),
-            "dst harness requires with_db(...) before run()"
-        );
         let seed = self.rand.rng().next_u64();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
@@ -471,7 +455,7 @@ impl Harness {
             rand: Arc::new(DbRand::new(startup_seed)),
         };
 
-        let db = startup_factory.expect("validated before runtime startup")(startup_ctx).await?;
+        let db = startup_factory(startup_ctx).await?;
 
         let shared = HarnessCtx {
             path,
