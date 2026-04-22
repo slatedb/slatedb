@@ -477,7 +477,7 @@ impl Harness {
             path,
             main_object_store,
             wal_object_store,
-            system_clock,
+            system_clock: system_clock.clone(),
             fp_registry,
             db_slot: Arc::new(RwLock::new(db)),
             shutdown_token: CancellationToken::new(),
@@ -547,8 +547,23 @@ impl Harness {
             }
         }
 
+        // DB depends on clock advancing for shutdown. Actors are all shut down
+        // at this point, so we need to keep advancing the clock until the DB
+        // finishes closing.
         let db = Arc::clone(&shared.db_slot.read());
-        db.close().await?;
+        let close = db.close();
+        tokio::pin!(close);
+
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut close => {
+                    result?;
+                    break;
+                }
+                _ = system_clock.advance(Duration::from_millis(1)) => {}
+            }
+        }
 
         Ok(())
     }
