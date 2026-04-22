@@ -324,14 +324,7 @@ impl Reader {
 
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: options.cache_blocks,
-            // Do not eagerly spawn block fetch tasks for point-gets. With eager_spawn:true,
-            // a block fetch tokio::spawn fires as soon as the SST index is loaded (inside
-            // ensure_metadata_loaded), which happens *before* the seek confirms the key is
-            // actually present. On a bloom filter false positive or an SST with no filter,
-            // that spawned task fetches a block that is immediately discarded. For a true
-            // positive the block is needed anyway and will be fetched synchronously by the
-            // seek, so there is no meaningful latency benefit to pre-spawning it here.
-            eager_spawn: false,
+            eager_spawn: true,
             ..SstIteratorOptions::default()
         };
 
