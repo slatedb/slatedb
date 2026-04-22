@@ -119,6 +119,16 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
+    let compactor_options = CompactorOptions {
+        poll_interval: Duration::from_millis(10),
+        scheduler_options: SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into(),
+        ..CompactorOptions::default()
+    };
     Harness::new("determinism", seed, move |ctx| async move {
         let db_seed = ctx.rand().rng().next_u64();
         let mut settings = build_settings(ctx.rand()).await;
@@ -154,6 +164,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         1,
         CompactorActorOptions {
             restart_interval: Duration::from_millis(25),
+            compactor_options,
         },
         compactor,
     )
