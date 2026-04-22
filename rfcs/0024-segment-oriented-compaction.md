@@ -50,7 +50,7 @@ The design targets the common single-active-segment case. Concurrent writes to m
 
 This section describes the intuitive LSM shape this RFC is trying to enable.
 
-A segment is a scope for compaction and retention. Each named segment is an independent logical LSM tree with its own L0 list and its own ordered list of sorted runs. A deterministic prefix extractor derives the segment from each key at memtable flush time, producing one L0 SST per segment touched by that flush. Because segments own disjoint key intervals, each segment's chain is read independently and there is no ordering relationship between segments. The read path routes queries to the segments whose key intervals overlap the query range.
+A segment defines a scope for compaction and retention. Each named segment is an independent logical LSM tree with its own L0 list and its own ordered list of sorted runs. A deterministic prefix extractor derives the segment from each key at memtable flush time, producing one L0 SST per segment touched by that flush. Because segments own disjoint key intervals, each segment's chain is read independently and there is no ordering relationship between segments. The read path routes queries to the segments whose key intervals overlap the query range.
 
 ```text
 prefix extractor derives segment prefixes from keys at flush time
@@ -75,7 +75,7 @@ SRs:  day=2026-03-10: [SR1]   day=2026-03-09: [SR1]
              expired segments dropped atomically
 ```
 
-Each segment provides an isolated compaction scope and a natural boundary for parallelism. Cold segments can be compacted independently from hot ones. Retention operates at segment granularity, removing all L0 SSTs and sorted runs for a segment atomically.
+Each segment provides an isolated compaction scope and a natural boundary for parallelism. Cold segments can be compacted independently of hot ones. Retention operates at segment granularity, removing all L0 SSTs and sorted runs for a segment atomically.
 
 ### LSM Segment Shaping Examples
 
@@ -144,7 +144,7 @@ hour=11    L0{seq=500..600}, L0{seq=400..500}, L0{seq=300..400}
 hour=10    SR{seq=1..900}
 ```
 
-The `hour=10` SR now covers the full seq range of the merged inputs. The range `1..900` overlaps what other segments are holding, but that's fine — disjoint key spaces make cross-segment ordering unnecessary.
+The `hour=10` SR now covers the full seq range of the merged inputs.
 
 #### Example 5: Segment retention
 
@@ -194,13 +194,15 @@ The `name()` check is soft: a user can keep the name and change the logic, and n
 
 - **Antichain invariant on segment prefixes.** The manifest maintains the invariant that no segment prefix is a proper prefix of another. Any manifest update that would introduce a nested prefix is rejected. Catches changes that would produce overlapping segmentation — the structural violation that would otherwise force cross-segment key-wise merging on reads.
 
-- **Route-consistency at flush.** When the memtable flusher routes a key to a (possibly new) segment, the resulting prefix is checked against the antichain invariant against the current segment set. This is the antichain check applied incrementally at flush time, surfacing violations at the write that introduces them rather than on a later read.
+- **Route-consistency at write.** Each incoming write is evaluated by the extractor before it is appended to the WAL. If the resulting prefix would introduce a nested prefix (violating the antichain invariant against the current segment set), the write is rejected and the caller sees an error — no WAL append, no memtable insertion. Checking before the WAL is the only way to surface errors at the call site; a check deferred to memtable flush would fail after the write has already been durably committed and acknowledged.
 
 These do not cover every kind of extractor change — for example, a swap that preserves the antichain and acknowledges existing prefixes, but routes future keys differently, will still slip through. The checks above narrow the surface to changes that cannot produce an inconsistent manifest undetected.
 
 ### WAL
 
-The WAL requires no format changes to support segments. Because the extractor is deterministic and configured at database open time, segment membership can be recomputed from keys during WAL replay. The extractor is applied at memtable flush time to group entries by segment — there is no need to persist segment information in the WAL.
+The WAL requires no format changes to support segments. Because the extractor is deterministic and configured at database open time, segment membership can be recomputed from keys during WAL replay — there is no need to persist segment information in the WAL.
+
+Replay runs the same antichain-invariant check that the write path applies (see [Validation](#validation)). This catches the case where an old WAL, written under a different extractor, contains writes that under the current extractor would nest with existing segment prefixes. If a replayed write would violate the invariant, the database refuses to complete replay rather than silently accepting an inconsistent state.
 
 The extractor must be configured consistently across restarts. The persisted extractor `name()` in the manifest guards against accidental reconfiguration; see the [Segment Extractor](#segment-extractor) section for details.
 
@@ -265,11 +267,15 @@ When an extractor is configured for the first time on an existing database, the 
 
 ### Write Path
 
-The write path is unchanged up to memtable flush. Writes go through the WAL and memtable as today — the extractor is not involved until flush time. When a memtable is frozen and flushed, the extractor is applied to each entry's key to determine its target tree. Entries are grouped accordingly and one L0 SST is produced per target: one per named segment that received entries from this flush, plus at most one for the unsegmented tree.
+The write path consults the extractor for each incoming write to validate the antichain invariant (see [Validation](#validation)) before appending to the WAL. If the check passes, the write proceeds through the WAL and memtable as today. At memtable flush, the extractor's output (either recomputed or carried alongside each entry) is used to group entries by target tree, producing one L0 SST per target: one per named segment that received entries from this flush, plus at most one for the unsegmented tree.
 
 All L0 SSTs from a single flush are uploaded (in parallel) and then added to the manifest in a single atomic update. This update appends the new L0 SST to each affected tree's `l0` list and advances the corresponding `l0_last_compacted` cursors as appropriate. Partial visibility of a multi-segment flush is not supported — the manifest either reflects the entire flush or none of it.
 
-The reason is the **flush cursor invariant**, not durability. The WAL replay cursor advances past a single contiguous sequence range once the corresponding writes have been durably captured in L0. If a multi-segment flush could be partially visible, replay would need to track a per-segment flush frontier and replay WAL entries selectively per target tree. Forcing atomicity at the manifest level keeps the cursor single-valued and keeps WAL replay logic unchanged. This holds regardless of whether the WAL is enabled — the simplification is in the state machine, not the durability guarantee.
+Atomicity is needed for two reasons, depending on whether the WAL is enabled.
+
+- **With WAL enabled**, it keeps the WAL replay cursor single-valued. The cursor advances past a contiguous sequence range once the corresponding writes are durably captured in L0. A partially visible multi-segment flush would force replay to track a per-segment flush frontier and selectively replay WAL entries per tree. Forcing atomicity at the manifest level keeps WAL replay logic unchanged.
+
+- **With WAL disabled**, it is a correctness requirement for reader snapshots. The flush itself is the durability boundary, and atomic publication of the flush's L0 SSTs is what makes sequence-number advancement observable to readers as a single step. Without it, a reader could see some of a memtable's writes (those in segments already published) while missing others at the same sequence numbers (those in segments not yet published), breaking the invariant that if sequence `N` is visible, all sequences `≤ N` are too.
 
 **Operational consideration.** In typical append-oriented workloads, writes concentrate on one or two segments (e.g. the current hour plus occasional backfill), so a flush produces a small number of L0 SSTs and parallel upload keeps latency comparable to today. A pathological wide backfill touching many segments in a single memtable does produce a correspondingly wide flush, and the memtable cannot be released until all uploads land and the manifest update succeeds. Near-term mitigation is to bound memtable width (size- or segment-count-based) so such flushes are frozen earlier; finer-grained WAL tracking to allow partial multi-segment flushes is deferred to [Future Work](#future-work).
 
