@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use log::info;
 use rand::RngCore;
+use slatedb::compactor::stats::COMPACTOR_EPOCH;
 use slatedb::config::CompactorOptions;
 use slatedb::{CloseReason, CompactorBuilder, Error, ErrorKind};
+use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
 use tokio::task::JoinHandle;
 use tracing::{instrument, Instrument, Span};
 
@@ -56,7 +58,7 @@ pub struct CompactorActorOptions {
 pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> Result<(), Error> {
     let shutdown_token = ctx.shutdown_token();
     let system_clock = ctx.system_clock();
-    let mut current = spawn_compactor(&ctx, &actor_options.compactor_options);
+    let mut current = spawn_compactor(&ctx, &actor_options.compactor_options).await?;
 
     while !shutdown_token.is_cancelled() {
         tokio::select! {
@@ -66,7 +68,7 @@ pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> R
         }
 
         let old = current;
-        current = spawn_compactor(&ctx, &actor_options.compactor_options);
+        current = spawn_compactor(&ctx, &actor_options.compactor_options).await?;
         info!("spawned replacement compactor");
 
         tokio::select! {
@@ -87,14 +89,24 @@ pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> R
     Ok(())
 }
 
-fn spawn_compactor(ctx: &ActorCtx, compactor_options: &CompactorOptions) -> CompactorTask {
+async fn spawn_compactor(
+    ctx: &ActorCtx,
+    compactor_options: &CompactorOptions,
+) -> Result<CompactorTask, Error> {
+    let recorder = std::sync::Arc::new(DefaultMetricsRecorder::new());
     let compactor_seed = ctx.rand().rng().next_u64();
     let compactor = CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
+        .with_metrics_recorder(recorder.clone())
         .with_options(compactor_options.clone())
         .with_system_clock(ctx.system_clock())
         .with_seed(compactor_seed)
         .build();
-    CompactorTask(Some(tokio::spawn(
+    let task = CompactorTask(Some(tokio::spawn(
         async move { compactor.run().await }.instrument(Span::current()),
-    )))
+    )));
+    // Wait for the compactor to start and publish its epoch before returning the task handle.
+    while lookup_metric(recorder.as_ref(), COMPACTOR_EPOCH).is_none_or(|epoch| epoch == 0) {
+        tokio::task::yield_now().await;
+    }
+    Ok(task)
 }
