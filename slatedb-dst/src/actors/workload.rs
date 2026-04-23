@@ -7,29 +7,11 @@ use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::{Error, WriteBatch};
 use tracing::instrument;
 
-use crate::utils::workload_key_with_prefix;
 use crate::ActorCtx;
 
 use super::PROGRESS_LOG_INTERVAL;
 
-/// Shared keyspace configuration for workload actors that map random samples
-/// onto a fixed logical key range.
-#[derive(Clone, Debug)]
-pub struct WorkloadKeyspace {
-    /// Prefix applied to each generated workload actor namespace.
-    pub prefix: String,
-    /// Number of logical keys to map random samples onto for each actor.
-    pub key_count: usize,
-}
-
-impl Default for WorkloadKeyspace {
-    fn default() -> Self {
-        Self {
-            prefix: "key".to_string(),
-            key_count: 32,
-        }
-    }
-}
+const WORKLOAD_KEY_COUNT: usize = 1024;
 
 #[derive(Clone, Copy, Debug)]
 enum WorkloadOperation {
@@ -57,9 +39,10 @@ impl WorkloadOperation {
 ///
 /// The actor runs until the shared shutdown token is cancelled.
 ///
-/// Each actor owns a disjoint prefix namespace derived from the configured
-/// [`WorkloadKeyspace`] plus its role and instance id. That keeps its local
-/// oracle authoritative for all keys it reads back.
+/// Each actor owns a disjoint key prefix derived from its role and instance id:
+/// `{role}/{instance}/`. The actor maps random samples onto a fixed logical key
+/// range under that prefix, which keeps its local oracle authoritative for all
+/// keys it reads back.
 ///
 /// On each step it:
 /// - samples one top-level operation uniformly from `get`, `scan`, `delete`,
@@ -69,21 +52,14 @@ impl WorkloadOperation {
 /// - verifies `get` and `scan` results with `assert!`/`assert_eq!` against the
 ///   actor-local oracle
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-pub async fn workload(ctx: ActorCtx, keyspace: WorkloadKeyspace) -> Result<(), Error> {
+pub async fn workload(ctx: ActorCtx) -> Result<(), Error> {
     let shutdown_token = ctx.shutdown_token();
     let put_options = PutOptions::default();
     let write_options = WriteOptions {
         await_durable: false,
         ..WriteOptions::default()
     };
-    let key_count = keyspace.key_count;
-    if key_count == 0 {
-        return Err(Error::invalid(
-            "workload actor key_count must be greater than zero".to_string(),
-        ));
-    }
-
-    let actor_prefix = workload_actor_prefix(&keyspace.prefix, ctx.role(), ctx.instance());
+    let key_prefix = format!("{}/{}/", ctx.role(), ctx.instance());
     let mut oracle = BTreeMap::<Bytes, Bytes>::new();
     let mut step = 0u64;
 
@@ -91,21 +67,21 @@ pub async fn workload(ctx: ActorCtx, keyspace: WorkloadKeyspace) -> Result<(), E
         let operation = WorkloadOperation::sample(ctx.rand().rng().next_u64());
         match operation {
             WorkloadOperation::Get => {
-                let key = workload_key(&actor_prefix, ctx.rand().rng().next_u64(), key_count);
+                let key = workload_key(&key_prefix, ctx.rand().rng().next_u64());
                 verify_get(&ctx, step, &key, &oracle).await?;
             }
             WorkloadOperation::Scan => {
-                verify_scan(&ctx, step, &actor_prefix, &oracle).await?;
+                verify_scan(&ctx, step, &key_prefix, &oracle).await?;
             }
             WorkloadOperation::Delete => {
-                let key = workload_key(&actor_prefix, ctx.rand().rng().next_u64(), key_count);
+                let key = workload_key(&key_prefix, ctx.rand().rng().next_u64());
                 ctx.db()
                     .delete_with_options(key.clone(), &write_options)
                     .await?;
                 oracle.remove(&key);
             }
             WorkloadOperation::Put => {
-                let key = workload_key(&actor_prefix, ctx.rand().rng().next_u64(), key_count);
+                let key = workload_key(&key_prefix, ctx.rand().rng().next_u64());
                 let value = workload_value(
                     ctx.role(),
                     ctx.instance(),
@@ -124,7 +100,7 @@ pub async fn workload(ctx: ActorCtx, keyspace: WorkloadKeyspace) -> Result<(), E
                 let batch_len = 2 + (ctx.rand().rng().next_u64() % 3) as usize;
 
                 for entry_idx in 0..batch_len {
-                    let key = workload_key(&actor_prefix, ctx.rand().rng().next_u64(), key_count);
+                    let key = workload_key(&key_prefix, ctx.rand().rng().next_u64());
                     if ctx.rand().rng().next_u64() & 1 == 0 {
                         let value = workload_value(
                             ctx.role(),
@@ -159,12 +135,9 @@ pub async fn workload(ctx: ActorCtx, keyspace: WorkloadKeyspace) -> Result<(), E
     Ok(())
 }
 
-fn workload_actor_prefix(prefix: &str, role: &str, instance: usize) -> String {
-    format!("{prefix}/{role}/{instance}/")
-}
-
-fn workload_key(prefix: &str, rand_value: u64, key_count: usize) -> Bytes {
-    Bytes::from(workload_key_with_prefix(prefix, rand_value, key_count))
+fn workload_key(prefix: &str, rand_value: u64) -> Bytes {
+    let key_index = ((rand_value >> 8) as usize) % WORKLOAD_KEY_COUNT;
+    Bytes::from(format!("{prefix}{key_index}"))
 }
 
 fn workload_value(
@@ -197,7 +170,7 @@ async fn verify_get(
         ctx.role(),
         ctx.instance(),
         step,
-        display_bytes(key),
+        String::from_utf8_lossy(key.as_ref()).into_owned(),
     );
     Ok(())
 }
@@ -205,10 +178,10 @@ async fn verify_get(
 async fn verify_scan(
     ctx: &ActorCtx,
     step: u64,
-    prefix: &str,
+    key_prefix: &str,
     oracle: &BTreeMap<Bytes, Bytes>,
 ) -> Result<(), Error> {
-    let mut iter = ctx.db().scan_prefix(prefix.as_bytes()).await?;
+    let mut iter = ctx.db().scan_prefix(key_prefix.as_bytes()).await?;
     let mut actual = BTreeMap::new();
 
     while let Some(key_value) = iter.next().await? {
@@ -216,27 +189,23 @@ async fn verify_scan(
             actual
                 .insert(key_value.key.clone(), key_value.value.clone())
                 .is_none(),
-            "workload scan returned duplicate key [role={}, instance={}, step={}, prefix={}, key={}]",
+            "workload scan returned duplicate key [role={}, instance={}, step={}, key_prefix={}, key={}]",
             ctx.role(),
             ctx.instance(),
             step,
-            prefix,
-            display_bytes(&key_value.key),
+            key_prefix,
+            String::from_utf8_lossy(key_value.key.as_ref()).into_owned(),
         );
     }
 
     assert_eq!(
         actual,
         *oracle,
-        "workload scan mismatch [role={}, instance={}, step={}, prefix={}]",
+        "workload scan mismatch [role={}, instance={}, step={}, key_prefix={}]",
         ctx.role(),
         ctx.instance(),
         step,
-        prefix,
+        key_prefix,
     );
     Ok(())
-}
-
-fn display_bytes(bytes: &Bytes) -> String {
-    String::from_utf8_lossy(bytes.as_ref()).into_owned()
 }

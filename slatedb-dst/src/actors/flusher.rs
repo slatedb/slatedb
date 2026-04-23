@@ -11,10 +11,6 @@ use super::PROGRESS_LOG_INTERVAL;
 ///
 /// The actor runs until the shared shutdown token is cancelled.
 ///
-/// Unlike the mixed workload actor, the flusher does not consume any
-/// actor-local randomness. Its role is to impose deterministic pressure on the
-/// SlateDB flush and compaction pipeline at fixed points in the scenario.
-///
 /// Each step calls [`slatedb::Db::flush_with_options`] with
 /// [`FlushType::MemTable`], which makes the actor useful in scenarios that need
 /// real SST creation and downstream compaction work rather than relying solely

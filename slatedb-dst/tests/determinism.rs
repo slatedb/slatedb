@@ -27,9 +27,7 @@ use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    actors::{
-        clock, compactor, flusher, shutdown, workload, CompactorActorOptions, WorkloadKeyspace,
-    },
+    actors::{clock, compactor, flusher, shutdown, workload, CompactorActorOptions},
     utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     Operation, StreamDirection, Toxic, ToxicKind,
@@ -114,10 +112,6 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
-    let workload_keyspace = WorkloadKeyspace {
-        key_count: 4,
-        ..WorkloadKeyspace::default()
-    };
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(10),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
@@ -155,7 +149,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
-    .actor_with_state("workload", 9, workload_keyspace, workload)
+    .actor("workload", 9, workload)
     .actor("flusher", 1, flusher)
     .actor_with_state(
         "compactor",
