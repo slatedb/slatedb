@@ -817,12 +817,13 @@ fn already_exists_error(path: &StdPath, source: io::Error) -> object_store::Erro
 
 fn is_valid_file_path(path: &Path) -> bool {
     match path.filename() {
-        Some(filename) => match filename.split_once('#') {
-            Some((_, suffix)) if !suffix.is_empty() => {
-                !suffix.as_bytes().iter().all(|byte| byte.is_ascii_digit())
-            }
-            _ => true,
-        },
+        // Exclude staged uploads.
+        Some(filename) => ![filename.rsplit_once('#'), filename.rsplit_once("%23")]
+            .into_iter()
+            .flatten()
+            .any(|(_, suffix)| {
+                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            }),
         None => false,
     }
 }
@@ -1029,6 +1030,33 @@ mod tests {
             .map(|meta| meta.location.to_string())
             .collect();
         assert_eq!(locations, vec!["wal/001.sst", "wal/002.sst"]);
+    }
+
+    #[tokio::test]
+    async fn should_skip_staged_uploads_in_listings() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+
+        let live_path = store
+            .path_to_filesystem(&Path::from("wal/001.sst"))
+            .unwrap();
+        std::fs::create_dir_all(live_path.parent().unwrap()).unwrap();
+        std::fs::write(&live_path, b"live").unwrap();
+
+        let staged_path = live_path.with_file_name("001.sst#1");
+        std::fs::write(&staged_path, b"staged").unwrap();
+
+        let listed = store
+            .list(Some(&Path::from("wal")))
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        let locations: Vec<_> = listed
+            .into_iter()
+            .map(|meta| meta.location.to_string())
+            .collect();
+        assert_eq!(locations, vec!["wal/001.sst"]);
     }
 
     #[tokio::test]

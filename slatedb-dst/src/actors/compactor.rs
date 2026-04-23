@@ -9,6 +9,25 @@ use tracing::{instrument, Instrument, Span};
 
 use crate::ActorCtx;
 
+struct CompactorTask(Option<JoinHandle<Result<(), Error>>>);
+
+impl CompactorTask {
+    async fn join(mut self) -> Result<Result<(), Error>, tokio::task::JoinError> {
+        self.0
+            .take()
+            .expect("compactor task missing join handle")
+            .await
+    }
+}
+
+impl Drop for CompactorTask {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 /// Configuration for the standalone compactor DST actor.
 #[derive(Clone, Debug)]
 pub struct CompactorActorOptions {
@@ -50,7 +69,7 @@ pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> R
         current = spawn_compactor(&ctx, &actor_options.compactor_options);
         info!("spawned replacement compactor");
 
-        match old.await {
+        match old.join().await {
             Ok(Err(err)) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {
                 // The old compactor was fenced as expected
                 continue;
@@ -65,15 +84,14 @@ pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> R
     Ok(())
 }
 
-fn spawn_compactor(
-    ctx: &ActorCtx,
-    compactor_options: &CompactorOptions,
-) -> JoinHandle<Result<(), Error>> {
+fn spawn_compactor(ctx: &ActorCtx, compactor_options: &CompactorOptions) -> CompactorTask {
     let compactor_seed = ctx.rand().rng().next_u64();
     let compactor = CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
         .with_options(compactor_options.clone())
         .with_system_clock(ctx.system_clock())
         .with_seed(compactor_seed)
         .build();
-    tokio::spawn(async move { compactor.run().await }.instrument(Span::current()))
+    CompactorTask(Some(tokio::spawn(
+        async move { compactor.run().await }.instrument(Span::current()),
+    )))
 }
