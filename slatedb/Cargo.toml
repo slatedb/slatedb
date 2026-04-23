@@ -31,6 +31,7 @@ flatbuffers = { workspace = true }
 foyer = { workspace = true, features = ["serde"], optional = true }
 futures = { workspace = true }
 log = { workspace = true }
+lru = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
 moka = { workspace = true, features = ["future"], optional = true }
 object_store = { workspace = true }
