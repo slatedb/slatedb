@@ -482,6 +482,7 @@ pub struct BlockIteratorV2BenchConfig {
 }
 
 #[cfg(feature = "bench-internal")]
+#[allow(clippy::panic)]
 pub fn block_iterator_v2_bench<F>(config: BlockIteratorV2BenchConfig, mut run_bench: F)
 where
     F: FnMut(&mut dyn FnMut()),
@@ -490,12 +491,12 @@ where
     use crate::iter::RowEntryIterator;
     use crate::types::{RowEntry, ValueDeletable};
     use futures::executor::block_on;
-    use rand::{RngCore, SeedableRng};
-    use rand_xoshiro::Xoshiro256PlusPlus;
+    use rand::{RngCore};
 
-    const SEED: u64 = 0x51A7EDB_BE4C4;
+    const SEED: u64 = 0x51A7_EDBB_E4C4;
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(SEED);
+    let rand = crate::rand::DbRand::new(SEED);
+    let mut rng = rand.rng();
     let mut pool: Vec<(Bytes, Bytes)> = (0..config.num_entries)
         .map(|_| {
             let mut key = vec![0u8; config.key_size];

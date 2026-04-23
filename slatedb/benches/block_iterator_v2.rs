@@ -10,6 +10,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::BlockIteratorV2BenchConfig;
 
+#[allow(clippy::redundant_closure)]
 fn criterion_benchmark(c: &mut Criterion) {
     // Small values: pool of 16B-key/512B-value entries filling a 4KB block.
     slatedb::block_iterator_v2_bench(
