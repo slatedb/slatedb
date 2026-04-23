@@ -29,14 +29,24 @@ pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_fals
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
 pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_count");
 
+/// Label key distinguishing filter metrics for point lookups from those for
+/// prefix scans. Value is one of [`FILTER_KIND_POINT`] or
+/// [`FILTER_KIND_PREFIX`].
+pub const FILTER_KIND_LABEL: &str = "kind";
+pub const FILTER_KIND_POINT: &str = "point";
+pub const FILTER_KIND_PREFIX: &str = "prefix";
+
 pub(crate) struct DbStatsInner {
     pub(crate) immutable_memtable_flushes: Arc<dyn CounterFn>,
     pub(crate) wal_buffer_estimated_bytes: Arc<dyn GaugeFn>,
     pub(crate) wal_buffer_flushes: Arc<dyn CounterFn>,
     pub(crate) wal_buffer_flush_requests: Arc<dyn CounterFn>,
-    pub(crate) sst_filter_false_positives: Arc<dyn CounterFn>,
-    pub(crate) sst_filter_positives: Arc<dyn CounterFn>,
-    pub(crate) sst_filter_negatives: Arc<dyn CounterFn>,
+    pub(crate) sst_filter_point_false_positives: Arc<dyn CounterFn>,
+    pub(crate) sst_filter_point_positives: Arc<dyn CounterFn>,
+    pub(crate) sst_filter_point_negatives: Arc<dyn CounterFn>,
+    pub(crate) sst_filter_prefix_false_positives: Arc<dyn CounterFn>,
+    pub(crate) sst_filter_prefix_positives: Arc<dyn CounterFn>,
+    pub(crate) sst_filter_prefix_negatives: Arc<dyn CounterFn>,
     pub(crate) backpressure_count: Arc<dyn CounterFn>,
     pub(crate) get_requests: Arc<dyn CounterFn>,
     pub(crate) scan_requests: Arc<dyn CounterFn>,
@@ -71,11 +81,30 @@ impl DbStats {
             wal_buffer_estimated_bytes: recorder.gauge(WAL_BUFFER_ESTIMATED_BYTES).register(),
             wal_buffer_flushes: recorder.counter(WAL_BUFFER_FLUSHES).register(),
             wal_buffer_flush_requests: recorder.counter(WAL_BUFFER_FLUSH_REQUESTS).register(),
-            sst_filter_false_positives: recorder
+            sst_filter_point_false_positives: recorder
                 .counter(SST_FILTER_FALSE_POSITIVE_COUNT)
+                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_POINT)])
                 .register(),
-            sst_filter_positives: recorder.counter(SST_FILTER_POSITIVE_COUNT).register(),
-            sst_filter_negatives: recorder.counter(SST_FILTER_NEGATIVE_COUNT).register(),
+            sst_filter_point_positives: recorder
+                .counter(SST_FILTER_POSITIVE_COUNT)
+                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_POINT)])
+                .register(),
+            sst_filter_point_negatives: recorder
+                .counter(SST_FILTER_NEGATIVE_COUNT)
+                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_POINT)])
+                .register(),
+            sst_filter_prefix_false_positives: recorder
+                .counter(SST_FILTER_FALSE_POSITIVE_COUNT)
+                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)])
+                .register(),
+            sst_filter_prefix_positives: recorder
+                .counter(SST_FILTER_POSITIVE_COUNT)
+                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)])
+                .register(),
+            sst_filter_prefix_negatives: recorder
+                .counter(SST_FILTER_NEGATIVE_COUNT)
+                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)])
+                .register(),
             backpressure_count: recorder.counter(BACKPRESSURE_COUNT).register(),
             get_requests: recorder
                 .counter(REQUEST_COUNT)

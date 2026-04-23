@@ -66,7 +66,7 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
-use crate::reader::Reader;
+use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
@@ -238,7 +238,40 @@ impl DbInner {
         self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
-            .scan_with_options(range, options, &db_state, None, None, None)
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix: None,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn scan_prefix_with_options(
+        &self,
+        prefix: Bytes,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, SlateDBError> {
+        self.check_closed()?;
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        let db_state = self.state.read().view();
+        self.reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix: Some(prefix),
+                },
+            )
             .await
     }
 
@@ -488,6 +521,7 @@ impl DbInner {
             cache_blocks: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
+            prefix: None,
         };
 
         let replay_options = WalReplayOptions {
@@ -1086,9 +1120,9 @@ impl Db {
     where
         P: AsRef<[u8]> + Send,
     {
-        let range = BytesRange::from_prefix(prefix.as_ref());
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
         self.inner
-            .scan_with_options(range, options)
+            .scan_prefix_with_options(prefix, options)
             .await
             .map_err(Into::into)
     }
@@ -1651,6 +1685,17 @@ impl DbReadOps for Db {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 
@@ -3437,7 +3482,7 @@ mod tests {
                 ..,
                 sst1,
                 table_store.clone(),
-                sst_iter_options,
+                sst_iter_options.clone(),
             )
             .await
             .unwrap()
