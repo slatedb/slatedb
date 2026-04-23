@@ -91,7 +91,11 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
 
 pub(crate) fn workload_key_with_prefix(prefix: &str, rand_value: u64, key_count: usize) -> String {
     let key_index = ((rand_value >> 8) as usize) % key_count;
-    format!("{prefix}-{key_index}")
+    if prefix.ends_with('/') {
+        format!("{prefix}{key_index}")
+    } else {
+        format!("{prefix}-{key_index}")
+    }
 }
 
 // A flag so we only initialize logging once.

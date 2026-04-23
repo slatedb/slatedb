@@ -6,7 +6,7 @@
 //! - starts from a fresh shared [`MockSystemClock`]
 //! - opens a real [`Db`] using randomized deterministic settings from
 //!   [`build_settings`]
-//! - runs looping writer, deleter, flusher, and clock actors against
+//! - runs looping workload, flusher, and clock actors against
 //!   deterministic local filesystem-backed object stores until a shutdown actor
 //!   cancels the shared token at a fixed mock-clock deadline
 //! - compares the next random `u64` and current clock time after the run
@@ -28,8 +28,7 @@ use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
     actors::{
-        clock, compactor, deleter, flusher, shutdown, writer, CompactorActorOptions,
-        WorkloadKeyspace,
+        clock, compactor, flusher, shutdown, workload, CompactorActorOptions, WorkloadKeyspace,
     },
     utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
@@ -115,7 +114,10 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
-    let workload_keyspace = WorkloadKeyspace::default();
+    let workload_keyspace = WorkloadKeyspace {
+        key_count: 4,
+        ..WorkloadKeyspace::default()
+    };
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(10),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
@@ -153,9 +155,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
-    // Split actor to roughly 70% writes, 20% deletes, and 10% flushes.
-    .actor_with_state("writer", 7, workload_keyspace.clone(), writer)
-    .actor_with_state("deleter", 2, workload_keyspace, deleter)
+    .actor_with_state("workload", 9, workload_keyspace, workload)
     .actor("flusher", 1, flusher)
     .actor_with_state(
         "compactor",
