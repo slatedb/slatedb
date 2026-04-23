@@ -169,20 +169,17 @@ impl SstRowCodecV2 {
     }
 
     /// Decode a V2 row entry from the data buffer.
-    pub(crate) fn decode(&self, data: &mut &[u8]) -> Result<SstRowEntryV2, SlateDBError> {
+    pub(crate) fn decode(&self, data: &mut impl Buf) -> Result<SstRowEntryV2, SlateDBError> {
         let shared_bytes = decode_varint(data);
         let unshared_bytes = decode_varint(data) as usize;
         let value_len = decode_varint(data) as usize;
 
         // Read key_delta
-        let key_suffix = Bytes::copy_from_slice(&data[..unshared_bytes]);
-        *data = &data[unshared_bytes..];
+        let key_suffix = data.copy_to_bytes(unshared_bytes);
 
         // Read value
         let value_bytes = if value_len > 0 {
-            let v = Bytes::copy_from_slice(&data[..value_len]);
-            *data = &data[value_len..];
-            Some(v)
+            Some(data.copy_to_bytes(value_len))
         } else {
             None
         };
