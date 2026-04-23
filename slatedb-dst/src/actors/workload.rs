@@ -12,6 +12,8 @@ use crate::ActorCtx;
 use super::PROGRESS_LOG_INTERVAL;
 
 const WORKLOAD_KEY_COUNT: usize = 1024;
+const WORKLOAD_MIN_VALUE_SIZE: usize = 32;
+const WORKLOAD_MAX_VALUE_SIZE: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 enum WorkloadOperation {
@@ -82,13 +84,7 @@ pub async fn workload(ctx: ActorCtx) -> Result<(), Error> {
             }
             WorkloadOperation::Put => {
                 let key = workload_key(&key_prefix, ctx.rand().rng().next_u64());
-                let value = workload_value(
-                    ctx.role(),
-                    ctx.instance(),
-                    step,
-                    None,
-                    ctx.rand().rng().next_u64(),
-                );
+                let value = workload_value(&mut *ctx.rand().rng());
                 ctx.db()
                     .put_with_options(key.clone(), value.clone(), &put_options, &write_options)
                     .await?;
@@ -99,16 +95,10 @@ pub async fn workload(ctx: ActorCtx) -> Result<(), Error> {
                 let mut next_oracle = oracle.clone();
                 let batch_len = 2 + (ctx.rand().rng().next_u64() % 3) as usize;
 
-                for entry_idx in 0..batch_len {
+                for _ in 0..batch_len {
                     let key = workload_key(&key_prefix, ctx.rand().rng().next_u64());
                     if ctx.rand().rng().next_u64() & 1 == 0 {
-                        let value = workload_value(
-                            ctx.role(),
-                            ctx.instance(),
-                            step,
-                            Some(entry_idx),
-                            ctx.rand().rng().next_u64(),
-                        );
+                        let value = workload_value(&mut *ctx.rand().rng());
                         batch.put_bytes(key.clone(), value.clone());
                         next_oracle.insert(key, value);
                     } else {
@@ -140,19 +130,12 @@ fn workload_key(prefix: &str, rand_value: u64) -> Bytes {
     Bytes::from(format!("{prefix}{key_index}"))
 }
 
-fn workload_value(
-    role: &str,
-    instance: usize,
-    step: u64,
-    batch_entry: Option<usize>,
-    rand_value: u64,
-) -> Bytes {
-    let batch_entry = batch_entry
-        .map(|entry| format!("{entry:02}"))
-        .unwrap_or_else(|| "na".to_string());
-    Bytes::from(format!(
-        "{role}:{instance}:{step:08}:{batch_entry}:{rand_value:016x}"
-    ))
+fn workload_value(rng: &mut impl RngCore) -> Bytes {
+    let value_len = WORKLOAD_MIN_VALUE_SIZE
+        + (rng.next_u64() as usize % (WORKLOAD_MAX_VALUE_SIZE - WORKLOAD_MIN_VALUE_SIZE + 1));
+    let mut value = vec![0; value_len];
+    rng.fill_bytes(&mut value);
+    Bytes::from(value)
 }
 
 async fn verify_get(
