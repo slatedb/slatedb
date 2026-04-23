@@ -123,6 +123,7 @@ all = [
     "zstd",
     "wal_disable",
     "foyer",
+    "moka",
     "test-util",
 ]
 # Enable compaction filters API.
