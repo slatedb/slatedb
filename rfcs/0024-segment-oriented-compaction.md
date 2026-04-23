@@ -398,6 +398,20 @@ table CompactionSpecV2 {
 
 Compared to the existing `TieredCompactionSpec`, the V2 schema adds the `segment` prefix and replaces the single-action shape with an explicit `action` enum to express `Drop` alongside `Merge`. The ID fields remain `uint` (globally unique), matching today's `u32` SR IDs.
 
+#### Default Scheduler
+
+SlateDB provides a default segment-aware compaction scheduler so that databases using segmentation have a working baseline without requiring the application to supply its own. The default applies the existing tiered compaction policy per tree:
+
+- **L0 → SR compaction** within each tree, using the existing tiered-policy config knobs scoped per tree.
+- **Intra-tree SR compaction** combining smaller sorted runs into larger ones, again using today's tiered rules scoped per tree.
+- **Empty segment cleanup.** When a named segment's `l0` and `compacted` lists are both empty, the default drops the segment entry from the manifest.
+
+**Alignment with backpressure.** The default scheduler's L0 compaction trigger is configured strictly below `l0_max_ssts` so that compaction fires before backpressure engages. A scheduler whose L0 trigger threshold is greater than or equal to `l0_max_ssts` would deadlock writes — backpressure engages before compaction can drain the segment. The existing alignment between the default tiered scheduler and `l0_max_ssts` carries over per tree; applications that replace the scheduler inherit responsibility for maintaining this invariant.
+
+**Cross-segment prioritization.** When more than one tree is eligible for compaction simultaneously, the default prefers trees with larger L0 counts — the segment closest to backpressure gets attention first. This keeps the scheduler responsive to write pressure without relying on any segment metadata beyond what the manifest already exposes. Finer ordering (tie-breaks among equally-pressured trees, secondary criteria based on SR shape, etc.) is left to the implementation; applications that need different prioritization can replace the default.
+
+**Retention is the application's responsibility.** The default does not implement a segment-level retention policy. If an application wants to drop a segment that still contains data — hour buckets outside a retention window, log segments past a consumption marker, etc. — it must supply its own scheduler (or extend the default). Retention policy depends on application semantics: time-based for a TSDB, consumption-based for a log, whatever the operator has decided for a given use case. Default policies are deferred to [Future Work](#future-work).
+
 ### Recovery and Progress Tracking
 
 The resume mechanism is unchanged: the executor reads the last output SST to compute a resume cursor. Since each compaction produces a single sorted run, the existing single-destination progress model applies without modification. The compactor epoch and fencing protocol are unaffected.
@@ -408,9 +422,9 @@ This RFC focuses on segment-oriented planning and explicit drop semantics. Natur
 
 **Finer-grained WAL tracking for partial multi-segment flushes.** The current design requires a multi-segment flush to become visible atomically via the manifest, which keeps a single WAL replay cursor but can extend flush latency for wide backfills (see [Write Path](#write-path)). A future iteration could track per-segment flush frontiers in the WAL or in the manifest, allowing partial flushes to become visible incrementally. This involves extending WAL replay to advance the frontier per segment and reconciling checkpoint semantics with per-segment progress; deferred until operational experience shows the wide-flush case is a real bottleneck.
 
-**Richer L0 backpressure policies.** The initial design applies `l0_max_ssts` uniformly across every tree (see [Backpressure](#backpressure)). Future iterations could expose per-segment overrides (e.g., a larger threshold for a known hot segment), differentiate between hot and cold segments in the scheduler's compaction priority, or cap the total L0 count across trees as a secondary guard against unbounded segment proliferation.
-
 **Parallel execution of independent segment compactions.** The execution model in this RFC can be extended to run compactions for disjoint segments concurrently. Each segment has its own L0 list, its own `l0_last_compacted` watermark, and its own `compacted` list in the manifest, so parallel compactions in different segments commit to disjoint `Segment` entries with distinct destination IDs drawn from the shared counter — no cross-segment ordering conflict arises. Parallel compaction *within* a single segment is a separate concern tied to the `l0_last_compacted` watermark's single-cursor design and is not addressed here.
+
+**Default segment retention policies.** The default scheduler (see [Default Scheduler](#default-scheduler)) does not implement segment-level retention. Natural extensions include a segment TTL that drops segments whose last-write timestamp exceeds a configured duration (requires tracking a `last_write_time` per segment in the manifest, updated on flush), or policy hooks that let applications plug retention decisions into the default without replacing it wholesale. The semantics questions — wall-clock vs. logical time, treatment of late backfills that reset the clock, interaction with checkpoints — deserve their own design pass before baking a particular policy into the default.
 
 **Multi-stage timeseries rollups.** Daily timeseries compactions can build on hourly segmentation:
 
@@ -459,10 +473,6 @@ The tree-per-segment layout in this RFC does not need any of that:
 
 Avoiding sequence-range bookkeeping also keeps migration trivial: it does not require reading SST index metadata to backfill seq ranges for existing runs, and the manifest does not grow to carry per-SST seq data.
 
-### Unifying L0 and sorted runs
-
-The structural distinction between L0 SSTs and sorted runs is independent of segmentation. An L0 SST is semantically equivalent to a sorted run containing a single SST, and unifying the two into a single abstraction would simplify the manifest schema. This RFC preserves the existing L0/SR distinction to limit scope — unification is a natural follow-on that would apply equally to segmented and unsegmented LSM state.
-
 ### Segment tag in WriteOptions instead of an extractor
 
 An alternative to the deterministic extractor is to specify the segment tag directly in `WriteOptions` as `segment: Option<Bytes>`. This gives the caller full control over segment assignment per write batch, without requiring the segment to be derivable from the key.
@@ -496,10 +506,6 @@ These could in principle be addressed by routing queries and deletes to *both* t
 An alternative to the per-tree backpressure policy (see [Backpressure](#backpressure)) is to compare `l0_max_ssts` against the sum of L0 entries across every tree — the unsegmented tree plus every named segment. This preserves a single global contract for operators and bounds the total L0 count in the database.
 
 The per-tree approach was chosen instead because a global sum couples unrelated segments together. Each retired segment typically retains a small tail of L0s until compaction drains it, and with many retired segments those tails add up. Writers to the current active segment would stall on backpressure triggered by stale L0s in cold segments that aren't falling behind in any meaningful sense. The resulting behavior isn't a true deadlock — compaction can still drain cold segments to bring the total below the threshold — but it produces persistent spurious stalls that couple the active segment's write latency to unrelated compaction state. The per-tree check removes that coupling.
-
-### Default segment-aware scheduler
-
-This RFC requires a custom compaction scheduler when segments are in use. A natural question is whether SlateDB should provide a default segment-aware scheduler. Efficient retention enforcement is a primary motivation for this feature, but retention policy depends on application-level durability guarantees — for example, time-based retention for a TSDB differs from consumption-based retention for a log. A default scheduler may be introduced in the future once common patterns emerge, but initially the application is responsible for providing a scheduler that understands its own segment and retention semantics.
 
 ## Appendix A: OpenData Timeseries Usage
 
