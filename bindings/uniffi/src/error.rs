@@ -1,5 +1,3 @@
-use std::error::Error as StdError;
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -28,6 +26,12 @@ pub(crate) enum SlateDbError {
     #[error("invalid checkpoint_id UUID: {source}")]
     InvalidCheckpointId { source: uuid::Error },
 
+    #[error("invalid compaction_id ULID: {source}")]
+    InvalidCompactionId { source: ulid::DecodeError },
+
+    #[error("invalid timestamp seconds: {timestamp_secs}")]
+    InvalidTimestampSeconds { timestamp_secs: i64 },
+
     #[error("range start must not be greater than range end")]
     RangeStartGreaterThanEnd,
 
@@ -51,12 +55,6 @@ pub(crate) enum SlateDbError {
 
     #[error("settings update produced invalid settings: {source}")]
     InvalidSettingsUpdate { source: serde_json::Error },
-
-    #[error("object store creation failed: {source}")]
-    ObjectStoreCreationError {
-        #[from]
-        source: Box<dyn StdError>,
-    },
 }
 
 /// Error returned by a foreign [`crate::MergeOperator`] implementation.
@@ -135,16 +133,16 @@ impl From<slatedb::Error> for Error {
     fn from(error: slatedb::Error) -> Self {
         let message = error.to_string();
         match error.kind() {
-            slatedb::ErrorKind::Transaction => Self::Transaction { message },
-            slatedb::ErrorKind::Closed(reason) => Self::Closed {
+            slatedb::ErrorKind::Transaction => Error::Transaction { message },
+            slatedb::ErrorKind::Closed(reason) => Error::Closed {
                 reason: reason.into(),
                 message,
             },
-            slatedb::ErrorKind::Unavailable => Self::Unavailable { message },
-            slatedb::ErrorKind::Invalid => Self::Invalid { message },
-            slatedb::ErrorKind::Data => Self::Data { message },
-            slatedb::ErrorKind::Internal => Self::Internal { message },
-            _ => Self::Internal { message },
+            slatedb::ErrorKind::Unavailable => Error::Unavailable { message },
+            slatedb::ErrorKind::Invalid => Error::Invalid { message },
+            slatedb::ErrorKind::Data => Error::Data { message },
+            slatedb::ErrorKind::Internal => Error::Internal { message },
+            _ => Error::Internal { message },
         }
     }
 }

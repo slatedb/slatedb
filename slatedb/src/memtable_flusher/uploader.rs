@@ -23,7 +23,7 @@ use crate::utils::SafeSender;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use log::warn;
+use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -168,7 +168,17 @@ impl UploadHandler {
             let encoded_sst = self.db.build_imm_sst(job.imm_memtable.table()).await?;
             match self.try_upload_once(job, encoded_sst).await {
                 Ok(success) => return Ok(success),
-                Err(_) => {
+                Err(e) => {
+                    // When the WAL is enabled and the database is shutting
+                    // down, give up immediately. The data is already durable
+                    // in the WAL and will be recovered on the next startup.
+                    if self.db.wal_enabled && self.db.check_closed().is_err() {
+                        info!(
+                            "skipping l0 upload retry during shutdown [sst_id={:?}, error={:?}]",
+                            job.sst_id, e
+                        );
+                        return Err(e);
+                    }
                     self.db.system_clock.sleep(self.retry_backoff).await;
                 }
             }
@@ -239,11 +249,12 @@ mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
-    use crate::db_state::{ManifestCore, SsTableId, SsTableView};
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
+    use crate::manifest::ManifestCore;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
@@ -577,5 +588,35 @@ mod tests {
             !matches!(err, SlateDBError::Closed),
             "expected specific error, got Closed"
         );
+    }
+
+    #[tokio::test]
+    async fn should_stop_retrying_on_shutdown_when_wal_enabled() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+        let db = setup_db(
+            "/tmp/test_parallel_l0_flush_uploader_shutdown_retry",
+            fp_registry,
+        )
+        .await;
+        assert!(db.wal_enabled);
+        let job = next_upload_job(&db, b"key", b"value", 1);
+
+        let test = start_test_uploader(&db);
+        test.submit(job).unwrap();
+
+        // Mark the database as closed (simulates Db::close()).
+        db.status_manager.write_result(Ok(()));
+
+        // The uploader should give up retrying and report the error.
+        let result = timeout(Duration::from_secs(5), test.await_closed())
+            .await
+            .expect("uploader should stop retrying on shutdown");
+        assert!(result.is_err());
     }
 }

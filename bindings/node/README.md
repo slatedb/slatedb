@@ -127,7 +127,7 @@ You only need these tools when regenerating bindings, running tests from this re
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-node-js --version 0.0.12
+cargo install uniffi-bindgen-node-js --version 0.0.13
 ```
 
 Install the package dependency used by the generated bindings with:

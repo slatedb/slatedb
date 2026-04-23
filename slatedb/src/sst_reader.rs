@@ -35,7 +35,7 @@
 //!     let reader = SstReader::new(path, object_store, None, None);
 //!
 //!     // Inspect L0 SSTs
-//!     for view in &manifest.l0 {
+//!     for view in manifest.l0() {
 //!         let sst_file = reader.open_with_handle(view.sst.clone())?;
 //!         if let Some(stats) = sst_file.stats().await? {
 //!             let _ = stats.num_puts;
@@ -52,12 +52,15 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use ulid::Ulid;
 
+use crate::block_iterator::DataBlockIterator;
 use crate::db_cache::DbCache;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
 use crate::format::sst::{BlockTransformer, SsTableFormat};
+use crate::iter::IterationOrder;
 use crate::object_stores::ObjectStores;
 use crate::sst_stats::SstStats;
 use crate::tablestore::{SstFileMetadata, TableStore};
+use crate::types::RowEntry;
 
 /// Opens compacted SST files for read-only inspection.
 ///
@@ -207,6 +210,42 @@ impl SstFile {
             .collect();
         Ok(result)
     }
+
+    /// Reads a single data block by its index and returns the decoded rows.
+    ///
+    /// The `block` parameter is the zero-based index of the block within the
+    /// SST, parallel to the entries returned by [`SstFile::index`]. Each
+    /// [`RowEntry`] carries the key, value (or tombstone/merge operand),
+    /// sequence number, and optional timestamps as stored on disk — no MVCC
+    /// filtering is applied.
+    ///
+    /// ## Errors
+    ///
+    /// Returns an error if `block` is out of range for this SST, or if there
+    /// is an issue reading or decoding the block.
+    pub async fn read_block(&self, block: usize) -> Result<Vec<RowEntry>, crate::Error> {
+        let index = self.table_store.read_index(&self.handle, true).await?;
+        let num_blocks = index.borrow().block_meta().len();
+        if block >= num_blocks {
+            return Err(crate::Error::invalid(format!(
+                "block index {block} out of range for SST with {num_blocks} block(s)"
+            )));
+        }
+        let mut blocks = self
+            .table_store
+            .read_blocks_using_index(&self.handle, index, block..block + 1, true)
+            .await?;
+        let block = blocks
+            .pop_front()
+            .expect("read_blocks_using_index returned no block for a valid index");
+        let mut iter =
+            DataBlockIterator::new(block, self.handle.format_version, IterationOrder::Ascending)?;
+        let mut rows = Vec::new();
+        while let Some(row) = iter.next().await? {
+            rows.push(row);
+        }
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +253,7 @@ mod tests {
     use super::*;
     use crate::config::{FlushOptions, FlushType, PutOptions, SstBlockSize, WriteOptions};
     use crate::test_utils::StringConcatMergeOperator;
+    use crate::types::ValueDeletable;
     use crate::Db;
     use object_store::memory::InMemory;
 
@@ -222,7 +262,7 @@ mod tests {
     async fn setup_db_with_l0() -> (
         Arc<dyn ObjectStore>,
         &'static str,
-        crate::manifest::ManifestCore,
+        crate::manifest::VersionedManifest,
     ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/test_sst_reader";
@@ -271,8 +311,11 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        assert!(!manifest.l0.is_empty(), "expected at least one L0 SST");
-        let view = &manifest.l0[0];
+        assert!(
+            !manifest.manifest.core.l0.is_empty(),
+            "expected at least one L0 SST"
+        );
+        let view = &manifest.manifest.core.l0[0];
         let sst_file = reader
             .open(view.sst.id.unwrap_compacted_id())
             .await
@@ -288,7 +331,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.l0[0];
+        let view = &manifest.manifest.core.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
 
         assert_eq!(sst_file.id(), view.sst.id.unwrap_compacted_id());
@@ -300,7 +343,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.l0[0];
+        let view = &manifest.manifest.core.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let stats = sst_file.stats().await.unwrap();
 
@@ -318,7 +361,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.l0[0];
+        let view = &manifest.manifest.core.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let index = sst_file.index().await.unwrap();
 
@@ -339,7 +382,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.l0[0];
+        let view = &manifest.manifest.core.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
 
         let stats = sst_file
@@ -361,11 +404,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_block_returns_all_kinds() {
+        let (store, path, manifest) = setup_db_with_l0().await;
+        let reader = SstReader::new(path, store, None, None);
+
+        let view = &manifest.manifest.core.l0[0];
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
+        let index = sst_file.index().await.unwrap();
+        assert!(!index.is_empty());
+
+        // Collect all rows across all blocks.
+        let mut all_rows: Vec<RowEntry> = Vec::new();
+        for i in 0..index.len() {
+            let rows = sst_file.read_block(i).await.unwrap();
+            assert!(!rows.is_empty(), "block {i} should have at least one row");
+            // Rows within a block are in ascending key order.
+            for window in rows.windows(2) {
+                assert!(window[0].key <= window[1].key);
+            }
+            all_rows.extend(rows);
+        }
+
+        let puts = all_rows
+            .iter()
+            .filter(|r| matches!(r.value, ValueDeletable::Value(_)))
+            .count();
+        let merges = all_rows
+            .iter()
+            .filter(|r| matches!(r.value, ValueDeletable::Merge(_)))
+            .count();
+        let tombstones = all_rows
+            .iter()
+            .filter(|r| matches!(r.value, ValueDeletable::Tombstone))
+            .count();
+        assert_eq!(puts, 10);
+        assert_eq!(merges, 2);
+        assert_eq!(tombstones, 3);
+    }
+
+    #[tokio::test]
+    async fn test_read_block_out_of_range() {
+        let (store, path, manifest) = setup_db_with_l0().await;
+        let reader = SstReader::new(path, store, None, None);
+
+        let view = &manifest.manifest.core.l0[0];
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
+        let num_blocks = sst_file.index().await.unwrap().len();
+
+        let err = sst_file.read_block(num_blocks).await.unwrap_err();
+        assert!(format!("{err}").contains("out of range"));
+    }
+
+    #[tokio::test]
+    async fn test_read_block_first_key_matches_index() {
+        let (store, path, manifest) = setup_db_with_l0().await;
+        let reader = SstReader::new(path, store, None, None);
+
+        let view = &manifest.manifest.core.l0[0];
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
+        let index = sst_file.index().await.unwrap();
+
+        // The index entry's first_key may be a shortened separator, so the
+        // block's actual first key is always >= the index's separator key.
+        for (i, (_, first_key)) in index.iter().enumerate() {
+            let rows = sst_file.read_block(i).await.unwrap();
+            assert!(rows[0].key >= *first_key);
+        }
+    }
+
+    #[tokio::test]
     async fn test_metadata() {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.l0[0];
+        let view = &manifest.manifest.core.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let metadata = sst_file.metadata().await.unwrap();
 
@@ -446,7 +558,7 @@ mod tests {
 
         // Reading with the correct transformer should succeed
         let reader = SstReader::new(path, object_store.clone(), None, Some(transformer));
-        let view = &manifest.l0[0];
+        let view = &manifest.manifest.core.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let stats = sst_file.stats().await.unwrap().expect("expected stats");
         assert_eq!(stats.num_puts, 5);

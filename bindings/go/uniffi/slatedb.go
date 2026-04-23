@@ -391,6 +391,114 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp()
+		})
+		if checksum != 39670 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_get_timestamp_for_sequence()
+		})
+		if checksum != 10449 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_get_timestamp_for_sequence: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_checkpoints()
+		})
+		if checksum != 43487 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_checkpoints: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_compactions()
+		})
+		if checksum != 9774 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_compactions: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_manifests()
+		})
+		if checksum != 13737 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_manifests: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compaction()
+		})
+		if checksum != 50237 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compaction: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compactions()
+		})
+		if checksum != 53923 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compactions: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compactor_state_view()
+		})
+		if checksum != 22143 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compactor_state_view: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_manifest()
+		})
+		if checksum != 1383 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_manifest: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_build()
+		})
+		if checksum != 46255 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_build: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed()
+		})
+		if checksum != 52226 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store()
+		})
+		if checksum != 18899 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_build()
 		})
 		if checksum != 18005 {
@@ -1345,6 +1453,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_adminbuilder_new()
+		})
+		if checksum != 41354 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_adminbuilder_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new()
 		})
 		if checksum != 60260 {
@@ -1755,6 +1872,533 @@ func (ffiObject *FfiObject) freeRustArcPtr() {
 		ffiObject.freeFunction(ffiObject.handle, status)
 		return 0
 	})
+}
+
+// Administrative read/query handle for SlateDB.
+type AdminInterface interface {
+	// Looks up a sequence number for the provided Unix UTC timestamp seconds.
+	GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (*uint64, error)
+	// Looks up a timestamp for the provided sequence number.
+	GetTimestampForSequence(seq uint64, roundUp bool) (*int64, error)
+	// Lists checkpoints, optionally filtering by exact name.
+	ListCheckpoints(nameFilter *string) ([]Checkpoint, error)
+	// Lists compactions files inside the half-open ID range `[from, to)`.
+	ListCompactions(from *uint64, to *uint64) ([]VersionedCompactions, error)
+	// Lists manifests inside the half-open ID range `[from, to)`.
+	ListManifests(from *uint64, to *uint64) ([]VersionedManifest, error)
+	// Reads a compaction by ULID string from a specific or latest compactions file.
+	ReadCompaction(compactionId string, compactionsId *uint64) (*Compaction, error)
+	// Reads a specific compactions file by ID, or the latest when `id` is `None`.
+	ReadCompactions(id *uint64) (*VersionedCompactions, error)
+	// Reads the latest compactor state view.
+	ReadCompactorStateView() (CompactorStateView, error)
+	// Reads a specific manifest by ID, or the latest when `id` is `None`.
+	ReadManifest(id *uint64) (*VersionedManifest, error)
+}
+
+// Administrative read/query handle for SlateDB.
+type Admin struct {
+	ffiObject FfiObject
+}
+
+// Looks up a sequence number for the provided Unix UTC timestamp seconds.
+func (_self *Admin) GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (*uint64, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *uint64 {
+			return FfiConverterOptionalUint64INSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_get_sequence_for_timestamp(
+			_pointer, FfiConverterInt64INSTANCE.Lower(timestampSecs), FfiConverterBoolINSTANCE.Lower(roundUp)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Looks up a timestamp for the provided sequence number.
+func (_self *Admin) GetTimestampForSequence(seq uint64, roundUp bool) (*int64, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *int64 {
+			return FfiConverterOptionalInt64INSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_get_timestamp_for_sequence(
+			_pointer, FfiConverterUint64INSTANCE.Lower(seq), FfiConverterBoolINSTANCE.Lower(roundUp)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Lists checkpoints, optionally filtering by exact name.
+func (_self *Admin) ListCheckpoints(nameFilter *string) ([]Checkpoint, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []Checkpoint {
+			return FfiConverterSequenceCheckpointINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_list_checkpoints(
+			_pointer, FfiConverterOptionalStringINSTANCE.Lower(nameFilter)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Lists compactions files inside the half-open ID range `[from, to)`.
+func (_self *Admin) ListCompactions(from *uint64, to *uint64) ([]VersionedCompactions, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []VersionedCompactions {
+			return FfiConverterSequenceVersionedCompactionsINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_list_compactions(
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Lists manifests inside the half-open ID range `[from, to)`.
+func (_self *Admin) ListManifests(from *uint64, to *uint64) ([]VersionedManifest, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []VersionedManifest {
+			return FfiConverterSequenceVersionedManifestINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_list_manifests(
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Reads a compaction by ULID string from a specific or latest compactions file.
+func (_self *Admin) ReadCompaction(compactionId string, compactionsId *uint64) (*Compaction, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *Compaction {
+			return FfiConverterOptionalCompactionINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_read_compaction(
+			_pointer, FfiConverterStringINSTANCE.Lower(compactionId), FfiConverterOptionalUint64INSTANCE.Lower(compactionsId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Reads a specific compactions file by ID, or the latest when `id` is `None`.
+func (_self *Admin) ReadCompactions(id *uint64) (*VersionedCompactions, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *VersionedCompactions {
+			return FfiConverterOptionalVersionedCompactionsINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_read_compactions(
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Reads the latest compactor state view.
+func (_self *Admin) ReadCompactorStateView() (CompactorStateView, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) CompactorStateView {
+			return FfiConverterCompactorStateViewINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_read_compactor_state_view(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Reads a specific manifest by ID, or the latest when `id` is `None`.
+func (_self *Admin) ReadManifest(id *uint64) (*VersionedManifest, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *VersionedManifest {
+			return FfiConverterOptionalVersionedManifestINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_read_manifest(
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+func (object *Admin) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterAdmin struct{}
+
+var FfiConverterAdminINSTANCE = FfiConverterAdmin{}
+
+func (c FfiConverterAdmin) Lift(handle C.uint64_t) *Admin {
+	result := &Admin{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_admin(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_admin(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*Admin).Destroy)
+	return result
+}
+
+func (c FfiConverterAdmin) Read(reader io.Reader) *Admin {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterAdmin) Lower(value *Admin) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*Admin")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterAdmin) Write(writer io.Writer, value *Admin) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalAdmin(handle uint64) *Admin {
+	return FfiConverterAdminINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalAdmin(value *Admin) uint64 {
+	return uint64(FfiConverterAdminINSTANCE.Lower(value))
+}
+
+type FfiDestroyerAdmin struct{}
+
+func (_ FfiDestroyerAdmin) Destroy(value *Admin) {
+	value.Destroy()
+}
+
+// Builder for opening an administrative [`crate::Admin`] handle.
+//
+// Builders are single-use: calling [`AdminBuilder::build`] consumes the builder.
+type AdminBuilderInterface interface {
+	// Builds the admin handle and consumes this builder.
+	Build() (*Admin, error)
+	// Sets the seed used for SlateDB's internal random number generation.
+	WithSeed(seed uint64) error
+	// Uses a separate object store for WAL-backed administrative operations.
+	WithWalObjectStore(walObjectStore *ObjectStore) error
+}
+
+// Builder for opening an administrative [`crate::Admin`] handle.
+//
+// Builders are single-use: calling [`AdminBuilder::build`] consumes the builder.
+type AdminBuilder struct {
+	ffiObject FfiObject
+}
+
+// Creates a new admin builder for `path` in `object_store`.
+func NewAdminBuilder(path string, objectStore *ObjectStore) *AdminBuilder {
+	return FfiConverterAdminBuilderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_adminbuilder_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+	}))
+}
+
+// Builds the admin handle and consumes this builder.
+func (_self *AdminBuilder) Build() (*Admin, error) {
+	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_adminbuilder_build(
+			_pointer, _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *Admin
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterAdminINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Sets the seed used for SlateDB's internal random number generation.
+func (_self *AdminBuilder) WithSeed(seed uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_seed(
+			_pointer, FfiConverterUint64INSTANCE.Lower(seed), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Uses a separate object store for WAL-backed administrative operations.
+func (_self *AdminBuilder) WithWalObjectStore(walObjectStore *ObjectStore) error {
+	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_wal_object_store(
+			_pointer, FfiConverterObjectStoreINSTANCE.Lower(walObjectStore), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+func (object *AdminBuilder) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterAdminBuilder struct{}
+
+var FfiConverterAdminBuilderINSTANCE = FfiConverterAdminBuilder{}
+
+func (c FfiConverterAdminBuilder) Lift(handle C.uint64_t) *AdminBuilder {
+	result := &AdminBuilder{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_adminbuilder(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_adminbuilder(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*AdminBuilder).Destroy)
+	return result
+}
+
+func (c FfiConverterAdminBuilder) Read(reader io.Reader) *AdminBuilder {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterAdminBuilder) Lower(value *AdminBuilder) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*AdminBuilder")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterAdminBuilder) Write(writer io.Writer, value *AdminBuilder) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalAdminBuilder(handle uint64) *AdminBuilder {
+	return FfiConverterAdminBuilderINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalAdminBuilder(value *AdminBuilder) uint64 {
+	return uint64(FfiConverterAdminBuilderINSTANCE.Lower(value))
+}
+
+type FfiDestroyerAdminBuilder struct{}
+
+func (_ FfiDestroyerAdminBuilder) Destroy(value *AdminBuilder) {
+	value.Destroy()
 }
 
 // Handle for a monotonic counter metric.
@@ -6771,6 +7415,239 @@ func (_ FfiDestroyerWriteBatch) Destroy(value *WriteBatch) {
 	value.Destroy()
 }
 
+// Checkpoint metadata stored in a manifest.
+type Checkpoint struct {
+	// Checkpoint UUID string.
+	Id string
+	// Referenced manifest ID.
+	ManifestId uint64
+	// Expiration time as Unix UTC seconds, if present.
+	ExpireTimeSecs *int64
+	// Creation time as Unix UTC seconds.
+	CreateTimeSecs int64
+	// Optional checkpoint name.
+	Name *string
+}
+
+func (r *Checkpoint) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Id)
+	FfiDestroyerUint64{}.Destroy(r.ManifestId)
+	FfiDestroyerOptionalInt64{}.Destroy(r.ExpireTimeSecs)
+	FfiDestroyerInt64{}.Destroy(r.CreateTimeSecs)
+	FfiDestroyerOptionalString{}.Destroy(r.Name)
+}
+
+type FfiConverterCheckpoint struct{}
+
+var FfiConverterCheckpointINSTANCE = FfiConverterCheckpoint{}
+
+func (c FfiConverterCheckpoint) Lift(rb RustBufferI) Checkpoint {
+	return LiftFromRustBuffer[Checkpoint](c, rb)
+}
+
+func (c FfiConverterCheckpoint) Read(reader io.Reader) Checkpoint {
+	return Checkpoint{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalInt64INSTANCE.Read(reader),
+		FfiConverterInt64INSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCheckpoint) Lower(value Checkpoint) C.RustBuffer {
+	return LowerIntoRustBuffer[Checkpoint](c, value)
+}
+
+func (c FfiConverterCheckpoint) LowerExternal(value Checkpoint) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[Checkpoint](c, value))
+}
+
+func (c FfiConverterCheckpoint) Write(writer io.Writer, value Checkpoint) {
+	FfiConverterStringINSTANCE.Write(writer, value.Id)
+	FfiConverterUint64INSTANCE.Write(writer, value.ManifestId)
+	FfiConverterOptionalInt64INSTANCE.Write(writer, value.ExpireTimeSecs)
+	FfiConverterInt64INSTANCE.Write(writer, value.CreateTimeSecs)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Name)
+}
+
+type FfiDestroyerCheckpoint struct{}
+
+func (_ FfiDestroyerCheckpoint) Destroy(value Checkpoint) {
+	value.Destroy()
+}
+
+// Canonical compaction record.
+type Compaction struct {
+	// Compaction ULID string.
+	Id string
+	// Compaction spec.
+	Spec CompactionSpec
+	// Bytes processed so far.
+	BytesProcessed uint64
+	// Current compaction status.
+	Status CompactionStatus
+	// Output SSTs produced so far.
+	OutputSsts []SsTableHandle
+	// Whether the compaction is active.
+	Active bool
+}
+
+func (r *Compaction) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Id)
+	FfiDestroyerCompactionSpec{}.Destroy(r.Spec)
+	FfiDestroyerUint64{}.Destroy(r.BytesProcessed)
+	FfiDestroyerCompactionStatus{}.Destroy(r.Status)
+	FfiDestroyerSequenceSsTableHandle{}.Destroy(r.OutputSsts)
+	FfiDestroyerBool{}.Destroy(r.Active)
+}
+
+type FfiConverterCompaction struct{}
+
+var FfiConverterCompactionINSTANCE = FfiConverterCompaction{}
+
+func (c FfiConverterCompaction) Lift(rb RustBufferI) Compaction {
+	return LiftFromRustBuffer[Compaction](c, rb)
+}
+
+func (c FfiConverterCompaction) Read(reader io.Reader) Compaction {
+	return Compaction{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterCompactionSpecINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterCompactionStatusINSTANCE.Read(reader),
+		FfiConverterSequenceSsTableHandleINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCompaction) Lower(value Compaction) C.RustBuffer {
+	return LowerIntoRustBuffer[Compaction](c, value)
+}
+
+func (c FfiConverterCompaction) LowerExternal(value Compaction) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[Compaction](c, value))
+}
+
+func (c FfiConverterCompaction) Write(writer io.Writer, value Compaction) {
+	FfiConverterStringINSTANCE.Write(writer, value.Id)
+	FfiConverterCompactionSpecINSTANCE.Write(writer, value.Spec)
+	FfiConverterUint64INSTANCE.Write(writer, value.BytesProcessed)
+	FfiConverterCompactionStatusINSTANCE.Write(writer, value.Status)
+	FfiConverterSequenceSsTableHandleINSTANCE.Write(writer, value.OutputSsts)
+	FfiConverterBoolINSTANCE.Write(writer, value.Active)
+}
+
+type FfiDestroyerCompaction struct{}
+
+func (_ FfiDestroyerCompaction) Destroy(value Compaction) {
+	value.Destroy()
+}
+
+// Immutable compaction specification.
+type CompactionSpec struct {
+	// Ordered compaction sources.
+	Sources []SourceId
+	// Destination sorted run ID.
+	Destination uint32
+	// Whether any input source is an L0 SST view.
+	HasL0Sources bool
+	// Whether any input source is a sorted run.
+	HasSrSources bool
+}
+
+func (r *CompactionSpec) Destroy() {
+	FfiDestroyerSequenceSourceId{}.Destroy(r.Sources)
+	FfiDestroyerUint32{}.Destroy(r.Destination)
+	FfiDestroyerBool{}.Destroy(r.HasL0Sources)
+	FfiDestroyerBool{}.Destroy(r.HasSrSources)
+}
+
+type FfiConverterCompactionSpec struct{}
+
+var FfiConverterCompactionSpecINSTANCE = FfiConverterCompactionSpec{}
+
+func (c FfiConverterCompactionSpec) Lift(rb RustBufferI) CompactionSpec {
+	return LiftFromRustBuffer[CompactionSpec](c, rb)
+}
+
+func (c FfiConverterCompactionSpec) Read(reader io.Reader) CompactionSpec {
+	return CompactionSpec{
+		FfiConverterSequenceSourceIdINSTANCE.Read(reader),
+		FfiConverterUint32INSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCompactionSpec) Lower(value CompactionSpec) C.RustBuffer {
+	return LowerIntoRustBuffer[CompactionSpec](c, value)
+}
+
+func (c FfiConverterCompactionSpec) LowerExternal(value CompactionSpec) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompactionSpec](c, value))
+}
+
+func (c FfiConverterCompactionSpec) Write(writer io.Writer, value CompactionSpec) {
+	FfiConverterSequenceSourceIdINSTANCE.Write(writer, value.Sources)
+	FfiConverterUint32INSTANCE.Write(writer, value.Destination)
+	FfiConverterBoolINSTANCE.Write(writer, value.HasL0Sources)
+	FfiConverterBoolINSTANCE.Write(writer, value.HasSrSources)
+}
+
+type FfiDestroyerCompactionSpec struct{}
+
+func (_ FfiDestroyerCompactionSpec) Destroy(value CompactionSpec) {
+	value.Destroy()
+}
+
+// Read-only compactor state view.
+type CompactorStateView struct {
+	// Latest compactions file, if present.
+	Compactions *VersionedCompactions
+	// Latest manifest file.
+	Manifest VersionedManifest
+}
+
+func (r *CompactorStateView) Destroy() {
+	FfiDestroyerOptionalVersionedCompactions{}.Destroy(r.Compactions)
+	FfiDestroyerVersionedManifest{}.Destroy(r.Manifest)
+}
+
+type FfiConverterCompactorStateView struct{}
+
+var FfiConverterCompactorStateViewINSTANCE = FfiConverterCompactorStateView{}
+
+func (c FfiConverterCompactorStateView) Lift(rb RustBufferI) CompactorStateView {
+	return LiftFromRustBuffer[CompactorStateView](c, rb)
+}
+
+func (c FfiConverterCompactorStateView) Read(reader io.Reader) CompactorStateView {
+	return CompactorStateView{
+		FfiConverterOptionalVersionedCompactionsINSTANCE.Read(reader),
+		FfiConverterVersionedManifestINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCompactorStateView) Lower(value CompactorStateView) C.RustBuffer {
+	return LowerIntoRustBuffer[CompactorStateView](c, value)
+}
+
+func (c FfiConverterCompactorStateView) LowerExternal(value CompactorStateView) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompactorStateView](c, value))
+}
+
+func (c FfiConverterCompactorStateView) Write(writer io.Writer, value CompactorStateView) {
+	FfiConverterOptionalVersionedCompactionsINSTANCE.Write(writer, value.Compactions)
+	FfiConverterVersionedManifestINSTANCE.Write(writer, value.Manifest)
+}
+
+type FfiDestroyerCompactorStateView struct{}
+
+func (_ FfiDestroyerCompactorStateView) Destroy(value CompactorStateView) {
+	value.Destroy()
+}
+
 // Snapshot of the current database lifecycle and durability state.
 type DbStatus struct {
 	// Highest durable sequence number observed by this handle.
@@ -6815,6 +7692,63 @@ func (c FfiConverterDbStatus) Write(writer io.Writer, value DbStatus) {
 type FfiDestroyerDbStatus struct{}
 
 func (_ FfiDestroyerDbStatus) Destroy(value DbStatus) {
+	value.Destroy()
+}
+
+// External DB reference recorded in a manifest.
+type ExternalDb struct {
+	// External database path.
+	Path string
+	// Source checkpoint UUID string.
+	SourceCheckpointId string
+	// Final checkpoint UUID string, if present.
+	FinalCheckpointId *string
+	// SST IDs referenced from the external DB.
+	SstIds []SsTableId
+}
+
+func (r *ExternalDb) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Path)
+	FfiDestroyerString{}.Destroy(r.SourceCheckpointId)
+	FfiDestroyerOptionalString{}.Destroy(r.FinalCheckpointId)
+	FfiDestroyerSequenceSsTableId{}.Destroy(r.SstIds)
+}
+
+type FfiConverterExternalDb struct{}
+
+var FfiConverterExternalDbINSTANCE = FfiConverterExternalDb{}
+
+func (c FfiConverterExternalDb) Lift(rb RustBufferI) ExternalDb {
+	return LiftFromRustBuffer[ExternalDb](c, rb)
+}
+
+func (c FfiConverterExternalDb) Read(reader io.Reader) ExternalDb {
+	return ExternalDb{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterSequenceSsTableIdINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterExternalDb) Lower(value ExternalDb) C.RustBuffer {
+	return LowerIntoRustBuffer[ExternalDb](c, value)
+}
+
+func (c FfiConverterExternalDb) LowerExternal(value ExternalDb) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ExternalDb](c, value))
+}
+
+func (c FfiConverterExternalDb) Write(writer io.Writer, value ExternalDb) {
+	FfiConverterStringINSTANCE.Write(writer, value.Path)
+	FfiConverterStringINSTANCE.Write(writer, value.SourceCheckpointId)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.FinalCheckpointId)
+	FfiConverterSequenceSsTableIdINSTANCE.Write(writer, value.SstIds)
+}
+
+type FfiDestroyerExternalDb struct{}
+
+func (_ FfiDestroyerExternalDb) Destroy(value ExternalDb) {
 	value.Destroy()
 }
 
@@ -7544,6 +8478,428 @@ func (_ FfiDestroyerScanOptions) Destroy(value ScanOptions) {
 	value.Destroy()
 }
 
+// A sorted run made up of one or more SST views.
+type SortedRun struct {
+	// Sorted run ID.
+	Id uint32
+	// SST views in this run.
+	SstViews []SsTableView
+	// Estimated total size in bytes.
+	EstimatedSizeBytes uint64
+}
+
+func (r *SortedRun) Destroy() {
+	FfiDestroyerUint32{}.Destroy(r.Id)
+	FfiDestroyerSequenceSsTableView{}.Destroy(r.SstViews)
+	FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes)
+}
+
+type FfiConverterSortedRun struct{}
+
+var FfiConverterSortedRunINSTANCE = FfiConverterSortedRun{}
+
+func (c FfiConverterSortedRun) Lift(rb RustBufferI) SortedRun {
+	return LiftFromRustBuffer[SortedRun](c, rb)
+}
+
+func (c FfiConverterSortedRun) Read(reader io.Reader) SortedRun {
+	return SortedRun{
+		FfiConverterUint32INSTANCE.Read(reader),
+		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSortedRun) Lower(value SortedRun) C.RustBuffer {
+	return LowerIntoRustBuffer[SortedRun](c, value)
+}
+
+func (c FfiConverterSortedRun) LowerExternal(value SortedRun) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SortedRun](c, value))
+}
+
+func (c FfiConverterSortedRun) Write(writer io.Writer, value SortedRun) {
+	FfiConverterUint32INSTANCE.Write(writer, value.Id)
+	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.SstViews)
+	FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes)
+}
+
+type FfiDestroyerSortedRun struct{}
+
+func (_ FfiDestroyerSortedRun) Destroy(value SortedRun) {
+	value.Destroy()
+}
+
+// A handle to a physical SSTable.
+type SsTableHandle struct {
+	// SST ID.
+	Id SsTableId
+	// SST metadata.
+	Info SsTableInfo
+	// Estimated on-disk size in bytes.
+	EstimatedSizeBytes uint64
+}
+
+func (r *SsTableHandle) Destroy() {
+	FfiDestroyerSsTableId{}.Destroy(r.Id)
+	FfiDestroyerSsTableInfo{}.Destroy(r.Info)
+	FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes)
+}
+
+type FfiConverterSsTableHandle struct{}
+
+var FfiConverterSsTableHandleINSTANCE = FfiConverterSsTableHandle{}
+
+func (c FfiConverterSsTableHandle) Lift(rb RustBufferI) SsTableHandle {
+	return LiftFromRustBuffer[SsTableHandle](c, rb)
+}
+
+func (c FfiConverterSsTableHandle) Read(reader io.Reader) SsTableHandle {
+	return SsTableHandle{
+		FfiConverterSsTableIdINSTANCE.Read(reader),
+		FfiConverterSsTableInfoINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSsTableHandle) Lower(value SsTableHandle) C.RustBuffer {
+	return LowerIntoRustBuffer[SsTableHandle](c, value)
+}
+
+func (c FfiConverterSsTableHandle) LowerExternal(value SsTableHandle) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SsTableHandle](c, value))
+}
+
+func (c FfiConverterSsTableHandle) Write(writer io.Writer, value SsTableHandle) {
+	FfiConverterSsTableIdINSTANCE.Write(writer, value.Id)
+	FfiConverterSsTableInfoINSTANCE.Write(writer, value.Info)
+	FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes)
+}
+
+type FfiDestroyerSsTableHandle struct{}
+
+func (_ FfiDestroyerSsTableHandle) Destroy(value SsTableHandle) {
+	value.Destroy()
+}
+
+// SSTable metadata.
+type SsTableInfo struct {
+	// First entry in the SSTable, if any.
+	FirstEntry *[]byte
+	// Last entry in the SSTable, if any.
+	LastEntry *[]byte
+	// Index block offset in bytes.
+	IndexOffset uint64
+	// Index block length in bytes.
+	IndexLen uint64
+	// Filter block offset in bytes.
+	FilterOffset uint64
+	// Filter block length in bytes.
+	FilterLen uint64
+	// Compression codec, if any.
+	CompressionCodec *CompressionCodec
+	// Physical SSTable type.
+	SstType SstType
+	// Stats block offset in bytes.
+	StatsOffset uint64
+	// Stats block length in bytes.
+	StatsLen uint64
+	// Filter block format.
+	FilterFormat FilterFormat
+}
+
+func (r *SsTableInfo) Destroy() {
+	FfiDestroyerOptionalBytes{}.Destroy(r.FirstEntry)
+	FfiDestroyerOptionalBytes{}.Destroy(r.LastEntry)
+	FfiDestroyerUint64{}.Destroy(r.IndexOffset)
+	FfiDestroyerUint64{}.Destroy(r.IndexLen)
+	FfiDestroyerUint64{}.Destroy(r.FilterOffset)
+	FfiDestroyerUint64{}.Destroy(r.FilterLen)
+	FfiDestroyerOptionalCompressionCodec{}.Destroy(r.CompressionCodec)
+	FfiDestroyerSstType{}.Destroy(r.SstType)
+	FfiDestroyerUint64{}.Destroy(r.StatsOffset)
+	FfiDestroyerUint64{}.Destroy(r.StatsLen)
+	FfiDestroyerFilterFormat{}.Destroy(r.FilterFormat)
+}
+
+type FfiConverterSsTableInfo struct{}
+
+var FfiConverterSsTableInfoINSTANCE = FfiConverterSsTableInfo{}
+
+func (c FfiConverterSsTableInfo) Lift(rb RustBufferI) SsTableInfo {
+	return LiftFromRustBuffer[SsTableInfo](c, rb)
+}
+
+func (c FfiConverterSsTableInfo) Read(reader io.Reader) SsTableInfo {
+	return SsTableInfo{
+		FfiConverterOptionalBytesINSTANCE.Read(reader),
+		FfiConverterOptionalBytesINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalCompressionCodecINSTANCE.Read(reader),
+		FfiConverterSstTypeINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterFilterFormatINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSsTableInfo) Lower(value SsTableInfo) C.RustBuffer {
+	return LowerIntoRustBuffer[SsTableInfo](c, value)
+}
+
+func (c FfiConverterSsTableInfo) LowerExternal(value SsTableInfo) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SsTableInfo](c, value))
+}
+
+func (c FfiConverterSsTableInfo) Write(writer io.Writer, value SsTableInfo) {
+	FfiConverterOptionalBytesINSTANCE.Write(writer, value.FirstEntry)
+	FfiConverterOptionalBytesINSTANCE.Write(writer, value.LastEntry)
+	FfiConverterUint64INSTANCE.Write(writer, value.IndexOffset)
+	FfiConverterUint64INSTANCE.Write(writer, value.IndexLen)
+	FfiConverterUint64INSTANCE.Write(writer, value.FilterOffset)
+	FfiConverterUint64INSTANCE.Write(writer, value.FilterLen)
+	FfiConverterOptionalCompressionCodecINSTANCE.Write(writer, value.CompressionCodec)
+	FfiConverterSstTypeINSTANCE.Write(writer, value.SstType)
+	FfiConverterUint64INSTANCE.Write(writer, value.StatsOffset)
+	FfiConverterUint64INSTANCE.Write(writer, value.StatsLen)
+	FfiConverterFilterFormatINSTANCE.Write(writer, value.FilterFormat)
+}
+
+type FfiDestroyerSsTableInfo struct{}
+
+func (_ FfiDestroyerSsTableInfo) Destroy(value SsTableInfo) {
+	value.Destroy()
+}
+
+// Projected SST view used by manifests and sorted runs.
+type SsTableView struct {
+	// View ULID string.
+	Id string
+	// Underlying SST handle.
+	Sst SsTableHandle
+	// Optional projected visible key range.
+	VisibleRange *KeyRange
+	// Estimated on-disk size in bytes.
+	EstimatedSizeBytes uint64
+}
+
+func (r *SsTableView) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Id)
+	FfiDestroyerSsTableHandle{}.Destroy(r.Sst)
+	FfiDestroyerOptionalKeyRange{}.Destroy(r.VisibleRange)
+	FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes)
+}
+
+type FfiConverterSsTableView struct{}
+
+var FfiConverterSsTableViewINSTANCE = FfiConverterSsTableView{}
+
+func (c FfiConverterSsTableView) Lift(rb RustBufferI) SsTableView {
+	return LiftFromRustBuffer[SsTableView](c, rb)
+}
+
+func (c FfiConverterSsTableView) Read(reader io.Reader) SsTableView {
+	return SsTableView{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterSsTableHandleINSTANCE.Read(reader),
+		FfiConverterOptionalKeyRangeINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSsTableView) Lower(value SsTableView) C.RustBuffer {
+	return LowerIntoRustBuffer[SsTableView](c, value)
+}
+
+func (c FfiConverterSsTableView) LowerExternal(value SsTableView) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SsTableView](c, value))
+}
+
+func (c FfiConverterSsTableView) Write(writer io.Writer, value SsTableView) {
+	FfiConverterStringINSTANCE.Write(writer, value.Id)
+	FfiConverterSsTableHandleINSTANCE.Write(writer, value.Sst)
+	FfiConverterOptionalKeyRangeINSTANCE.Write(writer, value.VisibleRange)
+	FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes)
+}
+
+type FfiDestroyerSsTableView struct{}
+
+func (_ FfiDestroyerSsTableView) Destroy(value SsTableView) {
+	value.Destroy()
+}
+
+// A compactions snapshot paired with its version ID.
+type VersionedCompactions struct {
+	// Compactions file version ID.
+	Id uint64
+	// Compactor epoch recorded in this file.
+	CompactorEpoch uint64
+	// Recent compactions tracked in this file.
+	RecentCompactions []Compaction
+}
+
+func (r *VersionedCompactions) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Id)
+	FfiDestroyerUint64{}.Destroy(r.CompactorEpoch)
+	FfiDestroyerSequenceCompaction{}.Destroy(r.RecentCompactions)
+}
+
+type FfiConverterVersionedCompactions struct{}
+
+var FfiConverterVersionedCompactionsINSTANCE = FfiConverterVersionedCompactions{}
+
+func (c FfiConverterVersionedCompactions) Lift(rb RustBufferI) VersionedCompactions {
+	return LiftFromRustBuffer[VersionedCompactions](c, rb)
+}
+
+func (c FfiConverterVersionedCompactions) Read(reader io.Reader) VersionedCompactions {
+	return VersionedCompactions{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterSequenceCompactionINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterVersionedCompactions) Lower(value VersionedCompactions) C.RustBuffer {
+	return LowerIntoRustBuffer[VersionedCompactions](c, value)
+}
+
+func (c FfiConverterVersionedCompactions) LowerExternal(value VersionedCompactions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[VersionedCompactions](c, value))
+}
+
+func (c FfiConverterVersionedCompactions) Write(writer io.Writer, value VersionedCompactions) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Id)
+	FfiConverterUint64INSTANCE.Write(writer, value.CompactorEpoch)
+	FfiConverterSequenceCompactionINSTANCE.Write(writer, value.RecentCompactions)
+}
+
+type FfiDestroyerVersionedCompactions struct{}
+
+func (_ FfiDestroyerVersionedCompactions) Destroy(value VersionedCompactions) {
+	value.Destroy()
+}
+
+// A manifest snapshot paired with its version ID.
+type VersionedManifest struct {
+	// Manifest version ID.
+	Id uint64
+	// Writer epoch stored in the manifest.
+	WriterEpoch uint64
+	// Compactor epoch stored in the manifest.
+	CompactorEpoch uint64
+	// Referenced external databases.
+	ExternalDbs []ExternalDb
+	// Whether initialization has completed.
+	Initialized bool
+	// Last compacted L0 SST view ID, if any.
+	LastCompactedL0SstViewId *string
+	// Last compacted L0 SST ID, if any.
+	LastCompactedL0SstId *string
+	// Current L0 SST views.
+	L0 []SsTableView
+	// Current compacted sorted runs.
+	Compacted []SortedRun
+	// Next WAL SST ID to assign.
+	NextWalSstId uint64
+	// WAL replay watermark.
+	ReplayAfterWalId uint64
+	// Last persisted L0 clock tick.
+	LastL0ClockTick int64
+	// Last persisted L0 sequence number.
+	LastL0Seq uint64
+	// Minimum sequence number still visible to recent snapshots.
+	RecentSnapshotMinSeq uint64
+	// Tracked checkpoints.
+	Checkpoints []Checkpoint
+	// Dedicated WAL object store URI, if any.
+	WalObjectStoreUri *string
+}
+
+func (r *VersionedManifest) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Id)
+	FfiDestroyerUint64{}.Destroy(r.WriterEpoch)
+	FfiDestroyerUint64{}.Destroy(r.CompactorEpoch)
+	FfiDestroyerSequenceExternalDb{}.Destroy(r.ExternalDbs)
+	FfiDestroyerBool{}.Destroy(r.Initialized)
+	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstViewId)
+	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstId)
+	FfiDestroyerSequenceSsTableView{}.Destroy(r.L0)
+	FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted)
+	FfiDestroyerUint64{}.Destroy(r.NextWalSstId)
+	FfiDestroyerUint64{}.Destroy(r.ReplayAfterWalId)
+	FfiDestroyerInt64{}.Destroy(r.LastL0ClockTick)
+	FfiDestroyerUint64{}.Destroy(r.LastL0Seq)
+	FfiDestroyerUint64{}.Destroy(r.RecentSnapshotMinSeq)
+	FfiDestroyerSequenceCheckpoint{}.Destroy(r.Checkpoints)
+	FfiDestroyerOptionalString{}.Destroy(r.WalObjectStoreUri)
+}
+
+type FfiConverterVersionedManifest struct{}
+
+var FfiConverterVersionedManifestINSTANCE = FfiConverterVersionedManifest{}
+
+func (c FfiConverterVersionedManifest) Lift(rb RustBufferI) VersionedManifest {
+	return LiftFromRustBuffer[VersionedManifest](c, rb)
+}
+
+func (c FfiConverterVersionedManifest) Read(reader io.Reader) VersionedManifest {
+	return VersionedManifest{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterSequenceExternalDbINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
+		FfiConverterSequenceSortedRunINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterInt64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterSequenceCheckpointINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterVersionedManifest) Lower(value VersionedManifest) C.RustBuffer {
+	return LowerIntoRustBuffer[VersionedManifest](c, value)
+}
+
+func (c FfiConverterVersionedManifest) LowerExternal(value VersionedManifest) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[VersionedManifest](c, value))
+}
+
+func (c FfiConverterVersionedManifest) Write(writer io.Writer, value VersionedManifest) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Id)
+	FfiConverterUint64INSTANCE.Write(writer, value.WriterEpoch)
+	FfiConverterUint64INSTANCE.Write(writer, value.CompactorEpoch)
+	FfiConverterSequenceExternalDbINSTANCE.Write(writer, value.ExternalDbs)
+	FfiConverterBoolINSTANCE.Write(writer, value.Initialized)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstViewId)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstId)
+	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0)
+	FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted)
+	FfiConverterUint64INSTANCE.Write(writer, value.NextWalSstId)
+	FfiConverterUint64INSTANCE.Write(writer, value.ReplayAfterWalId)
+	FfiConverterInt64INSTANCE.Write(writer, value.LastL0ClockTick)
+	FfiConverterUint64INSTANCE.Write(writer, value.LastL0Seq)
+	FfiConverterUint64INSTANCE.Write(writer, value.RecentSnapshotMinSeq)
+	FfiConverterSequenceCheckpointINSTANCE.Write(writer, value.Checkpoints)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.WalObjectStoreUri)
+}
+
+type FfiDestroyerVersionedManifest struct{}
+
+func (_ FfiDestroyerVersionedManifest) Destroy(value VersionedManifest) {
+	value.Destroy()
+}
+
 // Metadata describing a WAL file in object storage.
 type WalFileMetadata struct {
 	// Last-modified timestamp seconds component.
@@ -7731,6 +9087,84 @@ func (FfiConverterCloseReason) Write(writer io.Writer, value CloseReason) {
 type FfiDestroyerCloseReason struct{}
 
 func (_ FfiDestroyerCloseReason) Destroy(value CloseReason) {
+}
+
+// Compaction lifecycle state.
+type CompactionStatus uint
+
+const (
+	CompactionStatusSubmitted CompactionStatus = 1
+	CompactionStatusRunning   CompactionStatus = 2
+	CompactionStatusCompleted CompactionStatus = 3
+	CompactionStatusFailed    CompactionStatus = 4
+)
+
+type FfiConverterCompactionStatus struct{}
+
+var FfiConverterCompactionStatusINSTANCE = FfiConverterCompactionStatus{}
+
+func (c FfiConverterCompactionStatus) Lift(rb RustBufferI) CompactionStatus {
+	return LiftFromRustBuffer[CompactionStatus](c, rb)
+}
+
+func (c FfiConverterCompactionStatus) Lower(value CompactionStatus) C.RustBuffer {
+	return LowerIntoRustBuffer[CompactionStatus](c, value)
+}
+
+func (c FfiConverterCompactionStatus) LowerExternal(value CompactionStatus) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompactionStatus](c, value))
+}
+func (FfiConverterCompactionStatus) Read(reader io.Reader) CompactionStatus {
+	id := readInt32(reader)
+	return CompactionStatus(id)
+}
+
+func (FfiConverterCompactionStatus) Write(writer io.Writer, value CompactionStatus) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerCompactionStatus struct{}
+
+func (_ FfiDestroyerCompactionStatus) Destroy(value CompactionStatus) {
+}
+
+// Compression codec used for an SSTable.
+type CompressionCodec uint
+
+const (
+	CompressionCodecSnappy CompressionCodec = 1
+	CompressionCodecZlib   CompressionCodec = 2
+	CompressionCodecLz4    CompressionCodec = 3
+	CompressionCodecZstd   CompressionCodec = 4
+)
+
+type FfiConverterCompressionCodec struct{}
+
+var FfiConverterCompressionCodecINSTANCE = FfiConverterCompressionCodec{}
+
+func (c FfiConverterCompressionCodec) Lift(rb RustBufferI) CompressionCodec {
+	return LiftFromRustBuffer[CompressionCodec](c, rb)
+}
+
+func (c FfiConverterCompressionCodec) Lower(value CompressionCodec) C.RustBuffer {
+	return LowerIntoRustBuffer[CompressionCodec](c, value)
+}
+
+func (c FfiConverterCompressionCodec) LowerExternal(value CompressionCodec) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompressionCodec](c, value))
+}
+func (FfiConverterCompressionCodec) Read(reader io.Reader) CompressionCodec {
+	id := readInt32(reader)
+	return CompressionCodec(id)
+}
+
+func (FfiConverterCompressionCodec) Write(writer io.Writer, value CompressionCodec) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerCompressionCodec struct{}
+
+func (_ FfiDestroyerCompressionCodec) Destroy(value CompressionCodec) {
 }
 
 // Minimum durability level required for data returned by reads and scans.
@@ -8088,6 +9522,43 @@ func (_ FfiDestroyerError) Destroy(value *Error) {
 		_ = variantValue
 		panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerError.Destroy", value))
 	}
+}
+
+// Filter block format stored in SST metadata.
+type FilterFormat uint
+
+const (
+	FilterFormatLegacy    FilterFormat = 1
+	FilterFormatComposite FilterFormat = 2
+)
+
+type FfiConverterFilterFormat struct{}
+
+var FfiConverterFilterFormatINSTANCE = FfiConverterFilterFormat{}
+
+func (c FfiConverterFilterFormat) Lift(rb RustBufferI) FilterFormat {
+	return LiftFromRustBuffer[FilterFormat](c, rb)
+}
+
+func (c FfiConverterFilterFormat) Lower(value FilterFormat) C.RustBuffer {
+	return LowerIntoRustBuffer[FilterFormat](c, value)
+}
+
+func (c FfiConverterFilterFormat) LowerExternal(value FilterFormat) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FilterFormat](c, value))
+}
+func (FfiConverterFilterFormat) Read(reader io.Reader) FilterFormat {
+	id := readInt32(reader)
+	return FilterFormat(id)
+}
+
+func (FfiConverterFilterFormat) Write(writer io.Writer, value FilterFormat) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerFilterFormat struct{}
+
+func (_ FfiDestroyerFilterFormat) Destroy(value FilterFormat) {
 }
 
 // Storage layer targeted by an explicit flush.
@@ -8508,6 +9979,154 @@ type FfiDestroyerRowEntryKind struct{}
 func (_ FfiDestroyerRowEntryKind) Destroy(value RowEntryKind) {
 }
 
+// Compaction input source identifier.
+type SourceId interface {
+	Destroy()
+}
+
+// Existing sorted run ID.
+type SourceIdSortedRun struct {
+	Field0 uint32
+}
+
+func (e SourceIdSortedRun) Destroy() {
+	FfiDestroyerUint32{}.Destroy(e.Field0)
+}
+
+// L0 SST view ULID string.
+type SourceIdSstView struct {
+	Field0 string
+}
+
+func (e SourceIdSstView) Destroy() {
+	FfiDestroyerString{}.Destroy(e.Field0)
+}
+
+type FfiConverterSourceId struct{}
+
+var FfiConverterSourceIdINSTANCE = FfiConverterSourceId{}
+
+func (c FfiConverterSourceId) Lift(rb RustBufferI) SourceId {
+	return LiftFromRustBuffer[SourceId](c, rb)
+}
+
+func (c FfiConverterSourceId) Lower(value SourceId) C.RustBuffer {
+	return LowerIntoRustBuffer[SourceId](c, value)
+}
+
+func (c FfiConverterSourceId) LowerExternal(value SourceId) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SourceId](c, value))
+}
+func (FfiConverterSourceId) Read(reader io.Reader) SourceId {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return SourceIdSortedRun{
+			FfiConverterUint32INSTANCE.Read(reader),
+		}
+	case 2:
+		return SourceIdSstView{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterSourceId.Read()", id))
+	}
+}
+
+func (FfiConverterSourceId) Write(writer io.Writer, value SourceId) {
+	switch variant_value := value.(type) {
+	case SourceIdSortedRun:
+		writeInt32(writer, 1)
+		FfiConverterUint32INSTANCE.Write(writer, variant_value.Field0)
+	case SourceIdSstView:
+		writeInt32(writer, 2)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterSourceId.Write", value))
+	}
+}
+
+type FfiDestroyerSourceId struct{}
+
+func (_ FfiDestroyerSourceId) Destroy(value SourceId) {
+	value.Destroy()
+}
+
+// SSTable identifier.
+type SsTableId interface {
+	Destroy()
+}
+
+// WAL SST identified by numeric WAL ID.
+type SsTableIdWal struct {
+	Field0 uint64
+}
+
+func (e SsTableIdWal) Destroy() {
+	FfiDestroyerUint64{}.Destroy(e.Field0)
+}
+
+// Compacted SST identified by ULID string.
+type SsTableIdCompacted struct {
+	Field0 string
+}
+
+func (e SsTableIdCompacted) Destroy() {
+	FfiDestroyerString{}.Destroy(e.Field0)
+}
+
+type FfiConverterSsTableId struct{}
+
+var FfiConverterSsTableIdINSTANCE = FfiConverterSsTableId{}
+
+func (c FfiConverterSsTableId) Lift(rb RustBufferI) SsTableId {
+	return LiftFromRustBuffer[SsTableId](c, rb)
+}
+
+func (c FfiConverterSsTableId) Lower(value SsTableId) C.RustBuffer {
+	return LowerIntoRustBuffer[SsTableId](c, value)
+}
+
+func (c FfiConverterSsTableId) LowerExternal(value SsTableId) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SsTableId](c, value))
+}
+func (FfiConverterSsTableId) Read(reader io.Reader) SsTableId {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return SsTableIdWal{
+			FfiConverterUint64INSTANCE.Read(reader),
+		}
+	case 2:
+		return SsTableIdCompacted{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterSsTableId.Read()", id))
+	}
+}
+
+func (FfiConverterSsTableId) Write(writer io.Writer, value SsTableId) {
+	switch variant_value := value.(type) {
+	case SsTableIdWal:
+		writeInt32(writer, 1)
+		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
+	case SsTableIdCompacted:
+		writeInt32(writer, 2)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterSsTableId.Write", value))
+	}
+}
+
+type FfiDestroyerSsTableId struct{}
+
+func (_ FfiDestroyerSsTableId) Destroy(value SsTableId) {
+	value.Destroy()
+}
+
 // Block size used for newly written SSTable blocks.
 type SstBlockSize uint
 
@@ -8555,6 +10174,43 @@ func (FfiConverterSstBlockSize) Write(writer io.Writer, value SstBlockSize) {
 type FfiDestroyerSstBlockSize struct{}
 
 func (_ FfiDestroyerSstBlockSize) Destroy(value SstBlockSize) {
+}
+
+// Physical SSTable type.
+type SstType uint
+
+const (
+	SstTypeCompacted SstType = 1
+	SstTypeWal       SstType = 2
+)
+
+type FfiConverterSstType struct{}
+
+var FfiConverterSstTypeINSTANCE = FfiConverterSstType{}
+
+func (c FfiConverterSstType) Lift(rb RustBufferI) SstType {
+	return LiftFromRustBuffer[SstType](c, rb)
+}
+
+func (c FfiConverterSstType) Lower(value SstType) C.RustBuffer {
+	return LowerIntoRustBuffer[SstType](c, value)
+}
+
+func (c FfiConverterSstType) LowerExternal(value SstType) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SstType](c, value))
+}
+func (FfiConverterSstType) Read(reader io.Reader) SstType {
+	id := readInt32(reader)
+	return SstType(id)
+}
+
+func (FfiConverterSstType) Write(writer io.Writer, value SstType) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerSstType struct{}
+
+func (_ FfiDestroyerSstType) Destroy(value SstType) {
 }
 
 // Time-to-live policy applied to an inserted value or merge operand.
@@ -8899,6 +10555,88 @@ func (_ FfiDestroyerOptionalLogCallback) Destroy(value *LogCallback) {
 	}
 }
 
+type FfiConverterOptionalCompaction struct{}
+
+var FfiConverterOptionalCompactionINSTANCE = FfiConverterOptionalCompaction{}
+
+func (c FfiConverterOptionalCompaction) Lift(rb RustBufferI) *Compaction {
+	return LiftFromRustBuffer[*Compaction](c, rb)
+}
+
+func (_ FfiConverterOptionalCompaction) Read(reader io.Reader) *Compaction {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterCompactionINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalCompaction) Lower(value *Compaction) C.RustBuffer {
+	return LowerIntoRustBuffer[*Compaction](c, value)
+}
+
+func (c FfiConverterOptionalCompaction) LowerExternal(value *Compaction) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*Compaction](c, value))
+}
+
+func (_ FfiConverterOptionalCompaction) Write(writer io.Writer, value *Compaction) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterCompactionINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalCompaction struct{}
+
+func (_ FfiDestroyerOptionalCompaction) Destroy(value *Compaction) {
+	if value != nil {
+		FfiDestroyerCompaction{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalKeyRange struct{}
+
+var FfiConverterOptionalKeyRangeINSTANCE = FfiConverterOptionalKeyRange{}
+
+func (c FfiConverterOptionalKeyRange) Lift(rb RustBufferI) *KeyRange {
+	return LiftFromRustBuffer[*KeyRange](c, rb)
+}
+
+func (_ FfiConverterOptionalKeyRange) Read(reader io.Reader) *KeyRange {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterKeyRangeINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalKeyRange) Lower(value *KeyRange) C.RustBuffer {
+	return LowerIntoRustBuffer[*KeyRange](c, value)
+}
+
+func (c FfiConverterOptionalKeyRange) LowerExternal(value *KeyRange) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*KeyRange](c, value))
+}
+
+func (_ FfiConverterOptionalKeyRange) Write(writer io.Writer, value *KeyRange) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterKeyRangeINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalKeyRange struct{}
+
+func (_ FfiDestroyerOptionalKeyRange) Destroy(value *KeyRange) {
+	if value != nil {
+		FfiDestroyerKeyRange{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalKeyValue struct{}
 
 var FfiConverterOptionalKeyValueINSTANCE = FfiConverterOptionalKeyValue{}
@@ -9022,6 +10760,88 @@ func (_ FfiDestroyerOptionalRowEntry) Destroy(value *RowEntry) {
 	}
 }
 
+type FfiConverterOptionalVersionedCompactions struct{}
+
+var FfiConverterOptionalVersionedCompactionsINSTANCE = FfiConverterOptionalVersionedCompactions{}
+
+func (c FfiConverterOptionalVersionedCompactions) Lift(rb RustBufferI) *VersionedCompactions {
+	return LiftFromRustBuffer[*VersionedCompactions](c, rb)
+}
+
+func (_ FfiConverterOptionalVersionedCompactions) Read(reader io.Reader) *VersionedCompactions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterVersionedCompactionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalVersionedCompactions) Lower(value *VersionedCompactions) C.RustBuffer {
+	return LowerIntoRustBuffer[*VersionedCompactions](c, value)
+}
+
+func (c FfiConverterOptionalVersionedCompactions) LowerExternal(value *VersionedCompactions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*VersionedCompactions](c, value))
+}
+
+func (_ FfiConverterOptionalVersionedCompactions) Write(writer io.Writer, value *VersionedCompactions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterVersionedCompactionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalVersionedCompactions struct{}
+
+func (_ FfiDestroyerOptionalVersionedCompactions) Destroy(value *VersionedCompactions) {
+	if value != nil {
+		FfiDestroyerVersionedCompactions{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalVersionedManifest struct{}
+
+var FfiConverterOptionalVersionedManifestINSTANCE = FfiConverterOptionalVersionedManifest{}
+
+func (c FfiConverterOptionalVersionedManifest) Lift(rb RustBufferI) *VersionedManifest {
+	return LiftFromRustBuffer[*VersionedManifest](c, rb)
+}
+
+func (_ FfiConverterOptionalVersionedManifest) Read(reader io.Reader) *VersionedManifest {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterVersionedManifestINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalVersionedManifest) Lower(value *VersionedManifest) C.RustBuffer {
+	return LowerIntoRustBuffer[*VersionedManifest](c, value)
+}
+
+func (c FfiConverterOptionalVersionedManifest) LowerExternal(value *VersionedManifest) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*VersionedManifest](c, value))
+}
+
+func (_ FfiConverterOptionalVersionedManifest) Write(writer io.Writer, value *VersionedManifest) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterVersionedManifestINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalVersionedManifest struct{}
+
+func (_ FfiDestroyerOptionalVersionedManifest) Destroy(value *VersionedManifest) {
+	if value != nil {
+		FfiDestroyerVersionedManifest{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalWriteHandle struct{}
 
 var FfiConverterOptionalWriteHandleINSTANCE = FfiConverterOptionalWriteHandle{}
@@ -9101,6 +10921,47 @@ type FfiDestroyerOptionalCloseReason struct{}
 func (_ FfiDestroyerOptionalCloseReason) Destroy(value *CloseReason) {
 	if value != nil {
 		FfiDestroyerCloseReason{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalCompressionCodec struct{}
+
+var FfiConverterOptionalCompressionCodecINSTANCE = FfiConverterOptionalCompressionCodec{}
+
+func (c FfiConverterOptionalCompressionCodec) Lift(rb RustBufferI) *CompressionCodec {
+	return LiftFromRustBuffer[*CompressionCodec](c, rb)
+}
+
+func (_ FfiConverterOptionalCompressionCodec) Read(reader io.Reader) *CompressionCodec {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterCompressionCodecINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalCompressionCodec) Lower(value *CompressionCodec) C.RustBuffer {
+	return LowerIntoRustBuffer[*CompressionCodec](c, value)
+}
+
+func (c FfiConverterOptionalCompressionCodec) LowerExternal(value *CompressionCodec) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*CompressionCodec](c, value))
+}
+
+func (_ FfiConverterOptionalCompressionCodec) Write(writer io.Writer, value *CompressionCodec) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterCompressionCodecINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalCompressionCodec struct{}
+
+func (_ FfiDestroyerOptionalCompressionCodec) Destroy(value *CompressionCodec) {
+	if value != nil {
+		FfiDestroyerCompressionCodec{}.Destroy(*value)
 	}
 }
 
@@ -9333,6 +11194,147 @@ func (FfiDestroyerSequenceWalFile) Destroy(sequence []*WalFile) {
 	}
 }
 
+type FfiConverterSequenceCheckpoint struct{}
+
+var FfiConverterSequenceCheckpointINSTANCE = FfiConverterSequenceCheckpoint{}
+
+func (c FfiConverterSequenceCheckpoint) Lift(rb RustBufferI) []Checkpoint {
+	return LiftFromRustBuffer[[]Checkpoint](c, rb)
+}
+
+func (c FfiConverterSequenceCheckpoint) Read(reader io.Reader) []Checkpoint {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]Checkpoint, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterCheckpointINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceCheckpoint) Lower(value []Checkpoint) C.RustBuffer {
+	return LowerIntoRustBuffer[[]Checkpoint](c, value)
+}
+
+func (c FfiConverterSequenceCheckpoint) LowerExternal(value []Checkpoint) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]Checkpoint](c, value))
+}
+
+func (c FfiConverterSequenceCheckpoint) Write(writer io.Writer, value []Checkpoint) {
+	if len(value) > math.MaxInt32 {
+		panic("[]Checkpoint is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterCheckpointINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceCheckpoint struct{}
+
+func (FfiDestroyerSequenceCheckpoint) Destroy(sequence []Checkpoint) {
+	for _, value := range sequence {
+		FfiDestroyerCheckpoint{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceCompaction struct{}
+
+var FfiConverterSequenceCompactionINSTANCE = FfiConverterSequenceCompaction{}
+
+func (c FfiConverterSequenceCompaction) Lift(rb RustBufferI) []Compaction {
+	return LiftFromRustBuffer[[]Compaction](c, rb)
+}
+
+func (c FfiConverterSequenceCompaction) Read(reader io.Reader) []Compaction {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]Compaction, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterCompactionINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceCompaction) Lower(value []Compaction) C.RustBuffer {
+	return LowerIntoRustBuffer[[]Compaction](c, value)
+}
+
+func (c FfiConverterSequenceCompaction) LowerExternal(value []Compaction) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]Compaction](c, value))
+}
+
+func (c FfiConverterSequenceCompaction) Write(writer io.Writer, value []Compaction) {
+	if len(value) > math.MaxInt32 {
+		panic("[]Compaction is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterCompactionINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceCompaction struct{}
+
+func (FfiDestroyerSequenceCompaction) Destroy(sequence []Compaction) {
+	for _, value := range sequence {
+		FfiDestroyerCompaction{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceExternalDb struct{}
+
+var FfiConverterSequenceExternalDbINSTANCE = FfiConverterSequenceExternalDb{}
+
+func (c FfiConverterSequenceExternalDb) Lift(rb RustBufferI) []ExternalDb {
+	return LiftFromRustBuffer[[]ExternalDb](c, rb)
+}
+
+func (c FfiConverterSequenceExternalDb) Read(reader io.Reader) []ExternalDb {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]ExternalDb, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterExternalDbINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceExternalDb) Lower(value []ExternalDb) C.RustBuffer {
+	return LowerIntoRustBuffer[[]ExternalDb](c, value)
+}
+
+func (c FfiConverterSequenceExternalDb) LowerExternal(value []ExternalDb) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]ExternalDb](c, value))
+}
+
+func (c FfiConverterSequenceExternalDb) Write(writer io.Writer, value []ExternalDb) {
+	if len(value) > math.MaxInt32 {
+		panic("[]ExternalDb is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterExternalDbINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceExternalDb struct{}
+
+func (FfiDestroyerSequenceExternalDb) Destroy(sequence []ExternalDb) {
+	for _, value := range sequence {
+		FfiDestroyerExternalDb{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceMetric struct{}
 
 var FfiConverterSequenceMetricINSTANCE = FfiConverterSequenceMetric{}
@@ -9424,6 +11426,335 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSortedRun struct{}
+
+var FfiConverterSequenceSortedRunINSTANCE = FfiConverterSequenceSortedRun{}
+
+func (c FfiConverterSequenceSortedRun) Lift(rb RustBufferI) []SortedRun {
+	return LiftFromRustBuffer[[]SortedRun](c, rb)
+}
+
+func (c FfiConverterSequenceSortedRun) Read(reader io.Reader) []SortedRun {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]SortedRun, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSortedRunINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSortedRun) Lower(value []SortedRun) C.RustBuffer {
+	return LowerIntoRustBuffer[[]SortedRun](c, value)
+}
+
+func (c FfiConverterSequenceSortedRun) LowerExternal(value []SortedRun) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]SortedRun](c, value))
+}
+
+func (c FfiConverterSequenceSortedRun) Write(writer io.Writer, value []SortedRun) {
+	if len(value) > math.MaxInt32 {
+		panic("[]SortedRun is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSortedRunINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSortedRun struct{}
+
+func (FfiDestroyerSequenceSortedRun) Destroy(sequence []SortedRun) {
+	for _, value := range sequence {
+		FfiDestroyerSortedRun{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSsTableHandle struct{}
+
+var FfiConverterSequenceSsTableHandleINSTANCE = FfiConverterSequenceSsTableHandle{}
+
+func (c FfiConverterSequenceSsTableHandle) Lift(rb RustBufferI) []SsTableHandle {
+	return LiftFromRustBuffer[[]SsTableHandle](c, rb)
+}
+
+func (c FfiConverterSequenceSsTableHandle) Read(reader io.Reader) []SsTableHandle {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]SsTableHandle, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSsTableHandleINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSsTableHandle) Lower(value []SsTableHandle) C.RustBuffer {
+	return LowerIntoRustBuffer[[]SsTableHandle](c, value)
+}
+
+func (c FfiConverterSequenceSsTableHandle) LowerExternal(value []SsTableHandle) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]SsTableHandle](c, value))
+}
+
+func (c FfiConverterSequenceSsTableHandle) Write(writer io.Writer, value []SsTableHandle) {
+	if len(value) > math.MaxInt32 {
+		panic("[]SsTableHandle is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSsTableHandleINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSsTableHandle struct{}
+
+func (FfiDestroyerSequenceSsTableHandle) Destroy(sequence []SsTableHandle) {
+	for _, value := range sequence {
+		FfiDestroyerSsTableHandle{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSsTableView struct{}
+
+var FfiConverterSequenceSsTableViewINSTANCE = FfiConverterSequenceSsTableView{}
+
+func (c FfiConverterSequenceSsTableView) Lift(rb RustBufferI) []SsTableView {
+	return LiftFromRustBuffer[[]SsTableView](c, rb)
+}
+
+func (c FfiConverterSequenceSsTableView) Read(reader io.Reader) []SsTableView {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]SsTableView, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSsTableViewINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSsTableView) Lower(value []SsTableView) C.RustBuffer {
+	return LowerIntoRustBuffer[[]SsTableView](c, value)
+}
+
+func (c FfiConverterSequenceSsTableView) LowerExternal(value []SsTableView) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]SsTableView](c, value))
+}
+
+func (c FfiConverterSequenceSsTableView) Write(writer io.Writer, value []SsTableView) {
+	if len(value) > math.MaxInt32 {
+		panic("[]SsTableView is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSsTableViewINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSsTableView struct{}
+
+func (FfiDestroyerSequenceSsTableView) Destroy(sequence []SsTableView) {
+	for _, value := range sequence {
+		FfiDestroyerSsTableView{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceVersionedCompactions struct{}
+
+var FfiConverterSequenceVersionedCompactionsINSTANCE = FfiConverterSequenceVersionedCompactions{}
+
+func (c FfiConverterSequenceVersionedCompactions) Lift(rb RustBufferI) []VersionedCompactions {
+	return LiftFromRustBuffer[[]VersionedCompactions](c, rb)
+}
+
+func (c FfiConverterSequenceVersionedCompactions) Read(reader io.Reader) []VersionedCompactions {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]VersionedCompactions, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterVersionedCompactionsINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceVersionedCompactions) Lower(value []VersionedCompactions) C.RustBuffer {
+	return LowerIntoRustBuffer[[]VersionedCompactions](c, value)
+}
+
+func (c FfiConverterSequenceVersionedCompactions) LowerExternal(value []VersionedCompactions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]VersionedCompactions](c, value))
+}
+
+func (c FfiConverterSequenceVersionedCompactions) Write(writer io.Writer, value []VersionedCompactions) {
+	if len(value) > math.MaxInt32 {
+		panic("[]VersionedCompactions is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterVersionedCompactionsINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceVersionedCompactions struct{}
+
+func (FfiDestroyerSequenceVersionedCompactions) Destroy(sequence []VersionedCompactions) {
+	for _, value := range sequence {
+		FfiDestroyerVersionedCompactions{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceVersionedManifest struct{}
+
+var FfiConverterSequenceVersionedManifestINSTANCE = FfiConverterSequenceVersionedManifest{}
+
+func (c FfiConverterSequenceVersionedManifest) Lift(rb RustBufferI) []VersionedManifest {
+	return LiftFromRustBuffer[[]VersionedManifest](c, rb)
+}
+
+func (c FfiConverterSequenceVersionedManifest) Read(reader io.Reader) []VersionedManifest {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]VersionedManifest, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterVersionedManifestINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceVersionedManifest) Lower(value []VersionedManifest) C.RustBuffer {
+	return LowerIntoRustBuffer[[]VersionedManifest](c, value)
+}
+
+func (c FfiConverterSequenceVersionedManifest) LowerExternal(value []VersionedManifest) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]VersionedManifest](c, value))
+}
+
+func (c FfiConverterSequenceVersionedManifest) Write(writer io.Writer, value []VersionedManifest) {
+	if len(value) > math.MaxInt32 {
+		panic("[]VersionedManifest is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterVersionedManifestINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceVersionedManifest struct{}
+
+func (FfiDestroyerSequenceVersionedManifest) Destroy(sequence []VersionedManifest) {
+	for _, value := range sequence {
+		FfiDestroyerVersionedManifest{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSourceId struct{}
+
+var FfiConverterSequenceSourceIdINSTANCE = FfiConverterSequenceSourceId{}
+
+func (c FfiConverterSequenceSourceId) Lift(rb RustBufferI) []SourceId {
+	return LiftFromRustBuffer[[]SourceId](c, rb)
+}
+
+func (c FfiConverterSequenceSourceId) Read(reader io.Reader) []SourceId {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]SourceId, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSourceIdINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSourceId) Lower(value []SourceId) C.RustBuffer {
+	return LowerIntoRustBuffer[[]SourceId](c, value)
+}
+
+func (c FfiConverterSequenceSourceId) LowerExternal(value []SourceId) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]SourceId](c, value))
+}
+
+func (c FfiConverterSequenceSourceId) Write(writer io.Writer, value []SourceId) {
+	if len(value) > math.MaxInt32 {
+		panic("[]SourceId is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSourceIdINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSourceId struct{}
+
+func (FfiDestroyerSequenceSourceId) Destroy(sequence []SourceId) {
+	for _, value := range sequence {
+		FfiDestroyerSourceId{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSsTableId struct{}
+
+var FfiConverterSequenceSsTableIdINSTANCE = FfiConverterSequenceSsTableId{}
+
+func (c FfiConverterSequenceSsTableId) Lift(rb RustBufferI) []SsTableId {
+	return LiftFromRustBuffer[[]SsTableId](c, rb)
+}
+
+func (c FfiConverterSequenceSsTableId) Read(reader io.Reader) []SsTableId {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]SsTableId, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSsTableIdINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSsTableId) Lower(value []SsTableId) C.RustBuffer {
+	return LowerIntoRustBuffer[[]SsTableId](c, value)
+}
+
+func (c FfiConverterSequenceSsTableId) LowerExternal(value []SsTableId) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]SsTableId](c, value))
+}
+
+func (c FfiConverterSequenceSsTableId) Write(writer io.Writer, value []SsTableId) {
+	if len(value) > math.MaxInt32 {
+		panic("[]SsTableId is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSsTableIdINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSsTableId struct{}
+
+func (FfiDestroyerSequenceSsTableId) Destroy(sequence []SsTableId) {
+	for _, value := range sequence {
+		FfiDestroyerSsTableId{}.Destroy(value)
 	}
 }
 

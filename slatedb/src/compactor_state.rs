@@ -6,9 +6,9 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableView};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
@@ -305,10 +305,9 @@ impl Display for Compaction {
     }
 }
 
-/// Represents an immutable in-memory view of .compactions file that is suitable
-/// to expose to end-users.
+/// Internal immutable in-memory view of a `.compactions` file.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct CompactionsCore {
+pub(crate) struct CompactionsCore {
     /// The set of recent compactions tracked by this compactor. These may
     /// be pending, in progress, or recently completed (either with success
     /// or failure).
@@ -330,7 +329,7 @@ impl CompactionsCore {
     /// Returns an iterator over all recent compactions. Recent compactions include all
     /// active (submitted or running) compactions as well as the most recently finished
     /// compaction (failed or completed).
-    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+    pub(crate) fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.recent_compactions.values()
     }
 }
@@ -339,28 +338,43 @@ impl CompactionsCore {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VersionedCompactions {
     /// The version ID of the compactions file.
-    pub id: u64,
-    /// The persisted compactor epoch for this compactions version.
-    pub compactor_epoch: u64,
-    /// The compactions state at this version.
-    pub compactions: CompactionsCore,
+    pub(crate) id: u64,
+    /// The flattened compactions state at this version.
+    #[serde(flatten)]
+    pub(crate) compactions: Compactions,
 }
 
 impl VersionedCompactions {
     pub(crate) fn from_compactions(id: u64, compactions: Compactions) -> Self {
-        Self {
-            id,
-            compactor_epoch: compactions.compactor_epoch,
-            compactions: compactions.core,
-        }
+        Self { id, compactions }
+    }
+
+    /// Returns the compactions file version ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the compactor epoch recorded in this compactions snapshot.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.compactions.compactor_epoch
+    }
+
+    /// Returns an iterator over the recent compactions tracked in this snapshot.
+    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.compactions.core.recent_compactions()
+    }
+
+    pub(crate) fn core(&self) -> &CompactionsCore {
+        &self.compactions.core
     }
 }
 
 /// Container for compactions tracked by the compactor alongside its epoch.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Compactions {
     // The current compactor's epoch.
     pub(crate) compactor_epoch: u64,
+    #[serde(flatten)]
     pub(crate) core: CompactionsCore,
 }
 
@@ -714,6 +728,7 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.value.core = db_state;
+            self.manifest.value.prune_external_sst_ids();
             self.update_compaction(&compaction_id, |c| {
                 c.set_status(CompactionStatus::Completed);
             });
@@ -968,6 +983,61 @@ mod tests {
             .map(|h| h.sst.id)
             .collect();
         assert_eq!(expected_ids, found_ids);
+    }
+
+    #[test]
+    fn test_finish_compaction_prunes_external_sst_ids() {
+        use crate::manifest::ExternalDb;
+        use uuid::Uuid;
+
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let before_compaction = state.db_state().clone();
+
+        // Seed external_dbs with a mix of IDs that are currently in L0 (will move to the
+        // compacted sorted run and remain live) and a stale ID that was never in the
+        // manifest (simulating a parent SST already compacted away on a prior cycle).
+        let live_id = before_compaction.l0.front().unwrap().sst.id;
+        let stale_id = SsTableId::Compacted(Ulid::new());
+        state.manifest.value.external_dbs = vec![
+            ExternalDb {
+                path: "/parent/db".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![live_id, stale_id],
+            },
+            ExternalDb {
+                path: "/other/parent".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![stale_id],
+            },
+        ];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        let sr = SortedRun {
+            id: 0,
+            sst_views: before_compaction.l0.iter().cloned().collect(),
+        };
+        state.finish_compaction(compaction_id, sr);
+
+        let external_dbs = &state.manifest().value.external_dbs;
+        assert_eq!(external_dbs.len(), 2, "entries must be retained");
+        assert_eq!(
+            external_dbs[0].sst_ids,
+            vec![live_id],
+            "stale id must be pruned, live id kept"
+        );
+        assert!(
+            external_dbs[1].sst_ids.is_empty(),
+            "fully-stale entry must be retained with empty sst_ids (detach is GC's job)"
+        );
+        assert!(external_dbs[1].final_checkpoint_id.is_some());
     }
 
     #[test]

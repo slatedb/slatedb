@@ -15,7 +15,7 @@ use crate::compactor_state::{
     Compactions as CompactorCompactions, SourceId,
 };
 use crate::db_state::{self, FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
-use crate::db_state::{ManifestCore, SsTableHandle, SsTableView};
+use crate::db_state::{SsTableHandle, SsTableView};
 
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
@@ -43,7 +43,7 @@ use crate::flatbuffer_types::root_generated::{
     UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
-use crate::manifest::{ExternalDb, Manifest};
+use crate::manifest::{ExternalDb, Manifest, ManifestCore};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
@@ -287,6 +287,22 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
+        let external_dbs = manifest
+            .external_dbs()
+            .map(|external_dbs| {
+                external_dbs
+                    .iter()
+                    .map(|db| ExternalDb {
+                        path: db.path().to_string(),
+                        source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
+                        final_checkpoint_id: db
+                            .final_checkpoint_id()
+                            .map(|id| Self::decode_uuid(id)),
+                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
             // In V1, view IDs are SST IDs, so both fields are the same.
@@ -303,20 +319,8 @@ impl FlatBufferManifestCodec {
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
         };
-        let external_dbs = manifest.external_dbs().map(|external_dbs| {
-            external_dbs
-                .iter()
-                .map(|db| ExternalDb {
-                    path: db.path().to_string(),
-                    source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
-                    final_checkpoint_id: db.final_checkpoint_id().map(|id| Self::decode_uuid(id)),
-                    sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
-                })
-                .collect()
-        });
-
         Ok(Manifest {
-            external_dbs: external_dbs.unwrap_or_default(),
+            external_dbs,
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -401,6 +405,22 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
+        let external_dbs = manifest
+            .external_dbs()
+            .map(|external_dbs| {
+                external_dbs
+                    .iter()
+                    .map(|db| ExternalDb {
+                        path: db.path().to_string(),
+                        source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
+                        final_checkpoint_id: db
+                            .final_checkpoint_id()
+                            .map(|id| Self::decode_uuid(id)),
+                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
             last_compacted_l0_sst_view_id: l0_last_compacted,
@@ -417,20 +437,8 @@ impl FlatBufferManifestCodec {
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
         };
-        let external_dbs = manifest.external_dbs().map(|external_dbs| {
-            external_dbs
-                .iter()
-                .map(|db| ExternalDb {
-                    path: db.path().to_string(),
-                    source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
-                    final_checkpoint_id: db.final_checkpoint_id().map(|id| Self::decode_uuid(id)),
-                    sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
-                })
-                .collect()
-        });
-
         Ok(Manifest {
-            external_dbs: external_dbs.unwrap_or_default(),
+            external_dbs,
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -1222,13 +1230,11 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
     };
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
-    use crate::manifest::{ExternalDb, Manifest};
+    use crate::manifest::{ExternalDb, Manifest, ManifestCore};
     use crate::{checkpoint, error::SlateDBError};
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;

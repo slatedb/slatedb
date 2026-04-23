@@ -89,7 +89,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
 pub use crate::compactor_state::{
-    Compaction, CompactionSpec, CompactionStatus, CompactionsCore, CompactorState, SourceId,
+    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
 };
 pub use crate::compactor_state_protocols::CompactorStateView;
 pub use crate::db::builder::CompactorBuilder;
@@ -176,7 +176,7 @@ pub trait CompactionScheduler: Send + Sync {
         match request {
             CompactionRequest::Spec(spec) => Ok(vec![spec.clone()]),
             CompactionRequest::Full => {
-                let manifest = state.manifest();
+                let manifest = state.manifest().core();
                 let sources = manifest
                     .compacted
                     .iter()
@@ -612,7 +612,7 @@ impl CompactorEventHandler {
     /// Calculates the estimated total source bytes for a compaction.
     fn calculate_estimated_source_bytes(
         compaction: &Compaction,
-        db_state: &crate::db_state::ManifestCore,
+        db_state: &crate::manifest::ManifestCore,
     ) -> u64 {
         use crate::db_state::{SortedRun, SsTableView};
         use std::collections::HashMap;
@@ -1060,14 +1060,12 @@ mod tests {
         SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::Manifest;
+    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
@@ -1203,9 +1201,10 @@ mod tests {
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
                 // compact when there are at least 2 SSTs in L0 (one for key 'a' and one for key 'b')
-                state.manifest().l0.len() == 2 ||
+                state.manifest().core().l0.len() == 2 ||
                 // or when there is one SST in L0 and one in L1 (one for delete key 'a' and one for compacted key 'a'+'b')
-                (state.manifest().l0.len() == 1 && state.manifest().compacted.len() == 1)
+                (state.manifest().core().l0.len() == 1
+                    && state.manifest().core().compacted.len() == 1)
             },
         )));
 
@@ -1311,9 +1310,10 @@ mod tests {
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
                 // compact when there are at least 2 SSTs in L0
-                state.manifest().l0.len() == 2 ||
+                state.manifest().core().l0.len() == 2 ||
                 // or when there is one SST in L0 and one in L1
-                (state.manifest().l0.len() == 1 && state.manifest().compacted.len() == 1)
+                (state.manifest().core().l0.len() == 1
+                    && state.manifest().core().compacted.len() == 1)
             },
         )));
 
@@ -1421,7 +1421,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -1554,7 +1554,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
 
@@ -1627,7 +1627,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| !state.manifest().l0.is_empty(),
+            |state| !state.manifest().core().l0.is_empty(),
         )));
         let options = db_options(None);
 
@@ -1762,7 +1762,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -1879,7 +1879,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 3,
+            |state| state.manifest().core().l0.len() >= 3,
         )));
         let options = db_options(None);
 
@@ -2012,7 +2012,7 @@ mod tests {
         let insert_clock = Arc::new(MockSystemClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
 
         let mut options = db_options(None);
@@ -2099,7 +2099,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -2201,7 +2201,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -2333,7 +2333,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -2818,8 +2818,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
         let stored = compactions
+            .compactions
             .get(&compaction_id)
             .expect("missing submitted compaction");
 
@@ -2897,7 +2898,10 @@ mod tests {
             .generate(
                 &CompactorStateView {
                     compactions: None,
-                    manifest: (0, stored_manifest.manifest().clone()),
+                    manifest: VersionedManifest::from_manifest(
+                        0,
+                        stored_manifest.manifest().clone(),
+                    ),
                 },
                 &CompactionRequest::Full,
             )
@@ -2912,8 +2916,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
         let stored = compactions
+            .compactions
             .get(&compaction_id)
             .expect("missing submitted compaction");
         let expected_sources = vec![SourceId::SortedRun(2), SourceId::SortedRun(1)];
@@ -2928,7 +2933,7 @@ mod tests {
         let scheduler = MockScheduler::new();
         let state = CompactorStateView {
             compactions: None,
-            manifest: (0, Manifest::initial(ManifestCore::new())),
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(ManifestCore::new())),
         };
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
 
@@ -2982,7 +2987,7 @@ mod tests {
         ];
         let state = CompactorStateView {
             compactions: None,
-            manifest: (0, Manifest::initial(core)),
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
         };
 
         let planned = scheduler
@@ -3017,7 +3022,7 @@ mod tests {
         ]);
         let state = CompactorStateView {
             compactions: None,
-            manifest: (0, Manifest::initial(core)),
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
         };
 
         let err = scheduler
@@ -3291,11 +3296,12 @@ mod tests {
         // when: schedule compaction -> compactions are persisted
         fixture.handler.handle_ticker().await.unwrap();
 
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .iter()
@@ -3334,11 +3340,12 @@ mod tests {
 
         // then: finishing compaction clears persisted state
         fixture.handler.handle(msg).await.unwrap();
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         let mut stored_compactions_iter = stored_compactions.iter();
         assert_eq!(
             stored_compactions_iter
@@ -3389,11 +3396,12 @@ mod tests {
             .await
             .expect("fatal error handling progress message");
 
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         let stored = stored_compactions
             .get(&compaction_id)
             .expect("missing stored compaction");
@@ -3423,11 +3431,12 @@ mod tests {
         assert_eq!(scheduled.status(), CompactionStatus::Submitted);
         assert!(compactions.next().is_none());
 
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         let stored = stored_compactions
             .iter()
             .next()
@@ -3461,11 +3470,12 @@ mod tests {
                 .status(),
             CompactionStatus::Running
         );
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .get(&compaction_id)
@@ -3540,11 +3550,12 @@ mod tests {
                 .status(),
             CompactionStatus::Failed
         );
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .get(&compaction_id)
@@ -3647,7 +3658,11 @@ mod tests {
         };
         handler.handle(msg).await.unwrap();
 
-        let (_, stored_compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let stored_compactions = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .get(&compaction_id)
@@ -3695,11 +3710,12 @@ mod tests {
         let job = fixture.assert_started_compaction(1).pop().unwrap();
 
         // sanity: compaction persisted
-        let (_, stored) = fixture
+        let stored = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(stored.iter().collect::<Vec<&Compaction>>().len(), 1);
 
         // when: job fails
@@ -3710,11 +3726,12 @@ mod tests {
         fixture.handler.handle(msg).await.unwrap();
 
         // then: compaction marked failed in store
-        let (_, stored_after) = fixture
+        let stored_after = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_after
                 .iter()

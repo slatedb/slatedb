@@ -8,8 +8,7 @@ use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-use crate::block_iterator::BlockLike;
-use crate::block_iterator_v2::BlockIteratorV2;
+use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
@@ -17,9 +16,7 @@ use crate::error::SlateDBError;
 use crate::filter_policy::{FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
-use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::{
-    block_iterator::BlockIterator,
     iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
     partitioned_keyspace,
     tablestore::TableStore,
@@ -29,46 +26,6 @@ use crate::{
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
     Finished(VecDeque<Arc<Block>>),
-}
-
-enum DataBlockIterator<B: BlockLike> {
-    V1(BlockIterator<B>),
-    V2(BlockIteratorV2<B>),
-}
-
-impl<B: BlockLike> DataBlockIterator<B> {
-    fn new(block: B, sst_version: u16, order: IterationOrder) -> Result<Self, SlateDBError> {
-        match sst_version {
-            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new(block, order))),
-            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new(block, order))),
-            _ => Err(SlateDBError::InvalidVersion {
-                format_name: "SST",
-                supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
-                actual_version: sst_version,
-            }),
-        }
-    }
-
-    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        match self {
-            Self::V1(iter) => iter.next().await,
-            Self::V2(iter) => iter.next().await,
-        }
-    }
-
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        match self {
-            Self::V1(iter) => iter.seek(next_key).await,
-            Self::V2(iter) => iter.seek(next_key).await,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::V1(iter) => iter.is_empty(),
-            Self::V2(iter) => iter.is_empty(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

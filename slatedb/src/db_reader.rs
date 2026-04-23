@@ -2,15 +2,15 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
-use crate::db_read::DbRead;
-use crate::db_state::{ManifestCore, VersionedManifest};
+use crate::db_metadata::DbMetadataOps;
+use crate::db_read::DbReadOps;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::MergeOperatorType;
 use crate::oracle::DbReaderOracle;
@@ -1072,27 +1072,10 @@ impl DbReader {
 
         Ok(())
     }
-
-    /// Subscribe to database status changes.
-    ///
-    /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
-    /// deadlock warnings. The `durable_seq` and `current_manifest` fields are
-    /// updated whenever the reader's current checkpoint/manifest view changes
-    /// or it replays additional durable WAL data.
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_manager.subscribe()
-    }
-
-    /// Returns the latest reader status snapshot.
-    ///
-    /// See [`Db::status`](crate::Db::status) for full semantics.
-    pub fn status(&self) -> DbStatus {
-        self.inner.status()
-    }
 }
 
 #[async_trait::async_trait]
-impl DbRead for DbReader {
+impl DbReadOps for DbReader {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
@@ -1133,6 +1116,38 @@ impl DbRead for DbReader {
     }
 }
 
+impl DbMetadataOps for DbReader {
+    fn manifest(&self) -> VersionedManifest {
+        let state = Arc::clone(&self.inner.state.read());
+        VersionedManifest::from(state.as_ref())
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.inner.status_manager.subscribe()
+    }
+
+    fn status(&self) -> DbStatus {
+        self.inner.status()
+    }
+}
+
+impl DbReader {
+    /// See [`DbMetadataOps::manifest`].
+    pub fn manifest(&self) -> VersionedManifest {
+        <Self as DbMetadataOps>::manifest(self)
+    }
+
+    /// See [`DbMetadataOps::subscribe`].
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        <Self as DbMetadataOps>::subscribe(self)
+    }
+
+    /// See [`DbMetadataOps::status`].
+    pub fn status(&self) -> DbStatus {
+        <Self as DbMetadataOps>::status(self)
+    }
+}
+
 /// Checks if the error or any of its sources is an `object_store::Error::NotFound` error.
 fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(err);
@@ -1160,12 +1175,12 @@ mod tests {
         WriteOptions,
     };
     use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::SsTableId;
     use crate::db_stats::DbStats;
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::Manifest;
+    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::merge_operator::MergeOperatorType;
     use crate::object_stores::ObjectStores;
@@ -1219,6 +1234,26 @@ mod tests {
             reader.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
+    }
+
+    #[tokio::test]
+    async fn should_return_current_versioned_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_reader_manifest_accessor");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        db.put(b"test_key", b"test_value").await.unwrap();
+        db.flush().await.unwrap();
+
+        let reader = DbReader::open(path, object_store, None, DbReaderOptions::default())
+            .await
+            .unwrap();
+
+        let manifest = reader.manifest();
+        let expected: VersionedManifest =
+            VersionedManifest::from(reader.inner.state.read().as_ref());
+        assert_eq!(manifest, expected);
     }
 
     #[tokio::test]
@@ -1302,12 +1337,14 @@ mod tests {
         let parent_path = "/tmp/parent_store".to_string();
         let source_checkpoint_id = uuid::Uuid::new_v4();
 
-        let _ = StoredManifest::create_uninitialized_clone(
+        let _ = StoredManifest::store_uninitialized_clone(
             Arc::clone(&manifest_store),
-            &parent_manifest,
-            parent_path,
-            source_checkpoint_id,
-            Arc::new(DbRand::default()),
+            Manifest::cloned(
+                &parent_manifest,
+                parent_path,
+                source_checkpoint_id,
+                Arc::new(DbRand::default()),
+            ),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -1373,8 +1410,8 @@ mod tests {
             .await
             .unwrap();
         let manifest_store = test_provider.manifest_store();
-        let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        let initial_checkpoint_id = manifest.core.checkpoints.first().unwrap().id;
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        let initial_checkpoint_id = manifest.manifest.core.checkpoints.first().unwrap().id;
 
         let mut rng = new_test_rng(None);
         let table = sample::table(&mut rng, 256, 10);
@@ -1387,9 +1424,15 @@ mod tests {
         let mut db_iter = reader.scan::<Vec<u8>, _>(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
 
-        let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert!(!manifest.core.checkpoints.is_empty());
-        assert_eq!(None, manifest.core.find_checkpoint(initial_checkpoint_id));
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert!(!manifest.manifest.core.checkpoints.is_empty());
+        assert_eq!(
+            None,
+            manifest
+                .manifest
+                .core
+                .find_checkpoint(initial_checkpoint_id)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1411,15 +1454,27 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(1, initial_manifest.core.checkpoints.len());
-        let initial_reader_checkpoint = initial_manifest.core.checkpoints.first().unwrap().clone();
+        let initial_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(1, initial_manifest.manifest.core.checkpoints.len());
+        let initial_reader_checkpoint = initial_manifest
+            .manifest
+            .core
+            .checkpoints
+            .first()
+            .unwrap()
+            .clone();
 
         tokio::time::sleep(Duration::from_millis(5000)).await;
 
-        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(1, updated_manifest.core.checkpoints.len());
-        let updated_reader_checkpoint = updated_manifest.core.checkpoints.first().unwrap().clone();
+        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(1, updated_manifest.manifest.core.checkpoints.len());
+        let updated_reader_checkpoint = updated_manifest
+            .manifest
+            .core
+            .checkpoints
+            .first()
+            .unwrap()
+            .clone();
         assert_eq!(initial_reader_checkpoint.id, updated_reader_checkpoint.id);
         assert!(
             updated_reader_checkpoint.expire_time.unwrap()
@@ -1428,8 +1483,8 @@ mod tests {
 
         // The checkpoint is removed on shutdown
         reader.close().await.unwrap();
-        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(0, updated_manifest.core.checkpoints.len());
+        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(0, updated_manifest.manifest.core.checkpoints.len());
     }
 
     #[tokio::test(start_paused = true)]

@@ -26,9 +26,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
 use compactions_gc::CompactionsGcTask;
+use detach_gc::DetachGcTask;
 use futures::stream::BoxStream;
 use log::{error, info};
 use manifest_gc::ManifestGcTask;
+use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
@@ -39,6 +41,7 @@ use wal_gc::WalGcTask;
 
 mod compacted_gc;
 mod compactions_gc;
+mod detach_gc;
 mod manifest_gc;
 pub mod stats;
 mod wal_gc;
@@ -58,6 +61,7 @@ pub(crate) enum GcMessage {
     Compacted,
     Compactions,
     Manifest,
+    Detach,
 }
 
 /// SlateDB's garbage collector.
@@ -85,6 +89,7 @@ pub struct GarbageCollector {
     wal_gc_task: Option<WalGcTask>,
     compacted_gc_task: Option<CompactedGcTask>,
     compactions_gc_task: Option<CompactionsGcTask>,
+    detach_gc_task: Option<DetachGcTask>,
 }
 
 #[async_trait]
@@ -114,6 +119,12 @@ impl MessageHandler<GcMessage> for GarbageCollector {
             tickers.push((
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Compactions),
+            ));
+        }
+        if let Some(opts) = self.options.detach_options {
+            tickers.push((
+                opts.interval.unwrap_or(DEFAULT_INTERVAL),
+                Box::new(|| GcMessage::Detach),
             ));
         }
 
@@ -150,6 +161,13 @@ impl MessageHandler<GcMessage> for GarbageCollector {
                     .expect("got compactions tick with unconfigured compactions task");
                 self.run_gc_task(task).await;
             }
+            GcMessage::Detach => {
+                let task = self
+                    .detach_gc_task
+                    .as_ref()
+                    .expect("got detach tick with unconfigured detach task");
+                self.run_gc_task(task).await;
+            }
         }
         Ok(())
     }
@@ -183,6 +201,7 @@ impl GarbageCollector {
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
+        object_store: Arc<dyn ObjectStore>,
         options: GarbageCollectorOptions,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
@@ -215,6 +234,15 @@ impl GarbageCollector {
         let manifest_gc_task = options.manifest_options.map(|manifest_options| {
             ManifestGcTask::new(manifest_store.clone(), stats.clone(), manifest_options)
         });
+        let detach_gc_task = options.detach_options.map(|detach_options| {
+            DetachGcTask::new(
+                manifest_store.clone(),
+                object_store,
+                system_clock.clone(),
+                stats.clone(),
+                detach_options,
+            )
+        });
         Self {
             manifest_store,
             options,
@@ -224,6 +252,7 @@ impl GarbageCollector {
             wal_gc_task,
             compacted_gc_task,
             compactions_gc_task,
+            detach_gc_task,
         }
     }
 
@@ -234,6 +263,7 @@ impl GarbageCollector {
     /// - WAL SST garbage collection
     /// - Compacted SST garbage collection
     /// - Manifest garbage collection
+    /// - Detach clone from parent garbage
     pub async fn run_gc_once(&self) {
         if let Some(task) = &self.manifest_gc_task {
             self.run_gc_task(task).await;
@@ -245,6 +275,9 @@ impl GarbageCollector {
             self.run_gc_task(task).await;
         }
         if let Some(task) = &self.compactions_gc_task {
+            self.run_gc_task(task).await;
+        }
+        if let Some(task) = &self.detach_gc_task {
             self.run_gc_task(task).await;
         }
 
@@ -328,8 +361,11 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::utils::WatchableOnceCell;
     use crate::{
-        db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableView},
-        manifest::store::{ManifestStore, StoredManifest},
+        db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView},
+        manifest::{
+            store::{ManifestStore, StoredManifest},
+            ManifestCore,
+        },
         tablestore::TableStore,
     };
 
@@ -623,15 +659,14 @@ mod tests {
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
-        let (latest_manifest_id, latest_manifest) =
-            manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(4, latest_manifest_id);
-        assert_eq!(1, latest_manifest.core.checkpoints.len());
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(4, latest_manifest.id);
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints.len());
         assert_eq!(
             unexpired_checkpoint_id,
-            latest_manifest.core.checkpoints[0].id
+            latest_manifest.manifest.core.checkpoints[0].id
         );
-        assert_eq!(2, latest_manifest.core.checkpoints[0].manifest_id);
+        assert_eq!(2, latest_manifest.manifest.core.checkpoints[0].manifest_id);
 
         // Only the latest manifest and the one referenced by the unexpired checkpoint
         // should be retained.
@@ -690,12 +725,14 @@ mod tests {
         .await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
-        let (latest_manifest_id, latest_manifest) =
-            manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(4, latest_manifest_id);
-        assert_eq!(1, latest_manifest.core.checkpoints.len());
-        assert_eq!(active_checkpoint_id, latest_manifest.core.checkpoints[0].id);
-        assert_eq!(1, latest_manifest.core.checkpoints[0].manifest_id);
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(4, latest_manifest.id);
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints.len());
+        assert_eq!(
+            active_checkpoint_id,
+            latest_manifest.manifest.core.checkpoints[0].id
+        );
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints[0].manifest_id);
 
         // The active manifest and the manifest corresponding to the active
         // checkpoint should be retained. The rest should be deleted.
@@ -808,9 +845,9 @@ mod tests {
         assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(
-            current_manifest.core.replay_after_wal_id,
+            current_manifest.manifest.core.replay_after_wal_id,
             id2.unwrap_wal_id()
         );
 
@@ -945,9 +982,9 @@ mod tests {
         assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(
-            current_manifest.core.replay_after_wal_id,
+            current_manifest.manifest.core.replay_after_wal_id,
             id2.unwrap_wal_id()
         );
 
@@ -1042,10 +1079,13 @@ mod tests {
         }
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(current_manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(
+            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            2
+        );
 
         // Start the garbage collector
         run_gc_once(
@@ -1074,10 +1114,13 @@ mod tests {
         // Deleted SSTs
         assert!(!remaining_ids.contains(&inactive_expired_l0_sst_handle.id));
         assert!(!remaining_ids.contains(&inactive_expired_sst_handle.id));
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(current_manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(
+            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            2
+        );
     }
 
     /// This test creates six compacted SSTs:
@@ -1266,9 +1309,9 @@ mod tests {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
     ) {
-        let (manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
         let manifests = manifest_store
-            .read_referenced_manifests(manifest_id, &manifest)
+            .read_referenced_manifests(manifest.id, &manifest.manifest)
             .await
             .unwrap();
 
@@ -1378,12 +1421,14 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1444,12 +1489,14 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            detach_options: None,
         };
 
         let mut gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1506,12 +1553,14 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1544,12 +1593,14 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(17)),
             }),
+            detach_options: None,
         };
 
         let mut gc = GarbageCollector::new(
             manifest_store,
             compactions_store,
             table_store,
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
@@ -1588,12 +1639,14 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
             }),
+            detach_options: None,
         };
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             compactions_store.clone(),
             table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),

@@ -169,6 +169,15 @@ pub(crate) enum SlateDBError {
     )]
     IdenticalClonePaths(Path),
 
+    #[error("clone source paths must be unique, found duplicate: `{0}`")]
+    DuplicatedCloneSourcePath(Path),
+
+    #[error("Manifest union of sources with WAL is not supported, source with WAL: `{paths:?}`")]
+    InvalidUnionSourceWithWal { paths: Vec<Path> },
+
+    #[error("Source manifest set must not be empty")]
+    InvalidUnionSetEmpty(),
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -228,11 +237,11 @@ pub(crate) enum SlateDBError {
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
 
-    #[error("undefined environment variable {key}")]
-    UndefinedEnvironmentVariable { key: String },
-
-    #[error("invalid environment variable {key} value `{value}`")]
-    InvalidEnvironmentVariable { key: String, value: String },
+    #[error(
+        "invalid environment variable {key} value `{}`",
+        .value.as_deref().unwrap_or("null")
+    )]
+    InvalidEnvironmentVariable { key: String, value: Option<String> },
 
     #[error("unexpected tombstone encountered where a value was expected")]
     UnexpectedTombstone,
@@ -522,7 +531,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
-            SlateDBError::UndefinedEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
 
@@ -570,6 +578,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
+            SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
+            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
+            SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
         }
     }
 }

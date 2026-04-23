@@ -16,7 +16,7 @@ use crate::iter::IterationOrder;
 use crate::reader::ScanContext;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
-use crate::DbRead;
+use crate::DbReadOps;
 
 /// A database transaction that provides atomic read-write operations with
 /// configurable isolation levels. This is the main interface for transactional
@@ -60,7 +60,7 @@ pub struct DbTransaction {
     ///
     /// DbTransaction is not intended for concurrent use; we use `RwLock` (not `RefCell`) for
     /// interior mutability to preserve `Sync` in async contexts. `RefCell` is `!Sync` and would
-    /// make `DbTransaction` `!Sync`, which is incompatible with async code using the `DbRead`
+    /// make `DbTransaction` `!Sync`, which is incompatible with async code using the `DbReadOps`
     /// trait.
     write_batch: RwLock<WriteBatch>,
     /// Reference to the database
@@ -448,6 +448,9 @@ impl DbTransaction {
     }
 
     /// Merge a key-value pair into the transaction.
+    ///
+    /// ## Errors
+    /// - `Error`: if no merge operator is configured for the database.
     pub fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
@@ -457,6 +460,9 @@ impl DbTransaction {
     }
 
     /// Merge a key-value pair into the transaction with custom options.
+    ///
+    /// ## Errors
+    /// - `Error`: if no merge operator is configured for the database.
     pub fn merge_with_options<K, V>(
         &self,
         key: K,
@@ -467,6 +473,10 @@ impl DbTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        if self.db_inner.flush_merge_operator.is_none() {
+            return Err(SlateDBError::MergeOperatorMissing.into());
+        }
+
         self.write_batch
             .write()
             .merge_with_options(key, value, options);
@@ -599,7 +609,7 @@ impl DbTransaction {
 }
 
 #[async_trait::async_trait]
-impl DbRead for DbTransaction {
+impl DbReadOps for DbTransaction {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
@@ -1701,6 +1711,23 @@ mod tests {
         let value = db.get(b"counter").await.unwrap().unwrap();
         let total = u64::from_le_bytes(value.as_ref().try_into().unwrap());
         assert_eq!(total, EXPECTED);
+    }
+
+    #[tokio::test]
+    async fn test_txn_merge_requires_merge_operator() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_txn_merge_requires_merge_operator", object_store)
+            .await
+            .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let err = txn
+            .merge_with_options(b"counter", 1u64.to_le_bytes(), &MergeOptions::default())
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+
+        txn.commit().await.unwrap();
+        assert_eq!(db.get(b"counter").await.unwrap(), None);
     }
 
     fn test_db_options(
