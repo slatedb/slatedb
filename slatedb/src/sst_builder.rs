@@ -1699,15 +1699,8 @@ mod tests {
             fn name(&self) -> &str {
                 "fixed3"
             }
-            fn in_domain(&self, prefix: &[u8]) -> bool {
-                prefix.len() == 3
-            }
-            fn prefix_len(&self, key: &[u8]) -> Option<usize> {
-                if key.len() >= 3 {
-                    Some(3)
-                } else {
-                    None
-                }
+            fn prefix_len(&self, target: &crate::filter_policy::FilterTarget) -> Option<usize> {
+                (target.as_ref().len() >= 3).then_some(3)
             }
         }
 

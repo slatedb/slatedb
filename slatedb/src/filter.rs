@@ -36,12 +36,17 @@ impl BloomFilterBuilder {
         }
     }
 
-    pub(crate) fn add_key(&mut self, key: &[u8]) {
+    pub(crate) fn add_key(&mut self, key: Bytes) {
         // Keys must arrive in sorted order (as in SST construction) for the
         // deduplication of prefix hashes to work.
         if let Some(ref extractor) = self.prefix_extractor {
-            if let Some(len) = extractor.prefix_len(key) {
-                assert!(len <= key.len(), "PrefixExtractor returned a prefix length ({len}) greater than the key length ({})", key.len());
+            let target = FilterTarget::Point(key.clone());
+            if let Some(len) = extractor.prefix_len(&target) {
+                assert!(
+                    len <= key.len(),
+                    "PrefixExtractor returned a prefix length ({len}) greater than the key length ({})",
+                    key.len()
+                );
                 let prefix = &key[..len];
                 let is_same_prefix = self.last_prefix.as_deref() == Some(prefix);
                 if !is_same_prefix {
@@ -52,7 +57,7 @@ impl BloomFilterBuilder {
         }
         // Add full-key hash if whole_key_filtering is enabled
         if self.whole_key_filtering {
-            self.key_hashes.push(filter_hash(key));
+            self.key_hashes.push(filter_hash(&key));
         }
     }
 
@@ -127,7 +132,7 @@ impl BloomFilter {
 
 impl FilterBuilder for BloomFilterBuilder {
     fn add_entry(&mut self, entry: &RowEntry) {
-        self.add_key(&entry.key);
+        self.add_key(entry.key.clone());
     }
 
     fn build(&mut self) -> Arc<dyn Filter> {
@@ -137,28 +142,26 @@ impl FilterBuilder for BloomFilterBuilder {
 
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
-        match &query.target {
-            FilterTarget::Point(key) => {
-                // When whole_key_filtering is disabled, no full-key hashes were stored
-                // during construction. Probing with a full-key hash would produce false
-                // negatives, so return true (cannot rule out the key).
-                if !self.whole_key_filtering {
-                    return true;
-                }
-                self.might_contain(filter_hash(key.as_ref()))
-            }
-            FilterTarget::Prefix(prefix) => {
-                // No prefix extractor, so cannot answer prefix queries
-                let Some(ref extractor) = self.prefix_extractor else {
-                    return true;
-                };
-                // Verify the query prefix is valid for this extractor
-                if !extractor.in_domain(prefix.as_ref()) {
-                    return true;
-                }
-                self.might_contain(filter_hash(prefix.as_ref()))
-            }
+        // Full-key hash gives the tightest answer whenever it was stored.
+        if let (FilterTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
+            return self.might_contain(filter_hash(key.as_ref()));
         }
+
+        // Otherwise defer to the extractor.
+        //   - For `Point` with whole_key_filtering=false: we probe with the
+        //     extracted prefix of the queried key. If the prefix is in the
+        //     filter, the full key might be present; if not, it cannot be.
+        //   - For `Prefix`: the extractor answers whether the scan prefix is
+        //     safe to probe. Returning `None` (e.g., the scan prefix is
+        //     shorter than the extractor's output, or the extractor can't
+        //     make a truncation-safe guarantee) forces us to return `true`.
+        let Some(ref extractor) = self.prefix_extractor else {
+            return true;
+        };
+        let Some(n) = extractor.prefix_len(&query.target) else {
+            return true;
+        };
+        self.might_contain(filter_hash(&query.target.as_ref()[..n]))
     }
 
     fn encode(&self, writer: &mut dyn BufMut) {
@@ -324,7 +327,7 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            builder.add_key(bytes.freeze().as_ref());
+            builder.add_key(bytes.freeze());
         }
         let filter = builder.build_filter();
 
@@ -356,7 +359,7 @@ mod tests {
     #[test]
     fn test_bloom_filter_size() {
         let mut builder = point_builder(10);
-        builder.add_key(b"test_key");
+        builder.add_key(Bytes::from_static(b"test_key"));
         let filter = builder.build_filter();
 
         // The exact size may vary, so we'll check if it's greater than zero
@@ -377,7 +380,7 @@ mod tests {
     fn test_should_clamp_allocated_bytes() {
         let mut builder = point_builder(10);
         for i in 0..100 {
-            builder.add_key(format!("{}", i).as_bytes());
+            builder.add_key(Bytes::from(format!("{}", i)));
         }
         let filter = builder.build_filter();
         let original_size = filter.size();
