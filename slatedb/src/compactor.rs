@@ -520,6 +520,8 @@ impl CompactorEventHandler {
             rand.clone(),
         )
         .await?;
+        let compactor_epoch = state_writer.state.manifest().value.compactor_epoch;
+        stats.compactor_epoch.set(compactor_epoch as i64);
         Ok(Self {
             state_writer,
             options,
@@ -997,6 +999,7 @@ pub mod stats {
     }
 
     pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
+    pub const COMPACTOR_EPOCH: &str = compactor_stat_name!("epoch");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
     pub const TOTAL_BYTES_BEING_COMPACTED: &str =
@@ -1005,6 +1008,7 @@ pub mod stats {
         compactor_stat_name!("total_throughput_bytes_per_sec");
 
     pub(crate) struct CompactionStats {
+        pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
         pub(crate) last_compaction_ts: Arc<dyn GaugeFn>,
         pub(crate) running_compactions: Arc<dyn UpDownCounterFn>,
         pub(crate) bytes_compacted: Arc<dyn CounterFn>,
@@ -1016,6 +1020,7 @@ pub mod stats {
     impl CompactionStats {
         pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
             Self {
+                compactor_epoch: recorder.gauge(COMPACTOR_EPOCH).register(),
                 last_compaction_ts: recorder.gauge(LAST_COMPACTION_TS_SEC).register(),
                 running_compactions: recorder.up_down_counter(RUNNING_COMPACTIONS).register(),
                 bytes_compacted: recorder.counter(BYTES_COMPACTED).register(),
@@ -1049,6 +1054,7 @@ mod tests {
     use super::*;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
+    use crate::compactor::stats::COMPACTOR_EPOCH;
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
     use crate::compactor_executor::{
         CompactionExecutor, TokioCompactionExecutor, TokioCompactionExecutorOptions,
@@ -2783,6 +2789,20 @@ mod tests {
             .expect("failed to add compaction");
 
         assert_eq!(fixture.handler.state().active_compactions().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_record_compactor_epoch() {
+        let fixture = CompactorEventHandlerTestFixture::new().await;
+
+        let compactor_epoch =
+            slatedb_common::metrics::lookup_metric(&fixture.test_recorder, COMPACTOR_EPOCH)
+                .expect("metric not found");
+
+        assert_eq!(
+            compactor_epoch,
+            fixture.handler.state().manifest().value.compactor_epoch as i64
+        );
     }
 
     #[tokio::test]
