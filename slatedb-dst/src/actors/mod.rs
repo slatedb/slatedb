@@ -25,7 +25,7 @@ pub use self::clock::clock;
 pub use self::compactor::{compactor, CompactorActorOptions};
 pub use self::flusher::flusher;
 pub use self::shutdown::shutdown;
-pub use self::workload::workload;
+pub use self::workload::{workload, WorkloadActorOptions};
 
 /// Emit one progress log line every N completed steps for the looping actors.
 const PROGRESS_LOG_INTERVAL: u64 = 10;
