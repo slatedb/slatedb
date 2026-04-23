@@ -4,7 +4,6 @@ use tracing::instrument;
 
 use crate::ActorCtx;
 
-use super::super::PROGRESS_LOG_INTERVAL;
 use super::{account_prefix, decode_balance, parse_account_id, BankOptions};
 
 /// Repeatedly audits the bank by summing one scan view over all account rows.
@@ -51,7 +50,7 @@ pub async fn auditor(ctx: ActorCtx, options: BankOptions) -> Result<(), Error> {
         }
 
         step += 1;
-        if step % PROGRESS_LOG_INTERVAL == 0 {
+        if step % 1000 == 0 {
             info!("bank auditor step complete [step={}]", step);
         }
     }

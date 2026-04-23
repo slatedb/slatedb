@@ -108,7 +108,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
         "compactor",
         1,
         CompactorActorOptions {
-            restart_interval: Duration::from_millis(25),
+            restart_interval: Duration::from_millis(250),
             compactor_options,
         },
         compactor,

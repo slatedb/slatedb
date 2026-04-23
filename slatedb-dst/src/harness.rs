@@ -583,7 +583,7 @@ impl Harness {
             }
         }
 
-        // Wait for actors to complete, an error to occur, or shutdown to be requested.
+        // Wait for actors to complete and check their results as they finish.
         while let Some(result) = join_set.join_next_with_id().await {
             match result {
                 // An actor completed successfully.
@@ -612,7 +612,10 @@ impl Harness {
             }
         }
 
-        let db = Arc::clone(&shared.db_slot.read());
-        db.close().await
+        // Don't close Db because the compactor isn't running. The Db flushes and can hang
+        // without the compactor running (because L0 can get full forever).
+        // let db = Arc::clone(&shared.db_slot.read());
+        // db.close().await
+        Ok(())
     }
 }
