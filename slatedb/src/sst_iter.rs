@@ -14,7 +14,7 @@ use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter_policy::{FilterQuery, FilterTarget, NamedFilter};
-use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::{
     iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
@@ -385,46 +385,6 @@ impl<'a> InternalSstIterator<'a> {
         init_optional_iterator(iter).await
     }
 
-    fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
-        partitioned_keyspace::last_partition_including_key(index, key)
-    }
-
-    fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
-        partitioned_keyspace::first_partition_including_or_after_key(index, key)
-    }
-
-    fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
-        let start_block_id = match view.start_key() {
-            Included(k) | Excluded(k) => {
-                Self::first_block_with_data_including_or_after_key(index, k)
-            }
-            Unbounded => 0,
-        };
-
-        let end_block_id_exclusive = match view.end_key() {
-            Included(k) => Self::last_block_with_data_including_key(index, k)
-                .map(|b| b + 1)
-                .unwrap_or(start_block_id),
-            Excluded(k) => {
-                let block_index = Self::last_block_with_data_including_key(index, k);
-                match block_index {
-                    None => start_block_id,
-                    Some(block_index) => {
-                        let block = index.block_meta().get(block_index);
-                        if k == block.first_key().bytes() {
-                            block_index
-                        } else {
-                            block_index + 1
-                        }
-                    }
-                }
-            }
-            Unbounded => index.block_meta().len(),
-        };
-
-        start_block_id..end_block_id_exclusive
-    }
-
     /// Spawns fetch tasks for blocks based on iteration order.
     ///
     /// For ascending order: Fetches blocks forward from `next_block_idx_to_fetch`, incrementing it
@@ -610,8 +570,11 @@ impl<'a> InternalSstIterator<'a> {
                 .table_store
                 .read_index(&self.view.table_as_ref().sst, self.options.cache_blocks)
                 .await?;
-            let block_idx_range =
-                InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
+            let block_idx_range = partitioned_keyspace::partitions_covering_range(
+                &index.borrow(),
+                self.view.start_key(),
+                self.view.end_key(),
+            );
             self.block_idx_range = block_idx_range.clone();
             // For descending order, start from the end and work backwards
             self.next_block_idx_to_fetch = match self.options.order {
@@ -780,10 +743,13 @@ impl RowEntryIterator for InternalSstIterator<'_> {
             // For ascending order, find the first block with or after the key
             let block_idx = match self.options.order {
                 IterationOrder::Ascending => {
-                    Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key)
+                    partitioned_keyspace::first_partition_including_or_after_key(
+                        &index.borrow(),
+                        next_key,
+                    )
                 }
                 IterationOrder::Descending => {
-                    Self::last_block_with_data_including_key(&index.borrow(), next_key)
+                    partitioned_keyspace::last_partition_including_key(&index.borrow(), next_key)
                         .unwrap_or(self.block_idx_range.start)
                 }
             };
