@@ -184,7 +184,7 @@ Two properties follow directly from the trait contract:
 
 Together these give the active segments a natural total order by prefix, with pairwise disjoint key intervals. The [Scans](#scans) design leverages this to iterate segment-by-segment in prefix order without any key-wise merging across segments. The RFC does not constrain how unsegmented data relates to segment intervals; the unsegmented tree is treated as an independent iteration branch.
 
-The extractor's `name()` is persisted in the manifest. On restart, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. Reconfiguring the extractor is therefore treated as a one-way, offline operation — in general, changing segmentation on existing data requires a rewrite, which is out of scope for this RFC.
+The extractor's `name()` is persisted in the manifest. On restart, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. The extractor must be configured at database creation time or never configured — introducing an extractor on an existing non-empty database, or removing a previously-configured extractor, causes the open to fail. See [Migration](#migration) for the correctness rationale.
 
 #### Validation
 
@@ -255,15 +255,17 @@ This scoping has two consequences:
 
 #### Migration
 
-Because the change is purely additive, migration is a one-step schema bump. The manifest is revved to `ManifestV3`, which is `ManifestV2` plus the `segments` list and `segment_extractor_name` field.
+Because the change is purely additive, migration is a one-step schema bump to `ManifestV3`, which is `ManifestV2` plus the `segments` list and `segment_extractor_name` field.
+
+The version is bumped lazily — only when segments are actually used. A database that never configures a segment extractor continues to write V2 manifests indefinitely; the `segments` list and `segment_extractor_name` field are absent. The first manifest write that persists segmented state (either a configured extractor or a non-empty `segments` list) emits V3. This keeps the version number meaningful: V3 marks the presence of segmented state, not merely a compile-time capability.
 
 - A V3 manifest with an empty `segments` list is semantically identical to a V2 manifest — the existing `l0`/`compacted` fields carry the unsegmented state.
-- The writer upgrades lazily: the first manifest write under a V3-capable binary emits V3. No SST metadata rereads are required — existing sorted runs and L0 SSTs keep their current IDs and representation in the top-level fields.
-- Databases that never configure a segment extractor continue to operate entirely through the top-level fields, with `segments` always empty.
+- No SST metadata rereads are required. Existing sorted runs and L0 SSTs keep their current IDs and representation in the top-level fields; V3 adds alongside rather than restructuring.
+- The manifest decoder is updated to handle both V2 and V3. The standalone compactor reads whichever version the writer has published and does not independently upgrade.
 
-The manifest decoder is updated to handle both V2 and V3. The standalone compactor reads whichever version the writer has published and does not independently upgrade. Because no field changes require backfill, there is no decoder-first/encoder-later rollout phase.
+Broader concerns about safe manifest evolution across mismatched process versions — writers, standalone compactors, readers, CLI tools — are tracked by [issue #779](https://github.com/slatedb/slatedb/issues/779). This RFC does not propose an inner solution to that problem; it assumes whatever mechanism lands from that work will apply to V3 manifests as it does to V2.
 
-When an extractor is configured for the first time on an existing database, the existing unsegmented data remains in the top-level fields. New writes are routed through the extractor: a key whose `prefix_len(Point(key))` returns `Some(n)` flows into the segment identified by `key[..n]`, and a key whose `prefix_len` returns `None` continues to flow into the top-level fields. Existing unsegmented data is not automatically migrated into segments — if the application wants old data segmented, it must rewrite it (out of scope for this RFC).
+The extractor must be configured when the database is first created, or never configured. If a database has existing data and the open-time configuration disagrees with the manifest's persisted extractor state — configuring an extractor where none was before, or removing an extractor that was previously set — the database refuses to open. See [Alternatives](#alternatives) for additional discussion and potential room for future work.
 
 ### Write Path
 
@@ -285,7 +287,9 @@ SlateDB has two backpressure mechanisms today: a memory-based one driven by `max
 
 **Memory-based backpressure is unchanged.** Unflushed bytes are tracked at the WAL and memtable level, above the extractor. The threshold applies to the total in-memory footprint regardless of how it will later split into per-segment L0 SSTs. Writers pause when the total exceeds the configured limit, exactly as today.
 
-**L0-count-based backpressure uses a global count across all trees.** `l0_max_ssts` is compared against the sum of L0 entries in the unsegmented tree and across every named segment's `l0` list. This preserves today's operator-facing contract — "if the database has more than N uncompacted L0s, slow down flushes" — and is robust to pathological cases where a workload spreads writes thinly across many segments. The tradeoff is that a wide multi-segment flush contributes multiple entries at once (one per touched segment), so the threshold is reached sooner than in a single-tree configuration with the same data volume. This is aligned with the single-active-segment workload assumption in [Motivation](#motivation): a typical flush touches one or two segments, so global counting matches per-segment counting in the common case. Multi-active-segment workloads are where per-segment policies would begin to pay off — see [Future Work](#future-work) for segment-aware backpressure.
+**L0-count-based backpressure is applied per tree.** `l0_max_ssts` is compared against each individual tree's `l0` length — the unsegmented tree and every named segment — rather than against their sum. Backpressure fires when *any* tree exceeds the threshold. Each segment's backpressure therefore reflects only its own compaction lag; cold segments with small L0 counts do not delay flushes elsewhere.
+
+Applying the threshold per tree does allow the *total* L0 count to grow with the number of segments. This is an accepted tradeoff: for point reads and short range scans the read path routes to a single tree, so read amplification is governed by per-tree L0 count regardless; long range scans that touch multiple trees see cost proportional to total L0 count, which is inherent to segmentation. See [Alternatives](#alternatives) for the rejected global-sum approach.
 
 ### Read Path
 
@@ -404,7 +408,7 @@ This RFC focuses on segment-oriented planning and explicit drop semantics. Natur
 
 **Finer-grained WAL tracking for partial multi-segment flushes.** The current design requires a multi-segment flush to become visible atomically via the manifest, which keeps a single WAL replay cursor but can extend flush latency for wide backfills (see [Write Path](#write-path)). A future iteration could track per-segment flush frontiers in the WAL or in the manifest, allowing partial flushes to become visible incrementally. This involves extending WAL replay to advance the frontier per segment and reconciling checkpoint semantics with per-segment progress; deferred until operational experience shows the wide-flush case is a real bottleneck.
 
-**Segment-aware L0 backpressure for multi-active-segment workloads.** The first iteration applies `l0_max_ssts` as a global count across all trees (see [Backpressure](#backpressure)), which matches the single-active-segment assumption in [Motivation](#motivation). Workloads that sustain writes to multiple active segments in parallel would benefit from per-segment accounting — for example, allowing cold segments to accumulate more L0s without blocking flushes to hot segments, or exposing per-segment thresholds. Such policies would require the memtable flusher to consult per-segment L0 counts when deciding whether to stall, and the scheduler to prioritize compactions for segments near their threshold.
+**Richer L0 backpressure policies.** The initial design applies `l0_max_ssts` uniformly across every tree (see [Backpressure](#backpressure)). Future iterations could expose per-segment overrides (e.g., a larger threshold for a known hot segment), differentiate between hot and cold segments in the scheduler's compaction priority, or cap the total L0 count across trees as a secondary guard against unbounded segment proliferation.
 
 **Parallel execution of independent segment compactions.** The execution model in this RFC can be extended to run compactions for disjoint segments concurrently. Each segment has its own L0 list, its own `l0_last_compacted` watermark, and its own `compacted` list in the manifest, so parallel compactions in different segments commit to disjoint `Segment` entries with distinct destination IDs drawn from the shared counter — no cross-segment ordering conflict arises. Parallel compaction *within* a single segment is a separate concern tied to the `l0_last_compacted` watermark's single-cursor design and is not addressed here.
 
@@ -475,6 +479,23 @@ This RFC uses the deterministic extractor approach because it avoids WAL changes
 ### One memtable per segment
 
 An alternative to the single shared memtable is to maintain one memtable per segment, so flush output is already segment-aligned and no flush-time grouping is needed. In principle, this would enable independent segment flushing to L0. This would mean that a slow flush for segment A could complete without waiting for segment B, so A's data becomes visible sooner. This is possible, but it means tracking a per-segment cursor within the WAL so that replay does not introduce duplicates. Since our initial effort is aimed at uses cases which primarily write to a single active segment (with occasional backfills), the benefit may be marginal. This can be revisited in [Future Work](#future-work).
+
+### Dynamic migration from unsegmented to segmented
+
+An earlier version of this design allowed an extractor to be introduced on an existing non-empty database. New writes would route through the extractor, while pre-existing keys remained in the unsegmented tree. This is rejected in favor of requiring the extractor to be fixed at database creation time (see [Migration](#migration)).
+
+The core problem with dynamic migration is that pre-existing data is no longer addressable through the new routing:
+
+- **Reads miss shadowed data.** A key written before the extractor existed lives in the unsegmented tree. After the extractor is configured, `get`/`scan` route the query to a segment — which does not contain the key — producing false-negative reads.
+- **Tombstones never reach their targets.** A delete or tombstone written after the change lands in a segment while the key it targets remains in the unsegmented tree. Compaction operates per-tree, so the tombstone and the original key never meet. The delete effectively does nothing, and retention cannot expire the key.
+
+These could in principle be addressed by routing queries and deletes to *both* the unsegmented tree and the matching segment tree, and merging results — effectively treating the unsegmented tree as an always-consulted fallback for any segmented query. That restores correctness at the cost of consulting two trees on every routed operation and retaining precedence logic across them. We have chosen to defer this until there is a clear need which justifies the additional complexity. 
+
+### Global-sum L0 backpressure
+
+An alternative to the per-tree backpressure policy (see [Backpressure](#backpressure)) is to compare `l0_max_ssts` against the sum of L0 entries across every tree — the unsegmented tree plus every named segment. This preserves a single global contract for operators and bounds the total L0 count in the database.
+
+The per-tree approach was chosen instead because a global sum couples unrelated segments together. Each retired segment typically retains a small tail of L0s until compaction drains it, and with many retired segments those tails add up. Writers to the current active segment would stall on backpressure triggered by stale L0s in cold segments that aren't falling behind in any meaningful sense. The resulting behavior isn't a true deadlock — compaction can still drain cold segments to bring the total below the threshold — but it produces persistent spurious stalls that couple the active segment's write latency to unrelated compaction state. The per-tree check removes that coupling.
 
 ### Default segment-aware scheduler
 
