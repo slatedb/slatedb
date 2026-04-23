@@ -326,32 +326,50 @@ Databases that use the extractor consistently (i.e. all keys segmented) can conf
 
 ### Compaction
 
-Each compaction reads and writes within a single logical LSM tree — either a named segment or the unsegmented tree. Because sorted run IDs are globally unique across the database, compaction spec construction and execution follow today's single-tree logic with the target tree identified by an explicit segment prefix on the spec.
+Segmentation extends the existing compaction model in two small ways:
 
-A compaction spec identifies the target tree via an optional segment prefix, lists source SSTs and sorted runs from that tree, and specifies an action:
+1. The existing `TieredCompactionSpec` gains an optional `segment` field identifying the target tree. A spec whose `segment` is absent or empty targets the unsegmented tree (same as today); a spec whose `segment` is a named prefix targets that segment.
+2. A new `DropSegmentSpec` variant is added to the top-level `CompactionSpec` union, expressing wholesale segment retention as a distinct operation from merge.
 
-```rust
-pub enum CompactionAction {
-    /// Merge sources into a new sorted run with the given (globally
-    /// unique) u32 ID, appended to the target tree's `compacted` list.
-    Merge { destination: u32 },
-    /// Drop sources without producing output (segment retention).
-    Drop,
+The schema changes are:
+
+```flatbuffer
+union CompactionSpec {
+    TieredCompactionSpec,
+    DropSegmentSpec,           // new
 }
 
+table TieredCompactionSpec {
+    ssts: [Ulid];              // unchanged (deprecated)
+    sorted_runs: [uint32];     // unchanged
+    l0_view_ids: [Ulid];       // unchanged
+    segment: [ubyte];          // new — absent/empty = unsegmented tree
+}
+
+table DropSegmentSpec {
+    segment: [ubyte] (required);
+}
+```
+
+On the Rust side, `CompactionSpec` gains an optional `segment` field alongside its existing `sources` and `destination`. A new `DropSegmentSpec` type is introduced:
+
+```rust
 pub struct CompactionSpec {
     /// `None` targets the unsegmented tree; `Some(prefix)` targets the
     /// segment with that prefix.
     segment: Option<Bytes>,
-    l0_view_ids: Vec<Ulid>,
-    sorted_runs: Vec<u32>,
-    action: CompactionAction,
+    sources: Vec<SourceId>,
+    destination: u32,
+}
+
+pub struct DropSegmentSpec {
+    segment: Bytes,
 }
 ```
 
-All sources in a single compaction must be drawn from the target tree (either all from the unsegmented state or all from the same named segment). A `CompactionSpec` that mixes trees is invalid and is rejected during validation.
+**Scope of each operation.**
 
-For `Merge`, the executor merges inputs and produces one output sorted run appended to the target tree's `compacted` list with the specified `u32` ID. The scheduler obtains the destination ID from the manifest's shared counter via a convenience helper:
+- `CompactionSpec` (merge) draws all sources from the target tree and writes a single output sorted run with a globally-unique `u32` destination ID. Sources in a single compaction must be drawn from the same target tree — a spec that mixes trees is invalid and is rejected during validation. The scheduler obtains the destination ID from the shared counter via `ManifestCore::next_sorted_run_id()`:
 
 ```rust
 impl ManifestCore {
@@ -362,11 +380,11 @@ impl ManifestCore {
 }
 ```
 
-The helper is a convenience — the scheduler could equivalently track the counter itself — but centralizing allocation in `ManifestCore` keeps the counter authoritative and avoids drift between planning and commit.
+  The helper is a convenience — the scheduler could equivalently track the counter itself — but centralizing allocation in `ManifestCore` keeps the counter authoritative and avoids drift between planning and commit.
 
-For `Drop`, the sources are removed from the target tree with no output. Dropping every L0 SST and sorted run in a named segment (combined with removing the segment entry itself) is how segment retention is expressed. `Drop` only removes references from the latest manifest; the underlying SST files are not deleted immediately. The garbage collector is responsible for cleaning up SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them.
+- `DropSegmentSpec` targets a named segment wholesale. The executor drops whatever L0 SSTs and sorted runs are currently in that segment at commit time and removes the segment entry from the manifest. There is no partial drop — retention is atomic over the whole segment. Only the latest manifest's references are removed; the garbage collector is responsible for cleaning up the underlying SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them. The unsegmented tree cannot be dropped by this operation.
 
-To support segment-aware scheduling, `ManifestCore` exposes the segment list directly:
+**Segment-aware scheduling.** To support scheduling, `ManifestCore` exposes the segment list directly:
 
 ```rust
 impl ManifestCore {
@@ -378,25 +396,6 @@ impl ManifestCore {
 ```
 
 The scheduler uses this to plan work: selecting segments with many L0s, merging sorted runs within a segment, or identifying expired segments for retention. Segmented and unsegmented data may coexist in the same database — for example, a TSDB might segment time-bucketed metric data while keeping permanent configuration unsegmented. The scheduler handles both by planning per-segment compactions from `segments()` and unsegmented compactions from the top-level state.
-
-The `.compactions` file schema is updated to carry the segment prefix alongside the existing fields:
-
-```flatbuffer
-enum CompactionActionType : byte {
-    Merge = 0,
-    Drop,
-}
-
-table CompactionSpecV2 {
-    segment: [ubyte];         // absent/empty = unsegmented tree
-    l0_view_ids: [Ulid];
-    sorted_runs: [uint];      // globally unique SR IDs, all from the target tree
-    destination: uint;        // globally unique SR ID; only meaningful for Merge
-    action: CompactionActionType;
-}
-```
-
-Compared to the existing `TieredCompactionSpec`, the V2 schema adds the `segment` prefix and replaces the single-action shape with an explicit `action` enum to express `Drop` alongside `Merge`. The ID fields remain `uint` (globally unique), matching today's `u32` SR IDs.
 
 #### Default Scheduler
 
