@@ -44,7 +44,8 @@ The design targets the common single-active-segment case. Concurrent writes to m
 ## Non-Goals
 
 - Defining timestamp-native TWCS semantics (event-time watermarks, lateness contracts, clock policy).
-- Supporting segment remapping/key-rewriting transforms (deferred to future work)
+- Supporting segment remapping/key-rewriting transforms (deferred to future work).
+- Providing built-in segment-level retention or lifecycle policies (time-based retention, cold-segment auto-compaction, age-based rollups, etc.). The default scheduler handles structural compaction (L0→SR, SR→SR, empty-segment cleanup), but retention and hot/cold policy decisions are left to custom scheduler implementations.
 
 ## Target LSM Shape
 
@@ -166,7 +167,7 @@ When no segment extractor is configured, all data is unsegmented and the system 
 
 ### Segment Extractor
 
-Segment membership is derived via a `PrefixExtractor` — the same trait introduced in [RFC 22](./0022-pluggable-filter.md) for prefix bloom filters. For segmentation, the trait is hoisted out of the `BloomFilterPolicy` scope into a neutral location (e.g. `slatedb::config`) so it can be used independently of the filter subsystem. Users may configure the same extractor for both purposes, or configure them independently.
+Segment membership is derived via a `PrefixExtractor` — the same trait introduced in [RFC 22](./0022-pluggable-filter.md) for prefix bloom filters. For segmentation, the trait is hoisted out of the `BloomFilterPolicy` scope into a neutral location (e.g. `slatedb::config`) so it can be used independently of the filter subsystem. The two uses are configured independently — in practice they generally should differ, since a prefix bloom filter indexed on the segment prefix itself matches every key in the segment and provides no pruning.
 
 ```rust
 pub struct DbOptions {
@@ -196,7 +197,9 @@ The `name()` check is soft: a user can keep the name and change the logic, and n
 
 - **Route-consistency at write.** Each incoming write is evaluated by the extractor before it is appended to the WAL. If the resulting prefix would introduce a nested prefix (violating the antichain invariant against the current segment set), the write is rejected and the caller sees an error — no WAL append, no memtable insertion. Checking before the WAL is the only way to surface errors at the call site; a check deferred to memtable flush would fail after the write has already been durably committed and acknowledged.
 
-These do not cover every kind of extractor change — for example, a swap that preserves the antichain and acknowledges existing prefixes, but routes future keys differently, will still slip through. The checks above narrow the surface to changes that cannot produce an inconsistent manifest undetected.
+- **Route-consistency at compaction.** When compaction reads input SSTs, each key is passed through the current extractor and checked against the target segment. If a key's extracted prefix does not match the target tree, the compaction fails and the manifest is not updated. This catches extractor drift that slipped past the write-time antichain check — for example, an extractor swap whose new behavior produces antichain-compatible prefixes for future writes but routes existing keys differently than they were originally assigned. The existing keys would survive the structural checks but misroute on read; compaction is the first point where the system has each key in hand to verify.
+
+These do not cover every kind of extractor change — an extractor swap whose routing matches the existing assignment for every stored key will still slip through. The checks above narrow the surface to changes that cannot produce an inconsistent manifest undetected.
 
 ### WAL
 
@@ -421,7 +424,7 @@ This RFC focuses on segment-oriented planning and explicit drop semantics. Natur
 
 **Finer-grained WAL tracking for partial multi-segment flushes.** The current design requires a multi-segment flush to become visible atomically via the manifest, which keeps a single WAL replay cursor but can extend flush latency for wide backfills (see [Write Path](#write-path)). A future iteration could track per-segment flush frontiers in the WAL or in the manifest, allowing partial flushes to become visible incrementally. This involves extending WAL replay to advance the frontier per segment and reconciling checkpoint semantics with per-segment progress; deferred until operational experience shows the wide-flush case is a real bottleneck.
 
-**Parallel execution of independent segment compactions.** The execution model in this RFC can be extended to run compactions for disjoint segments concurrently. Each segment has its own L0 list, its own `l0_last_compacted` watermark, and its own `compacted` list in the manifest, so parallel compactions in different segments commit to disjoint `Segment` entries with distinct destination IDs drawn from the shared counter — no cross-segment ordering conflict arises. Parallel compaction *within* a single segment is a separate concern tied to the `l0_last_compacted` watermark's single-cursor design and is not addressed here.
+**Parallel L0 compaction across segments.** Parallel compaction of disjoint *sorted-run* compactions already works today, because the `l0_last_compacted` watermark is unaffected when no L0 SSTs are involved. What segmentation unlocks is parallel *L0-sourced* compaction across segments: each segment has its own L0 list and its own `l0_last_compacted` watermark, so an L0-draining compaction in segment A can complete out of order relative to one in segment B without the watermark truncation issue that blocks parallel L0 compactions in a single-tree layout. The execution model in this RFC can be extended to exploit this by scheduling L0 compactions in disjoint segments concurrently. Parallel L0 compaction *within* a single segment is a separate concern tied to the watermark's single-cursor design and is not addressed here.
 
 **Default segment retention policies.** The default scheduler (see [Default Scheduler](#default-scheduler)) does not implement segment-level retention. Natural extensions include a segment TTL that drops segments whose last-write timestamp exceeds a configured duration (requires tracking a `last_write_time` per segment in the manifest, updated on flush), or policy hooks that let applications plug retention decisions into the default without replacing it wholesale. The semantics questions — wall-clock vs. logical time, treatment of late backfills that reset the clock, interaction with checkpoints — deserve their own design pass before baking a particular policy into the default.
 
@@ -431,6 +434,8 @@ This RFC focuses on segment-oriented planning and explicit drop semantics. Natur
 - Then, daily compactions select exactly the 24 hourly segments for a target day as inputs.
 
 This staged model gives a clean source-selection boundary for day rollups and avoids mixing unrelated segment data, reducing unnecessary write amplification. Implementing it requires key-rewriting transforms (to relabel hourly keys into daily keys), which are out of scope for this RFC.
+
+An alternative to doing rollups as an internal compaction pass is to expose lower-level primitives — a bulk-write-SR API and an import-SR-as-segment API — and let applications perform the rollup computation externally, handing the result back as a new segment. This is appealing for TSDB-style rollups where the per-row consolidation logic (dictionaries, indexes, etc.) is highly application-specific, and keeps the rewrite-during-compaction machinery out of SlateDB. The in-SlateDB vs. out-of-SlateDB choice deserves its own design discussion once we have a concrete rollup use case to evaluate against.
 
 A concrete edge case for the rewriting design: once `hour=00..23` have been rolled up into `day=1` and the hourly segments dropped, a late backfill write for `hour=04` would re-create the `hour=04` segment rather than landing in `day=1`. Two approaches look viable and both remain open:
 
