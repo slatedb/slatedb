@@ -13,6 +13,7 @@
 //! same relative workload mix as the old bounded scenario, but the total number
 //! of operations now depends on when the scenario requests shutdown.
 
+pub mod bank;
 pub mod clock;
 pub mod compactor;
 pub mod deleter;
@@ -20,6 +21,7 @@ pub mod flusher;
 pub mod shutdown;
 pub mod writer;
 
+pub use self::bank::initialize_accounts;
 pub use self::clock::clock;
 pub use self::compactor::{compactor, CompactorActorOptions};
 pub use self::deleter::deleter;
