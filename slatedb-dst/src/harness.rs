@@ -3,16 +3,19 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use log::info;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use tokio::runtime::RngSeed;
+use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -232,6 +235,60 @@ struct HarnessCtx {
     shutdown_token: CancellationToken,
 }
 
+struct ClockDriver {
+    shutdown: CancellationToken,
+    task: Option<JoinHandle<()>>,
+}
+
+impl ClockDriver {
+    fn spawn(
+        system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
+        clock_advance_ms: RangeInclusive<u64>,
+    ) -> Self {
+        let shutdown = CancellationToken::new();
+        let mut steps = 0u64;
+        let task = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                while !shutdown.is_cancelled() {
+                    let advance_ms = rand.rng().random_range(clock_advance_ms.clone());
+                    system_clock
+                        .advance(Duration::from_millis(advance_ms))
+                        .await;
+                    steps += 1;
+                    if steps % 100 == 0 {
+                        info!(
+                            "clock driver advanced [steps={steps}, time={:?}]",
+                            system_clock.now()
+                        );
+                    }
+                }
+            }
+        });
+
+        Self {
+            shutdown,
+            task: Some(task),
+        }
+    }
+
+    async fn shutdown(mut self) {
+        self.shutdown.cancel();
+        if let Some(task) = self.task.take() {
+            if let Err(error) = task.await {
+                panic!("dst harness clock task failed: {error}");
+            }
+        }
+    }
+}
+
+impl Drop for ClockDriver {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
 /// Builder and executor for deterministic SlateDB scenario tests.
 ///
 /// A harness owns the seeded runtime configuration, shared mock clock,
@@ -244,6 +301,7 @@ pub struct Harness {
     path: Option<Path>,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
+    clock_advance_ms: RangeInclusive<u64>,
     startup_factory: StartupFactory,
     actors: Vec<ActorRegistration>,
 }
@@ -273,6 +331,7 @@ impl Harness {
             path: None,
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
+            clock_advance_ms: 1..=5,
             startup_factory: Box::new(move |ctx| Box::pin(factory(ctx))),
             actors: Vec::new(),
         }
@@ -313,6 +372,30 @@ impl Harness {
     /// - `Harness`: The updated harness builder.
     pub fn with_system_clock(mut self, system_clock: Arc<MockSystemClock>) -> Self {
         self.system_clock = system_clock;
+        self
+    }
+
+    /// Overrides the inclusive millisecond range used by the background clock driver.
+    ///
+    /// ## Arguments
+    /// - `clock_advance_ms`: Inclusive millisecond range to sample for each
+    ///   clock step.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    ///
+    /// # Panics
+    /// Panics if the range starts at zero or is empty.
+    pub fn with_clock_advance(mut self, clock_advance_ms: RangeInclusive<u64>) -> Self {
+        assert!(
+            *clock_advance_ms.start() > 0,
+            "dst harness clock advance minimum must be greater than zero"
+        );
+        assert!(
+            clock_advance_ms.start() <= clock_advance_ms.end(),
+            "dst harness clock advance range must not be empty"
+        );
+        self.clock_advance_ms = clock_advance_ms;
         self
     }
 
@@ -407,15 +490,28 @@ impl Harness {
     /// # Panics
     /// Panics if the runtime cannot be created.
     pub fn run(self) -> Result<(), Error> {
-        let seed = self.rand.rng().next_u64();
+        let runtime_seed = self.rand.rng().next_u64();
+        let startup_seed = self.rand.rng().next_u64();
+        let clock_seed = self.rand.rng().next_u64();
+        let system_clock: Arc<dyn SystemClock> = self.system_clock.clone();
+        let clock_advance_ms = self.clock_advance_ms.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
+            .rng_seed(RngSeed::from_bytes(&runtime_seed.to_le_bytes()))
             .build_local(Default::default())
             .expect("failed to build dst harness runtime");
-        runtime.block_on(self.run_inner())
+        runtime.block_on(async move {
+            let clock_driver = ClockDriver::spawn(
+                system_clock,
+                Arc::new(DbRand::new(clock_seed)),
+                clock_advance_ms,
+            );
+            let result = self.run_inner(startup_seed).await;
+            clock_driver.shutdown().await;
+            result
+        })
     }
 
-    async fn run_inner(self) -> Result<(), Error> {
+    async fn run_inner(self, startup_seed: u64) -> Result<(), Error> {
         let Harness {
             name,
             rand,
@@ -423,6 +519,7 @@ impl Harness {
             path,
             main_object_store,
             wal_object_store,
+            clock_advance_ms: _,
             startup_factory,
             actors,
         } = self;
@@ -436,7 +533,6 @@ impl Harness {
         let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/seed-{seed:016x}")));
         let system_clock: Arc<dyn SystemClock> = system_clock;
         let fp_registry = Arc::new(FailPointRegistry::new());
-        let startup_seed = rand.rng().next_u64();
         let main_object_store: Arc<dyn ObjectStore> = Arc::new(ClockedObjectStore::new(
             main_object_store.clone(),
             system_clock.clone(),
@@ -531,24 +627,7 @@ impl Harness {
             }
         }
 
-        // DB depends on clock advancing for shutdown. Actors are all shut down
-        // at this point, so we need to keep advancing the clock until the DB
-        // finishes closing.
         let db = Arc::clone(&shared.db_slot.read());
-        let close = db.close();
-        tokio::pin!(close);
-
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut close => {
-                    result?;
-                    break;
-                }
-                _ = system_clock.advance(Duration::from_millis(1)) => {}
-            }
-        }
-
-        Ok(())
+        db.close().await
     }
 }

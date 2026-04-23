@@ -27,7 +27,8 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 /// The returned settings are entirely derived from `rand`, except that
 /// object-store caching is always disabled. The cache implementation uses
 /// filesystem and blocking-task wakeups outside the seeded current-thread DST
-/// runtime, which breaks logical-clock determinism for looping clock actors.
+/// runtime, which breaks logical-clock determinism for the harness-managed
+/// clock.
 pub async fn build_settings(rand: &DbRand) -> Settings {
     let mut rng = rand.rng();
     let flush_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(60));

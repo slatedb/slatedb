@@ -6,7 +6,7 @@
 //! - starts from a fresh shared [`MockSystemClock`]
 //! - opens a real [`Db`] using randomized deterministic settings from
 //!   [`build_settings`]
-//! - runs looping workload, flusher, and clock actors against
+//! - runs looping workload, flusher, and compactor actors against
 //!   deterministic local filesystem-backed object stores until a shutdown actor
 //!   cancels the shared token at a fixed mock-clock deadline
 //! - compares the next random `u64` and current clock time after the run
@@ -27,9 +27,7 @@ use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    actors::{
-        clock, compactor, flusher, shutdown, workload, CompactorActorOptions, WorkloadActorOptions,
-    },
+    actors::{compactor, flusher, shutdown, workload, CompactorActorOptions, WorkloadActorOptions},
     utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     Operation, StreamDirection, Toxic, ToxicKind,
@@ -163,7 +161,6 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         },
         compactor,
     )
-    .actor("clock", 1, clock)
     .actor_with_state("shutdown", 1, 100, shutdown)
     .run()?;
 

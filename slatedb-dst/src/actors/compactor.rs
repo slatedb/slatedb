@@ -31,8 +31,8 @@ pub struct CompactorActorOptions {
 /// compactor configuration. Scenarios that use this actor should disable the
 /// main database client's embedded compactor so the actor is the only
 /// compactor intentionally competing for the compactor epoch. Because the
-/// cadence is driven by the shared mock clock, the scenario must also include
-/// an actor that advances logical time, such as [`crate::actors::clock`].
+/// cadence is driven by the shared mock clock, the harness must own logical
+/// time for the full lifetime of the scenario.
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> Result<(), Error> {
     let shutdown_token = ctx.shutdown_token();

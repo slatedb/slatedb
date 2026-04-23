@@ -44,12 +44,14 @@ The harness is built around one root seed:
 3. The harness derives additional deterministic seeds for:
    - database startup (`StartupCtx::rand()`)
    - each actor instance (`ActorCtx::rand()`)
+   - the harness-owned background clock task
 4. The harness wraps the configured object stores with:
    - a clock-aware layer that reports deterministic `last_modified` metadata
 5. If your scenario uses `FailingObjectStore`, seed its controller explicitly
    so fault sampling stays reproducible.
-6. The shared `MockSystemClock` advances only when your test advances it or a
-   configured toxic adds latency/bandwidth delay.
+6. The shared `MockSystemClock` advances from the harness-owned background
+   clock task, when your test advances it explicitly, or when a configured
+   toxic adds latency/bandwidth delay.
 
 Given the same seed and the same DST-compatible code paths, the harness is
 designed to replay the same scenario.
@@ -104,7 +106,7 @@ use rand::RngCore;
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
-    actors::{clock, shutdown, workload, WorkloadActorOptions}, utils::build_settings,
+    actors::{shutdown, workload, WorkloadActorOptions}, utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     Operation, StreamDirection, Toxic, ToxicKind,
 };
@@ -164,7 +166,6 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         .with_main_object_store(main_store)
         .with_wal_object_store(wal_store)
         .actor_with_state("workload", 1, workload_options, workload)
-        .actor("clock", 1, clock)
         .actor_with_state("shutdown", 1, shutdown_at_millis, shutdown)
         .run()?;
 
@@ -181,14 +182,16 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 - `with_path(path)`: overrides the default DB path
 - `with_rand(rand)`: replaces the root RNG
 - `with_system_clock(clock)`: injects a shared `MockSystemClock`
+- `with_clock_advance(min_ms..=max_ms)`: overrides the inclusive millisecond
+  range used by the harness-owned background clock task
 - `with_main_object_store(store)`: replaces the default in-memory main store
 - `with_wal_object_store(store)`: configures a separate WAL store
 - `actor(role, count, actor_fn)`: registers `count` actors for the same role
 - `actor_with_state(role, count, state, actor_fn)`: same as `actor`, but
   clones the supplied state into each actor
-- `run()`: builds the seeded runtime, opens the DB, spawns actors, and runs
-  until all actors finish successfully or some actor cancels the shared
-  shutdown token
+- `run()`: builds the seeded runtime, starts the harness-owned background
+  clock task, opens the DB, spawns actors, and runs until all actors finish
+  successfully or some actor cancels the shared shutdown token
 
 If `with_path(...)` is not set, the harness uses:
 
