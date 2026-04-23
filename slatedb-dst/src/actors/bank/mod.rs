@@ -1,11 +1,10 @@
-use log::info;
-use rand::RngCore;
-use slatedb::{Db, DbTransaction, Error, ErrorKind, IsolationLevel};
-use tracing::instrument;
+mod auditor;
+mod transfer;
 
-use crate::ActorCtx;
+use slatedb::{Db, DbTransaction, Error};
 
-use super::PROGRESS_LOG_INTERVAL;
+pub use self::auditor::auditor;
+pub use self::transfer::transfer;
 
 /// Configuration for the deterministic bank workload.
 #[derive(Clone, Debug)]
@@ -68,118 +67,6 @@ pub async fn initialize_accounts(db: &Db, options: &BankOptions) -> Result<(), E
         db.put(key.as_bytes(), &starting_balance).await?;
     }
     db.flush().await?;
-
-    Ok(())
-}
-
-/// Repeatedly transfers funds between deterministic account pairs.
-#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-pub async fn transfer(ctx: ActorCtx, options: BankOptions) -> Result<(), Error> {
-    options.validate()?;
-
-    let shutdown_token = ctx.shutdown_token();
-    let mut step = 0u64;
-
-    while !shutdown_token.is_cancelled() {
-        let from_rand = ctx.rand().rng().next_u64();
-        let to_rand = ctx.rand().rng().next_u64();
-        let amount_rand = ctx.rand().rng().next_u64();
-
-        let from = sample_account_index(from_rand, options.account_count);
-        let to = sample_account_index(to_rand, options.account_count);
-        let sampled_amount = 1 + (amount_rand % options.max_transfer);
-
-        if from != to {
-            let from_key = account_key(&options.prefix, from);
-            let to_key = account_key(&options.prefix, to);
-
-            loop {
-                let txn = ctx.db().begin(IsolationLevel::Snapshot).await?;
-                let from_balance = load_balance(&txn, from_key.as_bytes()).await?;
-                let to_balance = load_balance(&txn, to_key.as_bytes()).await?;
-                let transfer_amount = sampled_amount.min(from_balance);
-
-                if transfer_amount == 0 {
-                    break;
-                }
-                let updated_to_balance =
-                    to_balance.checked_add(transfer_amount).ok_or_else(|| {
-                        Error::invalid(
-                            "bank transfer overflowed destination account balance".to_string(),
-                        )
-                    })?;
-
-                txn.put(
-                    from_key.as_bytes(),
-                    (from_balance - transfer_amount).to_le_bytes(),
-                )?;
-                txn.put(to_key.as_bytes(), updated_to_balance.to_le_bytes())?;
-
-                match txn.commit().await {
-                    Ok(_) => break,
-                    Err(error) if error.kind() == ErrorKind::Transaction => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-
-        step += 1;
-        if step % PROGRESS_LOG_INTERVAL == 0 {
-            info!("bank transfer step complete [step={}]", step);
-        }
-    }
-
-    Ok(())
-}
-
-/// Repeatedly audits the bank by summing one scan view over all account rows.
-#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-pub async fn auditor(ctx: ActorCtx, options: BankOptions) -> Result<(), Error> {
-    options.validate()?;
-
-    let shutdown_token = ctx.shutdown_token();
-    let scan_prefix = account_prefix(&options.prefix);
-    let expected_total = options.expected_total();
-    let mut step = 0u64;
-
-    while !shutdown_token.is_cancelled() {
-        let mut total = 0u128;
-        let mut seen = vec![false; options.account_count];
-        let mut iter = ctx.db().scan_prefix(scan_prefix.as_bytes()).await?;
-
-        while let Some(kv) = iter.next().await? {
-            let account_id =
-                parse_account_id(kv.key.as_ref(), &options.prefix, options.account_count)?;
-            if seen[account_id] {
-                return Err(Error::invalid(format!(
-                    "duplicate bank account key observed during audit: {}",
-                    String::from_utf8_lossy(kv.key.as_ref()),
-                )));
-            }
-
-            seen[account_id] = true;
-            total += u128::from(decode_balance(kv.value.as_ref())?);
-        }
-
-        let observed_count = seen.iter().filter(|present| **present).count();
-        if observed_count != options.account_count {
-            return Err(Error::invalid(format!(
-                "bank audit observed {} accounts but expected {}",
-                observed_count, options.account_count,
-            )));
-        }
-        if total != expected_total {
-            return Err(Error::invalid(format!(
-                "bank audit total mismatch: observed {} expected {}",
-                total, expected_total,
-            )));
-        }
-
-        step += 1;
-        if step % PROGRESS_LOG_INTERVAL == 0 {
-            info!("bank auditor step complete [step={}]", step);
-        }
-    }
 
     Ok(())
 }
