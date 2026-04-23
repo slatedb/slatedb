@@ -69,16 +69,19 @@ pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> R
         current = spawn_compactor(&ctx, &actor_options.compactor_options);
         info!("spawned replacement compactor");
 
-        match old.join().await {
-            Ok(Err(err)) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {
-                // The old compactor was fenced as expected
-                continue;
+        tokio::select! {
+            biased;
+            _ = shutdown_token.cancelled() => break,
+            result = old.join() => {
+                match result {
+                    // The old compactor was fenced as expected.
+                    Ok(Err(err)) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {
+                        continue;
+                    }
+                    r => panic!("previous compactor was not fenced as expected [result={:?}]", r),
+                };
             }
-            r => panic!(
-                "expected previous compactor to be fenced after spawning replacement, but got: {:?}",
-                r
-            ),
-        };
+        }
     }
 
     Ok(())
