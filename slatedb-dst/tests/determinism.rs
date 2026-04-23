@@ -149,7 +149,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
-    .actor("workload", 9, workload)
+    .actor("workload", 10, workload)
     .actor("flusher", 1, flusher)
     .actor_with_state(
         "compactor",
