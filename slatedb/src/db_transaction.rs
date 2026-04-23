@@ -615,7 +615,7 @@ impl DbReadOps for DbTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, options).await
+        DbTransaction::get_with_options(self, key, options).await
     }
 
     async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
@@ -623,7 +623,7 @@ impl DbReadOps for DbTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, options).await
+        DbTransaction::get_key_value_with_options(self, key, options).await
     }
 
     async fn scan_with_options<K, T>(
@@ -635,7 +635,7 @@ impl DbReadOps for DbTransaction {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, options).await
+        DbTransaction::scan_with_options(self, range, options).await
     }
 
     async fn scan_prefix_with_options<P>(
@@ -646,7 +646,7 @@ impl DbReadOps for DbTransaction {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_prefix_with_options(prefix, options).await
+        DbTransaction::scan_prefix_with_options(self, prefix, options).await
     }
 }
 
