@@ -257,7 +257,7 @@ impl ClockDriver {
                         .advance(Duration::from_millis(advance_ms))
                         .await;
                     steps += 1;
-                    if steps % 100 == 0 {
+                    if steps % 1000 == 0 {
                         info!(
                             "clock driver advanced [steps={steps}, time={:?}]",
                             system_clock.now()
