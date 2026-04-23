@@ -11,6 +11,7 @@ use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
 use parking_lot::Mutex;
 use slatedb_common::clock::SystemClock;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::{ops::Range, sync::Arc};
 use tokio::sync::OnceCell;
 
@@ -25,6 +26,37 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 type InflightPrefetch = Arc<OnceCell<(ObjectMeta, Attributes)>>;
 type InflightPart = Arc<OnceCell<Bytes>>;
 
+/// Cache key for in-flight prefetch coalescing. Includes both the object
+/// location and the (aligned) byte range so that concurrent requests for
+/// different ranges of the same file are not incorrectly coalesced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PrefetchKey {
+    location: Path,
+    range: Option<GetRange>,
+}
+
+impl Hash for PrefetchKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.location.hash(state);
+        match &self.range {
+            None => 0u8.hash(state),
+            Some(GetRange::Bounded(r)) => {
+                1u8.hash(state);
+                r.start.hash(state);
+                r.end.hash(state);
+            }
+            Some(GetRange::Offset(o)) => {
+                2u8.hash(state);
+                o.hash(state);
+            }
+            Some(GetRange::Suffix(s)) => {
+                3u8.hash(state);
+                s.hash(state);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
@@ -35,7 +67,7 @@ pub(crate) struct CachedObjectStore {
     // Absolute path of the root folder relative to the bucket. See #1319.
     resolved_root: Arc<OnceCell<Path>>,
     stats: Arc<CachedObjectStoreStats>,
-    inflight_prefetches: Arc<Mutex<HashMap<Path, InflightPrefetch>>>,
+    inflight_prefetches: Arc<Mutex<HashMap<PrefetchKey, InflightPrefetch>>>,
     inflight_parts: Arc<Mutex<HashMap<(Path, PartID), InflightPart>>>,
 }
 
@@ -384,13 +416,18 @@ impl CachedObjectStore {
             opts.range = Some(self.align_get_range(range));
         }
 
-        // Coalesce concurrent misses for the same path — only one caller fetches
-        let cell = self
-            .inflight_prefetches
-            .lock()
-            .entry(location.clone())
-            .or_default()
-            .clone();
+        // Build the coalescing key from (location, aligned range) so that
+        // concurrent requests for different ranges are not merged.
+        let key = PrefetchKey {
+            location: location.clone(),
+            range: opts.range.clone(),
+        };
+
+        // Coalesce concurrent misses for the same (path, range) — only one caller fetches
+        let cell = {
+            let mut lock = self.inflight_prefetches.lock();
+            lock.entry(key.clone()).or_default().clone()
+        };
 
         let this = self.clone();
         let location_owned = location.clone();
@@ -412,9 +449,9 @@ impl CachedObjectStore {
         // may have inserted a fresh cell that we must not remove).
         {
             let mut map = self.inflight_prefetches.lock();
-            if let Some(existing) = map.get(location) {
+            if let Some(existing) = map.get(&key) {
                 if Arc::ptr_eq(existing, &cell) {
-                    map.remove(location);
+                    map.remove(&key);
                 }
             }
         }
@@ -1601,29 +1638,37 @@ mod tests {
     async fn test_concurrent_gets_coalesce_remote_fetches() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // A wrapper that counts get_opts calls to detect duplicate fetches.
+        use crate::instrumented_object_store::stats::REQUEST_COUNT;
+        use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
+        use crate::object_stores::ObjectStoreType;
+        use slatedb_common::metrics::{lookup_metric_with_labels, test_recorder_helper};
+
+        // A thin wrapper that gates get_opts behind a watch channel so we can
+        // deterministically ensure all callers are racing before any fetch completes.
         #[derive(Debug)]
-        struct CountingStore {
+        struct GatingStore {
             inner: Arc<dyn ObjectStore>,
-            get_count: AtomicUsize,
+            gate: tokio::sync::watch::Receiver<bool>,
+            entered_count: AtomicUsize,
         }
 
-        impl std::fmt::Display for CountingStore {
+        impl std::fmt::Display for GatingStore {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "CountingStore({})", self.inner)
+                write!(f, "GatingStore({})", self.inner)
             }
         }
 
         #[async_trait::async_trait]
-        impl ObjectStore for CountingStore {
+        impl ObjectStore for GatingStore {
             async fn get_opts(
                 &self,
                 location: &Path,
                 options: GetOptions,
             ) -> object_store::Result<GetResult> {
-                self.get_count.fetch_add(1, Ordering::SeqCst);
-                // Yield to give other tasks a chance to race
-                tokio::task::yield_now().await;
+                self.entered_count.fetch_add(1, Ordering::SeqCst);
+                // Block until the test opens the gate, ensuring all concurrent
+                // callers have entered the coalescer before this fetch completes.
+                self.gate.clone().wait_for(|open| *open).await.unwrap();
                 self.inner.get_opts(location, options).await
             }
 
@@ -1706,14 +1751,25 @@ mod tests {
             .await
             .unwrap();
 
-        let counting_store = Arc::new(CountingStore {
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let gating_store = Arc::new(GatingStore {
             inner: inner.clone(),
-            get_count: AtomicUsize::new(0),
+            gate: gate_rx,
+            entered_count: AtomicUsize::new(0),
         });
+        let gating_ref = gating_store.clone();
+
+        let (metrics_recorder, metrics_helper) = test_recorder_helper();
+        let instrumented_store: Arc<dyn ObjectStore> = Arc::new(InstrumentedObjectStore::new(
+            gating_store,
+            &metrics_helper,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
+        ));
 
         let test_cache_folder = new_test_cache_folder();
-        let recorder = MetricsRecorderHelper::noop();
-        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let noop_recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&noop_recorder));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder,
             None,
@@ -1724,8 +1780,7 @@ mod tests {
         ));
 
         let cached_store =
-            CachedObjectStore::new(counting_store.clone(), cache_storage, 1024, false, stats)
-                .unwrap();
+            CachedObjectStore::new(instrumented_store, cache_storage, 1024, false, stats).unwrap();
 
         // Spawn 10 concurrent gets for the same file
         let barrier = Arc::new(tokio::sync::Barrier::new(10));
@@ -1744,17 +1799,44 @@ mod tests {
             }));
         }
 
+        // Wait until the first (and only) caller has reached the inner get_opts,
+        // confirming that the coalescer is active and holding 9 other callers.
+        while gating_ref.entered_count.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        // Give remaining tasks time to settle on the OnceCell.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Open the gate — the single coalesced fetch can now complete.
+        gate_tx.send(true).unwrap();
+
         for handle in handles {
             let bytes = handle.await.unwrap();
             assert_eq!(bytes, payload);
         }
 
+        // Verify coalescing via InstrumentedObjectStore metrics.
+        let get_labels = [
+            ("component", "db"),
+            ("store_type", "main"),
+            ("op", "get"),
+            ("api", "get"),
+        ];
+        let total_gets = lookup_metric_with_labels(&metrics_recorder, REQUEST_COUNT, &get_labels)
+            .expect("get metric should exist");
         // The prefetch should have been coalesced into a single remote get_opts call.
         // Without coalescing this would be 10+.
-        let total_gets = counting_store.get_count.load(Ordering::SeqCst);
         assert!(
             total_gets <= 2,
             "expected at most 2 remote get_opts calls (1 prefetch + possibly 1 part miss), got {total_gets}"
+        );
+        // Also confirm the gating store saw at most 2 entries.
+        let entered = gating_ref.entered_count.load(Ordering::SeqCst);
+        assert!(
+            entered <= 2,
+            "expected at most 2 calls through to inner store, got {entered}"
         );
     }
 }
