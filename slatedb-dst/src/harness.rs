@@ -563,6 +563,7 @@ impl Harness {
             shutdown_token: CancellationToken::new(),
         };
 
+        // Spawn one task per actor instance and track them in a JoinSet.
         let mut join_set = JoinSet::new();
         let mut actor_names = HashMap::new();
         for registration in actors {
@@ -582,47 +583,31 @@ impl Harness {
             }
         }
 
-        let shutdown_token = shared.shutdown_token.clone();
-        let mut shutdown_requested = false;
-        while let Some(result) = {
-            if shutdown_requested {
-                join_set.join_next_with_id().await
-            } else {
-                tokio::select! {
-                    biased;
-                    result = join_set.join_next_with_id() => result,
-                    _ = shutdown_token.cancelled() => {
-                        shutdown_requested = true;
-                        join_set.abort_all();
-                        join_set.join_next_with_id().await
-                    }
-                }
-            }
-        } {
-            if !shutdown_requested && shutdown_token.is_cancelled() {
-                shutdown_requested = true;
-                join_set.abort_all();
-            }
-
+        // Wait for actors to complete, an error to occur, or shutdown to be requested.
+        while let Some(result) = join_set.join_next_with_id().await {
             match result {
+                // An actor completed successfully.
                 Ok((id, Ok(()))) => {
                     actor_names.remove(&id);
                 }
+                // An actor returned an error.
+                Ok((id, Err(error))) => {
+                    actor_names.remove(&id);
+                    join_set.abort_all();
+                    return Err(error);
+                }
+                // An actor panicked or was aborted.
                 Err(error) => {
                     let id = error.id();
                     let actor_name = actor_names
                         .remove(&id)
                         .unwrap_or_else(|| format!("task {id:?}"));
-                    if shutdown_requested && error.is_cancelled() {
+                    // If task was aborted due to shutdown, it's OK.
+                    if shared.shutdown_token.is_cancelled() && error.is_cancelled() {
                         continue;
                     }
                     join_set.abort_all();
                     panic!("dst harness actor {actor_name} failed: {error}");
-                }
-                Ok((id, Err(error))) => {
-                    actor_names.remove(&id);
-                    join_set.abort_all();
-                    return Err(error);
                 }
             }
         }
