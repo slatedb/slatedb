@@ -1,6 +1,57 @@
 # SlateDB RFC: Segment-Oriented Compaction
 
-Status: Draft
+Table of Contents:
+
+<!-- TOC start (generate with https://bitdowntoc.derlin.ch) -->
+
+- [Summary](#summary)
+- [Motivation](#motivation)
+- [Goals](#goals)
+- [Non-Goals](#non-goals)
+- [Target LSM Shape](#target-lsm-shape)
+   - [LSM Segment Shaping Examples](#lsm-segment-shaping-examples)
+      - [Example 1: Accumulated L0 state](#example-1-accumulated-l0-state)
+      - [Example 2: L0 compaction for the oldest segment](#example-2-l0-compaction-for-the-oldest-segment)
+      - [Example 3: New writes and backfill arrive together](#example-3-new-writes-and-backfill-arrive-together)
+      - [Example 4: Compacting backfill within a segment](#example-4-compacting-backfill-within-a-segment)
+      - [Example 5: Segment retention](#example-5-segment-retention)
+- [Detailed Design](#detailed-design)
+   - [Overview](#overview)
+   - [Segment Extractor](#segment-extractor)
+      - [Validation](#validation)
+   - [WAL](#wal)
+   - [Manifest](#manifest)
+      - [Current Model](#current-model)
+      - [Proposed Change: Per-Segment LSM State](#proposed-change-per-segment-lsm-state)
+      - [Migration](#migration)
+   - [Write Path](#write-path)
+   - [Backpressure](#backpressure)
+   - [Read Path](#read-path)
+   - [Scans](#scans)
+   - [Compaction](#compaction)
+      - [Default Scheduler](#default-scheduler)
+   - [Recovery and Progress Tracking](#recovery-and-progress-tracking)
+- [Future Work](#future-work)
+- [Alternatives](#alternatives)
+   - [Time-Window Compaction Strategy (TWCS)](#time-window-compaction-strategy-twcs)
+   - [Arbitrary-function segment mapper](#arbitrary-function-segment-mapper)
+   - [Sequence-range bookkeeping and unordered sorted run bag](#sequence-range-bookkeeping-and-unordered-sorted-run-bag)
+   - [Segment tag in WriteOptions instead of an extractor](#segment-tag-in-writeoptions-instead-of-an-extractor)
+   - [One memtable per segment](#one-memtable-per-segment)
+   - [Dynamic migration from unsegmented to segmented](#dynamic-migration-from-unsegmented-to-segmented)
+   - [Global-sum L0 backpressure](#global-sum-l0-backpressure)
+- [Appendix A: OpenData Timeseries Usage](#appendix-a-opendata-timeseries-usage)
+   - [A.1 Ingestion Shape](#a1-ingestion-shape)
+   - [A.2 Long-Term Reshaping](#a2-long-term-reshaping)
+   - [A.3 Retention](#a3-retention)
+- [Appendix B: OpenData Log Usage](#appendix-b-opendata-log-usage)
+   - [B.1 Segment Model](#b1-segment-model)
+   - [B.2 Compaction Needs](#b2-compaction-needs)
+   - [B.3 Retention](#b3-retention)
+
+<!-- TOC end -->
+
+Status: Accepted
 
 Authors:
 
