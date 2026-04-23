@@ -153,7 +153,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
     .actor_with_state("workload", 10, workload_options, workload)
-    .actor("flusher", 1, flusher)
+    .actor_with_state("flusher", 1, 1_u64..=5_u64, flusher)
     .actor_with_state(
         "compactor",
         1,
