@@ -1,34 +1,16 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use log::info;
 use rand::RngCore;
 use slatedb::compactor::stats::COMPACTOR_EPOCH;
+use slatedb::compactor::Compactor;
 use slatedb::config::CompactorOptions;
 use slatedb::{CloseReason, CompactorBuilder, Error, ErrorKind};
 use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
-use tokio::task::JoinHandle;
-use tracing::{instrument, Instrument, Span};
+use tracing::instrument;
 
 use crate::ActorCtx;
-
-struct CompactorTask(Option<JoinHandle<Result<(), Error>>>);
-
-impl CompactorTask {
-    async fn join(mut self) -> Result<Result<(), Error>, tokio::task::JoinError> {
-        self.0
-            .take()
-            .expect("compactor task missing join handle")
-            .await
-    }
-}
-
-impl Drop for CompactorTask {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.0 {
-            handle.abort();
-        }
-    }
-}
 
 /// Configuration for the standalone compactor DST actor.
 #[derive(Clone, Debug)]
@@ -40,73 +22,59 @@ pub struct CompactorActorOptions {
     pub compactor_options: CompactorOptions,
 }
 
-/// Exercises standalone compactor fencing with deterministic restarts.
-///
-/// This actor repeatedly starts a standalone SlateDB compactor against the
-/// shared harness database path. After each configured restart interval, it
-/// starts a replacement compactor and verifies that the previous one exits with
-/// a fencing error.
-///
-/// Register the actor with [`crate::Harness::actor_with_state`] and pass
-/// [`CompactorActorOptions`] to control the restart cadence and standalone
-/// compactor configuration. Scenarios that use this actor should disable the
-/// main database client's embedded compactor so the actor is the only
-/// compactor intentionally competing for the compactor epoch. Because the
-/// cadence is driven by the shared mock clock, the harness must own logical
-/// time for the full lifetime of the scenario.
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 pub async fn compactor(ctx: ActorCtx, actor_options: CompactorActorOptions) -> Result<(), Error> {
     let shutdown_token = ctx.shutdown_token();
     let system_clock = ctx.system_clock();
-    let mut current = spawn_compactor(&ctx, &actor_options.compactor_options).await?;
+    let mut current: Option<Compactor> = None;
 
     while !shutdown_token.is_cancelled() {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let old = current;
+        current = Some(
+            compactor_builder(ctx.clone(), actor_options.clone())
+                .with_metrics_recorder(recorder.clone())
+                .build(),
+        );
+
+        let current_cloned = current.clone().expect("compactor should always exist");
+        let current_spawned = tokio::spawn(async move { current_cloned.run().await });
+
+        // Wait for the current compactor to start and publish its epoch before fencing it.
+        while lookup_metric(recorder.as_ref(), COMPACTOR_EPOCH).is_none_or(|epoch| epoch == 0) {
+            tokio::task::yield_now().await;
+        }
+
+        // If there was a previous compactor, assert that it was fenced and log the replacement.
+        if let Some(old) = old {
+            info!("spawned replacement compactor");
+            match old.stop().await {
+                Err(err) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => (),
+                r => panic!("compactor was not fenced as expected [result={:?}]", r),
+            }
+        }
+
         tokio::select! {
             biased;
+            result = current_spawned => panic!("compactor exited unexpectedly: {result:?}"),
             _ = shutdown_token.cancelled() => break,
             _ = system_clock.sleep(actor_options.restart_interval) => {}
         }
+    }
 
-        let old = current;
-        current = spawn_compactor(&ctx, &actor_options.compactor_options).await?;
-        info!("spawned replacement compactor");
-
-        tokio::select! {
-            biased;
-            _ = shutdown_token.cancelled() => break,
-            result = old.join() => {
-                match result {
-                    // The old compactor was fenced as expected.
-                    Ok(Err(err)) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {
-                        continue;
-                    }
-                    r => panic!("previous compactor was not fenced as expected [result={:?}]", r),
-                };
-            }
-        }
+    if let Some(current) = current {
+        current.stop().await?;
     }
 
     Ok(())
 }
 
-async fn spawn_compactor(
-    ctx: &ActorCtx,
-    compactor_options: &CompactorOptions,
-) -> Result<CompactorTask, Error> {
-    let recorder = std::sync::Arc::new(DefaultMetricsRecorder::new());
-    let compactor_seed = ctx.rand().rng().next_u64();
-    let compactor = CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
-        .with_metrics_recorder(recorder.clone())
-        .with_options(compactor_options.clone())
+fn compactor_builder(
+    ctx: ActorCtx,
+    actor_options: CompactorActorOptions,
+) -> CompactorBuilder<object_store::path::Path> {
+    CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
+        .with_options(actor_options.compactor_options.clone())
         .with_system_clock(ctx.system_clock())
-        .with_seed(compactor_seed)
-        .build();
-    let task = CompactorTask(Some(tokio::spawn(
-        async move { compactor.run().await }.instrument(Span::current()),
-    )));
-    // Wait for the compactor to start and publish its epoch before returning the task handle.
-    while lookup_metric(recorder.as_ref(), COMPACTOR_EPOCH).is_none_or(|epoch| epoch == 0) {
-        tokio::task::yield_now().await;
-    }
-    Ok(task)
+        .with_seed(ctx.rand().rng().next_u64())
 }
