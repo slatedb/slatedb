@@ -1700,7 +1700,11 @@ mod tests {
                 "fixed3"
             }
             fn prefix_len(&self, target: &crate::filter_policy::FilterTarget) -> Option<usize> {
-                (target.as_ref().len() >= 3).then_some(3)
+                let input = match target {
+                    crate::filter_policy::FilterTarget::Point(k) => k.as_ref(),
+                    crate::filter_policy::FilterTarget::Prefix(p) => p.as_ref(),
+                };
+                (input.len() >= 3).then_some(3)
             }
         }
 

@@ -110,14 +110,6 @@ pub enum FilterTarget {
     Prefix(Bytes),
 }
 
-impl AsRef<[u8]> for FilterTarget {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            FilterTarget::Point(b) | FilterTarget::Prefix(b) => b.as_ref(),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // NamedFilter — a filter paired with its policy name
 // ---------------------------------------------------------------------------
@@ -452,7 +444,11 @@ mod tests {
             // bytes fully determine the extracted prefix, so both the
             // `Point` and `Prefix` variants return the same answer. We
             // only require the input to be at least `len` bytes.
-            (target.as_ref().len() >= self.len).then_some(self.len)
+            let input = match target {
+                FilterTarget::Point(k) => k.as_ref(),
+                FilterTarget::Prefix(p) => p.as_ref(),
+            };
+            (input.len() >= self.len).then_some(self.len)
         }
     }
 
@@ -672,7 +668,10 @@ mod tests {
                 "user-only"
             }
             fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
-                let input = target.as_ref();
+                let input = match target {
+                    FilterTarget::Point(k) => k.as_ref(),
+                    FilterTarget::Prefix(p) => p.as_ref(),
+                };
                 (input.len() >= 5 && input.starts_with(b"user:")).then_some(5)
             }
         }
@@ -851,8 +850,19 @@ mod tests {
             .with_prefix_extractor(Arc::new(EmptyPrefixExtractor))
             .with_whole_key_filtering(false);
         let mut builder = policy.builder();
-        builder.add_entry(&make_entry(b"whatever"));
+        // Add 100 distinct entries — every one extracts the empty prefix.
+        // The `last_prefix` dedup should collapse them to a single stored
+        // hash. Filter size is derived from that hash count; at 10
+        // bits/key with one hash, the payload is 10 bits → 2 bytes.
+        for i in 0u32..100 {
+            builder.add_entry(&make_entry(format!("entry{i}").as_bytes()));
+        }
         let filter = builder.build();
+        assert_eq!(
+            filter.size(),
+            2,
+            "expected dedup to collapse the empty prefix to one stored hash",
+        );
 
         // Every probe collapses to hash("") and matches. Degenerate but
         // not a panic or out-of-bounds slice.
@@ -872,7 +882,11 @@ mod tests {
                 "full-key"
             }
             fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
-                Some(target.as_ref().len())
+                let input = match target {
+                    FilterTarget::Point(k) => k.as_ref(),
+                    FilterTarget::Prefix(p) => p.as_ref(),
+                };
+                Some(input.len())
             }
         }
 
@@ -948,6 +962,44 @@ mod tests {
                 );
 
                 // Extracted prefix hash stored — prefix query matches.
+                let q = FilterQuery::prefix(Bytes::copy_from_slice(&key[..3]));
+                assert!(
+                    filter.might_match(&q),
+                    "prefix false negative for {:?}",
+                    &key[..3],
+                );
+            }
+        }
+
+        /// With `whole_key_filtering=false`, no full-key hashes are stored.
+        /// A point lookup is resolved by probing the filter with the
+        /// *extracted prefix* of the queried key. That means: for any key
+        /// that *was* added to the filter, its point lookup must still
+        /// match — because its prefix hash is there.
+        #[test]
+        fn prop_no_false_negatives_with_whole_key_filtering_disabled(
+            keys in vec(vec(any::<u8>(), 3..32), 1..64),
+        ) {
+            let policy = BloomFilterPolicy::new(10)
+                .with_prefix_extractor(Arc::new(FixedPrefixExtractor::new(3)))
+                .with_whole_key_filtering(false);
+            let mut builder = policy.builder();
+            for key in &keys {
+                builder.add_entry(&make_entry(key));
+            }
+            let filter = builder.build();
+
+            for key in &keys {
+                // Point lookup probes with the key's extracted prefix, which
+                // was stored during build.
+                let q = FilterQuery::point(Bytes::copy_from_slice(key));
+                assert!(
+                    filter.might_match(&q),
+                    "point-via-prefix false negative for {:?}",
+                    key,
+                );
+
+                // The extracted prefix itself also round-trips.
                 let q = FilterQuery::prefix(Bytes::copy_from_slice(&key[..3]));
                 assert!(
                     filter.might_match(&q),

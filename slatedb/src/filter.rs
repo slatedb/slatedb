@@ -161,7 +161,11 @@ impl Filter for BloomFilter {
         let Some(n) = extractor.prefix_len(&query.target) else {
             return true;
         };
-        self.might_contain(filter_hash(&query.target.as_ref()[..n]))
+        let bytes = match &query.target {
+            FilterTarget::Point(k) => k.as_ref(),
+            FilterTarget::Prefix(p) => p.as_ref(),
+        };
+        self.might_contain(filter_hash(&bytes[..n]))
     }
 
     fn encode(&self, writer: &mut dyn BufMut) {
