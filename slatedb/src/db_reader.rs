@@ -2,8 +2,10 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
 use crate::db_metadata::DbMetadataOps;
 use crate::db_read::DbReadOps;
+use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -1146,6 +1148,24 @@ impl DbReader {
     /// See [`DbMetadataOps::status`].
     pub fn status(&self) -> DbStatus {
         <Self as DbMetadataOps>::status(self)
+    }
+}
+
+#[async_trait]
+impl DbCacheManagerOps for DbReader {
+    async fn warm_sst(
+        &self,
+        sst_id: SsTableId,
+        targets: &[CacheTarget],
+    ) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        let manifest = self.manifest();
+        db_cache_manager::warm_sst_impl(&self.inner.table_store, &manifest, sst_id, targets).await
+    }
+
+    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, sst_id).await
     }
 }
 
