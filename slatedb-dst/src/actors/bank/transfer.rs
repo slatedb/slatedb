@@ -1,33 +1,43 @@
+use async_trait::async_trait;
 use log::info;
 use rand::RngCore;
 use slatedb::{Error, ErrorKind, IsolationLevel};
 use tracing::instrument;
 
-use crate::ActorCtx;
+use crate::{Actor, ActorCtx};
 
 use super::super::PROGRESS_LOG_INTERVAL;
 use super::{account_key, load_balance, sample_account_index, BankOptions};
 
 /// Repeatedly transfers funds between deterministic account pairs.
-#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-pub async fn transfer(ctx: ActorCtx, options: BankOptions) -> Result<(), Error> {
-    options.validate()?;
+#[derive(Debug)]
+pub struct TransferActor {
+    options: BankOptions,
+    step: u64,
+}
 
-    let shutdown_token = ctx.shutdown_token();
-    let mut step = 0u64;
+impl TransferActor {
+    pub fn new(options: BankOptions) -> Result<Self, Error> {
+        options.validate()?;
+        Ok(Self { options, step: 0 })
+    }
+}
 
-    while !shutdown_token.is_cancelled() {
+#[async_trait]
+impl Actor for TransferActor {
+    #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
+    async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let from_rand = ctx.rand().rng().next_u64();
         let to_rand = ctx.rand().rng().next_u64();
         let amount_rand = ctx.rand().rng().next_u64();
 
-        let from = sample_account_index(from_rand, options.account_count);
-        let to = sample_account_index(to_rand, options.account_count);
-        let sampled_amount = 1 + (amount_rand % options.max_transfer);
+        let from = sample_account_index(from_rand, self.options.account_count);
+        let to = sample_account_index(to_rand, self.options.account_count);
+        let sampled_amount = 1 + (amount_rand % self.options.max_transfer);
 
         if from != to {
-            let from_key = account_key(&options.prefix, from);
-            let to_key = account_key(&options.prefix, to);
+            let from_key = account_key(&self.options.prefix, from);
+            let to_key = account_key(&self.options.prefix, to);
 
             loop {
                 let txn = ctx.db().begin(IsolationLevel::Snapshot).await?;
@@ -59,11 +69,15 @@ pub async fn transfer(ctx: ActorCtx, options: BankOptions) -> Result<(), Error> 
             }
         }
 
-        step += 1;
-        if step % PROGRESS_LOG_INTERVAL == 0 {
-            info!("bank transfer step complete [step={}]", step);
+        self.step += 1;
+        if self.step % PROGRESS_LOG_INTERVAL == 0 {
+            info!(
+                "bank transfer step complete [name={}, step={}]",
+                ctx.name(),
+                self.step
+            );
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }

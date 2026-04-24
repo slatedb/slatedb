@@ -3,8 +3,8 @@ mod transfer;
 
 use slatedb::{Db, DbTransaction, Error};
 
-pub use self::auditor::auditor;
-pub use self::transfer::transfer;
+pub use self::auditor::AuditorActor;
+pub use self::transfer::TransferActor;
 
 /// Configuration for the deterministic bank workload.
 #[derive(Clone, Debug)]

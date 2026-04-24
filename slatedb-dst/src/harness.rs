@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use log::info;
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -27,44 +28,41 @@ use slatedb_common::MockSystemClock;
 use crate::clocked_object_store::ClockedObjectStore;
 
 type DbFactoryFuture = Pin<Box<dyn Future<Output = Result<Arc<Db>, Error>> + Send + 'static>>;
-type ActorFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
-type ActorFn = Arc<dyn Fn(ActorCtx) -> ActorFuture + Send + Sync + 'static>;
 
-struct ActorRegistration {
-    role: String,
-    count: usize,
-    actor: ActorFn,
+#[async_trait]
+pub trait Actor: Send + 'static {
+    async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error>;
+
+    async fn finish(&mut self, _ctx: &ActorCtx) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
-#[derive(Clone)]
+struct ActorRegistration {
+    name: String,
+    actor: Box<dyn Actor>,
+}
+
 /// Per-actor context passed to each registered harness task.
 ///
 /// The context exposes deterministic randomness, the shared database slot,
 /// clock-wrapped object stores, the shared shutdown token, and test
 /// infrastructure such as the failpoint registry and mock clock.
+#[derive(Clone)]
 pub struct ActorCtx {
-    role: String,
-    instance: usize,
+    name: String,
     rand: Arc<DbRand>,
     shared: HarnessCtx,
 }
 
 impl ActorCtx {
-    /// Returns the logical role assigned when the actor was registered.
+    /// Returns the logical name assigned when the actor was registered.
     ///
     /// ## Returns
-    /// - `&str`: The role label shared by all instances in the registration.
-    pub fn role(&self) -> &str {
-        &self.role
-    }
-
-    /// Returns the zero-based instance index within the actor's role.
-    ///
-    /// ## Returns
-    /// - `usize`: The actor instance number for this role.
-    pub fn instance(&self) -> usize {
-        self.instance
+    /// - `&str`: The unique actor name for this harness run.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Returns the actor-local deterministic random number generator.
@@ -423,58 +421,30 @@ impl Harness {
         self
     }
 
-    /// Registers a group of actor tasks that share the same role label.
+    /// Registers one actor task under a unique logical name.
     ///
     /// ## Arguments
-    /// - `role`: Logical name assigned to each actor in the registration.
-    /// - `count`: Number of actor instances to spawn for the role.
-    /// - `actor`: Async actor function to execute once per instance.
+    /// - `name`: Unique logical name for the actor task.
+    /// - `actor`: Actor instance to run until the shared shutdown token is cancelled.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
-    pub fn actor<F, Fut>(mut self, role: impl Into<String>, count: usize, actor: F) -> Self
+    ///
+    /// # Panics
+    /// Panics if the supplied name has already been registered on this harness.
+    pub fn actor<A>(mut self, name: impl Into<String>, actor: A) -> Self
     where
-        F: Fn(ActorCtx) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(), Error>> + Send + 'static,
+        A: Actor,
     {
-        self.actors.push(ActorRegistration {
-            role: role.into(),
-            count,
-            actor: Arc::new(move |ctx| Box::pin(actor(ctx))),
-        });
-        self
-    }
+        let name = name.into();
+        assert!(
+            self.actors.iter().all(|registered| registered.name != name),
+            "dst harness actor names must be unique: {name}"
+        );
 
-    /// Registers a group of actor tasks that receive shared external state.
-    ///
-    /// ## Arguments
-    /// - `role`: Logical name assigned to each actor in the registration.
-    /// - `count`: Number of actor instances to spawn for the role.
-    /// - `state`: State value cloned into each actor invocation.
-    /// - `actor`: Async actor function that receives an [`ActorCtx`] and the
-    ///   cloned state.
-    ///
-    /// ## Returns
-    /// - `Harness`: The updated harness builder.
-    pub fn actor_with_state<T, F, Fut>(
-        mut self,
-        role: impl Into<String>,
-        count: usize,
-        state: T,
-        actor: F,
-    ) -> Self
-    where
-        T: Clone + Send + Sync + 'static,
-        F: Fn(ActorCtx, T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(), Error>> + Send + 'static,
-    {
         self.actors.push(ActorRegistration {
-            role: role.into(),
-            count,
-            actor: Arc::new(move |ctx| {
-                let state = state.clone();
-                Box::pin(actor(ctx, state))
-            }),
+            name,
+            actor: Box::new(actor),
         });
         self
     }
@@ -486,9 +456,6 @@ impl Harness {
     ///   shutdown and all remaining actor exits were neutral.
     /// - `Err(Error)`: Database startup failed, no actors were configured, or
     ///   an actor returned or joined with an error.
-    ///
-    /// # Panics
-    /// Panics if the runtime cannot be created.
     pub fn run(self) -> Result<(), Error> {
         let runtime_seed = self.rand.rng().next_u64();
         let startup_seed = self.rand.rng().next_u64();
@@ -496,6 +463,7 @@ impl Harness {
         let system_clock: Arc<dyn SystemClock> = self.system_clock.clone();
         let clock_advance_ms = self.clock_advance_ms.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .rng_seed(RngSeed::from_bytes(&runtime_seed.to_le_bytes()))
             .build_local(Default::default())
             .expect("failed to build dst harness runtime");
@@ -563,24 +531,26 @@ impl Harness {
             shutdown_token: CancellationToken::new(),
         };
 
-        // Spawn one task per actor instance and track them in a JoinSet.
+        // Spawn one task per registered actor and track them in a JoinSet.
         let mut join_set = JoinSet::new();
         let mut actor_names = HashMap::new();
         for registration in actors {
-            for instance in 0..registration.count {
-                let actor_seed = rand.rng().next_u64();
-                let actor = Arc::clone(&registration.actor);
-                let role = registration.role.clone();
-                let ctx = ActorCtx {
-                    role: role.clone(),
-                    instance,
-                    rand: Arc::new(DbRand::new(actor_seed)),
-                    shared: shared.clone(),
-                };
-                let actor_name = format!("{role}[{instance}]");
-                let handle = join_set.spawn(async move { actor(ctx).await });
-                actor_names.insert(handle.id(), actor_name);
-            }
+            let actor_seed = rand.rng().next_u64();
+            let name = registration.name;
+            let mut actor = registration.actor;
+            let ctx = ActorCtx {
+                name: name.clone(),
+                rand: Arc::new(DbRand::new(actor_seed)),
+                shared: shared.clone(),
+            };
+            let handle = join_set.spawn(async move {
+                let shutdown_token = ctx.shutdown_token();
+                while !shutdown_token.is_cancelled() {
+                    actor.run(&ctx).await?;
+                }
+                actor.finish(&ctx).await
+            });
+            actor_names.insert(handle.id(), name);
         }
 
         // Wait for actors to complete and check their results as they finish.
@@ -593,6 +563,7 @@ impl Harness {
                 // An actor returned an error.
                 Ok((id, Err(error))) => {
                     actor_names.remove(&id);
+                    shared.shutdown_token.cancel();
                     join_set.abort_all();
                     return Err(error);
                 }

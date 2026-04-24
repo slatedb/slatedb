@@ -5,10 +5,8 @@
 //! its behavior is driven entirely by the harness-provided seeded RNG, shared
 //! database handle, and shared mock clock.
 //!
-//! The `workload`, `flusher`, and `compactor` actors are unbounded loops.
-//! Register them alongside a separate shutdown actor to build deterministic,
-//! time-bounded scenarios while the harness advances logical time in the
-//! background.
+//! The harness owns the outer execution loop and repeatedly calls
+//! [`crate::Actor::run`] until the shared shutdown token is cancelled.
 //!
 //! Registering `workload` and `flusher` actors together preserves the old
 //! scenario shape of steady write churn plus explicit flush pressure, while the
@@ -20,11 +18,11 @@ pub mod flusher;
 pub mod shutdown;
 pub mod workload;
 
-pub use self::bank::initialize_accounts;
-pub use self::compactor::{compactor, CompactorActorOptions};
-pub use self::flusher::flusher;
-pub use self::shutdown::shutdown;
-pub use self::workload::{workload, WorkloadActorOptions};
+pub use self::bank::{initialize_accounts, AuditorActor, BankOptions, TransferActor};
+pub use self::compactor::{CompactorActor, CompactorActorOptions};
+pub use self::flusher::FlusherActor;
+pub use self::shutdown::ShutdownActor;
+pub use self::workload::{WorkloadActor, WorkloadActorOptions};
 
 /// Emit one progress log line every N completed steps for the looping actors.
 const PROGRESS_LOG_INTERVAL: u64 = 10;

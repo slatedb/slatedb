@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use log::info;
 use rand::RngCore;
@@ -7,7 +8,7 @@ use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::{Error, WriteBatch};
 use tracing::instrument;
 
-use crate::ActorCtx;
+use crate::{Actor, ActorCtx};
 
 use super::PROGRESS_LOG_INTERVAL;
 
@@ -15,7 +16,7 @@ use super::PROGRESS_LOG_INTERVAL;
 #[derive(Clone, Debug)]
 pub struct WorkloadActorOptions {
     /// Number of logical keys each actor maps random samples onto under its
-    /// `{role}/{instance}/` prefix.
+    /// `{name}/` prefix.
     pub key_count: usize,
     /// Minimum random value size generated for `put` and `write_batch`.
     pub min_value_size: usize,
@@ -30,6 +31,37 @@ impl Default for WorkloadActorOptions {
             min_value_size: 32,
             max_value_size: 256,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkloadActor {
+    options: WorkloadActorOptions,
+    oracle: BTreeMap<Bytes, Bytes>,
+    step: u64,
+    key_prefix: Option<String>,
+}
+
+impl WorkloadActor {
+    pub fn new(options: WorkloadActorOptions) -> Result<Self, Error> {
+        if options.key_count == 0 {
+            return Err(Error::invalid(
+                "workload actor key_count must be greater than zero".to_string(),
+            ));
+        }
+        if options.min_value_size > options.max_value_size {
+            return Err(Error::invalid(
+                "workload actor min_value_size must be less than or equal to max_value_size"
+                    .to_string(),
+            ));
+        }
+
+        Ok(Self {
+            options,
+            oracle: BTreeMap::new(),
+            step: 0,
+            key_prefix: None,
+        })
     }
 }
 
@@ -54,85 +86,79 @@ impl WorkloadOperation {
     }
 }
 
-/// Runs a mixed deterministic workload against the shared database while
-/// verifying reads against an actor-local oracle.
-///
-/// The actor runs until the shared shutdown token is cancelled.
-///
-/// Each actor owns a disjoint key prefix derived from its role and instance id:
-/// `{role}/{instance}/`. The actor maps random samples onto a fixed logical key
-/// range under that prefix, which keeps its local oracle authoritative for all
-/// keys it reads back.
-///
-/// On each step it:
-/// - samples one top-level operation uniformly from `get`, `scan`, `delete`,
-///   `put`, and `write_batch`
-/// - issues the corresponding SlateDB operation with non-durable
-///   [`slatedb::config::WriteOptions`] for writes
-/// - verifies `get` and `scan` results with `assert!`/`assert_eq!` against the
-///   actor-local oracle
-#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-pub async fn workload(ctx: ActorCtx, options: WorkloadActorOptions) -> Result<(), Error> {
-    let shutdown_token = ctx.shutdown_token();
-    let put_options = PutOptions::default();
-    let write_options = WriteOptions {
-        await_durable: false,
-        ..WriteOptions::default()
-    };
-    if options.key_count == 0 {
-        return Err(Error::invalid(
-            "workload actor key_count must be greater than zero".to_string(),
-        ));
-    }
-    if options.min_value_size > options.max_value_size {
-        return Err(Error::invalid(
-            "workload actor min_value_size must be less than or equal to max_value_size"
-                .to_string(),
-        ));
-    }
-
-    let key_count = options.key_count;
-    let min_value_size = options.min_value_size;
-    let max_value_size = options.max_value_size;
-    let key_prefix = format!("{}/{}/", ctx.role(), ctx.instance());
-    let mut oracle = BTreeMap::<Bytes, Bytes>::new();
-    let mut step = 0u64;
-
-    while !shutdown_token.is_cancelled() {
+#[async_trait]
+impl Actor for WorkloadActor {
+    /// Executes one mixed deterministic workload step against the shared
+    /// database while verifying reads against an actor-local oracle.
+    #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
+    async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        let put_options = PutOptions::default();
+        let write_options = WriteOptions {
+            await_durable: false,
+            ..WriteOptions::default()
+        };
+        let key_prefix = self
+            .key_prefix
+            .get_or_insert_with(|| format!("{}/", ctx.name()))
+            .clone();
         let operation = WorkloadOperation::sample(ctx.rand().rng().next_u64());
+
         match operation {
             WorkloadOperation::Get => {
-                let key = workload_key(&key_prefix, ctx.rand().rng().next_u64(), key_count);
-                verify_get(&ctx, step, &key, &oracle).await?;
+                let key = workload_key(
+                    &key_prefix,
+                    ctx.rand().rng().next_u64(),
+                    self.options.key_count,
+                );
+                verify_get(ctx, self.step, &key, &self.oracle).await?;
             }
             WorkloadOperation::Scan => {
-                verify_scan(&ctx, step, &key_prefix, &oracle).await?;
+                verify_scan(ctx, self.step, &key_prefix, &self.oracle).await?;
             }
             WorkloadOperation::Delete => {
-                let key = workload_key(&key_prefix, ctx.rand().rng().next_u64(), key_count);
+                let key = workload_key(
+                    &key_prefix,
+                    ctx.rand().rng().next_u64(),
+                    self.options.key_count,
+                );
                 ctx.db()
                     .delete_with_options(key.clone(), &write_options)
                     .await?;
-                oracle.remove(&key);
+                self.oracle.remove(&key);
             }
             WorkloadOperation::Put => {
-                let key = workload_key(&key_prefix, ctx.rand().rng().next_u64(), key_count);
-                let value = workload_value(&mut *ctx.rand().rng(), min_value_size, max_value_size);
+                let key = workload_key(
+                    &key_prefix,
+                    ctx.rand().rng().next_u64(),
+                    self.options.key_count,
+                );
+                let value = workload_value(
+                    &mut *ctx.rand().rng(),
+                    self.options.min_value_size,
+                    self.options.max_value_size,
+                );
                 ctx.db()
                     .put_with_options(key.clone(), value.clone(), &put_options, &write_options)
                     .await?;
-                oracle.insert(key, value);
+                self.oracle.insert(key, value);
             }
             WorkloadOperation::WriteBatch => {
                 let mut batch = WriteBatch::new();
-                let mut next_oracle = oracle.clone();
+                let mut next_oracle = self.oracle.clone();
                 let batch_len = 2 + (ctx.rand().rng().next_u64() % 3) as usize;
 
                 for _ in 0..batch_len {
-                    let key = workload_key(&key_prefix, ctx.rand().rng().next_u64(), key_count);
+                    let key = workload_key(
+                        &key_prefix,
+                        ctx.rand().rng().next_u64(),
+                        self.options.key_count,
+                    );
                     if ctx.rand().rng().next_u64() & 1 == 0 {
-                        let value =
-                            workload_value(&mut *ctx.rand().rng(), min_value_size, max_value_size);
+                        let value = workload_value(
+                            &mut *ctx.rand().rng(),
+                            self.options.min_value_size,
+                            self.options.max_value_size,
+                        );
                         batch.put_bytes(key.clone(), value.clone());
                         next_oracle.insert(key, value);
                     } else {
@@ -142,21 +168,22 @@ pub async fn workload(ctx: ActorCtx, options: WorkloadActorOptions) -> Result<()
                 }
 
                 ctx.db().write_with_options(batch, &write_options).await?;
-                oracle = next_oracle;
+                self.oracle = next_oracle;
             }
         }
-        step += 1;
 
-        if step % PROGRESS_LOG_INTERVAL == 0 {
+        self.step += 1;
+        if self.step % PROGRESS_LOG_INTERVAL == 0 {
             info!(
-                "workload step complete [step={}, oracle_keys={}]",
-                step,
-                oracle.len()
+                "workload step complete [name={}, step={}, oracle_keys={}]",
+                ctx.name(),
+                self.step,
+                self.oracle.len()
             );
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 fn workload_key(prefix: &str, rand_value: u64, key_count: usize) -> Bytes {
@@ -183,9 +210,8 @@ async fn verify_get(
     assert_eq!(
         actual,
         expected,
-        "workload get mismatch [role={}, instance={}, step={}, key={}]",
-        ctx.role(),
-        ctx.instance(),
+        "workload get mismatch [name={}, step={}, key={}]",
+        ctx.name(),
         step,
         String::from_utf8_lossy(key.as_ref()).into_owned(),
     );
@@ -206,9 +232,8 @@ async fn verify_scan(
             actual
                 .insert(key_value.key.clone(), key_value.value.clone())
                 .is_none(),
-            "workload scan returned duplicate key [role={}, instance={}, step={}, key_prefix={}, key={}]",
-            ctx.role(),
-            ctx.instance(),
+            "workload scan returned duplicate key [name={}, step={}, key_prefix={}, key={}]",
+            ctx.name(),
             step,
             key_prefix,
             String::from_utf8_lossy(key_value.key.as_ref()).into_owned(),
@@ -218,9 +243,8 @@ async fn verify_scan(
     assert_eq!(
         actual,
         *oracle,
-        "workload scan mismatch [role={}, instance={}, step={}, key_prefix={}]",
-        ctx.role(),
-        ctx.instance(),
+        "workload scan mismatch [name={}, step={}, key_prefix={}]",
+        ctx.name(),
         step,
         key_prefix,
     );

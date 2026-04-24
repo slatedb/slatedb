@@ -27,7 +27,10 @@ use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    actors::{compactor, flusher, shutdown, workload, CompactorActorOptions, WorkloadActorOptions},
+    actors::{
+        CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
+        WorkloadActorOptions,
+    },
     utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     Operation, StreamDirection, Toxic, ToxicKind,
@@ -123,7 +126,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         .into(),
         ..CompactorOptions::default()
     };
-    Harness::new("determinism", seed, move |ctx| async move {
+    let harness = Harness::new("determinism", seed, move |ctx| async move {
         let db_seed = ctx.rand().rng().next_u64();
         let mut settings = build_settings(ctx.rand()).await;
 
@@ -149,20 +152,24 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     .with_system_clock(Arc::clone(&system_clock))
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
-    .with_wal_object_store(wal_store)
-    .actor_with_state("workload", 4, workload_options, workload)
-    .actor_with_state("flusher", 1, 1_u64..=5_u64, flusher)
-    .actor_with_state(
-        "compactor",
-        1,
-        CompactorActorOptions {
-            restart_interval: Duration::from_millis(25),
-            compactor_options,
-        },
-        compactor,
-    )
-    .actor_with_state("shutdown", 1, 100, shutdown)
-    .run()?;
+    .with_wal_object_store(wal_store);
+
+    let harness = harness
+        .actor("workload-1", WorkloadActor::new(workload_options.clone())?)
+        .actor("workload-2", WorkloadActor::new(workload_options.clone())?)
+        .actor("workload-3", WorkloadActor::new(workload_options.clone())?)
+        .actor("workload-4", WorkloadActor::new(workload_options)?)
+        .actor("flusher", FlusherActor::new(1_u64..=5_u64)?)
+        .actor(
+            "compactor",
+            CompactorActor::new(CompactorActorOptions {
+                restart_interval: Duration::from_millis(25),
+                compactor_options,
+            })?,
+        )
+        .actor("shutdown", ShutdownActor::new(100)?);
+
+    harness.run()?;
 
     let next_u64 = rand.rng().next_u64();
     let next_time = system_clock.now();

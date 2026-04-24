@@ -1,29 +1,50 @@
+use async_trait::async_trait;
 use log::info;
 use slatedb::Error;
 use tracing::instrument;
 
-use crate::ActorCtx;
+use crate::{Actor, ActorCtx};
 
 use super::{account_prefix, decode_balance, parse_account_id, BankOptions};
 
 /// Repeatedly audits the bank by summing one scan view over all account rows.
-#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-pub async fn auditor(ctx: ActorCtx, options: BankOptions) -> Result<(), Error> {
-    options.validate()?;
+#[derive(Debug)]
+pub struct AuditorActor {
+    options: BankOptions,
+    scan_prefix: String,
+    expected_total: u128,
+    step: u64,
+}
 
-    let shutdown_token = ctx.shutdown_token();
-    let scan_prefix = account_prefix(&options.prefix);
-    let expected_total = options.expected_total();
-    let mut step = 0u64;
+impl AuditorActor {
+    pub fn new(options: BankOptions) -> Result<Self, Error> {
+        options.validate()?;
+        let scan_prefix = account_prefix(&options.prefix);
+        let expected_total = options.expected_total();
 
-    while !shutdown_token.is_cancelled() {
+        Ok(Self {
+            options,
+            scan_prefix,
+            expected_total,
+            step: 0,
+        })
+    }
+}
+
+#[async_trait]
+impl Actor for AuditorActor {
+    #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
+    async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let mut total = 0u128;
-        let mut seen = vec![false; options.account_count];
-        let mut iter = ctx.db().scan_prefix(scan_prefix.as_bytes()).await?;
+        let mut seen = vec![false; self.options.account_count];
+        let mut iter = ctx.db().scan_prefix(self.scan_prefix.as_bytes()).await?;
 
         while let Some(kv) = iter.next().await? {
-            let account_id =
-                parse_account_id(kv.key.as_ref(), &options.prefix, options.account_count)?;
+            let account_id = parse_account_id(
+                kv.key.as_ref(),
+                &self.options.prefix,
+                self.options.account_count,
+            )?;
             if seen[account_id] {
                 return Err(Error::invalid(format!(
                     "duplicate bank account key observed during audit: {}",
@@ -36,24 +57,28 @@ pub async fn auditor(ctx: ActorCtx, options: BankOptions) -> Result<(), Error> {
         }
 
         let observed_count = seen.iter().filter(|present| **present).count();
-        if observed_count != options.account_count {
+        if observed_count != self.options.account_count {
             return Err(Error::invalid(format!(
                 "bank audit observed {} accounts but expected {}",
-                observed_count, options.account_count,
+                observed_count, self.options.account_count,
             )));
         }
-        if total != expected_total {
+        if total != self.expected_total {
             return Err(Error::invalid(format!(
                 "bank audit total mismatch: observed {} expected {}",
-                total, expected_total,
+                total, self.expected_total,
             )));
         }
 
-        step += 1;
-        if step % 1000 == 0 {
-            info!("bank auditor step complete [step={}]", step);
+        self.step += 1;
+        if self.step % 1000 == 0 {
+            info!(
+                "bank auditor step complete [name={}, step={}]",
+                ctx.name(),
+                self.step
+            );
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }

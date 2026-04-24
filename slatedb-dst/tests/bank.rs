@@ -12,8 +12,8 @@ use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
     actors::{
-        bank::{auditor, transfer, BankOptions},
-        compactor, initialize_accounts, shutdown, CompactorActorOptions,
+        initialize_accounts, AuditorActor, BankOptions, CompactorActor, CompactorActorOptions,
+        ShutdownActor, TransferActor,
     },
     utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
@@ -68,7 +68,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
         .into(),
     };
 
-    Harness::new("bank", seed, {
+    let harness = Harness::new("bank", seed, {
         let bank_options = bank_options.clone();
         move |ctx| async move {
             let db_seed = ctx.rand().rng().next_u64();
@@ -101,20 +101,27 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
     .with_path(Path::from("bank"))
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
-    .with_clock_advance(1..=5)
-    .actor_with_state("transfer", 6, bank_options.clone(), transfer)
-    .actor_with_state("auditor", 2, bank_options, auditor)
-    .actor_with_state(
-        "compactor",
-        1,
-        CompactorActorOptions {
-            restart_interval: Duration::from_millis(250),
-            compactor_options,
-        },
-        compactor,
-    )
-    .actor_with_state("shutdown", 1, 20_000, shutdown)
-    .run()?;
+    .with_clock_advance(1..=5);
+
+    let harness = harness
+        .actor("transfer-1", TransferActor::new(bank_options.clone())?)
+        .actor("transfer-2", TransferActor::new(bank_options.clone())?)
+        .actor("transfer-3", TransferActor::new(bank_options.clone())?)
+        .actor("transfer-4", TransferActor::new(bank_options.clone())?)
+        .actor("transfer-5", TransferActor::new(bank_options.clone())?)
+        .actor("transfer-6", TransferActor::new(bank_options.clone())?)
+        .actor("auditor-1", AuditorActor::new(bank_options.clone())?)
+        .actor("auditor-2", AuditorActor::new(bank_options)?)
+        .actor(
+            "compactor",
+            CompactorActor::new(CompactorActorOptions {
+                restart_interval: Duration::from_millis(250),
+                compactor_options,
+            })?,
+        )
+        .actor("shutdown", ShutdownActor::new(20_000)?);
+
+    harness.run()?;
 
     Ok(())
 }

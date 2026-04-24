@@ -19,6 +19,7 @@ an internal path dependency rather than from crates.io.
 ## What the crate provides
 
 - `Harness`: builder and executor for deterministic simulations
+- `Actor`: async actor trait run by the harness
 - `StartupCtx`: context passed to the database factory configured with
   `Harness::new`
 - `ActorCtx`: per-actor context with deterministic RNG, DB access, shared
@@ -106,7 +107,7 @@ use rand::RngCore;
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
-    actors::{shutdown, workload, WorkloadActorOptions}, utils::build_settings,
+    actors::{ShutdownActor, WorkloadActor, WorkloadActorOptions}, utils::build_settings,
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     Operation, StreamDirection, Toxic, ToxicKind,
 };
@@ -144,9 +145,9 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         failures,
         system_clock.clone(),
     ));
-    let shutdown_at_millis = 10u64;
+    let shutdown_at_millis = 10i64;
     let workload_options = WorkloadActorOptions::default();
-    Harness::new("smoke", 7, move |ctx| async move {
+    let harness = Harness::new("smoke", 7, move |ctx| async move {
         let db_seed = ctx.rand().rng().next_u64();
         let settings = build_settings(ctx.rand()).await;
 
@@ -164,9 +165,11 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         .with_path(Path::from("dst/smoke"))
         .with_system_clock(system_clock)
         .with_main_object_store(main_store)
-        .with_wal_object_store(wal_store)
-        .actor_with_state("workload", 1, workload_options, workload)
-        .actor_with_state("shutdown", 1, shutdown_at_millis, shutdown)
+        .with_wal_object_store(wal_store);
+
+    harness
+        .actor("workload-1", WorkloadActor::new(workload_options)?)
+        .actor("shutdown", ShutdownActor::new(shutdown_at_millis)?)
         .run()?;
 
     Ok(())
@@ -186,12 +189,10 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
   range used by the harness-owned background clock task
 - `with_main_object_store(store)`: replaces the default in-memory main store
 - `with_wal_object_store(store)`: configures a separate WAL store
-- `actor(role, count, actor_fn)`: registers `count` actors for the same role
-- `actor_with_state(role, count, state, actor_fn)`: same as `actor`, but
-  clones the supplied state into each actor
+- `actor(name, actor)`: registers one actor instance under a unique name
 - `run()`: builds the seeded runtime, starts the harness-owned background
-  clock task, opens the DB, spawns actors, and runs until all actors finish
-  successfully or some actor cancels the shared shutdown token
+  clock task, opens the DB, spawns one Tokio task per registered actor, and
+  runs until the shared shutdown token is cancelled or an actor fails
 
 If `with_path(...)` is not set, the harness uses:
 
@@ -227,7 +228,7 @@ Each registered actor instance receives its own `ActorCtx`.
 
 `ActorCtx` exposes:
 
-- `role()` and `instance()` for actor identity
+- `name()` for actor identity
 - `rand()` for actor-local deterministic randomness
 - `db()` to read the currently installed shared `Arc<Db>`
 - `swap_db(new_db)` to replace the shared DB handle for all actors
@@ -241,19 +242,16 @@ replace the database instance mid-run.
 
 ### Shutdown semantics
 
-Actors may finish normally without cancelling the shared shutdown token. If all
-actors return `Ok(())`, the harness closes the DB and returns success.
+The harness owns the outer actor loop:
 
-Once shutdown is requested, the harness aborts all remaining tasks and drains
-them with these rules:
+- it repeatedly calls `Actor::run(&mut self, &ActorCtx)` for one logical
+  iteration
+- actors request shutdown only by cancelling `ctx.shutdown_token()`
+- once the shared shutdown token is cancelled, the harness stops calling
+  `run()` and then calls `Actor::finish(&mut self, &ActorCtx)` once
 
-- cancelled task: ignored
-- task returned `Ok(())` before the abort landed: ignored
-- task returned `Err(e)` before the abort landed: run fails with `Err(e)`
-- panicked task or non-cancel join error: run fails with an internal error
-
-If the drain completes with only cancelled or successful tasks, the harness
-closes the DB and returns success.
+If an actor returns `Err(e)`, the harness cancels shutdown, aborts the
+remaining tasks, and returns `Err(e)`.
 
 ## Failure injection
 
