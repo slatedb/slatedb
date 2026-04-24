@@ -49,7 +49,7 @@ pub(crate) struct FileHandleCache {
 
 impl std::fmt::Debug for FileHandleCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().expect("lock should not be poisoned");
         f.debug_struct("FileHandleCache")
             .field("len", &inner.len())
             .field("cap", &inner.cap())
@@ -72,7 +72,7 @@ impl FileHandleCache {
         &self,
         path: &std::path::Path,
     ) -> Result<Option<Arc<CachedFileHandle>>, std::io::Error> {
-        let mut cache = self.inner.lock().unwrap();
+        let mut cache = self.inner.lock().expect("lock should not be poisoned");
         if let Some(handle) = cache.get(path) {
             if Self::is_valid(handle) {
                 return Ok(Some(handle.clone()));
@@ -102,7 +102,7 @@ impl FileHandleCache {
     #[cfg(unix)]
     fn is_valid(handle: &CachedFileHandle) -> bool {
         use std::os::unix::fs::MetadataExt;
-        handle.file().metadata().map_or(false, |m| m.nlink() > 0)
+        handle.file().metadata().is_ok_and(|m| m.nlink() > 0)
     }
 
     #[cfg(not(unix))]
@@ -113,7 +113,7 @@ impl FileHandleCache {
     /// Remove a cached handle, e.g. after eviction or after a write replaces
     /// the file (since the cached fd would still reference the old inode).
     fn invalidate(&self, path: &std::path::Path) {
-        let mut cache = self.inner.lock().unwrap();
+        let mut cache = self.inner.lock().expect("lock should not be poisoned");
         cache.pop(path);
     }
 }
