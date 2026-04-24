@@ -131,15 +131,44 @@ impl std::fmt::Debug for NamedFilter {
 // Built-in implementation: BloomFilterPolicy
 // ---------------------------------------------------------------------------
 
-/// Extractor for a prefix from a key for use in prefix-based bloom filtering.
+/// Extractor for a prefix from a byte string, used to build and probe
+/// prefix-based bloom filters.
 ///
 /// This trait is specific to `BloomFilterPolicy` — it is not part of the core
 /// `FilterPolicy`/`FilterBuilder`/`Filter` traits. Custom filter policies that
 /// need prefix-based filtering can implement their own logic directly in
 /// `add_entry`/`might_match`.
 ///
-/// Used on the write path to hash prefixes into the bloom filter during SST
-/// construction.
+/// The extractor's output is always a *prefix* of its input — if
+/// `prefix_len(target)` returns `Some(n)`, then the bytes inside `target`
+/// sliced to `..n` are the extracted prefix.
+///
+/// # `FilterTarget` variants
+///
+/// The `target` argument distinguishes two different semantic questions:
+///
+/// - [`FilterTarget::Point`] — the input is a complete key (a stored key
+///   during SST construction, or the target of a point lookup).
+///   `prefix_len` returns the extraction length that was / will be hashed
+///   into the filter. **Invariant**: if `prefix_len(Point(k)) = Some(n)`,
+///   then for every `k'` with `k'[..n] == k[..n]`, also
+///   `prefix_len(Point(k')) = Some(n)`. The extraction depends only on
+///   the first `n` bytes.
+///
+/// - [`FilterTarget::Prefix`] — the input is a scan prefix. `prefix_len`
+///   returns `Some(n)` only if probing with the first `n` bytes is safe
+///   for *every* possible extension of the input. **Invariant**: if
+///   `prefix_len(Prefix(p)) = Some(n)`, then for every extension `q` of
+///   `p`, `prefix_len(Point(q)) = Some(n)` and `q[..n] == p[..n]`. When
+///   this cannot be guaranteed (e.g., the extractor inspects later bytes
+///   of the key, as a "last-delimiter" extractor would), the extractor
+///   must return `None` for the `Prefix` variant.
+///
+/// For most extractors — fixed-length, first-delimiter, anchored-prefix —
+/// the two variants return the same answer. The split matters for
+/// extractors whose extraction depends on the full input; those can still
+/// be used for the build and point paths while conservatively disabling
+/// prefix-scan filtering.
 pub trait PrefixExtractor: Send + Sync {
     /// A unique name identifying this extractor's configuration.
     ///
@@ -148,44 +177,43 @@ pub trait PrefixExtractor: Send + Sync {
     /// includes this name in the policy name it writes to SST metadata.
     fn name(&self) -> &str;
 
-    /// Returns whether `prefix` is a valid output of [`prefix_len`]
+    /// Returns the length `n` such that the bytes of `target` sliced to
+    /// `..n` are the extracted prefix, or `None` if this target has no
+    /// extractable prefix under this extractor.
     ///
-    /// Used on the read path to decide whether a user-provided scan prefix
-    /// can be answered by the filter. If this returns `false`, the filter
-    /// must NOT be consulted; doing so can produce false negatives.
+    /// Called on three paths, distinguished by the variant of `target`:
+    /// - **Build time** — policy wraps each stored key in
+    ///   `FilterTarget::Point` and hashes `key[..n]` into the filter when
+    ///   this returns `Some(n)`.
+    /// - **Point reads** — policy forwards the incoming
+    ///   `FilterTarget::Point` and probes with `hash(key[..n])`.
+    /// - **Prefix reads** — policy forwards the incoming
+    ///   `FilterTarget::Prefix` and probes with `hash(prefix[..n])`; a
+    ///   `None` result causes the filter to be skipped so no false
+    ///   negative can occur.
     ///
-    /// **Consistency with `prefix_len`:** implementors must ensure that
-    /// `in_domain` agrees with what `prefix_len` would produce. In
-    /// particular, if `prefix_len(key)` returns `None` for every key that
-    /// begins with some byte string `p`, then `in_domain(p)` must return
-    /// `false`, otherwise the read path will consult the filter for a
-    /// prefix that was never hashed into it and silently miss real data.
-    fn in_domain(&self, prefix: &[u8]) -> bool;
-
-    /// Returns the length of the prefix this extractor produces from `key`,
-    /// or `None` if `key` has no extractable prefix. The caller interprets
-    /// the returned length as `&key[..len]`.
+    /// # Worked example
     ///
-    /// For example, an extractor that selectively indexes keys matching
-    /// `"user:"` (so that `scan_prefix("user:")` can use the filter) but
-    /// ignores all other keys would return:
-    /// - `prefix_len(b"user:alice")` → `Some(5)` (hash `"user:"` into the filter)
-    /// - `prefix_len(b"user:bob")`   → `Some(5)` (same)
-    /// - `prefix_len(b"post:42")`    → `None`    (don't index this key's prefix)
-    /// - `prefix_len(b"session:x")`  → `None`    (don't index this key's prefix)
+    /// A 3-byte fixed extractor with an SST containing keys `abc_1`,
+    /// `abc_2`, `abx_1` stores hashes of `abc` and `abx`. Then:
+    /// - `Prefix("ab")` → `None` (2 < 3; filter skipped).
+    /// - `Prefix("abc")` → `Some(3)` → probe `hash("abc")`.
+    /// - `Prefix("abcd")` → `Some(3)` → probe `hash("abc")` (truncation
+    ///   safe by the `Prefix` invariant).
+    /// - `Point("abc_1")` → `Some(3)` → probe `hash("abc")`.
     ///
-    /// When `None` is returned, the caller skips adding a prefix for this
-    /// key into the filter. A prefix scan over this key's prefix cannot
-    /// use the filter and must fall back to scanning the SST directly
-    /// which requires that [`in_domain`] also return `false` for such prefixes
-    /// (see the note on `in_domain`).
+    /// For a *last-delimiter* extractor (extract up to and including the
+    /// last `:`), the `Prefix` variant must return `None` always — the
+    /// last delimiter's position can change as bytes are appended, so no
+    /// scan prefix is safe to probe. The `Point` variant still returns
+    /// the position correctly for complete keys.
     ///
     /// # Panics
     ///
-    /// The returned length must be ≤ `key.len()`. Returning a longer value
-    /// is a contract violation and will panic when the length is used to
-    /// slice the key.
-    fn prefix_len(&self, key: &[u8]) -> Option<usize>;
+    /// The returned length must be ≤ the length of the bytes inside
+    /// `target`. Returning a longer value is a contract violation and
+    /// will panic when the length is used to slice the target bytes.
+    fn prefix_len(&self, target: &FilterTarget) -> Option<usize>;
 }
 
 /// A filter policy backed by the existing bloom filter implementation.
@@ -411,16 +439,16 @@ mod tests {
             &self.name
         }
 
-        fn in_domain(&self, prefix: &[u8]) -> bool {
-            prefix.len() == self.len
-        }
-
-        fn prefix_len(&self, key: &[u8]) -> Option<usize> {
-            if key.len() >= self.len {
-                Some(self.len)
-            } else {
-                None
-            }
+        fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+            // A fixed-length extractor is truncation-safe: the first `len`
+            // bytes fully determine the extracted prefix, so both the
+            // `Point` and `Prefix` variants return the same answer. We
+            // only require the input to be at least `len` bytes.
+            let input = match target {
+                FilterTarget::Point(k) => k.as_ref(),
+                FilterTarget::Prefix(p) => p.as_ref(),
+            };
+            (input.len() >= self.len).then_some(self.len)
         }
     }
 
@@ -543,12 +571,442 @@ mod tests {
         let query = FilterQuery::prefix(Bytes::from_static(b"aaa"));
         assert!(decoded.might_match(&query));
 
-        // Point queries must return true (inapplicable). No full-key hashes were stored,
-        // so probing would produce false negatives for keys that actually exist.
+        // With whole_key_filtering=false but an extractor configured, point
+        // queries probe the filter using the extracted prefix of the key.
+        // All stored keys begin with "aaa", so the prefix hash is present and
+        // a point query for "aaa0001" must report "might match".
         let query = FilterQuery::point(Bytes::from_static(b"aaa0001"));
+        assert!(decoded.might_match(&query));
+    }
+
+    /// With `whole_key_filtering=false` and a prefix extractor configured, a
+    /// point lookup whose extracted prefix was never stored in the filter
+    /// must be rejected. This is the `GroupId ‖ Suffix` workload: stored
+    /// prefixes are group ids, and point lookups reuse those hashes.
+    ///
+    /// Filter size scales with the number of *stored* hashes (deduplicated
+    /// prefix hashes here), so the test uses many distinct group ids to
+    /// keep the filter non-trivially sized.
+    #[test]
+    fn test_point_lookup_via_extracted_prefix_rejects_absent_prefix() {
+        let extractor = Arc::new(FixedPrefixExtractor::new(3));
+        let policy = BloomFilterPolicy::new(10)
+            .with_prefix_extractor(extractor)
+            .with_whole_key_filtering(false);
+
+        // 1000 distinct 3-byte group ids in the "A.." space, each with one
+        // suffix. The builder stores 1000 distinct prefix hashes after dedup.
+        let mut builder = policy.builder();
+        for gid in 0u32..1000 {
+            builder.add_entry(&make_entry(format!("A{:03}_row", gid).as_bytes()));
+        }
+        let filter = builder.build();
+
+        // Every stored group id must probe as "might match".
+        for gid in 0u32..1000 {
+            let q = FilterQuery::point(Bytes::from(format!("A{:03}_row", gid)));
+            assert!(filter.might_match(&q), "gid {} missing from filter", gid);
+        }
+
+        // Point lookups whose extracted 3-byte prefix lives in a disjoint
+        // namespace ("B..") must be rejected at bloom-filter FP rate.
+        let mut fp = 0;
+        let mut total = 0;
+        for gid in 0u32..1000 {
+            let q = FilterQuery::point(Bytes::from(format!("B{:03}_row", gid)));
+            total += 1;
+            if filter.might_match(&q) {
+                fp += 1;
+            }
+        }
+        let fpr = fp as f64 / total as f64;
         assert!(
-            decoded.might_match(&query),
-            "point query must return true when whole_key_filtering=false to avoid false negatives"
+            fpr < 0.02,
+            "point-via-prefix FPR should be low: got {} of {} ({})",
+            fp,
+            total,
+            fpr,
         );
+    }
+
+    /// A scan prefix longer than the extractor's output is still safe to
+    /// probe — the extractor can return a shorter length and the filter is
+    /// probed with the truncated bytes. Stored key `"aaa0001"` hashes prefix
+    /// `"aaa"`; a scan for `"aaa0"` must truncate to `"aaa"` and match.
+    #[test]
+    fn test_prefix_scan_truncates_over_length_scan_prefix() {
+        let extractor = Arc::new(FixedPrefixExtractor::new(3));
+        let policy = BloomFilterPolicy::new(10).with_prefix_extractor(extractor);
+
+        let mut builder = policy.builder();
+        builder.add_entry(&make_entry(b"aaa0001"));
+        let filter = builder.build();
+
+        // Over-length scan prefixes whose first 3 bytes match a stored prefix
+        // must still "might match" after truncation.
+        for scan in ["aaa", "aaa0", "aaa1234"] {
+            let query = FilterQuery::prefix(Bytes::copy_from_slice(scan.as_bytes()));
+            assert!(
+                filter.might_match(&query),
+                "scan_prefix({scan:?}) should match after truncation",
+            );
+        }
+    }
+
+    /// A selective extractor indexes only a subset of keys — e.g., `user:*`
+    /// but not `post:*`. During build, keys outside the domain return `None`
+    /// from `prefix_len(Point(_))` and their prefix is never hashed; during
+    /// reads, a prefix scan outside the domain returns `None` as well and
+    /// the filter reports "might match" (cannot rule out). Returning `Some`
+    /// for an out-of-domain `Prefix` would violate the trait's truncation
+    /// invariant and produce false negatives for stored keys in that namespace.
+    #[test]
+    fn test_selective_extractor_indexes_only_matching_keys() {
+        struct UserOnlyExtractor;
+        impl PrefixExtractor for UserOnlyExtractor {
+            fn name(&self) -> &str {
+                "user-only"
+            }
+            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+                let input = match target {
+                    FilterTarget::Point(k) => k.as_ref(),
+                    FilterTarget::Prefix(p) => p.as_ref(),
+                };
+                (input.len() >= 5 && input.starts_with(b"user:")).then_some(5)
+            }
+        }
+
+        let policy = BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(UserOnlyExtractor));
+
+        let mut builder = policy.builder();
+        for i in 0u32..10 {
+            builder.add_entry(&make_entry(format!("user:u{:02}", i).as_bytes()));
+        }
+        for i in 0u32..10 {
+            builder.add_entry(&make_entry(format!("post:p{:02}", i).as_bytes()));
+        }
+        let filter = builder.build();
+
+        // Prefix scan on the indexed namespace finds the stored prefix.
+        let q = FilterQuery::prefix(Bytes::from_static(b"user:"));
+        assert!(filter.might_match(&q));
+
+        // Prefix scan on a non-indexed namespace — extractor returns `None`,
+        // so the filter returns true (inapplicable). This is crucial: the
+        // `post:` prefix was never hashed during build, so returning
+        // `Some(5)` here would let the filter flag the SST as absent and
+        // skip real `post:` data. The `None` return keeps us correct.
+        let q = FilterQuery::prefix(Bytes::from_static(b"post:"));
+        assert!(filter.might_match(&q));
+        let q = FilterQuery::prefix(Bytes::from_static(b"session:"));
+        assert!(filter.might_match(&q));
+
+        // Whole-key filtering is still on (default), so every stored key
+        // round-trips on point lookup regardless of namespace.
+        for i in 0u32..10 {
+            let q = FilterQuery::point(Bytes::from(format!("user:u{:02}", i)));
+            assert!(filter.might_match(&q));
+            let q = FilterQuery::point(Bytes::from(format!("post:p{:02}", i)));
+            assert!(filter.might_match(&q));
+        }
+    }
+
+    /// `add_key` asserts that an extractor respects the "returned length must
+    /// be ≤ input length" contract. A misbehaving extractor trips the panic.
+    #[test]
+    #[should_panic(expected = "PrefixExtractor returned a prefix length")]
+    fn test_add_key_panics_on_prefix_len_longer_than_key() {
+        struct TooLongExtractor;
+        impl PrefixExtractor for TooLongExtractor {
+            fn name(&self) -> &str {
+                "too-long"
+            }
+            fn prefix_len(&self, _target: &FilterTarget) -> Option<usize> {
+                Some(usize::MAX)
+            }
+        }
+
+        let policy = BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(TooLongExtractor));
+        let mut builder = policy.builder();
+        builder.add_entry(&make_entry(b"short"));
+    }
+
+    /// A "last-delimiter" extractor depends on bytes beyond any proper
+    /// prefix, so it cannot make a truncation-safe promise for `Prefix`
+    /// inputs. The trait contract says such an extractor must return `None`
+    /// for `FilterTarget::Prefix`; the bloom filter then conservatively
+    /// returns `true` for prefix scans. `Point` inputs still work.
+    #[test]
+    fn test_last_delimiter_extractor_skips_prefix_scan() {
+        struct LastColonExtractor;
+        impl PrefixExtractor for LastColonExtractor {
+            fn name(&self) -> &str {
+                "last-colon"
+            }
+            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+                match target {
+                    // For a complete key, extract up to and including the last ':'.
+                    FilterTarget::Point(k) => {
+                        k.as_ref().iter().rposition(|&b| b == b':').map(|i| i + 1)
+                    }
+                    // For a scan prefix, the final ':' could land anywhere in
+                    // an unseen extension, so no truncation is safe.
+                    FilterTarget::Prefix(_) => None,
+                }
+            }
+        }
+
+        let policy = BloomFilterPolicy::new(10)
+            .with_prefix_extractor(Arc::new(LastColonExtractor))
+            .with_whole_key_filtering(false);
+
+        let mut builder = policy.builder();
+        builder.add_entry(&make_entry(b"ns1:item:abc"));
+        builder.add_entry(&make_entry(b"ns1:item:xyz"));
+        let filter = builder.build();
+
+        // Point lookup: extractor returns Some(9) for "ns1:item:", and that
+        // hash was stored during build. Must match.
+        let q = FilterQuery::point(Bytes::from_static(b"ns1:item:abc"));
+        assert!(filter.might_match(&q));
+
+        // Prefix scan: extractor returns None, so the filter returns true
+        // rather than risk a false negative.
+        let q = FilterQuery::prefix(Bytes::from_static(b"ns1:item:"));
+        assert!(filter.might_match(&q));
+        let q = FilterQuery::prefix(Bytes::from_static(b"ns1:"));
+        assert!(filter.might_match(&q));
+    }
+
+    /// Degenerate configuration: `whole_key_filtering=false` with no prefix
+    /// extractor configured disables all filtering. `might_match` must
+    /// unconditionally return `true` — there are no stored hashes to probe.
+    #[test]
+    fn test_no_filtering_configured_returns_true() {
+        let policy = BloomFilterPolicy::new(10).with_whole_key_filtering(false);
+        let mut builder = policy.builder();
+        builder.add_entry(&make_entry(b"anything"));
+        let filter = builder.build();
+
+        assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"anything"))));
+        assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"missing"))));
+        assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"any"))));
+    }
+
+    /// The `last_prefix` dedup in `BloomFilterBuilder` only fires for
+    /// *consecutive* same-prefix keys — which is the sorted-input case SST
+    /// construction provides. Non-consecutive duplicates re-hash, inflating
+    /// the stored hash count and thus the filter size. This test pins that
+    /// invariant: a future change to full set-based dedup would shrink the
+    /// interleaved filter below the sorted one and fail the assertion.
+    ///
+    /// Uses `whole_key_filtering=false` so filter size depends *only* on
+    /// unique prefix-hash dedup behavior, not on whole-key hashes.
+    #[test]
+    fn test_dedup_only_fires_on_consecutive_same_prefix() {
+        let make_filter = |order: &[&[u8]]| {
+            let policy = BloomFilterPolicy::new(10)
+                .with_prefix_extractor(Arc::new(FixedPrefixExtractor::new(3)))
+                .with_whole_key_filtering(false);
+            let mut builder = policy.builder();
+            for key in order {
+                builder.add_entry(&make_entry(key));
+            }
+            builder.build()
+        };
+
+        let sorted = make_filter(&[b"aaa1", b"aaa2", b"bbb1", b"bbb2"]);
+        let interleaved = make_filter(&[b"aaa1", b"bbb1", b"aaa2", b"bbb2"]);
+
+        // Sorted: dedup keeps 2 prefix hashes ("aaa", "bbb").
+        // Interleaved: dedup resets at each prefix flip, 4 stored hashes.
+        // Filter bytes track hash count * bits_per_key, so interleaved is
+        // strictly larger.
+        assert!(
+            interleaved.size() > sorted.size(),
+            "expected interleaved filter to be larger than sorted (sorted={}, interleaved={}); \
+             consecutive-only dedup invariant may have regressed",
+            sorted.size(),
+            interleaved.size(),
+        );
+    }
+
+    /// `prefix_len` returning `Some(0)` (empty prefix) must not panic, and
+    /// the filter must still report "might match" for the same empty prefix
+    /// on read. The empty hash is degenerate but legal.
+    #[test]
+    fn test_prefix_len_zero_is_legal() {
+        struct EmptyPrefixExtractor;
+        impl PrefixExtractor for EmptyPrefixExtractor {
+            fn name(&self) -> &str {
+                "empty"
+            }
+            fn prefix_len(&self, _target: &FilterTarget) -> Option<usize> {
+                Some(0)
+            }
+        }
+
+        let policy = BloomFilterPolicy::new(10)
+            .with_prefix_extractor(Arc::new(EmptyPrefixExtractor))
+            .with_whole_key_filtering(false);
+        let mut builder = policy.builder();
+        // Add 100 distinct entries — every one extracts the empty prefix.
+        // The `last_prefix` dedup should collapse them to a single stored
+        // hash. Filter size is derived from that hash count; at 10
+        // bits/key with one hash, the payload is 10 bits → 2 bytes.
+        for i in 0u32..100 {
+            builder.add_entry(&make_entry(format!("entry{i}").as_bytes()));
+        }
+        let filter = builder.build();
+        assert_eq!(
+            filter.size(),
+            2,
+            "expected dedup to collapse the empty prefix to one stored hash",
+        );
+
+        // Every probe collapses to hash("") and matches. Degenerate but
+        // not a panic or out-of-bounds slice.
+        assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"any"))));
+        assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"any"))));
+    }
+
+    /// `prefix_len` returning `Some(key.len())` means the extracted prefix is
+    /// the full input. With `whole_key_filtering=true`, the prefix hash and
+    /// whole-key hash are identical — not wasted bits exactly, but
+    /// duplicates set the same probes. Must not panic and must round-trip.
+    #[test]
+    fn test_prefix_len_equals_full_key_length() {
+        struct FullKeyExtractor;
+        impl PrefixExtractor for FullKeyExtractor {
+            fn name(&self) -> &str {
+                "full-key"
+            }
+            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+                let input = match target {
+                    FilterTarget::Point(k) => k.as_ref(),
+                    FilterTarget::Prefix(p) => p.as_ref(),
+                };
+                Some(input.len())
+            }
+        }
+
+        let policy = BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(FullKeyExtractor));
+        let mut builder = policy.builder();
+        builder.add_entry(&make_entry(b"key1"));
+        builder.add_entry(&make_entry(b"key2"));
+        let filter = builder.build();
+
+        // Point lookup on stored key matches via whole-key hash.
+        assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"key1"))));
+        // "Prefix" query whose length equals a stored key is probed with
+        // hash of the full candidate — stored keys match, others don't
+        // (modulo bloom FP).
+        assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"key1"))));
+    }
+
+    // ---------- Property tests ----------
+
+    use proptest::collection::vec;
+    use proptest::prelude::{any, proptest};
+
+    proptest! {
+        /// Every key inserted into a bloom filter under the default policy
+        /// must be reported by `might_match(Point(..))`. This is the
+        /// defining "no false negatives" invariant of bloom filters. The
+        /// behavioral tests above spot-check it; this property explores
+        /// many more shapes (empty keys, single-byte keys, long keys,
+        /// non-UTF8 bytes, duplicates, unsorted input).
+        #[test]
+        fn prop_no_false_negatives_default_policy(
+            keys in vec(vec(any::<u8>(), 0..32), 1..64),
+        ) {
+            let policy = BloomFilterPolicy::new(10);
+            let mut builder = policy.builder();
+            for key in &keys {
+                builder.add_entry(&make_entry(key));
+            }
+            let filter = builder.build();
+            for key in &keys {
+                let q = FilterQuery::point(Bytes::copy_from_slice(key));
+                assert!(
+                    filter.might_match(&q),
+                    "false negative for {:?}",
+                    key,
+                );
+            }
+        }
+
+        /// With a `FixedPrefixExtractor(3)` configured, every stored key
+        /// round-trips on point lookup AND every key's extracted prefix
+        /// round-trips on prefix lookup. Keys are constrained to ≥ 3
+        /// bytes so the extractor always extracts.
+        #[test]
+        fn prop_no_false_negatives_with_prefix_extractor(
+            keys in vec(vec(any::<u8>(), 3..32), 1..64),
+        ) {
+            let policy = BloomFilterPolicy::new(10)
+                .with_prefix_extractor(Arc::new(FixedPrefixExtractor::new(3)));
+            let mut builder = policy.builder();
+            for key in &keys {
+                builder.add_entry(&make_entry(key));
+            }
+            let filter = builder.build();
+
+            for key in &keys {
+                // Full-key hash stored (default whole_key_filtering=true).
+                let q = FilterQuery::point(Bytes::copy_from_slice(key));
+                assert!(
+                    filter.might_match(&q),
+                    "point false negative for {:?}",
+                    key,
+                );
+
+                // Extracted prefix hash stored — prefix query matches.
+                let q = FilterQuery::prefix(Bytes::copy_from_slice(&key[..3]));
+                assert!(
+                    filter.might_match(&q),
+                    "prefix false negative for {:?}",
+                    &key[..3],
+                );
+            }
+        }
+
+        /// With `whole_key_filtering=false`, no full-key hashes are stored.
+        /// A point lookup is resolved by probing the filter with the
+        /// *extracted prefix* of the queried key. That means: for any key
+        /// that *was* added to the filter, its point lookup must still
+        /// match — because its prefix hash is there.
+        #[test]
+        fn prop_no_false_negatives_with_whole_key_filtering_disabled(
+            keys in vec(vec(any::<u8>(), 3..32), 1..64),
+        ) {
+            let policy = BloomFilterPolicy::new(10)
+                .with_prefix_extractor(Arc::new(FixedPrefixExtractor::new(3)))
+                .with_whole_key_filtering(false);
+            let mut builder = policy.builder();
+            for key in &keys {
+                builder.add_entry(&make_entry(key));
+            }
+            let filter = builder.build();
+
+            for key in &keys {
+                // Point lookup probes with the key's extracted prefix, which
+                // was stored during build.
+                let q = FilterQuery::point(Bytes::copy_from_slice(key));
+                assert!(
+                    filter.might_match(&q),
+                    "point-via-prefix false negative for {:?}",
+                    key,
+                );
+
+                // The extracted prefix itself also round-trips.
+                let q = FilterQuery::prefix(Bytes::copy_from_slice(&key[..3]));
+                assert!(
+                    filter.might_match(&q),
+                    "prefix false negative for {:?}",
+                    &key[..3],
+                );
+            }
+        }
     }
 }
