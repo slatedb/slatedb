@@ -491,7 +491,7 @@ where
     use crate::iter::RowEntryIterator;
     use crate::types::{RowEntry, ValueDeletable};
     use futures::executor::block_on;
-    use rand::{RngCore};
+    use rand::RngCore;
 
     const SEED: u64 = 0x51A7_EDBB_E4C4;
 
