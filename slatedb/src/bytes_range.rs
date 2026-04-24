@@ -57,6 +57,10 @@ impl BytesRange {
         inner.non_empty().then_some(Self { inner })
     }
 
+    pub(crate) fn unbounded() -> Self {
+        Self::new(Unbounded, Unbounded)
+    }
+
     pub(crate) fn new_empty() -> Self {
         Self {
             inner: ComparableRange::new(
