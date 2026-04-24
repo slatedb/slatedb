@@ -100,30 +100,17 @@ impl FileHandleCache {
     /// much cheaper than a full `open` and lets us detect deleted or replaced
     /// files without a TOCTOU-prone path `stat`.
     ///
-    /// On Windows there is no `nlink` equivalent, so we compare the file index
-    /// (the Windows inode equivalent) of the cached handle against the file
-    /// currently residing at `path`. If the path no longer exists, or resolves
-    /// to a different file, the cached handle is considered stale.
+    /// On non-Unix platforms (e.g. Windows), we fall back to checking whether
+    /// the path still exists on disk.
     #[cfg(unix)]
     fn is_valid(handle: &CachedFileHandle, _path: &std::path::Path) -> bool {
         use std::os::unix::fs::MetadataExt;
         handle.file().metadata().is_ok_and(|m| m.nlink() > 0)
     }
 
-    #[cfg(windows)]
-    fn is_valid(handle: &CachedFileHandle, path: &std::path::Path) -> bool {
-        use std::os::windows::fs::MetadataExt;
-        let handle_idx = handle.file().metadata().ok().and_then(|m| m.file_index());
-        let path_idx = std::fs::metadata(path).ok().and_then(|m| m.file_index());
-        match (handle_idx, path_idx) {
-            (Some(h), Some(p)) => h == p,
-            _ => false,
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn is_valid(_handle: &CachedFileHandle, _path: &std::path::Path) -> bool {
-        true
+    #[cfg(not(unix))]
+    fn is_valid(_handle: &CachedFileHandle, path: &std::path::Path) -> bool {
+        path.exists()
     }
 
     /// Remove a cached handle, e.g. after eviction or after a write replaces
