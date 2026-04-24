@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use slatedb_common::metrics::CounterFn;
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -12,7 +13,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterQuery, NamedFilter};
+use crate::filter_policy::{FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
 use crate::{
@@ -27,13 +28,14 @@ enum FetchTask {
     Finished(VecDeque<Arc<Block>>),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
     pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) eager_spawn: bool,
     pub(crate) order: IterationOrder,
+    pub(crate) prefix: Option<Bytes>,
 }
 
 impl Default for SstIteratorOptions {
@@ -44,6 +46,7 @@ impl Default for SstIteratorOptions {
             cache_blocks: true,
             eager_spawn: false,
             order: IterationOrder::Ascending,
+            prefix: None,
         }
     }
 }
@@ -152,7 +155,7 @@ enum FilterState {
 }
 
 struct FilterEvaluator {
-    key: Bytes,
+    query: FilterQuery,
     db_stats: Option<DbStats>,
     state: FilterState,
     found_key: bool,
@@ -160,9 +163,9 @@ struct FilterEvaluator {
 }
 
 impl FilterEvaluator {
-    fn new(key: Bytes, db_stats: Option<DbStats>) -> Self {
+    fn new_point(key: Bytes, db_stats: Option<DbStats>) -> Self {
         Self {
-            key,
+            query: FilterQuery::point(key),
             db_stats,
             state: FilterState::NotChecked,
             found_key: false,
@@ -170,9 +173,20 @@ impl FilterEvaluator {
         }
     }
 
-    /// Evaluate the filters against the key using AND logic.
+    fn new_prefix(prefix: Bytes, db_stats: Option<DbStats>) -> Self {
+        Self {
+            query: FilterQuery::prefix(prefix),
+            db_stats,
+            state: FilterState::NotChecked,
+            found_key: false,
+            false_positive_recorded: false,
+        }
+    }
+
+    /// Evaluate the filters against the query using AND logic.
     ///
-    /// If any filter returns `false` for `might_match`, the key is filtered out.
+    /// All filters must agree the query might match for the read to proceed.
+    /// If any filter says the query is absent, the SST is skipped.
     /// If no filters are provided, the state is set to `NoFilter`.
     async fn evaluate(&mut self, filters: &[NamedFilter]) {
         if self.state != FilterState::NotChecked {
@@ -184,23 +198,42 @@ impl FilterEvaluator {
             return;
         }
 
-        let query = FilterQuery::point(self.key.clone());
-
         // AND logic: if any filter says the key is NOT present, filter it out.
-        // All filters reaching here are decoded — TableStore::read_filters
+        // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters.iter().all(|nf| nf.filter.might_match(&query));
+        let might_match = filters.iter().all(|nf| nf.filter.might_match(&self.query));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_positives.increment(1);
+                self.positives_counter(stats).increment(1);
             }
             self.state = FilterState::Positive;
         } else {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_negatives.increment(1);
+                self.negatives_counter(stats).increment(1);
             }
             self.state = FilterState::Negative;
+        }
+    }
+
+    fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+        }
+    }
+
+    fn negatives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_negatives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+        }
+    }
+
+    fn false_positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_false_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
         }
     }
 
@@ -209,15 +242,17 @@ impl FilterEvaluator {
     }
 
     fn notify_key_found(&mut self, key: &[u8]) {
-        if key == self.key.as_ref() {
-            self.found_key = true;
+        match &self.query.target {
+            FilterTarget::Point(k) if key == k.as_ref() => self.found_key = true,
+            FilterTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            _ => {}
         }
     }
 
     fn notify_finished_iteration(&mut self) {
         if self.state == FilterState::Positive && !self.found_key && !self.false_positive_recorded {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_false_positives.increment(1);
+                self.false_positives_counter(stats).increment(1);
             }
             self.false_positive_recorded = true;
         }
@@ -875,11 +910,12 @@ pub(crate) struct SstIterator<'a> {
 impl<'a> SstIterator<'a> {
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
-        let delegate = match point_key {
-            Some(key) => {
-                let filter = FilterEvaluator::new(key, db_stats);
-                SstIteratorDelegate::Filter(FilterIterator::new(internal, filter))
-            }
+        let prefix = internal.options.prefix.clone();
+        let filter_evaluator = point_key
+            .map(|key| FilterEvaluator::new_point(key, db_stats.clone()))
+            .or_else(|| prefix.map(|p| FilterEvaluator::new_prefix(p, db_stats)));
+        let delegate = match filter_evaluator {
+            Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
             None => SstIteratorDelegate::Direct(internal),
         };
         Self { delegate }
@@ -1082,7 +1118,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
 
@@ -1198,11 +1234,25 @@ mod tests {
             other => panic!("expected value, found {other:?}"),
         }
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(0)
         );
     }
@@ -1230,11 +1280,25 @@ mod tests {
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(0)
         );
     }
@@ -1282,16 +1346,32 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
+        let point_labels = &[(
+            crate::db_stats::FILTER_KIND_LABEL,
+            crate::db_stats::FILTER_KIND_POINT,
+        )];
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                point_labels,
+            ),
             Some(0)
         );
     }
@@ -1740,6 +1820,7 @@ mod tests {
                 cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
+                prefix: None,
             },
         )
         .await
@@ -1756,6 +1837,7 @@ mod tests {
                 cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
+                prefix: None,
             },
         )
         .await
@@ -2327,6 +2409,7 @@ mod tests {
             cache_blocks: true,
             eager_spawn: false,
             order,
+            prefix: None,
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2611,6 +2694,7 @@ mod tests {
                 cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
+                prefix: None,
             },
         )
         .await

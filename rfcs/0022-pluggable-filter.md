@@ -110,7 +110,7 @@ pub trait FilterPolicy {
     ///   stored, so querying with a different extractor produces false
     ///   negatives.
     ///
-    /// Examples: `"_bf"`, `"_bf:prefix=fixed3"`.
+    /// Examples: `"_bf"`, `"_bf:p=fixed3"`.
     fn name(&self) -> &str;
 
     /// Creates a new builder for constructing a filter.
@@ -303,7 +303,7 @@ pub trait PrefixExtractor {
     /// to a delimiter-based one) changes which hashes are stored in the
     /// filter, so existing filters become invalid. `BloomFilterPolicy`
     /// includes this name in the policy name it writes to SST metadata
-    /// (e.g. `"_bf:prefix=fixed3"`), which lets the reader
+    /// (e.g. `"_bf:p=fixed3"`), which lets the reader
     /// detect the mismatch and skip the filter instead of returning wrong
     /// results.
     fn name(&self) -> &str;
@@ -343,7 +343,6 @@ pub trait PrefixExtractor {
 
 The policy would look like:
 ```rust
-#[derive(Debug)]
 pub struct BloomFilterPolicy {
     bits_per_key: u32,
 
@@ -360,6 +359,10 @@ pub struct BloomFilterPolicy {
     name: String,
 }
 
+// `BloomFilterPolicy` has a manual `Debug` impl (not derived) because
+// `dyn PrefixExtractor` does not implement `Debug`; the manual impl surfaces
+// the extractor's name instead.
+
 impl BloomFilterPolicy {
     pub const NAME: &'static str = "_bf";
 
@@ -368,16 +371,29 @@ impl BloomFilterPolicy {
             bits_per_key,
             whole_key_filtering: true,
             prefix_extractor: None,
-            name: Self::NAME,
+            name: Self::NAME.to_string(),
         }
     }
 
+    /// Configures a prefix extractor for prefix-based bloom filtering.
+    ///
+    /// When set, the bloom filter hashes both extracted prefixes and (if
+    /// `whole_key_filtering` is enabled) full keys. Prefix scans can then
+    /// probe the filter to skip SSTs that contain no matching prefixes.
+    ///
+    /// The extractor's name is included in the policy name to ensure that
+    /// filters built with different extractors are not mismatched.
     pub fn with_prefix_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
-        self.name = format!("_bf:prefix={}", extractor.name());
+        self.name = format!("{}:p={}", Self::NAME, extractor.name());
         self.prefix_extractor = Some(extractor);
         self
     }
 
+    /// Controls whether full keys are hashed into the bloom filter.
+    ///
+    /// When `true` (the default), point lookups can use the filter. Set
+    /// to `false` if only prefix scans are needed and you want to reduce
+    /// filter size.
     pub fn with_whole_key_filtering(mut self, enabled: bool) -> Self {
         self.whole_key_filtering = enabled;
         self
@@ -399,7 +415,7 @@ impl FilterPolicy for BloomFilterPolicy {
         Arc::new(BloomFilter::decode(
             data,
             self.whole_key_filtering,
-            self.prefix_extractor.is_some(),
+            self.prefix_extractor.clone(),
         ))
     }
 
@@ -776,8 +792,11 @@ SlateDB features and components that this RFC interacts with. Check all that app
 - **Configuration**: New `with_filter_policies` on `DbBuilder` /
   `CompactorBuilder` (programmatic only; not serializable to TOML/JSON).
   `filter_bits_per_key` has been removed from `Settings`.
-- **Metrics**: Existing `sst_filter_positives`, `sst_filter_negatives`,
-  `sst_filter_false_positives` metrics are preserved.
+- **Metrics**: Existing `sst_filter_positive_count`, `sst_filter_negative_count`,
+  `sst_filter_false_positive_count` counters are preserved. Each gains a
+  `kind` label with values `point` or `prefix` so point-lookup filtering and
+  prefix-scan filtering can be tracked independently (mirrors RocksDB's
+  separation of `BLOOM_FILTER_FULL_*` and `BLOOM_FILTER_PREFIX_*` tickers).
 
 ### Compatibility
 
@@ -786,16 +805,17 @@ SlateDB features and components that this RFC interacts with. Check all that app
   Old SSTs without this field default to `Legacy` (FlatBuffers absent-field
   semantics map to `0`). See [SST Format Changes](#sst-format-changes).
 - **Public API**: `filter_bits_per_key` is removed from `Settings`.
-  `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. `ScanOptions`
-  gains a `filter_context: Option<Arc<dyn Any + Send + Sync>>` field. See
-  [Configuration](#configuration) for migration examples.
+  `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. See
+  [Configuration](#configuration) for migration examples. The
+  `ScanOptions::filter_context` field is deferred and not added in the
+  initial implementation.
 - **Rolling upgrades**: Old readers that don't understand the `filter_format`
   field will ignore it (FlatBuffers forward compatibility). They will continue
   to decode filters as bloom filters, which is correct as long as the bloom
   filter policy is still in use.
 - **Prefix extractor changes**: Changing the prefix extractor changes the policy
-  name (e.g., `"_bf:prefix=fixed3"` →
-  `"_bf:prefix=delim:"`). With the array design, the old
+  name (e.g., `"_bf:p=fixed3"` →
+  `"_bf:p=delim:"`). With the array design, the old
   policy can remain in `filter_policies` alongside the new one, so existing
   SSTs' filters remain usable while new SSTs are written with both. After
   compaction rewrites all SSTs, the old policy can be removed.

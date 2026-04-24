@@ -178,7 +178,7 @@ impl<'a> SortedRunIterator<'a> {
             .view
             .build_next_iter(
                 self.table_store.clone(),
-                self.sst_iter_options,
+                self.sst_iter_options.clone(),
                 self.db_stats.clone(),
             )
             .await?;

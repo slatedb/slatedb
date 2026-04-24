@@ -15,6 +15,7 @@ use crate::types::KeyValue;
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
+use bytes::Bytes;
 use futures::future::join;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -30,6 +31,31 @@ struct IteratorSources {
     mem_iters: Vec<Box<dyn RowEntryIterator + 'static>>,
     l0_iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
     sr_iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
+}
+
+/// Context for [`Reader::scan_with_options`].
+///
+/// Groups the state each scan needs from its caller.
+pub(crate) struct ScanContext<'a> {
+    /// Read-only view over in-memory state (memtables) and access to on-disk
+    /// data (level-0 SSTs and compacted sorted runs) used to construct
+    /// iterators.
+    pub(crate) db_state: &'a (dyn DbStateReader + Sync),
+    /// Optional write batch iterator to include in the merged scan. Set only
+    /// when the scan is running inside a transaction.
+    pub(crate) write_batch_iter: Option<WriteBatchIterator>,
+    /// Optional upper bound on sequence number visibility. When set, entries
+    /// with a greater sequence number are filtered out by the iterator
+    /// construction. Used by snapshots and transactions.
+    pub(crate) max_seq: Option<u64>,
+    /// Optional tracker that records the scanned range for SSI conflict
+    /// detection. Populated only for transactions running at the
+    /// serializable-snapshot isolation level.
+    pub(crate) range_tracker: Option<Arc<DbIteratorRangeTracker>>,
+    /// Optional scan prefix forwarded to per-SST filter evaluation. When set,
+    /// filters are probed with a prefix query so SSTs that do not contain the
+    /// prefix can be skipped.
+    pub(crate) prefix: Option<Bytes>,
 }
 
 pub(crate) struct Reader {
@@ -110,7 +136,7 @@ impl Reader {
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
         write_batch_iter: Option<WriteBatchIterator>,
-        sst_iter_options: SstIteratorOptions,
+        sst_iter_options: &SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources, SlateDBError> {
         let mut memtables = VecDeque::new();
@@ -167,7 +193,7 @@ impl Reader {
         range: &BytesRange,
         key: &[u8],
         db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: SstIteratorOptions,
+        sst_iter_options: &SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
@@ -182,7 +208,7 @@ impl Reader {
                 range.clone(),
                 sst.clone(),
                 self.table_store.clone(),
-                sst_iter_options,
+                sst_iter_options.clone(),
                 db_stats.clone(),
             )?;
             if let Some(iterator) = iterator {
@@ -197,7 +223,7 @@ impl Reader {
         range: &BytesRange,
         key: &[u8],
         db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: SstIteratorOptions,
+        sst_iter_options: &SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
@@ -213,7 +239,7 @@ impl Reader {
                     range.clone(),
                     handle.clone(),
                     self.table_store.clone(),
-                    sst_iter_options,
+                    sst_iter_options.clone(),
                     db_stats.clone(),
                 )?;
                 if let Some(iterator) = iterator {
@@ -228,17 +254,19 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: SstIteratorOptions,
+        sst_iter_options: &SstIteratorOptions,
         max_parallel: usize,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
         let table_store = self.table_store.clone();
+        let sst_iter_options = sst_iter_options.clone();
         build_concurrent(
             db_state.core().l0.iter().cloned(),
             max_parallel,
             move |sst| {
                 let table_store = table_store.clone();
                 let range = range_clone.clone();
+                let sst_iter_options = sst_iter_options.clone();
                 async move {
                     SstIterator::new_owned_initialized(
                         range.clone(),
@@ -260,7 +288,7 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: SstIteratorOptions,
+        sst_iter_options: &SstIteratorOptions,
         max_parallel: usize,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
@@ -280,7 +308,7 @@ impl Reader {
                     range.clone(),
                     sr,
                     table_store,
-                    sst_iter_options,
+                    sst_iter_options.clone(),
                     Some(self.db_stats.clone()),
                 )
                 .await
@@ -338,7 +366,7 @@ impl Reader {
                 &range,
                 db_state,
                 write_batch_iter,
-                sst_iter_options,
+                &sst_iter_options,
                 Some(self.db_stats.clone()),
             )
             .await?;
@@ -388,24 +416,15 @@ impl Reader {
     ///   exclusive).
     /// - `options`: Options for the scan, including read-ahead, caching, and the
     ///   maximum number of concurrent fetch tasks.
-    /// - `db_state`: Read-only view over in-memory state (memtables) and access to on-disk
-    ///   data (level-0 SSTs and compacted sorted runs) needed to construct iterators.
-    /// - `write_batch`: Optional `WriteBatch` to include in the merged scan. It's only used when
-    ///   operating within a Transaction.
-    /// - `max_seq`: Optional upper bound on the sequence number visibility for
-    ///   the scan. If provided, entries with a greater sequence number are
-    ///   filtered out by the iterator construction.
+    /// - `ctx`: Caller-threaded state. See [`ScanContext`] for the details.
     pub(crate) async fn scan_with_options(
         &self,
         range: BytesRange,
         options: &ScanOptions,
-        db_state: &(dyn DbStateReader + Sync),
-        write_batch_iter: Option<WriteBatchIterator>,
-        max_seq: Option<u64>,
-        range_tracker: Option<Arc<DbIteratorRangeTracker>>,
+        ctx: ScanContext<'_>,
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
-        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
+        let max_seq = self.prepare_max_seq(ctx.max_seq, options.durability_filter, options.dirty);
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
@@ -414,6 +433,7 @@ impl Reader {
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
             order: options.order,
+            prefix: ctx.prefix,
         };
 
         let IteratorSources {
@@ -422,7 +442,13 @@ impl Reader {
             l0_iters,
             sr_iters,
         } = self
-            .build_iterator_sources(&range, db_state, write_batch_iter, sst_iter_options, None)
+            .build_iterator_sources(
+                &range,
+                ctx.db_state,
+                ctx.write_batch_iter,
+                &sst_iter_options,
+                None,
+            )
             .await?;
 
         DbIterator::new(
@@ -432,7 +458,7 @@ impl Reader {
             l0_iters,
             sr_iters,
             max_seq,
-            range_tracker,
+            ctx.range_tracker,
             self.read_merge_operator.clone(),
             options.order,
         )
@@ -484,7 +510,8 @@ mod tests {
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorder, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
+        MetricsRecorderHelper,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1735,10 +1762,13 @@ mod tests {
             .scan_with_options(
                 range,
                 &scan_options,
-                &test_db_state,
-                wb_iter,
-                test_case.max_seq,
-                None,
+                ScanContext {
+                    db_state: &test_db_state,
+                    write_batch_iter: wb_iter,
+                    max_seq: test_case.max_seq,
+                    range_tracker: None,
+                    prefix: None,
+                },
             )
             .await?;
 
@@ -1862,10 +1892,13 @@ mod tests {
             .scan_with_options(
                 scan_range,
                 &scan_options,
-                &test_db_state,
-                wb_iter,
-                None,
-                None,
+                ScanContext {
+                    db_state: &test_db_state,
+                    write_batch_iter: wb_iter,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix: None,
+                },
             )
             .await?;
 
@@ -1930,16 +1963,32 @@ mod tests {
             .await?;
 
         assert!(result.is_none());
+        let point_labels = &[(
+            crate::db_stats::FILTER_KIND_LABEL,
+            crate::db_stats::FILTER_KIND_POINT,
+        )];
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(0)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(0)
         );
 
@@ -2013,7 +2062,17 @@ mod tests {
         let scan_options = ScanOptions::default().with_dirty(true);
         let wb_iter = wb_range_iter(&write_batch, &range, scan_options.order);
         let mut iter = reader
-            .scan_with_options(range, &scan_options, &test_db_state, wb_iter, None, None)
+            .scan_with_options(
+                range,
+                &scan_options,
+                ScanContext {
+                    db_state: &test_db_state,
+                    write_batch_iter: wb_iter,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix: None,
+                },
+            )
             .await?;
 
         // then: each result should carry its expire_ts

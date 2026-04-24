@@ -66,7 +66,7 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
-use crate::reader::Reader;
+use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
@@ -238,7 +238,40 @@ impl DbInner {
         self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
-            .scan_with_options(range, options, &db_state, None, None, None)
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix: None,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn scan_prefix_with_options(
+        &self,
+        prefix: Bytes,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, SlateDBError> {
+        self.check_closed()?;
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        let db_state = self.state.read().view();
+        self.reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix: Some(prefix),
+                },
+            )
             .await
     }
 
@@ -488,6 +521,7 @@ impl DbInner {
             cache_blocks: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
+            prefix: None,
         };
 
         let replay_options = WalReplayOptions {
@@ -1086,9 +1120,9 @@ impl Db {
     where
         P: AsRef<[u8]> + Send,
     {
-        let range = BytesRange::from_prefix(prefix.as_ref());
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
         self.inner
-            .scan_with_options(range, options)
+            .scan_prefix_with_options(prefix, options)
             .await
             .map_err(Into::into)
     }
@@ -1304,9 +1338,13 @@ impl Db {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        let mut batch = WriteBatch::new();
-        batch.merge(key, value);
-        self.write(batch).await
+        self.merge_with_options(
+            key,
+            value,
+            &MergeOptions::default(),
+            &WriteOptions::default(),
+        )
+        .await
     }
 
     /// Merge a value into the database with custom `MergeOptions` and `WriteOptions`.
@@ -1369,6 +1407,10 @@ impl Db {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        if self.inner.flush_merge_operator.is_none() {
+            return Err(SlateDBError::MergeOperatorMissing.into());
+        }
+
         let mut batch = WriteBatch::new();
         batch.merge_with_options(key, value, merge_opts);
         self.write_with_options(batch, write_opts).await
@@ -1622,7 +1664,7 @@ impl DbReadOps for Db {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, options).await
+        Db::get_with_options(self, key, options).await
     }
 
     async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
@@ -1630,7 +1672,7 @@ impl DbReadOps for Db {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, options).await
+        Db::get_key_value_with_options(self, key, options).await
     }
 
     async fn scan_with_options<K, T>(
@@ -1642,7 +1684,18 @@ impl DbReadOps for Db {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, options).await
+        Db::scan_with_options(self, range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        Db::scan_prefix_with_options(self, prefix, options).await
     }
 }
 
@@ -3429,7 +3482,7 @@ mod tests {
                 ..,
                 sst1,
                 table_store.clone(),
-                sst_iter_options,
+                sst_iter_options.clone(),
             )
             .await
             .unwrap()
@@ -6149,40 +6202,66 @@ mod tests {
 
     #[tokio::test]
     async fn should_error_when_merging_without_merge_operator() {
-        // Given: Database without merge operator configured
+        // Given: Database with merge operator, merge operands written
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_merge_4", object_store.clone())
+        let path = "/tmp/test_merge_4";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        db.merge(b"key1", b"value1").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // When: Reopening the DB without a merge operator and then reading
+        let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
             .build()
             .await
             .unwrap();
 
-        // When: Attempting to merge and then reading
-        // Note: Merge writes succeed, but reads will fail to merge operands
-        db.merge(b"key1", b"value1").await.unwrap();
+        // Then: Reading should fail because merge operands require a merge operator
+        let err = db.get(b"key1").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+    }
 
-        // Then: Reading should fail because merge operator is required at read time
-        // The merge operand is stored but can't be merged without an operator
-        let result = db.get(b"key1").await;
+    #[tokio::test]
+    async fn should_error_when_writing_merge_without_merge_operator() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_4_write_fails", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
 
-        // Verify that reading fails with MergeOperatorMissing error
-        assert!(
-            result.is_err(),
-            "Reading merge operand without merge operator should error"
-        );
-        match result {
-            Err(e) => {
-                // Expected: reading merge operands without a merge operator should error with MergeOperatorMissing
-                let error_string = format!("{}", e);
-                assert!(
-                    error_string.contains("merge operator missing")
-                        || error_string.contains("MergeOperatorMissing"),
-                    "Error should be MergeOperatorMissing, got: {:?}",
-                    e
-                );
-            }
-            Ok(_) => unreachable!("Should have errored"),
-        }
+        let err = db.merge(b"key1", b"value1").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn should_error_when_writing_batch_with_merge_without_merge_operator() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_4_batch_write_fails", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.merge(b"key2", b"value2");
+
+        let err = db.write(batch).await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+
+        assert_eq!(db.get(b"key1").await.unwrap(), None);
+        assert_eq!(db.get(b"key2").await.unwrap(), None);
     }
 
     #[tokio::test]
