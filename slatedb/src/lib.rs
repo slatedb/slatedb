@@ -54,8 +54,8 @@ pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
 pub use filter_policy::{
-    BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery, FilterTarget,
-    PrefixExtractor,
+    BloomFilterPolicy, Filter, FilterBuilder, FilterContext, FilterPolicy, FilterQuery,
+    FilterTarget, PrefixExtractor,
 };
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;

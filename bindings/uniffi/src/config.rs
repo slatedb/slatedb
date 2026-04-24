@@ -118,6 +118,23 @@ impl From<Ttl> for slatedb::config::Ttl {
     }
 }
 
+/// Opaque caller-supplied context forwarded to custom filter policies at
+/// query time. Raw bytes that a custom filter decodes; built-in filters
+/// (including bloom) ignore this entirely.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FilterContext {
+    pub bytes: Vec<u8>,
+}
+
+impl From<FilterContext> for slatedb::FilterContext {
+    fn from(value: FilterContext) -> Self {
+        // The core enum's `Inline([u8; 64])` variant is a Rust-side
+        // no-heap-allocation optimization and doesn't cross the uniffi
+        // ABI, so bindings always land in `Bytes`.
+        slatedb::FilterContext::Bytes(slatedb::bytes::Bytes::from(value.bytes))
+    }
+}
+
 /// Options that control a point read.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReadOptions {
@@ -127,6 +144,10 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether fetched blocks should be inserted into the block cache.
     pub cache_blocks: bool,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    #[uniffi(default = None)]
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ReadOptions {
@@ -135,6 +156,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            filter_context: None,
         }
     }
 }
@@ -145,6 +167,7 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
+            filter_context: value.filter_context.map(Into::into),
         }
     }
 }
@@ -218,6 +241,10 @@ pub struct ScanOptions {
     /// The iteration order for the scan. Defaults to ascending when not set.
     #[uniffi(default = None)]
     pub order: Option<IterationOrder>,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    #[uniffi(default = None)]
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ScanOptions {
@@ -229,6 +256,7 @@ impl Default for ScanOptions {
             cache_blocks: false,
             max_fetch_tasks: 1,
             order: None,
+            filter_context: None,
         }
     }
 }
@@ -252,6 +280,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                 })
             })?,
             order: value.order.unwrap_or_default().into(),
+            filter_context: value.filter_context.map(Into::into),
         })
     }
 }

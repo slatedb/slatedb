@@ -609,8 +609,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
                 .with_recorder(recorder.clone())
-                .with_seed(rand.rng().next_u64())
-                .with_filter_policies(self.filter_policies.clone());
+                .with_seed(rand.rng().next_u64());
 
             if let Some(operator) = self.merge_operator {
                 builder = builder.with_merge_operator(operator);

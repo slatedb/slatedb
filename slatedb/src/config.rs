@@ -178,6 +178,7 @@
 //!     min_age: '86400s'
 //! ```
 //!
+use crate::filter_policy::FilterContext;
 use crate::iter::IterationOrder;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
@@ -270,6 +271,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ReadOptions {
@@ -278,6 +282,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            filter_context: None,
         }
     }
 }
@@ -304,6 +309,13 @@ impl ReadOptions {
             ..self
         }
     }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -325,6 +337,12 @@ pub struct ScanOptions {
     pub max_fetch_tasks: usize,
     /// The iteration order for the scan. Defaults to [`IterationOrder::Ascending`].
     pub order: IterationOrder,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    ///
+    /// Only consulted for `scan_prefix` today. Plain range scans do not
+    /// evaluate SST filters, so this field has no effect on `scan`.
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ScanOptions {
@@ -337,6 +355,7 @@ impl Default for ScanOptions {
             cache_blocks: false,
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
+            filter_context: None,
         }
     }
 }
@@ -380,6 +399,13 @@ impl ScanOptions {
 
     pub fn with_order(self, order: IterationOrder) -> Self {
         Self { order, ..self }
+    }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
     }
 }
 

@@ -13,7 +13,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterQuery, FilterTarget, NamedFilter};
+use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
 use crate::{
@@ -36,6 +36,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) eager_spawn: bool,
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
+    pub(crate) filter_context: Option<FilterContext>,
 }
 
 impl Default for SstIteratorOptions {
@@ -47,6 +48,7 @@ impl Default for SstIteratorOptions {
             eager_spawn: false,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         }
     }
 }
@@ -163,9 +165,9 @@ struct FilterEvaluator {
 }
 
 impl FilterEvaluator {
-    fn new_point(key: Bytes, db_stats: Option<DbStats>) -> Self {
+    fn new_point(key: Bytes, context: Option<FilterContext>, db_stats: Option<DbStats>) -> Self {
         Self {
-            query: FilterQuery::point(key),
+            query: FilterQuery::point(key).with_context(context),
             db_stats,
             state: FilterState::NotChecked,
             found_key: false,
@@ -173,9 +175,13 @@ impl FilterEvaluator {
         }
     }
 
-    fn new_prefix(prefix: Bytes, db_stats: Option<DbStats>) -> Self {
+    fn new_prefix(
+        prefix: Bytes,
+        context: Option<FilterContext>,
+        db_stats: Option<DbStats>,
+    ) -> Self {
         Self {
-            query: FilterQuery::prefix(prefix),
+            query: FilterQuery::prefix(prefix).with_context(context),
             db_stats,
             state: FilterState::NotChecked,
             found_key: false,
@@ -911,9 +917,12 @@ impl<'a> SstIterator<'a> {
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
         let prefix = internal.options.prefix.clone();
-        let filter_evaluator = point_key
-            .map(|key| FilterEvaluator::new_point(key, db_stats.clone()))
-            .or_else(|| prefix.map(|p| FilterEvaluator::new_prefix(p, db_stats)));
+        let filter_context = internal.options.filter_context.clone();
+        let filter_evaluator = match (point_key, prefix) {
+            (Some(key), _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
+            (None, Some(p)) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
+            (None, None) => None,
+        };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
             None => SstIteratorDelegate::Direct(internal),
@@ -1821,6 +1830,7 @@ mod tests {
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
+                filter_context: None,
             },
         )
         .await
@@ -1838,6 +1848,7 @@ mod tests {
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
+                filter_context: None,
             },
         )
         .await
@@ -2410,6 +2421,7 @@ mod tests {
             eager_spawn: false,
             order,
             prefix: None,
+            filter_context: None,
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2695,6 +2707,7 @@ mod tests {
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
+                filter_context: None,
             },
         )
         .await

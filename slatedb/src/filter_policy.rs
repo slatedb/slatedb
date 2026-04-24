@@ -80,9 +80,19 @@ pub trait Filter: Send + Sync {
 }
 
 /// A membership query passed to [`Filter::might_match`].
+#[derive(Clone, Debug)]
 pub struct FilterQuery {
     /// The target of this query (a specific key or a prefix).
     pub target: FilterTarget,
+    /// Opaque, caller-supplied context forwarded from
+    /// [`crate::config::ScanOptions::filter_context`] or
+    /// [`crate::config::ReadOptions::filter_context`].
+    ///
+    /// Custom filter policies read this to parametrize their evaluation
+    /// (e.g., a min/max version filter expects two `u64`s encoded in the
+    /// `Inline` variant). Built-in filters (including `BloomFilterPolicy`)
+    /// ignore this field.
+    pub context: Option<FilterContext>,
 }
 
 impl FilterQuery {
@@ -90,6 +100,7 @@ impl FilterQuery {
     pub fn point(key: Bytes) -> Self {
         Self {
             target: FilterTarget::Point(key),
+            context: None,
         }
     }
 
@@ -97,7 +108,14 @@ impl FilterQuery {
     pub fn prefix(prefix: Bytes) -> Self {
         Self {
             target: FilterTarget::Prefix(prefix),
+            context: None,
         }
+    }
+
+    /// Attaches caller-supplied context to this query.
+    pub fn with_context(mut self, context: Option<FilterContext>) -> Self {
+        self.context = context;
+        self
     }
 }
 
@@ -108,6 +126,22 @@ pub enum FilterTarget {
     Point(Bytes),
     /// Used to test whether any key with the given prefix might exist in the SST.
     Prefix(Bytes),
+}
+
+/// Caller-supplied opaque context forwarded to custom filter policies at
+/// query time.
+///
+/// Carries raw bytes that a custom filter policy knows how to decode.
+/// Built-in policies ignore this entirely. The two variants exist to keep
+/// small payloads (e.g., a pair of `u64` version bounds) free of heap allocation
+/// on the hot path while still supporting larger payloads via [`Bytes`].
+#[derive(Clone, Debug)]
+pub enum FilterContext {
+    /// Inline 64-byte payload with no heap allocation. Suitable for
+    /// pairs of `u64`s, `u128`s, and other fixed-layout small structs.
+    Inline([u8; 64]),
+    /// Heap-allocated payload for anything larger or variable-sized.
+    Bytes(Bytes),
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1041,43 @@ mod tests {
                     &key[..3],
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_filter_query_default_context_is_none() {
+        let q = FilterQuery::point(Bytes::from_static(b"k"));
+        assert!(q.context.is_none());
+        let q = FilterQuery::prefix(Bytes::from_static(b"p"));
+        assert!(q.context.is_none());
+    }
+
+    #[test]
+    fn test_filter_query_with_inline_context() {
+        let mut payload = [0u8; 64];
+        payload[..8].copy_from_slice(&42u64.to_be_bytes());
+        payload[8..16].copy_from_slice(&100u64.to_be_bytes());
+        let ctx = FilterContext::Inline(payload);
+
+        let query = FilterQuery::point(Bytes::from_static(b"k")).with_context(Some(ctx));
+        match query.context {
+            Some(FilterContext::Inline(buf)) => {
+                assert_eq!(u64::from_be_bytes(buf[..8].try_into().unwrap()), 42);
+                assert_eq!(u64::from_be_bytes(buf[8..16].try_into().unwrap()), 100);
+            }
+            other => panic!("expected Inline variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_filter_query_with_bytes_context() {
+        let payload = Bytes::copy_from_slice(&[1, 2, 3, 4, 5]);
+        let ctx = FilterContext::Bytes(payload.clone());
+
+        let query = FilterQuery::prefix(Bytes::from_static(b"p")).with_context(Some(ctx));
+        match query.context {
+            Some(FilterContext::Bytes(b)) => assert_eq!(b, payload),
+            other => panic!("expected Bytes variant, got {:?}", other),
         }
     }
 }

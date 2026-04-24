@@ -522,6 +522,7 @@ impl DbInner {
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         };
 
         let replay_options = WalReplayOptions {
@@ -2251,6 +2252,7 @@ mod tests {
                                         durability_filter: Memory,
                                         dirty: false,
                                         cache_blocks: true,
+                                        filter_context: None,
                                     }
                                 )
                                 .await

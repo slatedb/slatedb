@@ -339,6 +339,7 @@ impl Reader {
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
+            filter_context: options.filter_context.clone(),
             ..SstIteratorOptions::default()
         };
 
@@ -413,6 +414,7 @@ impl Reader {
             eager_spawn: true,
             order: options.order,
             prefix: ctx.prefix,
+            filter_context: options.filter_context.clone(),
         };
 
         let IteratorSources {
