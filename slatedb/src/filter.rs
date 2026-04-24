@@ -36,7 +36,7 @@ impl BloomFilterBuilder {
         }
     }
 
-    pub(crate) fn add_key(&mut self, key: Bytes) {
+    pub(crate) fn add_key(&mut self, key: &Bytes) {
         // Keys must arrive in sorted order (as in SST construction) for the
         // deduplication of prefix hashes to work.
         if let Some(ref extractor) = self.prefix_extractor {
@@ -57,7 +57,7 @@ impl BloomFilterBuilder {
         }
         // Add full-key hash if whole_key_filtering is enabled
         if self.whole_key_filtering {
-            self.key_hashes.push(filter_hash(&key));
+            self.key_hashes.push(filter_hash(key));
         }
     }
 
@@ -132,7 +132,7 @@ impl BloomFilter {
 
 impl FilterBuilder for BloomFilterBuilder {
     fn add_entry(&mut self, entry: &RowEntry) {
-        self.add_key(entry.key.clone());
+        self.add_key(&entry.key);
     }
 
     fn build(&mut self) -> Arc<dyn Filter> {
@@ -331,7 +331,7 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            builder.add_key(bytes.freeze());
+            builder.add_key(&bytes.freeze());
         }
         let filter = builder.build_filter();
 
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn test_bloom_filter_size() {
         let mut builder = point_builder(10);
-        builder.add_key(Bytes::from_static(b"test_key"));
+        builder.add_key(&Bytes::from_static(b"test_key"));
         let filter = builder.build_filter();
 
         // The exact size may vary, so we'll check if it's greater than zero
@@ -384,7 +384,7 @@ mod tests {
     fn test_should_clamp_allocated_bytes() {
         let mut builder = point_builder(10);
         for i in 0..100 {
-            builder.add_key(Bytes::from(format!("{}", i)));
+            builder.add_key(&Bytes::from(format!("{}", i)));
         }
         let filter = builder.build_filter();
         let original_size = filter.size();
