@@ -1634,20 +1634,6 @@ impl Db {
         Ok(txn)
     }
 
-    /// See [`DbCacheManagerOps::warm_sst`].
-    pub async fn warm_sst(
-        &self,
-        sst_id: SsTableId,
-        targets: &[CacheTarget],
-    ) -> Result<(), crate::Error> {
-        <Self as DbCacheManagerOps>::warm_sst(self, sst_id, targets).await
-    }
-
-    /// See [`DbCacheManagerOps::evict_cached_sst`].
-    pub async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
-        <Self as DbCacheManagerOps>::evict_cached_sst(self, sst_id).await
-    }
-
     /// Resolve an object store from a URL.
     ///
     /// ## Arguments
