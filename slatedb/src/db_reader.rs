@@ -246,9 +246,10 @@ impl DbReaderInner {
     fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
-        latest.last_compacted_l0_sst_view_id != current_state.last_compacted_l0_sst_view_id
+        latest.tree.last_compacted_l0_sst_view_id
+            != current_state.tree.last_compacted_l0_sst_view_id
             || latest.last_l0_seq > current_state.last_l0_seq
-            || latest.compacted != current_state.compacted
+            || latest.tree.compacted != current_state.tree.compacted
     }
 
     async fn replace_checkpoint(
@@ -2554,7 +2555,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         loop {
             let manifest = stored_manifest.refresh().await.unwrap();
-            if manifest.core.l0.len() == 1 {
+            if manifest.core.tree.l0.len() == 1 {
                 break;
             }
             assert!(
@@ -2567,7 +2568,7 @@ mod tests {
         let timeout = Duration::from_secs(30);
         let start = tokio::time::Instant::now();
         loop {
-            if reader.inner.state.read().manifest.core.l0.len() == 1 {
+            if reader.inner.state.read().manifest.core.tree.l0.len() == 1 {
                 break;
             }
             // The reader poller may observe the pre-flush manifest on one tick and

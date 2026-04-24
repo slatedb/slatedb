@@ -8,7 +8,7 @@ use ulid::Ulid;
 
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
-use crate::manifest::{Manifest, ManifestCore};
+use crate::manifest::{LsmTreeState, Manifest, ManifestCore};
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
@@ -205,8 +205,12 @@ impl Compaction {
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_sorted_runs(&self, db_state: &ManifestCore) -> Vec<SortedRun> {
-        let srs_by_id: HashMap<u32, &SortedRun> =
-            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+        let srs_by_id: HashMap<u32, &SortedRun> = db_state
+            .tree
+            .compacted
+            .iter()
+            .map(|sr| (sr.id, sr))
+            .collect();
 
         self.spec
             .sources()
@@ -221,8 +225,12 @@ impl Compaction {
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_l0_sst_views(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
-        let sst_views_by_id: HashMap<Ulid, &SsTableView> =
-            db_state.l0.iter().map(|view| (view.id, view)).collect();
+        let sst_views_by_id: HashMap<Ulid, &SsTableView> = db_state
+            .tree
+            .l0
+            .iter()
+            .map(|view| (view.id, view))
+            .collect();
 
         self.spec
             .sources()
@@ -573,9 +581,9 @@ impl CompactorState {
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let my_db_state = self.db_state();
-        let last_compacted_l0 = my_db_state.last_compacted_l0_sst_view_id;
+        let last_compacted_l0 = my_db_state.tree.last_compacted_l0_sst_view_id;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.value.core.l0;
+        let writer_l0 = &remote_manifest.value.core.tree.l0;
         for writer_l0_sst in writer_l0 {
             // todo: this is brittle. we are relying on the l0 list always being updated in
             //       an expected order. We should instead encode the ordering in the l0 SST IDs
@@ -593,10 +601,12 @@ impl CompactorState {
         // write out the merged core db state and manifest
         let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
-            last_compacted_l0_sst_view_id: my_db_state.last_compacted_l0_sst_view_id,
-            last_compacted_l0_sst_id: my_db_state.last_compacted_l0_sst_id,
-            l0: merged_l0s,
-            compacted: my_db_state.compacted.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: my_db_state.tree.last_compacted_l0_sst_view_id,
+                last_compacted_l0_sst_id: my_db_state.tree.last_compacted_l0_sst_id,
+                l0: merged_l0s,
+                compacted: my_db_state.tree.compacted.clone(),
+            },
             next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
             replay_after_wal_id: remote_manifest.value.core.replay_after_wal_id,
             last_l0_clock_tick: remote_manifest.value.core.last_l0_clock_tick,
@@ -629,6 +639,7 @@ impl CompactorState {
         }
         if self
             .db_state()
+            .tree
             .compacted
             .iter()
             .any(|sr| sr.id == spec.destination())
@@ -690,6 +701,7 @@ impl CompactorState {
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
             let new_l0: VecDeque<SsTableView> = db_state
+                .tree
                 .l0
                 .iter()
                 .filter(|l0| !compaction_l0s.contains(&l0.id))
@@ -697,7 +709,7 @@ impl CompactorState {
                 .collect();
             let mut new_compacted = Vec::new();
             let mut inserted = false;
-            for compacted in db_state.compacted.iter() {
+            for compacted in db_state.tree.compacted.iter() {
                 if !inserted && output_sr.id >= compacted.id {
                     new_compacted.push(output_sr.clone());
                     inserted = true;
@@ -717,16 +729,17 @@ impl CompactorState {
             if let Some(view_id) = first_source.maybe_unwrap_sst_view() {
                 // if there are l0s, the newest must be the first entry in sources.
                 // TODO: validate that this is the case
-                db_state.last_compacted_l0_sst_view_id = Some(view_id);
+                db_state.tree.last_compacted_l0_sst_view_id = Some(view_id);
                 // Resolve the SST ID from the view before it's removed from l0.
-                db_state.last_compacted_l0_sst_id = db_state
+                db_state.tree.last_compacted_l0_sst_id = db_state
+                    .tree
                     .l0
                     .iter()
                     .find(|v| v.id == view_id)
                     .map(|v| v.sst.id.unwrap_compacted_id());
             }
-            db_state.l0 = new_l0;
-            db_state.compacted = new_compacted;
+            db_state.tree.l0 = new_l0;
+            db_state.tree.compacted = new_compacted;
             self.manifest.value.core = db_state;
             self.manifest.value.prune_external_sst_ids();
             self.update_compaction(&compaction_id, |c| {
@@ -929,7 +942,7 @@ mod tests {
         let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec = build_l0_compaction(&state.db_state().l0, 0);
+        let spec = build_l0_compaction(&state.db_state().tree.l0, 0);
         // when:
         let compaction = Compaction::new(compaction_id, spec.clone());
         state
@@ -950,14 +963,14 @@ mod tests {
         let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        let spec = build_l0_compaction(&before_compaction.tree.l0, 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
             .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // when:
-        let compacted_ssts = before_compaction.l0.iter().cloned().collect();
+        let compacted_ssts = before_compaction.tree.l0.iter().cloned().collect();
         let sr = SortedRun {
             id: 0,
             sst_views: compacted_ssts,
@@ -966,15 +979,16 @@ mod tests {
 
         // then:
         assert_eq!(
-            state.db_state().last_compacted_l0_sst_view_id,
-            Some(before_compaction.l0.front().unwrap().id)
+            state.db_state().tree.last_compacted_l0_sst_view_id,
+            Some(before_compaction.tree.l0.front().unwrap().id)
         );
-        assert_eq!(state.db_state().l0.len(), 0);
-        assert_eq!(state.db_state().compacted.len(), 1);
-        assert_eq!(state.db_state().compacted.first().unwrap().id, sr.id);
+        assert_eq!(state.db_state().tree.l0.len(), 0);
+        assert_eq!(state.db_state().tree.compacted.len(), 1);
+        assert_eq!(state.db_state().tree.compacted.first().unwrap().id, sr.id);
         let expected_ids: Vec<SsTableId> = sr.sst_views.iter().map(|h| h.sst.id).collect();
         let found_ids: Vec<SsTableId> = state
             .db_state()
+            .tree
             .compacted
             .first()
             .unwrap()
@@ -997,7 +1011,7 @@ mod tests {
         // Seed external_dbs with a mix of IDs that are currently in L0 (will move to the
         // compacted sorted run and remain live) and a stale ID that was never in the
         // manifest (simulating a parent SST already compacted away on a prior cycle).
-        let live_id = before_compaction.l0.front().unwrap().sst.id;
+        let live_id = before_compaction.tree.l0.front().unwrap().sst.id;
         let stale_id = SsTableId::Compacted(Ulid::new());
         state.manifest.value.external_dbs = vec![
             ExternalDb {
@@ -1015,14 +1029,14 @@ mod tests {
         ];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        let spec = build_l0_compaction(&before_compaction.tree.l0, 0);
         state
             .add_compaction(Compaction::new(compaction_id, spec))
             .expect("failed to add compaction");
 
         let sr = SortedRun {
             id: 0,
-            sst_views: before_compaction.l0.iter().cloned().collect(),
+            sst_views: before_compaction.tree.l0.iter().cloned().collect(),
         };
         state.finish_compaction(compaction_id, sr);
 
@@ -1047,14 +1061,14 @@ mod tests {
         let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        let spec = build_l0_compaction(&before_compaction.tree.l0, 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
             .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // when:
-        let compacted_ssts = before_compaction.l0.iter().cloned().collect();
+        let compacted_ssts = before_compaction.tree.l0.iter().cloned().collect();
         let sr = SortedRun {
             id: 0,
             sst_views: compacted_ssts,
@@ -1074,22 +1088,28 @@ mod tests {
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
         rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48])).unwrap();
-        wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
+        wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().tree.l0.len() + 1);
 
         // when:
         state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
-        assert!(state.db_state().last_compacted_l0_sst_view_id.is_none());
+        assert!(state
+            .db_state()
+            .tree
+            .last_compacted_l0_sst_view_id
+            .is_none());
         let expected_merged_l0s: Vec<Ulid> = sm
             .manifest()
             .core
+            .tree
             .l0
             .iter()
             .map(|t| t.sst.id.unwrap_compacted_id())
             .collect();
         let merged_l0s: Vec<Ulid> = state
             .db_state()
+            .tree
             .l0
             .iter()
             .map(|h| h.sst.id.unwrap_compacted_id())
@@ -1103,7 +1123,7 @@ mod tests {
         let rt = build_runtime();
         let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
-        let original_l0s = &state.db_state().clone().l0;
+        let original_l0s = &state.db_state().clone().tree.l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(vec![SstView(original_l0s.back().unwrap().id)], 0);
         let compaction = Compaction::new(compaction_id, spec);
@@ -1137,6 +1157,7 @@ mod tests {
         let new_l0 = sm
             .manifest()
             .core
+            .tree
             .l0
             .front()
             .unwrap()
@@ -1145,14 +1166,15 @@ mod tests {
             .unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
+            .tree
             .l0
             .iter()
             .map(|h| h.sst.id.unwrap_compacted_id())
             .collect();
         assert_eq!(merged_l0, expected_merged_l0s);
         assert_eq!(
-            compacted_to_description(&db_state.compacted),
-            compacted_to_description(&db_state_before_merge.compacted)
+            compacted_to_description(&db_state.tree.compacted),
+            compacted_to_description(&db_state_before_merge.tree.compacted)
         );
         assert_eq!(
             db_state.replay_after_wal_id,
@@ -1167,7 +1189,7 @@ mod tests {
         let rt = build_runtime();
         let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
-        let original_l0s = &state.db_state().clone().l0;
+        let original_l0s = &state.db_state().clone().tree.l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
 
         let spec = CompactionSpec::new(original_l0s.iter().map(|h| SstView(h.id)).collect(), 0);
@@ -1182,7 +1204,7 @@ mod tests {
                 sst_views: original_l0s.clone().into(),
             },
         );
-        assert_eq!(state.db_state().l0.len(), 0);
+        assert_eq!(state.db_state().tree.l0.len(), 0);
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
@@ -1198,6 +1220,7 @@ mod tests {
         let new_l0 = sm
             .manifest()
             .core
+            .tree
             .l0
             .front()
             .unwrap()
@@ -1206,6 +1229,7 @@ mod tests {
             .unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
+            .tree
             .l0
             .iter()
             .map(|h| h.sst.id.unwrap_compacted_id())
@@ -1243,7 +1267,7 @@ mod tests {
         let rt = build_runtime();
         let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
-        let original_l0s = &state.db_state().clone().l0;
+        let original_l0s = &state.db_state().clone().tree.l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(
             original_l0s
@@ -1266,8 +1290,8 @@ mod tests {
         // given:
         let rt = build_runtime();
         let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
-        let original_l0s = &state.db_state().clone().l0;
-        let original_srs = &state.db_state().clone().compacted;
+        let original_l0s = &state.db_state().clone().tree.l0;
+        let original_srs = &state.db_state().clone().tree.compacted;
         // L0: from 4th onward (index > 2)
         let l0_sources = original_l0s.iter().skip(3).map(|h| SourceId::SstView(h.id));
 
@@ -1352,7 +1376,7 @@ mod tests {
     ) {
         run_for(Duration::from_secs(30), || {
             let manifest = tokio_handle.block_on(stored_manifest.refresh()).unwrap();
-            if manifest.core.l0.len() == len {
+            if manifest.core.tree.l0.len() == len {
                 return Some(manifest.core.clone());
             }
             None

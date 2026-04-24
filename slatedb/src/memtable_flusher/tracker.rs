@@ -199,7 +199,7 @@ impl FlushTracker {
     }
 
     fn available_l0_slots(&self) -> usize {
-        let l0_len = self.inner.state.read().state().core().l0.len();
+        let l0_len = self.inner.state.read().state().core().tree.l0.len();
         self.inner
             .settings
             .l0_max_ssts
@@ -548,9 +548,9 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.clear();
+        dirty.value.core.tree.l0.clear();
         for idx in 0..l0_len {
-            dirty.value.core.l0.push_back(SsTableView::new(
+            dirty.value.core.tree.l0.push_back(SsTableView::new(
                 ulid::Ulid::new(),
                 seeded_l0_handle(format!("seed-{idx}").as_bytes()),
             ));
@@ -561,13 +561,14 @@ mod tests {
     fn set_local_l0_len(harness: &TestHarness, l0_len: usize) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.l0.clear();
+            modifier.state.manifest.value.core.tree.l0.clear();
             for idx in 0..l0_len {
                 modifier
                     .state
                     .manifest
                     .value
                     .core
+                    .tree
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -862,7 +863,7 @@ mod tests {
             // Clear both local and remote L0 so the flusher can make progress.
             {
                 let mut guard = flusher.inner.state.write();
-                guard.modify(|modifier| modifier.state.manifest.value.core.l0.clear());
+                guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
             }
             set_remote_l0_len(&path, object_store, 0).await;
 

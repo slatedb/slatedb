@@ -20,15 +20,11 @@ pub(crate) mod store;
 
 pub use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
 
-/// Internal immutable in-memory view of a `.manifest` file.
-#[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct ManifestCore {
-    /// Flag to indicate whether initialization has finished. When creating the initial manifest for
-    /// a root db (one that is not a clone), this flag will be set to true. When creating the initial
-    /// manifest for a clone db, this flag will be set to false and then updated to true once clone
-    /// initialization has completed.
-    pub initialized: bool,
-
+/// Per-LSM-tree state. Shared shape between the unsegmented tree (held directly
+/// on `ManifestCore`) and — once segmented compaction is wired up — each named
+/// segment.
+#[derive(Clone, Default, PartialEq, Serialize, Debug)]
+pub(crate) struct LsmTreeState {
     /// The last compacted l0 SstView ID.
     pub last_compacted_l0_sst_view_id: Option<ulid::Ulid>,
 
@@ -42,6 +38,23 @@ pub(crate) struct ManifestCore {
 
     /// A list of the sorted runs that are valid to read in the `compacted` folder.
     pub compacted: Vec<SortedRun>,
+}
+
+/// Internal immutable in-memory view of a `.manifest` file.
+#[derive(Clone, PartialEq, Serialize, Debug)]
+pub(crate) struct ManifestCore {
+    /// Flag to indicate whether initialization has finished. When creating the initial manifest for
+    /// a root db (one that is not a clone), this flag will be set to true. When creating the initial
+    /// manifest for a clone db, this flag will be set to false and then updated to true once clone
+    /// initialization has completed.
+    pub initialized: bool,
+
+    /// LSM state for data that is not associated with any named segment. When
+    /// segmentation is not configured this is the only tree; once segmented
+    /// compaction is wired up, named segments will sit alongside it as a
+    /// sibling `segments` list.
+    #[serde(flatten)]
+    pub tree: LsmTreeState,
 
     /// The next WAL SST ID to be assigned when creating a new WAL SST. The manifest FlatBuffer
     /// contains `wal_id_last_seen`, which is always one less than this value.
@@ -83,10 +96,7 @@ impl ManifestCore {
     pub(crate) fn new() -> Self {
         Self {
             initialized: true,
-            last_compacted_l0_sst_view_id: None,
-            last_compacted_l0_sst_id: None,
-            l0: VecDeque::new(),
-            compacted: vec![],
+            tree: LsmTreeState::default(),
             next_wal_sst_id: 1,
             replay_after_wal_id: 0,
             last_l0_clock_tick: i64::MIN,
@@ -112,8 +122,9 @@ impl ManifestCore {
     }
 
     pub(crate) fn log_db_runs(&self) {
-        let l0s: Vec<_> = self.l0.iter().map(|l0| l0.estimate_size()).collect();
+        let l0s: Vec<_> = self.tree.l0.iter().map(|l0| l0.estimate_size()).collect();
         let compacted: Vec<_> = self
+            .tree
             .compacted
             .iter()
             .map(|sr| (sr.id, sr.estimate_size()))
@@ -183,22 +194,22 @@ impl VersionedManifest {
 
     /// Returns the last compacted L0 SST view ID, if any.
     pub fn last_compacted_l0_sst_view_id(&self) -> Option<ulid::Ulid> {
-        self.manifest.core.last_compacted_l0_sst_view_id
+        self.manifest.core.tree.last_compacted_l0_sst_view_id
     }
 
     /// Returns the last compacted L0 SST ID, if any.
     pub fn last_compacted_l0_sst_id(&self) -> Option<ulid::Ulid> {
-        self.manifest.core.last_compacted_l0_sst_id
+        self.manifest.core.tree.last_compacted_l0_sst_id
     }
 
     /// Returns the current L0 SST views.
     pub fn l0(&self) -> &VecDeque<SsTableView> {
-        &self.manifest.core.l0
+        &self.manifest.core.tree.l0
     }
 
     /// Returns the current compacted sorted runs.
     pub fn compacted(&self) -> &Vec<SortedRun> {
-        &self.manifest.core.compacted
+        &self.manifest.core.tree.compacted
     }
 
     /// Returns the next WAL SST ID to assign.
@@ -286,10 +297,11 @@ impl Manifest {
 
         let parent_owned_sst_ids = parent_manifest
             .core
+            .tree
             .compacted
             .iter()
             .flat_map(|sr| sr.sst_views.iter().map(|s| s.sst.id))
-            .chain(parent_manifest.core.l0.iter().map(|s| s.sst.id))
+            .chain(parent_manifest.core.tree.l0.iter().map(|s| s.sst.id))
             .filter(|id| !parent_external_sst_ids.contains(id))
             .collect();
 
@@ -311,7 +323,7 @@ impl Manifest {
     pub(crate) fn projected(source_manifest: &Manifest, range: BytesRange) -> Manifest {
         let mut projected = source_manifest.clone();
         let mut sorter_runs_filtered = vec![];
-        for sorter_run in &projected.core.compacted {
+        for sorter_run in &projected.core.tree.compacted {
             let sst_views = Self::filter_view_handles(&sorter_run.sst_views, false, &range);
             if !sst_views.is_empty() {
                 sorter_runs_filtered.push(SortedRun {
@@ -320,15 +332,17 @@ impl Manifest {
                 });
             }
         }
-        projected.core.l0 = Self::filter_view_handles(&projected.core.l0, true, &range).into();
-        projected.core.compacted = sorter_runs_filtered;
+        projected.core.tree.l0 =
+            Self::filter_view_handles(&projected.core.tree.l0, true, &range).into();
+        projected.core.tree.compacted = sorter_runs_filtered;
         // drop unused external_dbs
         let used_sst_ids: HashSet<SsTableId> = projected
             .core
+            .tree
             .compacted
             .iter()
             .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
-            .chain(projected.core.l0.iter().map(|v| v.sst.id))
+            .chain(projected.core.tree.l0.iter().map(|v| v.sst.id))
             .collect();
         projected
             .external_dbs
@@ -401,12 +415,12 @@ impl Manifest {
                 });
             }
             // Then, we can add all the l0 ssts
-            for sst in &manifest.core.l0 {
-                core.l0.push_back(sst.clone());
+            for sst in &manifest.core.tree.l0 {
+                core.tree.l0.push_back(sst.clone());
             }
             // Finally, we can add all the sorted runs
-            for sorted_run in &manifest.core.compacted {
-                core.compacted.push(sorted_run.clone());
+            for sorted_run in &manifest.core.tree.compacted {
+                core.tree.compacted.push(sorted_run.clone());
             }
 
             let owned_ssts = manifest.owned_ssts();
@@ -421,7 +435,7 @@ impl Manifest {
         }
 
         // Renumber sorted runs to ensure sequential IDs without duplicates
-        for (idx, sorted_run) in core.compacted.iter_mut().enumerate() {
+        for (idx, sorted_run) in core.tree.compacted.iter_mut().enumerate() {
             sorted_run.id = idx as u32;
         }
 
@@ -439,8 +453,9 @@ impl Manifest {
     fn range(&self) -> Option<BytesRange> {
         let mut start_bound = None;
         let mut end_bound = None;
-        let all_views = self.core.l0.iter().chain(
+        let all_views = self.core.tree.l0.iter().chain(
             self.core
+                .tree
                 .compacted
                 .iter()
                 .flat_map(|sr| sr.sst_views.iter()),
@@ -495,10 +510,11 @@ impl Manifest {
         // Owned SSTs = SSTs in core not already delegated to an external_db
         let owned_sst_ids: Vec<SsTableId> = self
             .core
+            .tree
             .compacted
             .iter()
             .flat_map(|sr| sr.sst_views.iter().map(|s| s.sst.id))
-            .chain(self.core.l0.iter().map(|s| s.sst.id))
+            .chain(self.core.tree.l0.iter().map(|s| s.sst.id))
             .filter(|id| !source_external_sst_ids.contains(id))
             .collect();
         owned_sst_ids
@@ -515,10 +531,11 @@ impl Manifest {
     pub(crate) fn prune_external_sst_ids(&mut self) {
         let used_sst_ids: HashSet<SsTableId> = self
             .core
+            .tree
             .compacted
             .iter()
             .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
-            .chain(self.core.l0.iter().map(|v| v.sst.id))
+            .chain(self.core.tree.l0.iter().map(|v| v.sst.id))
             .collect();
         for external_db in self.external_dbs.iter_mut() {
             external_db.sst_ids.retain(|id| used_sst_ids.contains(id));
@@ -950,9 +967,9 @@ mod tests {
         );
 
         // After union, we should have 5 SRs with IDs 0, 1, 2, 3, 4
-        assert_eq!(union.core.compacted.len(), 5);
+        assert_eq!(union.core.tree.compacted.len(), 5);
 
-        let sr_ids: Vec<u32> = union.core.compacted.iter().map(|sr| sr.id).collect();
+        let sr_ids: Vec<u32> = union.core.tree.compacted.iter().map(|sr| sr.id).collect();
         assert_eq!(sr_ids, vec![0, 1, 2, 3, 4], "SR IDs should be sequential");
 
         // Verify no duplicates
@@ -1149,7 +1166,7 @@ mod tests {
         for entry in &manifest.l0 {
             let sst_id = sst_id_fn(entry.sst_alias);
             let view_id = sst_id.unwrap_compacted_id();
-            core.l0.push_back(SsTableView::new_projected(
+            core.tree.l0.push_back(SsTableView::new_projected(
                 view_id,
                 SsTableHandle::new(
                     sst_id,
@@ -1163,7 +1180,7 @@ mod tests {
             ));
         }
         for (idx, sorted_run) in manifest.sorted_runs.iter().enumerate() {
-            core.compacted.push(SortedRun {
+            core.tree.compacted.push(SortedRun {
                 id: idx as u32,
                 sst_views: sorted_run
                     .iter()
@@ -1197,11 +1214,11 @@ mod tests {
         let sst_aliases: HashMap<SsTableId, String> =
             sst_ids.iter().map(|(k, v)| (*v, k.clone())).collect();
 
-        if actual.core.l0 != expected.core.l0 {
+        if actual.core.tree.l0 != expected.core.tree.l0 {
             let mut error_msg = String::from("Manifest L0 mismatch.\n\nActual: \n");
 
             // Format actual L0 entries
-            for (idx, handle) in actual.core.l0.iter().enumerate() {
+            for (idx, handle) in actual.core.tree.l0.iter().enumerate() {
                 let id_str = sst_aliases
                     .get(&handle.sst.id)
                     .map(|a| a.as_str())
@@ -1221,7 +1238,7 @@ mod tests {
                     .map(format_range)
                     .unwrap_or_else(|| "None".to_string());
 
-                let result = if expected.core.l0.get(idx) == Some(handle) {
+                let result = if expected.core.tree.l0.get(idx) == Some(handle) {
                     ""
                 } else {
                     " --> Unexpected"
@@ -1240,7 +1257,7 @@ mod tests {
             error_msg.push_str("\nExpected: \n");
 
             // Format expected L0 entries
-            for (idx, handle) in expected.core.l0.iter().enumerate() {
+            for (idx, handle) in expected.core.tree.l0.iter().enumerate() {
                 let id_str = sst_aliases.get(&handle.sst.id).unwrap();
 
                 let first_entry = handle
@@ -1270,7 +1287,7 @@ mod tests {
         }
 
         assert_eq!(
-            actual.core.compacted, expected.core.compacted,
+            actual.core.tree.compacted, expected.core.tree.compacted,
             "Sorted runs do not match."
         );
     }
@@ -1300,10 +1317,10 @@ mod tests {
 
         let mut core = ManifestCore::new();
 
-        core.l0.push_back(create_sst_view(sst_id_1, b"a")); // inside projection_range
-        core.l0.push_back(create_sst_view(sst_id_2, b"c")); // outside projection_range
-        core.l0.push_back(create_sst_view(sst_id_3, b"d")); // outside projection_range
-        core.l0.push_back(create_sst_view(sst_id_4, b"e")); // outside projection_range
+        core.tree.l0.push_back(create_sst_view(sst_id_1, b"a")); // inside projection_range
+        core.tree.l0.push_back(create_sst_view(sst_id_2, b"c")); // outside projection_range
+        core.tree.l0.push_back(create_sst_view(sst_id_3, b"d")); // outside projection_range
+        core.tree.l0.push_back(create_sst_view(sst_id_4, b"e")); // outside projection_range
 
         let mut manifest = Manifest::initial(core);
 
@@ -1338,8 +1355,8 @@ mod tests {
         let stale_b = SsTableId::Compacted(Ulid::new());
 
         let mut core = ManifestCore::new();
-        core.l0.push_back(create_sst_view(live_l0, b"a"));
-        core.compacted.push(SortedRun {
+        core.tree.l0.push_back(create_sst_view(live_l0, b"a"));
+        core.tree.compacted.push(SortedRun {
             id: 0,
             sst_views: vec![create_sst_view(live_compacted, b"b")],
         });

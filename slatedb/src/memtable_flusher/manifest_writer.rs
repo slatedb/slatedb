@@ -476,6 +476,7 @@ impl ManifestWriterHandler {
                     .manifest
                     .value
                     .core
+                    .tree
                     .l0
                     .push_front(SsTableView::new(
                         self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
@@ -608,7 +609,7 @@ impl ManifestWriterHandler {
             self.db
                 .db_stats
                 .l0_sst_count
-                .set(cow.core().l0.len() as i64);
+                .set(cow.core().tree.l0.len() as i64);
             cow.manifest.clone()
         };
         self.db
