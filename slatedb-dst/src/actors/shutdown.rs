@@ -44,6 +44,7 @@ impl Actor for ShutdownActor {
             _ = shutdown_token.cancelled() => {}
             _ = system_clock.sleep(remaining) => {
                 if system_clock.now() >= self.shutdown_at {
+                    info!("shutdown deadline reached, cancelling shutdown token");
                     shutdown_token.cancel();
                 }
             }
