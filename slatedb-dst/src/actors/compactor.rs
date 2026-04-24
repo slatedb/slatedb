@@ -5,11 +5,9 @@ use async_trait::async_trait;
 use log::info;
 use rand::RngCore;
 use slatedb::compactor::stats::COMPACTOR_EPOCH;
-use slatedb::compactor::Compactor;
 use slatedb::config::CompactorOptions;
 use slatedb::{CloseReason, CompactorBuilder, Error, ErrorKind};
 use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
-use tokio::task::JoinHandle;
 use tracing::instrument;
 
 use crate::{Actor, ActorCtx};
@@ -26,8 +24,6 @@ pub struct CompactorActorOptions {
 
 pub struct CompactorActor {
     actor_options: CompactorActorOptions,
-    current: Option<Compactor>,
-    current_task: Option<JoinHandle<Result<(), Error>>>,
 }
 
 impl CompactorActor {
@@ -38,11 +34,7 @@ impl CompactorActor {
             ));
         }
 
-        Ok(Self {
-            actor_options,
-            current: None,
-            current_task: None,
-        })
+        Ok(Self { actor_options })
     }
 }
 
@@ -59,17 +51,18 @@ impl Actor for CompactorActor {
             .with_metrics_recorder(recorder.clone())
             .build();
         let next_cloned = next.clone();
-        let mut next_task = tokio::spawn(async move { next_cloned.run().await });
+        let mut new_task = tokio::spawn(async move { next_cloned.run().await });
 
+        // Wait for the new compactor to start and claim a new epoch.
         while lookup_metric(recorder.as_ref(), COMPACTOR_EPOCH).is_none_or(|epoch| epoch == 0) {
             tokio::select! {
-                result = &mut next_task => panic!("compactor exited unexpectedly: {result:?}"),
+                result = &mut new_task => panic!("compactor exited unexpectedly: {result:?}"),
                 _ = tokio::task::yield_now() => {}
             }
         }
 
-        if let Some(old) = self.current.replace(next) {
-            let _old_task = self.current_task.take();
+        // Verify the previous compactor is fenced.
+        if let Some(old) = ctx.swap_compactor(next.clone()) {
             info!("spawned replacement compactor [name={}]", ctx.name());
             match old.stop().await {
                 Err(err) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => (),
@@ -77,35 +70,12 @@ impl Actor for CompactorActor {
             }
         }
 
-        self.current_task = Some(next_task);
-        let mut current_task = self
-            .current_task
-            .take()
-            .expect("compactor task should exist after spawn");
-
+        // Wait for the restart interval before allowing the next generation to start.
         tokio::select! {
             biased;
-            result = &mut current_task => panic!("compactor exited unexpectedly: {result:?}"),
+            result = &mut new_task => panic!("compactor exited unexpectedly: {result:?}"),
             _ = shutdown_token.cancelled() => {}
             _ = system_clock.sleep(self.actor_options.restart_interval) => {}
-        }
-
-        self.current_task = Some(current_task);
-        Ok(())
-    }
-
-    async fn finish(&mut self, _ctx: &ActorCtx) -> Result<(), Error> {
-        if let Some(current) = self.current.take() {
-            current.stop().await?;
-        }
-
-        if let Some(current_task) = self.current_task.take() {
-            match current_task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(error) if error.is_cancelled() => {}
-                Err(error) => panic!("compactor actor task failed during finish: {error}"),
-            }
         }
 
         Ok(())

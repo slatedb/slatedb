@@ -232,6 +232,7 @@ Each registered actor instance receives its own `ActorCtx`.
 - `rand()` for actor-local deterministic randomness
 - `db()` to read the currently installed shared `Arc<Db>`
 - `swap_db(new_db)` to replace the shared DB handle for all actors
+- `swap_compactor(new_compactor)` to replace the shared standalone compactor handle
 - `shutdown_token()` to request or observe harness shutdown
 - `advance_time(duration)` to move the shared mock clock forward
 - `path()`, `main_object_store()`, `wal_object_store()`

@@ -21,6 +21,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use fail_parallel::FailPointRegistry;
+use slatedb::compactor::Compactor;
 use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::MockSystemClock;
@@ -91,6 +92,18 @@ impl ActorCtx {
     pub fn swap_db(&self, new_db: Arc<Db>) -> Arc<Db> {
         let mut guard = self.shared.db_slot.write();
         std::mem::replace(&mut *guard, new_db)
+    }
+
+    /// Replaces the shared standalone compactor handle for harness shutdown.
+    ///
+    /// ## Arguments
+    /// - `new_compactor`: The standalone compactor handle to install.
+    ///
+    /// ## Returns
+    /// - `Option<Compactor>`: The previously installed compactor handle, if any.
+    pub fn swap_compactor(&self, new_compactor: Compactor) -> Option<Compactor> {
+        let mut guard = self.shared.compactor_slot.write();
+        guard.replace(new_compactor)
     }
 
     /// Advances the shared mock system clock by the provided duration.
@@ -230,6 +243,7 @@ struct HarnessCtx {
     system_clock: Arc<dyn SystemClock>,
     fp_registry: Arc<FailPointRegistry>,
     db_slot: Arc<RwLock<Arc<Db>>>,
+    compactor_slot: Arc<RwLock<Option<Compactor>>>,
     shutdown_token: CancellationToken,
 }
 
@@ -528,6 +542,7 @@ impl Harness {
             system_clock: system_clock.clone(),
             fp_registry,
             db_slot: Arc::new(RwLock::new(db)),
+            compactor_slot: Arc::new(RwLock::new(None)),
             shutdown_token: CancellationToken::new(),
         };
 
@@ -583,10 +598,12 @@ impl Harness {
             }
         }
 
-        // Don't close Db because the compactor isn't running. The Db flushes and can hang
-        // without the compactor running (because L0 can get full forever).
-        // let db = Arc::clone(&shared.db_slot.read());
-        // db.close().await
-        Ok(())
+        let db_result = shared.db_slot.write().close().await;
+        let compactor_result = match shared.compactor_slot.write().take() {
+            Some(compactor) => compactor.stop().await,
+            None => Ok(()),
+        };
+        db_result?;
+        compactor_result
     }
 }
