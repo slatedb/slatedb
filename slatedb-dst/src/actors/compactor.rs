@@ -28,26 +28,43 @@ pub struct CompactorActor {
 
 impl CompactorActor {
     pub fn new(actor_options: CompactorActorOptions) -> Result<Self, Error> {
-        if actor_options.restart_interval.is_zero() {
-            return Err(Error::invalid(
-                "compactor actor restart_interval must be greater than zero".to_string(),
-            ));
-        }
-
         Ok(Self { actor_options })
     }
 }
 
+/// Spawns a standalone compactor in a loop, fencing any existing ones.
+/// 
+/// - Create new compactor
+/// - Wait for new compactor to claim an epoch (i.e. fence old)
+/// - Assert old compactor is fenced
+/// - Wait for restart interval before returning.
+/// 
+/// If the new compactor fails to start with `Unavailable`, it is retried indefinitely
+/// until it succeeds (disregarding the shutdown token). This is because the compactor
+/// can fail due to a timeout (outside of RetryingObjectStore) on startup. With toxics
+/// enabled, this can cause the compactor to fail to start without retrying. In such a
+/// case, we need to keep retrying or we might end up with no compactor at all, which
+/// can cause deadlocks in tests (due to backpressure).
 #[async_trait]
 impl Actor for CompactorActor {
-    /// Spawns the next compactor generation, fences the previous generation if
-    /// present, then waits for one restart interval.
     #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        loop {
+            match self.run_inner(ctx).await {
+                Err(err) if matches!(err.kind(), ErrorKind::Unavailable) => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+impl CompactorActor {
+    async fn run_inner(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let shutdown_token = ctx.shutdown_token();
         let system_clock = ctx.system_clock();
         let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let next = compactor_builder(ctx, &self.actor_options)
+        let next = self
+            .compactor_builder(ctx)
             .with_metrics_recorder(recorder.clone())
             .build();
         let next_cloned = next.clone();
@@ -57,11 +74,9 @@ impl Actor for CompactorActor {
         while lookup_metric(recorder.as_ref(), COMPACTOR_EPOCH).is_none_or(|epoch| epoch == 0) {
             tokio::select! {
                 result = &mut new_task => match result {
-                    // Allow Unavailable since a toxic might cause startup to fail without retrying object store.
-                    Ok(Err(err)) if matches!(err.kind(), ErrorKind::Unavailable) => {
-                        return Ok(());
-                    }
-                    result => panic!("compactor exited unexpectedly: {result:?}"),
+                    Ok(Ok(())) => panic!("compactor suceeded unexpectedly during startup"),
+                    Ok(Err(err)) => return Err(err),
+                    Err(err) => panic!("compactor task panicked during startup: {err:?}"),
                 },
                 _ = tokio::task::yield_now() => {}
             }
@@ -86,14 +101,11 @@ impl Actor for CompactorActor {
 
         Ok(())
     }
-}
 
-fn compactor_builder(
-    ctx: &ActorCtx,
-    actor_options: &CompactorActorOptions,
-) -> CompactorBuilder<object_store::path::Path> {
-    CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
-        .with_options(actor_options.compactor_options.clone())
-        .with_system_clock(ctx.system_clock())
-        .with_seed(ctx.rand().rng().next_u64())
+    fn compactor_builder(&self, ctx: &ActorCtx) -> CompactorBuilder<object_store::path::Path> {
+        CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
+            .with_options(self.actor_options.compactor_options.clone())
+            .with_system_clock(ctx.system_clock())
+            .with_seed(ctx.rand().rng().next_u64())
+    }
 }

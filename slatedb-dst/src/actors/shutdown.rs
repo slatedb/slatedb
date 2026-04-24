@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use log::info;
 use slatedb::Error;
 use tracing::instrument;
 
