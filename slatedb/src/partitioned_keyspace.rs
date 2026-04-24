@@ -1,3 +1,5 @@
+use std::ops::{Bound, Range};
+
 /// Represents a set of keys that are partitioned into multiple partitions, where each
 /// partition stores some range of keys and the keys in a given partition are greater than
 /// or equal to all keys from the previous partitions. The space is a multiset, so a given key
@@ -78,6 +80,33 @@ pub(crate) fn last_partition_including_key<T: RangePartitionedKeySpace>(
         return None;
     }
     Some(part_point - 1)
+}
+
+/// Returns the half-open range of partitions that overlap `[start, end)`. Used for mapping
+/// key ranges to SST block ranges (range scans, cache warming).
+pub(crate) fn partitions_covering_range<T: RangePartitionedKeySpace>(
+    keyspace: &T,
+    start: Bound<&[u8]>,
+    end: Bound<&[u8]>,
+) -> Range<usize> {
+    let start_idx = match start {
+        Bound::Included(k) | Bound::Excluded(k) => {
+            first_partition_including_or_after_key(keyspace, k)
+        }
+        Bound::Unbounded => 0,
+    };
+    let end_idx_exclusive = match end {
+        Bound::Included(k) => last_partition_including_key(keyspace, k)
+            .map(|p| p + 1)
+            .unwrap_or(start_idx),
+        Bound::Excluded(k) => match last_partition_including_key(keyspace, k) {
+            None => start_idx,
+            Some(p) if k == keyspace.partition_first_key(p) => p,
+            Some(p) => p + 1,
+        },
+        Bound::Unbounded => keyspace.partitions(),
+    };
+    start_idx..end_idx_exclusive
 }
 
 #[cfg(test)]

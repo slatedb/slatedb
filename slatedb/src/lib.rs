@@ -45,6 +45,7 @@ pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
+pub use db_cache_manager::{CacheTarget, DbCacheManagerOps};
 pub use db_iter::DbIterator;
 pub use db_metadata::DbMetadataOps;
 pub use db_read::DbReadOps;
@@ -108,6 +109,7 @@ mod compactor_state_protocols;
 #[allow(dead_code)]
 mod comparable_range;
 mod db;
+mod db_cache_manager;
 mod db_common;
 mod db_iter;
 mod db_metadata;

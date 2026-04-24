@@ -95,59 +95,33 @@ pub enum CacheTarget {
     /// Warm the SST data blocks that overlap the supplied key range.
     ///
     /// This also warms the SST index, since block planning depends on it.
-    ///
-    /// Callers can select all data blocks in an SST by passing an unbounded
-    /// range, for example `(..)`.
-    Data(BytesRange),
+    /// The payload is a standard `(Bound, Bound)` pair that implements
+    /// `RangeBounds<Bytes>`.
+    Data((Bound<Bytes>, Bound<Bytes>)),
 }
 
-/// Per-target outcome from `warm_sst()`. One entry is returned for each
-/// target the caller requested.
-pub struct WarmResult {
-    pub target: CacheTarget,
-    pub outcome: Result<WarmBlocks, crate::Error>,
-}
-
-pub struct WarmBlocks {
-    /// Offsets of blocks newly inserted into the block cache by this call.
-    pub blocks_warmed: Vec<u64>,
-    /// Offsets of blocks skipped because they were already cached.
-    pub blocks_skipped: Vec<u64>,
-}
-
-pub struct EvictBlocks {
-    /// Offsets of blocks removed from the block cache.
-    pub blocks_evicted: Vec<u64>,
+impl CacheTarget {
+    /// Construct a [`CacheTarget::Data`] from any `RangeBounds<impl AsRef<[u8]>>`,
+    /// mirroring the [`Db::scan`] signature. Pass `..` to warm all data blocks.
+    pub fn data<K, T>(range: T) -> Self
+    where
+        K: AsRef<[u8]>,
+        T: RangeBounds<K>;
 }
 
 /// Trait for block-cache warming and eviction operations.
-///
-/// Implemented by both [`Db`](crate::Db) and [`DbReader`](crate::DbReader) so
-/// callers can use the same methods against either handle.
 #[async_trait::async_trait]
 pub trait DbCacheManagerOps {
-    /// Warms selected cache content for one SST.
-    ///
-    /// Returns an entry per requested target, each carrying the per-target
-    /// outcome. Callers fan out over SSTs themselves (for example with
-    /// `FuturesUnordered`) to get the concurrency they want.
-    ///
-    /// If no block cache is configured, logs a warning and returns an empty
-    /// list.
+    /// Warms selected cache content for one SST. Short-circuits on the first
+    /// failing target.
     async fn warm_sst(
         &self,
         sst_id: SsTableId,
         targets: &[CacheTarget],
-    ) -> Result<Vec<WarmResult>, crate::Error>;
+    ) -> Result<(), crate::Error>;
 
     /// Best-effort eviction of block-cache entries for one SST.
-    ///
-    /// If no block cache is configured, logs a warning and returns empty
-    /// `EvictBlocks`.
-    async fn evict_cached_sst(
-        &self,
-        sst_id: SsTableId,
-    ) -> Result<EvictBlocks, crate::Error>;
+    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error>;
 }
 ```
 
@@ -165,8 +139,10 @@ This API makes three deliberate choices.
    their own concurrency primitive. This keeps the API small and pushes
    policy (parallelism, rate-limiting, ordering) to the caller.
 
-`warm_sst()` returns per-target outcomes instead of failing the whole call on
-the first target that fails.
+Both methods return `Result<(), crate::Error>`. Per-target visibility (what was
+warmed, what was skipped, how many blocks moved through the cache) belongs in
+cache-manager metrics, not the return value. A richer return shape can be added
+later in a backwards-compatible way (see Alternatives).
 
 ### Warm Targets
 
@@ -175,23 +151,23 @@ the first target that fails.
 - `CacheTarget::Index` warms the SST index.
 - `CacheTarget::Filters` warms all filters on the SST, if any exist.
 - `CacheTarget::Stats` warms the SST stats block, if one exists.
-- `CacheTarget::Data(BytesRange)` warms the data blocks that overlap the
-  supplied key range. It also warms the SST index, since data-block planning
-  depends on that index.
+- `CacheTarget::Data((Bound<Bytes>, Bound<Bytes>))` warms the data blocks that
+  overlap the supplied key range. It also warms the SST index, since data-block
+  planning depends on that index.
 
 `warm_sst()` accepts multiple targets for the same call. A caller can warm
 only metadata, data ranges plus their required indexes, or both. Batching
 targets into one call lets SlateDB share the SST index read across
 `CacheTarget::Index` and `CacheTarget::Data(_)`.
 
-For data warming, SlateDB uses the same range model it already uses elsewhere:
-`BytesRange` describes key intervals, and overlapping target ranges in a
-single call are coalesced before the read. If the caller provides redundant
-ranges, SlateDB should not fetch the same block twice.
+For data warming, callers pass any standard `RangeBounds` through
+`CacheTarget::data(range)`, mirroring the `Db::scan<K, T>(range: T)` signature.
+Overlapping target ranges in a single call are not coalesced upfront; the
+block cache's per-block lookup in `read_blocks_using_index` prevents duplicate
+object-store fetches.
 
-`BytesRange` can also express "all data" with an unbounded range, so
-`CacheTarget::Data(..)` is enough for full-SST data warming. This RFC does not
-need a separate `AllData` target.
+`CacheTarget::data(..)` expresses "all data" with an unbounded range, so
+full-SST data warming does not need a separate `AllData` target.
 
 `CacheTarget::Data(...)` implies `CacheTarget::Index` as part of the API
 contract, because SlateDB cannot warm data blocks without using the index to
@@ -222,15 +198,18 @@ For each `CacheTarget::Data(range)`, SlateDB:
 2. Skips the target if that intersection is empty.
 3. Reads the SST index if it has not already done so for this call.
 4. Uses the index to map the overlapping key range to block intervals.
-5. Coalesces overlapping intervals.
-6. Reads those blocks through
-   `TableStore::read_blocks_using_index(..., cache=true)`.
 
-If the SST is not reachable from the current manifest, `warm_sst()` returns an
-empty result list. It does not try to recreate a previous session's cache
-contents. If a block cache implementation persists entries across restarts,
-callers decide whether rewarming is worth the cost of redundant cache lookups,
-which is non-trivial for large ranges even when every block hits.
+For each `CacheTarget::Data(_)`, SlateDB warms the covered block ranges
+through `TableStore::read_blocks_using_index(..., cache=true)`. That reader
+consults the block cache per block and fetches only uncached ones, so
+overlapping targets in the same call do not double-fetch.
+
+If the SST is not reachable from the current manifest, `warm_sst()` returns
+`Ok(())` without doing any work. It does not try to recreate a previous
+session's cache contents. If a block cache implementation persists entries
+across restarts, callers decide whether rewarming is worth the cost of
+redundant cache lookups, which is non-trivial for large ranges even when every
+block hits.
 
 ### Best-Effort Eviction
 
@@ -278,9 +257,8 @@ and it matches the real read path.
 
 It is still a side effect, not a goal of this RFC.
 
-- If no block cache is configured, both methods log a warning and return an
-  empty result (empty list for `warm_sst`, empty `EvictBlocks` for
-  `evict_cached_sst`).
+- If no block cache is configured, both methods log a warning and return
+  `Ok(())` without doing any work.
 - Eviction only targets SlateDB block-cache entries.
 - Object-store cache behavior stays unchanged.
 
@@ -292,20 +270,17 @@ two caches behind one policy surface.
 
 These APIs should not put database availability at risk.
 
-- `warm_sst()` and `evict_cached_sst()` return `Err` for call-level failures,
-  such as database shutdown or invalid request setup.
-- For `warm_sst()`, per-target failures are reported inside each `WarmResult`
-  (`outcome: Err(...)`) rather than by aborting the call. One failing target
-  does not prevent other targets in the same call from succeeding.
+- `warm_sst()` short-circuits on the first failing target and returns `Err`.
+  Targets processed before the failure may already have inserted blocks into
+  the cache; that partial state is left alone.
+- `evict_cached_sst()` returns `Err` if the index read or any cache removal
+  fails. Partial eviction is acceptable.
 - Cross-SST orchestration is the caller's responsibility. A caller fanning out
   over many SSTs decides whether one failing `warm_sst()` or
   `evict_cached_sst()` should short-circuit the rest.
 
-Warming is not atomic. If one target inside a `warm_sst()` call fails, other
-targets may already have inserted blocks into the cache. Eviction is not
-atomic either. If `evict_cached_sst()` fails partway through, SlateDB may
-already have removed some of the SST's cache entries. That is acceptable. The
-contract is best effort plus reporting, not transactional cache state.
+Neither method is atomic. The contract is best effort, not transactional
+cache state.
 
 ## Impact Analysis
 
@@ -493,6 +468,21 @@ We could bake warming into `Db::open()` or builder setup. This RFC does not do
 that. Some users will want to block on warm-up before serving reads. Others will
 want to skip it, or make that decision with external state. The lower-level API
 keeps that choice with the caller.
+
+**Rich return types: `Vec<WarmResult>` with per-target `WarmBlocks` / `EvictBlocks`**
+
+An earlier draft had `warm_sst()` return a `Vec<WarmResult>` (one entry per
+target, each with its own `Result<WarmBlocks, Error>` payload listing block
+offsets), and `evict_cached_sst()` return an `EvictBlocks` listing every
+offset the call attempted to remove. It also meant per-target failures could
+be reported without aborting the whole call.
+
+We rejected it because metrics cover the same ground more cheaply: warm/evict
+counts, durations, per-target breakdowns, and error counts are all recordable
+without shaping a struct into the public API. A `Result<(), Error>` is easier
+to commit to for a v1 and can be widened backwards-compatibly later (for
+example via a `warm_sst_detailed()` variant, or by returning an opaque handle)
+if a real caller shows up needing that detail.
 
 **Plural `warm_ssts(&[SsTableId], &[CacheTarget])`**
 
