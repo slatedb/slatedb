@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use log::info;
+use log::{info, warn};
 use rand::RngCore;
 use slatedb::compactor::stats::COMPACTOR_EPOCH;
 use slatedb::config::CompactorOptions;
@@ -56,7 +56,13 @@ impl Actor for CompactorActor {
         // Wait for the new compactor to start and claim a new epoch.
         while lookup_metric(recorder.as_ref(), COMPACTOR_EPOCH).is_none_or(|epoch| epoch == 0) {
             tokio::select! {
-                result = &mut new_task => panic!("compactor exited unexpectedly: {result:?}"),
+                result = &mut new_task => match result {
+                    // Allow Unavailable since a toxic might cause startup to fail without retrying object store.
+                    Ok(Err(err)) if matches!(err.kind(), ErrorKind::Unavailable) => {
+                        return Ok(());
+                    }
+                    result => panic!("compactor exited unexpectedly: {result:?}"),
+                },
                 _ = tokio::task::yield_now() => {}
             }
         }
