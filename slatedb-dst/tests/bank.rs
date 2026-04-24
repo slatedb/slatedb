@@ -54,6 +54,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
         max_transfer: 500,
         ..BankOptions::default()
     };
+    let audit_interval = Duration::from_millis(1000);
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(5),
         manifest_update_timeout: Duration::from_millis(250),
@@ -110,8 +111,14 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
         .actor("transfer-4", TransferActor::new(bank_options.clone())?)
         .actor("transfer-5", TransferActor::new(bank_options.clone())?)
         .actor("transfer-6", TransferActor::new(bank_options.clone())?)
-        .actor("auditor-1", AuditorActor::new(bank_options.clone())?)
-        .actor("auditor-2", AuditorActor::new(bank_options)?)
+        .actor(
+            "auditor-1",
+            AuditorActor::new(bank_options.clone(), audit_interval)?,
+        )
+        .actor(
+            "auditor-2",
+            AuditorActor::new(bank_options, audit_interval)?,
+        )
         .actor(
             "compactor",
             CompactorActor::new(CompactorActorOptions {
