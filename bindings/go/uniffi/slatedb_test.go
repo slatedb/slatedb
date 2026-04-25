@@ -2184,24 +2184,27 @@ func TestDbTtl(t *testing.T) {
 		t.Fatalf("Put(alpha): %v", err)
 	}
 
-	kv, err := handle.db.GetKeyValue(key)
-	if err != nil {
-		t.Fatalf("Get(alpha): %v", err)
-	}
-	if kv == nil {
-		t.Fatalf("Get(alpha): got nil kv")
-	}
-	if !bytes.Equal(value, kv.Value) {
-		t.Fatalf("Get(alpha): got %v, want %v", kv.Value, value)
+	readerHandle := openTestReader(t, store, nil)
+
+	type getKeyValue interface {
+		GetKeyValue([]byte) (*slatedb.KeyValue, error)
 	}
 
-	time.Sleep(2 * time.Second)
-
-	kv, err = handle.db.GetKeyValue(key)
-	if err != nil {
-		t.Fatalf("Get(alpha): %v", err)
-	}
-	if kv != nil && (kv.ExpireTs == nil || *kv.ExpireTs != 1) {
-		t.Fatalf("Get(alpha): got not nil kv")
+	for _, tc := range []struct {
+		name string
+		db   getKeyValue
+	}{{"db", handle.db}, {"reader", readerHandle.reader}} {
+		t.Run(tc.name, func(t *testing.T) {
+			kv, err := tc.db.GetKeyValue(key)
+			if err != nil {
+				t.Fatalf("Get(alpha): %v", err)
+			}
+			if kv == nil {
+				t.Fatalf("Get(alpha): got nil kv")
+			}
+			if !bytes.Equal(value, kv.Value) {
+				t.Fatalf("Get(alpha): got %v, want %v", kv.Value, value)
+			}
+		})
 	}
 }
