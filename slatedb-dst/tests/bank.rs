@@ -4,9 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
@@ -24,7 +25,7 @@ use tempfile::TempDir;
 #[test]
 fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
     let seed = rand::random::<u64>();
-    println!("dst bank seed: {seed}");
+    info!("dst bank seed: {seed}");
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
     let wal_dir = tempdir.path().join("wal");
@@ -48,12 +49,8 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
         system_clock.clone(),
     ));
 
-    let bank_options = BankOptions {
-        account_count: 48,
-        initial_balance: 25_000,
-        max_transfer: 500,
-        ..BankOptions::default()
-    };
+    let bank_options = random_bank_options(&rand);
+    info!("dst bank options: {bank_options:?}");
     let audit_interval = Duration::from_millis(1000);
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(5),
@@ -75,12 +72,6 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
             let db_seed = ctx.rand().rng().next_u64();
             let mut settings = build_settings(ctx.rand()).await;
 
-            settings.l0_sst_size_bytes = 1024;
-            settings.l0_max_ssts = 4;
-            settings.manifest_poll_interval = Duration::from_millis(10);
-            settings.manifest_update_timeout = Duration::from_millis(250);
-            settings.max_unflushed_bytes = 8 * 1024;
-            settings.flush_interval = Some(Duration::from_millis(10));
             // The test registers the standalone compactor actor below.
             settings.compactor_options = None;
 
@@ -131,6 +122,23 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
     harness.run()?;
 
     Ok(())
+}
+
+fn random_bank_options(rand: &DbRand) -> BankOptions {
+    let mut rng = rand.rng();
+    let account_magnitude = 10usize.pow(rng.random_range(1..=7));
+    let account_count = rng.random_range(2..=7) * account_magnitude;
+    let initial_balance = rng.random_range(1_000..=100_000);
+    let max_transfer = rng.random_range(1..=initial_balance.min(1_000));
+    let value_size_bytes = rng.random_range(8..=8192);
+
+    BankOptions {
+        prefix: format!("acct-{:016x}", rng.next_u64()),
+        account_count,
+        initial_balance,
+        max_transfer,
+        value_size_bytes,
+    }
 }
 
 fn add_toxics(failures: &FailingObjectStoreController) {

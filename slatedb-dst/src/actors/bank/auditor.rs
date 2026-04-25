@@ -3,7 +3,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use log::info;
 use slatedb::Error;
-use tracing::instrument;
 
 use crate::{Actor, ActorCtx};
 
@@ -38,7 +37,6 @@ impl AuditorActor {
 
 #[async_trait]
 impl Actor for AuditorActor {
-    #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let shutdown_token = ctx.shutdown_token();
         let system_clock = ctx.system_clock();
@@ -60,7 +58,10 @@ impl Actor for AuditorActor {
             }
 
             seen[account_id] = true;
-            total += u128::from(decode_balance(kv.value.as_ref())?);
+            total += u128::from(decode_balance(
+                kv.value.as_ref(),
+                self.options.value_size_bytes,
+            )?);
         }
 
         let observed_count = seen.iter().filter(|present| **present).count();
@@ -78,13 +79,11 @@ impl Actor for AuditorActor {
         }
 
         self.step += 1;
-        if self.step % 1000 == 0 {
-            info!(
-                "bank auditor step complete [name={}, step={}]",
-                ctx.name(),
-                self.step
-            );
-        }
+        info!(
+            "bank auditor step complete [name={}, step={}]",
+            ctx.name(),
+            self.step
+        );
 
         tokio::select! {
             biased;

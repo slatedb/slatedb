@@ -1,13 +1,12 @@
 use async_trait::async_trait;
 use log::info;
 use rand::RngCore;
+use slatedb::config::WriteOptions;
 use slatedb::{Error, ErrorKind, IsolationLevel};
-use tracing::instrument;
 
 use crate::{Actor, ActorCtx};
 
-use super::super::PROGRESS_LOG_INTERVAL;
-use super::{account_key, load_balance, sample_account_index, BankOptions};
+use super::{account_key, encode_balance, load_balance, sample_account_index, BankOptions};
 
 /// Repeatedly transfers funds between deterministic account pairs.
 #[derive(Debug)]
@@ -25,8 +24,11 @@ impl TransferActor {
 
 #[async_trait]
 impl Actor for TransferActor {
-    #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        let write_options = WriteOptions {
+            await_durable: false,
+            ..WriteOptions::default()
+        };
         let from_rand = ctx.rand().rng().next_u64();
         let to_rand = ctx.rand().rng().next_u64();
         let amount_rand = ctx.rand().rng().next_u64();
@@ -41,8 +43,10 @@ impl Actor for TransferActor {
 
             loop {
                 let txn = ctx.db().begin(IsolationLevel::Snapshot).await?;
-                let from_balance = load_balance(&txn, from_key.as_bytes()).await?;
-                let to_balance = load_balance(&txn, to_key.as_bytes()).await?;
+                let from_balance =
+                    load_balance(&txn, from_key.as_bytes(), self.options.value_size_bytes).await?;
+                let to_balance =
+                    load_balance(&txn, to_key.as_bytes(), self.options.value_size_bytes).await?;
                 let transfer_amount = sampled_amount.min(from_balance);
 
                 if transfer_amount == 0 {
@@ -55,13 +59,17 @@ impl Actor for TransferActor {
                         )
                     })?;
 
-                txn.put(
-                    from_key.as_bytes(),
-                    (from_balance - transfer_amount).to_le_bytes(),
-                )?;
-                txn.put(to_key.as_bytes(), updated_to_balance.to_le_bytes())?;
+                let updated_from_value = encode_balance(
+                    from_balance - transfer_amount,
+                    self.options.value_size_bytes,
+                );
+                let updated_to_value =
+                    encode_balance(updated_to_balance, self.options.value_size_bytes);
 
-                match txn.commit().await {
+                txn.put(from_key.as_bytes(), updated_from_value)?;
+                txn.put(to_key.as_bytes(), updated_to_value)?;
+
+                match txn.commit_with_options(&write_options).await {
                     Ok(_) => break,
                     Err(error) if error.kind() == ErrorKind::Transaction => continue,
                     Err(error) => return Err(error),
@@ -70,7 +78,7 @@ impl Actor for TransferActor {
         }
 
         self.step += 1;
-        if self.step % PROGRESS_LOG_INTERVAL == 0 {
+        if self.step % 10_000 == 0 {
             info!(
                 "bank transfer step complete [name={}, step={}]",
                 ctx.name(),

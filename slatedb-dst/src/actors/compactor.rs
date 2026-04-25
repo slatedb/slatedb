@@ -30,6 +30,7 @@ pub struct CompactorActor {
 
 impl CompactorActor {
     pub fn new(actor_options: CompactorActorOptions) -> Result<Self, Error> {
+        info!("compactor actor created [options={:?}]", actor_options);
         Ok(Self {
             actor_options,
             current_task: None,
