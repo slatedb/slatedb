@@ -228,7 +228,7 @@ If the coordinator crashes between steps 2 and 3, the `Completed` entry is trimm
 
 ### Deployment Shapes
 
-In all cases the coordinator uses `RemoteCompactionExecutor`. `compactor_options: None` in `Settings` means no coordinator runs in that process; a standalone `CompactorBuilder` process owns coordination instead.
+In all cases the coordinator uses `RemoteCompactionExecutor`. `compactor_options: None` in `Settings` means no coordinator runs in that process; a standalone `Compactor` process owns coordination instead.
 
 1. **Coordinator + embedded worker:** coordinator and worker run together in the DB process.
 
