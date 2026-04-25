@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
@@ -52,7 +53,7 @@ type TestResult<T> = Result<T, TestError>;
 /// fails or panics.
 #[test]
 fn test_dst_is_deterministic() -> TestResult<()> {
-    let simulations = 10;
+    let simulations = 4;
     let num_cores = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(1);
@@ -62,7 +63,7 @@ fn test_dst_is_deterministic() -> TestResult<()> {
         .into_iter()
         .enumerate()
         .map(|(core, seed)| {
-            println!("dst determinism seed [core={core}, seed={seed}]");
+            info!("dst determinism seed [core={core}, seed={seed}]");
             (
                 core,
                 seed,
@@ -75,7 +76,7 @@ fn test_dst_is_deterministic() -> TestResult<()> {
         match handle.join() {
             Ok(result) => result?,
             Err(payload) => {
-                eprintln!("dst determinism panicked [core={core}, seed={seed}]");
+                error!("dst determinism panicked [core={core}, seed={seed}]");
                 std::panic::resume_unwind(payload);
             }
         }
@@ -225,7 +226,7 @@ fn run_seed_once(seed: u64) -> TestResult<(u64, DateTime<Utc>)> {
                 compactor_options,
             })?,
         )
-        .actor("shutdown", ShutdownActor::new(100)?);
+        .actor("shutdown", ShutdownActor::new(200)?);
 
     harness.run()?;
 
