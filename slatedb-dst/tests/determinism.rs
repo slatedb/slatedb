@@ -38,52 +38,110 @@ use slatedb_dst::{
 use tempfile::TempDir;
 use tracing::instrument;
 
+type TestError = Box<dyn std::error::Error + Send + Sync>;
+type TestResult<T> = Result<T, TestError>;
+
+/// Verifies that the DST harness produces repeatable outcomes for independently
+/// chosen seeds.
+///
+/// The test creates one random seed per available CPU core, then runs those
+/// seed groups concurrently on separate OS threads. Each thread owns one seed
+/// and executes that seed repeatedly in serial, so the determinism assertion is
+/// still made by comparing multiple runs of the same seed against one another.
+/// Printing the seed and core gives a direct reproduction handle when a worker
+/// fails or panics.
 #[test]
-fn test_dst_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
+fn test_dst_is_deterministic() -> TestResult<()> {
     let simulations = 10;
+    let num_cores = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1);
+    let seeds: Vec<u64> = (0..num_cores).map(|_| rand::random::<u64>()).collect();
 
-    for seed in 101..=110 {
-        let mut expected_u64: Option<u64> = None;
-        let mut expected_time: Option<DateTime<Utc>> = None;
-        for simulation_count in 0..simulations {
-            let (next_u64, next_time) = run_seed_once(seed)?;
+    let handles = seeds
+        .into_iter()
+        .enumerate()
+        .map(|(core, seed)| {
+            println!("dst determinism seed [core={core}, seed={seed}]");
+            (
+                core,
+                seed,
+                std::thread::spawn(move || run_seed_is_deterministic(core, seed, simulations)),
+            )
+        })
+        .collect::<Vec<_>>();
 
-            if let Some(expected_u64) = expected_u64 {
-                assert_eq!(
-                    next_u64,
-                    expected_u64,
-                    "non-determinism detected [seed={}, simulation_count={}, next_u64={}, expected_u64={}]",
-                    seed,
-                    simulation_count,
-                    next_u64,
-                    expected_u64,
-                );
+    for (core, seed, handle) in handles {
+        match handle.join() {
+            Ok(result) => result?,
+            Err(payload) => {
+                eprintln!("dst determinism panicked [core={core}, seed={seed}]");
+                std::panic::resume_unwind(payload);
             }
-
-            if let Some(expected_time) = expected_time {
-                assert_eq!(
-                    next_time,
-                    expected_time,
-                    "non-determinism detected [seed={}, simulation_count={}, next_time={:?}, expected_time={:?}]",
-                    seed,
-                    simulation_count,
-                    next_time,
-                    expected_time,
-                );
-            }
-
-            expected_u64 = Some(next_u64);
-            expected_time = Some(next_time);
         }
     }
 
     Ok(())
 }
 
-/// Runs one seeded deterministic scenario and returns the next root RNG value
-/// and current mock-clock time after the harness completes.
+/// Re-runs a single seed and checks that every simulation leaves deterministic
+/// state in the same post-run position.
+///
+/// The first simulation establishes the expected next root RNG value and
+/// mock-clock time. Later simulations with the same seed must produce the same
+/// values. The `core` argument is diagnostic context only; it identifies which
+/// worker thread owned the seed when reporting assertion failures.
+fn run_seed_is_deterministic(core: usize, seed: u64, simulations: u32) -> TestResult<()> {
+    let mut expected_u64: Option<u64> = None;
+    let mut expected_time: Option<DateTime<Utc>> = None;
+
+    for simulation_count in 0..simulations {
+        let (next_u64, next_time) = run_seed_once(seed)?;
+
+        if let Some(expected_u64) = expected_u64 {
+            assert_eq!(
+                next_u64,
+                expected_u64,
+                "non-determinism detected [core={}, seed={}, simulation_count={}, next_u64={}, expected_u64={}]",
+                core,
+                seed,
+                simulation_count,
+                next_u64,
+                expected_u64,
+            );
+        }
+
+        if let Some(expected_time) = expected_time {
+            assert_eq!(
+                next_time,
+                expected_time,
+                "non-determinism detected [core={}, seed={}, simulation_count={}, next_time={:?}, expected_time={:?}]",
+                core,
+                seed,
+                simulation_count,
+                next_time,
+                expected_time,
+            );
+        }
+
+        expected_u64 = Some(next_u64);
+        expected_time = Some(next_time);
+    }
+
+    Ok(())
+}
+
+/// Runs one complete seeded scenario and returns the observable deterministic
+/// state after the harness shuts down.
+///
+/// Each invocation builds a fresh temporary main and WAL object-store root,
+/// fresh root RNG, fresh mock clock, and fresh fault-injection controller. The
+/// harness then opens a real `Db`, starts workload, flusher, compactor, and
+/// shutdown actors, and runs until the shutdown actor cancels the simulation.
+/// Returning the next root RNG value and current mock-clock time gives callers a
+/// compact fingerprint of the deterministic execution path.
 #[instrument(level = "debug", skip_all, fields(seed = seed))]
-fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::Error>> {
+fn run_seed_once(seed: u64) -> TestResult<(u64, DateTime<Utc>)> {
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
     let wal_dir = tempdir.path().join("wal");
