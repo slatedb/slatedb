@@ -141,12 +141,7 @@ worker_heartbeat_timeout_ms = 30000
 max_concurrent_compactions = 2
 ```
 
-The coordinator (`CompactorEventHandler`) always runs embedded in the DB process and behaves identically in both cases. The only difference is which `CompactionExecutor` it uses:
-
-- `compactor_options = Some(options)` — uses `TokioCompactionExecutor`, which spawns in-process Tokio tasks to execute compaction jobs. This is the existing single-node behavior, unchanged.
-- `compactor_options = None` — uses `RemoteCompactionExecutor`, which writes `Submitted` jobs to `.compactions` and polls for `Completed` rather than spawning local tasks. Execution is handled entirely by external `CompactorWorkerBuilder` processes.
-
-Both implement the `CompactionExecutor` trait; the coordinator calls `executor.start_compaction_job()` the same way regardless.
+The coordinator always uses `RemoteCompactionExecutor`. In the embedded case, a `CompactionWorker` runs alongside the coordinator. In standalone-worker deployments, separate `CompactionWorker` processes are run externally.
 
 `max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
@@ -154,10 +149,10 @@ Both implement the `CompactionExecutor` trait; the coordinator calls `executor.s
 
 Workers don't use `CompactorOptions`. The primary setting is `worker_poll_interval_ms`, which controls how often a worker checks `.compactions` for new jobs.
 
-New `CompactorWorkerBuilder` entrypoint for worker processes:
+New `CompactionWorkerBuilder` entrypoint for `CompactionWorker` processes:
 
 ```rust
-let worker = CompactorWorkerBuilder::new("/path/to/db", object_store.clone())
+let worker = CompactionWorkerBuilder::new("/path/to/db", object_store.clone())
     .with_poll_interval_ms(5000)
     .build()
     .await?;
@@ -224,14 +219,14 @@ Only the coordinator commits manifest updates (preserves single-writer invariant
 
 If the coordinator crashes between steps 2 and 3, the `Completed` entry is trimmed on the next cycle with no further action needed.
 
-### Backward Compatibility: Existing Modes
+### Deployment shapes
 
-The coordinator always runs embedded in the DB process. The two deployment shapes map onto `compactor_options` and determine whether the compaction worker is also embedded in the DB process:
+In all cases the coordinator uses `RemoteCompactionExecutor`.
 
-| Deployment | `compactor_options` | Executor | Changes |
-|------------|---------------------|----------|---------|
-| **Embedded** | `Some(options)` | `TokioCompactionExecutor` | None — existing behavior |
-| **Stand-Alone** | `None` | `RemoteCompactionExecutor` | Coordinator delegates to external `CompactorWorkerBuilder` processes |
+| Deployment | Coordinator | Workers | `compactor_options` |
+|------------|-------------|---------|---------------------|
+| **Embedded** | In DB process | In-process (via `RemoteCompactionExecutor`) | `Some(options)` |
+| **Standalone Workers** | In DB process | External `CompactionWorker` processes | `None` |
 
 ## Impact Analysis
 
@@ -309,7 +304,7 @@ Worker lifecycle events logged at INFO.
 ### Compatibility
 
 - **Object storage**: Backward compatible. New fields default to unclaimed/0; no migration needed.
-- **Public API**: DB read/write API and `CompactorBuilder` unchanged. `CompactorWorkerBuilder` is additive.
+- **Public API**: DB read/write API and `CompactorBuilder` unchanged. `CompactionWorkerBuilder` and `CompactionWorker` are additive.
 - **Rolling upgrades**: Upgrade coordinator first, then start workers. Old standalone compactors safely ignore new fields.
 
 ## Testing
@@ -326,7 +321,7 @@ Worker lifecycle events logged at INFO.
 
 Phases:
 1. **Schema extension** — add `worker_id` and `last_heartbeat_ms` to `compactor.fbs`; no behavior change.
-2. **Worker implementation** — implement `CompactorWorkerBuilder` and `RemoteCompactionExecutor`; coordinator uses `RemoteCompactionExecutor` when `compactor_options` is `None`.
+2. **Worker implementation** — implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`.
 3. **Failure detection** — heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
 
 ### Docs Updates
