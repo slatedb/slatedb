@@ -36,7 +36,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
     let failure_seed = rand.rng().next_u64();
     let failure_rand = Arc::new(DbRand::new(failure_seed));
     let failures = FailingObjectStoreController::new(failure_rand.clone());
-    add_toxics(&failures, failure_rand.as_ref(), "bank");
+    add_toxics(&failures, failure_rand.as_ref(), "bank", 10);
 
     let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),

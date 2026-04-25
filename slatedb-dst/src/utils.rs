@@ -94,7 +94,7 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
 
 /// Adds a deterministic randomized set of object-store toxics to `failures`.
 ///
-/// This function adds between 1 and 16 toxics. Generated toxics may be:
+/// Generated toxics may be:
 /// - `Latency`: 1 to 5 ms base latency, 0 to 15 ms jitter, and 0.35 to 0.95
 ///   toxicity.
 /// - `Bandwidth`: 16 to 256 KiB/s bandwidth and 0.20 to 0.80 toxicity.
@@ -103,14 +103,23 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
 ///
 /// ## Arguments
 /// - `failures`: The controller to append generated toxics to.
-/// - `rand`: The deterministic RNG used to choose the number of toxics.
+/// - `rand`: The deterministic RNG used to choose each toxic's kind, operation
+///   filter, path filter, direction, and toxicity.
 /// - `root_path`: The object-store root path used by the scenario. When non-empty,
 ///   generated path filters may target the root itself or one of SlateDB's standard
 ///   subdirectories: `wal`, `manifest`, `compacted`, or `compactions`.
-pub fn add_toxics(failures: &FailingObjectStoreController, rand: &DbRand, root_path: &str) {
+/// - `toxic_count`: The number of toxics to add.
+///
+/// ## Returns
+/// Returns `()` after adding exactly `toxic_count` toxics to `failures`.
+pub fn add_toxics(
+    failures: &FailingObjectStoreController,
+    rand: &DbRand,
+    root_path: &str,
+    toxic_count: usize,
+) {
     let mut rng = rand.rng();
     let root_path = root_path.trim_matches('/');
-    let toxic_count = rng.random_range(1..=16);
 
     for index in 0..toxic_count {
         let (kind_name, kind, direction, toxicity) = match rng.random_range(0..10) {
