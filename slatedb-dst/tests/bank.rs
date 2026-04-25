@@ -16,9 +16,8 @@ use slatedb_dst::{
         initialize_accounts, AuditorActor, BankOptions, CompactorActor, CompactorActorOptions,
         ShutdownActor, TransferActor,
     },
-    utils::build_settings,
+    utils::{add_toxics, build_settings},
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -35,8 +34,9 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
     let failure_seed = rand.rng().next_u64();
-    let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(failure_seed)));
-    add_toxics(&failures);
+    let failure_rand = Arc::new(DbRand::new(failure_seed));
+    let failures = FailingObjectStoreController::new(failure_rand.clone());
+    add_toxics(&failures, failure_rand.as_ref(), "bank");
 
     let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
@@ -138,122 +138,5 @@ fn random_bank_options(rand: &DbRand) -> BankOptions {
         initial_balance,
         max_transfer,
         value_size_bytes,
-    }
-}
-
-fn add_toxics(failures: &FailingObjectStoreController) {
-    for toxic in [
-        Toxic {
-            name: "wal-put-latency".into(),
-            kind: ToxicKind::Latency {
-                latency: Duration::from_millis(1),
-                jitter: Duration::from_millis(4),
-            },
-            direction: StreamDirection::Upstream,
-            toxicity: 0.90,
-            operations: vec![Operation::PutOpts],
-            path_prefix: Some("bank/wal".into()),
-        },
-        Toxic {
-            name: "main-put-latency".into(),
-            kind: ToxicKind::Latency {
-                latency: Duration::from_millis(2),
-                jitter: Duration::from_millis(6),
-            },
-            direction: StreamDirection::Upstream,
-            toxicity: 0.75,
-            operations: vec![Operation::PutOpts],
-            path_prefix: None,
-        },
-        Toxic {
-            name: "manifest-read-latency".into(),
-            kind: ToxicKind::Latency {
-                latency: Duration::from_millis(1),
-                jitter: Duration::from_millis(5),
-            },
-            direction: StreamDirection::Downstream,
-            toxicity: 0.80,
-            operations: vec![Operation::GetOpts, Operation::GetRange, Operation::Head],
-            path_prefix: Some("bank/manifest".into()),
-        },
-        Toxic {
-            name: "sst-get-bandwidth".into(),
-            kind: ToxicKind::Bandwidth {
-                bytes_per_sec: 64 * 1024,
-            },
-            direction: StreamDirection::Downstream,
-            toxicity: 0.70,
-            operations: vec![
-                Operation::GetOpts,
-                Operation::GetRange,
-                Operation::GetRanges,
-            ],
-            path_prefix: Some("bank/compacted".into()),
-        },
-        Toxic {
-            name: "wal-get-bandwidth".into(),
-            kind: ToxicKind::Bandwidth {
-                bytes_per_sec: 48 * 1024,
-            },
-            direction: StreamDirection::Downstream,
-            toxicity: 0.65,
-            operations: vec![
-                Operation::GetOpts,
-                Operation::GetRange,
-                Operation::GetRanges,
-            ],
-            path_prefix: Some("bank/wal".into()),
-        },
-        Toxic {
-            name: "list-slow-close".into(),
-            kind: ToxicKind::SlowClose {
-                delay: Duration::from_millis(2),
-            },
-            direction: StreamDirection::Downstream,
-            toxicity: 0.80,
-            operations: vec![Operation::List, Operation::ListWithOffset],
-            path_prefix: Some("bank".into()),
-        },
-        Toxic {
-            name: "compactions-put-latency".into(),
-            kind: ToxicKind::Latency {
-                latency: Duration::from_millis(2),
-                jitter: Duration::from_millis(8),
-            },
-            direction: StreamDirection::Upstream,
-            toxicity: 0.80,
-            operations: vec![Operation::PutOpts],
-            path_prefix: Some("bank/compactions".into()),
-        },
-        Toxic {
-            name: "read-reset".into(),
-            kind: ToxicKind::ResetPeer,
-            direction: StreamDirection::Upstream,
-            toxicity: 0.03,
-            operations: vec![
-                Operation::GetOpts,
-                Operation::GetRange,
-                Operation::GetRanges,
-            ],
-            path_prefix: Some("bank".into()),
-        },
-        Toxic {
-            name: "list-reset".into(),
-            kind: ToxicKind::ResetPeer,
-            direction: StreamDirection::Upstream,
-            toxicity: 0.02,
-            operations: vec![Operation::List, Operation::ListWithOffset],
-            path_prefix: Some("bank".into()),
-        },
-        Toxic {
-            name: "put-reset".into(),
-            kind: ToxicKind::ResetPeer,
-            direction: StreamDirection::Upstream,
-            toxicity: 0.01,
-            operations: vec![Operation::PutOpts],
-            path_prefix: Some("bank".into()),
-        },
-    ] {
-        failures.add_toxic(toxic);
     }
 }
