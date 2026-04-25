@@ -1181,6 +1181,15 @@ pub struct GarbageCollectorOptions {
     ///
     /// None means garbage collection is disabled for the compactions directory.
     pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
+
+    /// Garbage collection options for detaching a clone from its parent database(s).
+    ///
+    /// When a clone no longer references any of a parent's SSTs (in its current
+    /// manifest or any live checkpoint), the detach pass removes the pinning
+    /// checkpoint from the parent and drops the external DB entry from the clone.
+    ///
+    /// None means detach is disabled.
+    pub detach_options: Option<GarbageCollectorScheduleOptions>,
 }
 
 impl GarbageCollectorOptions {
@@ -1189,6 +1198,7 @@ impl GarbageCollectorOptions {
             && self.wal_options.is_none()
             && self.compacted_options.is_none()
             && self.compactions_options.is_none()
+            && self.detach_options.is_none()
     }
 }
 
@@ -1224,6 +1234,27 @@ pub struct GarbageCollectorDirectoryOptions {
     pub min_age: Duration,
 }
 
+/// Schedule options for a GC task that has no file-age threshold.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct GarbageCollectorScheduleOptions {
+    /// The interval at which the task will run in the background thread.
+    ///
+    /// If set to None, recurring execution is disabled, but a one-time pass
+    /// can still be triggered via
+    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
+    #[serde(deserialize_with = "deserialize_option_duration")]
+    #[serde(serialize_with = "serialize_option_duration")]
+    pub interval: Option<Duration>,
+}
+
+impl Default for GarbageCollectorScheduleOptions {
+    fn default() -> Self {
+        Self {
+            interval: Some(DEFAULT_INTERVAL),
+        }
+    }
+}
+
 /// Default options for the garbage collector.
 ///
 /// By default, garbage collection is enabled for all managed directories
@@ -1239,6 +1270,7 @@ impl Default for GarbageCollectorOptions {
             wal_options: Some(GarbageCollectorDirectoryOptions::default()),
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
+            detach_options: Some(GarbageCollectorScheduleOptions::default()),
         }
     }
 }

@@ -9,13 +9,11 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-anyhow = { workspace = true, optional = true }
 async-channel = { workspace = true }
 async-trait = { workspace = true }
 atomic = { workspace = true }
 backon = { workspace = true }
 bitflags = { workspace = true }
-bytemuck = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 chrono = { workspace = true, features = ["serde"] }
 sysinfo = { workspace = true }
@@ -107,7 +105,7 @@ lz4 = ["dep:lz4_flex"]
 zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
-foyer = ["dep:foyer", "dep:anyhow"]
+foyer = ["dep:foyer"]
 test-util = [
     "tokio/test-util",
     "slatedb-common/test-util",
@@ -125,6 +123,7 @@ all = [
     "zstd",
     "wal_disable",
     "foyer",
+    "moka",
     "test-util",
 ]
 # Enable compaction filters API.

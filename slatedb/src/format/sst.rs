@@ -1085,6 +1085,9 @@ impl SsTableFormat {
                 size += 2 + p.name().len() + 8;
                 size += p.estimate_size(entry_num);
             }
+            // One CRC32 checksum appended to the entire composite block by
+            // compress_and_transform.
+            size += CHECKSUM_SIZE;
             size
         } else {
             0

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use slatedb::{admin, Db};
 
-use crate::error::{Error, SlateDbError};
+use crate::error::Error;
 
 /// Object store handle used when opening databases, readers, and WAL readers.
 #[derive(uniffi::Object)]
@@ -25,7 +25,7 @@ impl ObjectStore {
     /// file before constructing the store.
     #[uniffi::constructor]
     pub fn from_env(env_file: Option<String>) -> Result<Arc<Self>, Error> {
-        let inner = admin::load_object_store_from_env(env_file).map_err(SlateDbError::from)?;
+        let inner = admin::load_object_store_from_env(env_file)?;
         Ok(Arc::new(Self { inner }))
     }
 }

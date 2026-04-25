@@ -658,6 +658,56 @@ impl TableStore {
         self.sst_format
             .estimate_encoded_size_wal(num_entries, size_entries)
     }
+
+    pub(crate) fn cache(&self) -> Option<&Arc<dyn DbCache>> {
+        self.cache.as_ref()
+    }
+
+    /// Best-effort removal of all cache entries associated with the given SST:
+    /// data blocks, index, filters, and stats. Returns the offsets whose
+    /// cache removal was attempted.
+    pub(crate) async fn evict_sst_from_cache(&self, handle: &SsTableHandle) {
+        let Some(ref cache) = self.cache else {
+            return;
+        };
+        // Best effort: if we can't read the index we can't enumerate blocks,
+        // so log and skip. Remaining entries will age out under normal pressure.
+        let index = match self.read_index(handle, false).await {
+            Ok(index) => index,
+            Err(e) => {
+                warn!(
+                    "evict_sst_from_cache: failed to read index for SST {:?}: {}",
+                    handle.id, e
+                );
+                return;
+            }
+        };
+        {
+            let index_borrow = index.borrow();
+            let meta = index_borrow.block_meta();
+            for block_num in 0..meta.len() {
+                let offset = meta.get(block_num).offset();
+                cache.remove(&(handle.id, offset).into()).await;
+            }
+        }
+        cache
+            .remove(&(handle.id, handle.info.index_offset).into())
+            .await;
+        // Only evict filter/stats when those sections exist. Otherwise
+        // SsTableInfo's filter_offset collides with index_offset (filter_len
+        // == 0) and stats_offset collides with the first data block
+        // (stats_offset == 0).
+        if handle.info.filter_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.filter_offset).into())
+                .await;
+        }
+        if handle.info.stats_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.stats_offset).into())
+                .await;
+        }
+    }
 }
 
 async fn write_sst_in_object_store(

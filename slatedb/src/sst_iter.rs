@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use slatedb_common::metrics::CounterFn;
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -7,18 +8,15 @@ use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-use crate::block_iterator::BlockLike;
-use crate::block_iterator_v2::BlockIteratorV2;
+use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterQuery, NamedFilter};
-use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
+use crate::filter_policy::{FilterQuery, FilterTarget, NamedFilter};
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
-use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::{
-    block_iterator::BlockIterator,
     iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
     partitioned_keyspace,
     tablestore::TableStore,
@@ -30,53 +28,14 @@ enum FetchTask {
     Finished(VecDeque<Arc<Block>>),
 }
 
-enum DataBlockIterator<B: BlockLike> {
-    V1(BlockIterator<B>),
-    V2(BlockIteratorV2<B>),
-}
-
-impl<B: BlockLike> DataBlockIterator<B> {
-    fn new(block: B, sst_version: u16, order: IterationOrder) -> Result<Self, SlateDBError> {
-        match sst_version {
-            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new(block, order))),
-            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new(block, order))),
-            _ => Err(SlateDBError::InvalidVersion {
-                format_name: "SST",
-                supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
-                actual_version: sst_version,
-            }),
-        }
-    }
-
-    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        match self {
-            Self::V1(iter) => iter.next().await,
-            Self::V2(iter) => iter.next().await,
-        }
-    }
-
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        match self {
-            Self::V1(iter) => iter.seek(next_key).await,
-            Self::V2(iter) => iter.seek(next_key).await,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::V1(iter) => iter.is_empty(),
-            Self::V2(iter) => iter.is_empty(),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
     pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) eager_spawn: bool,
     pub(crate) order: IterationOrder,
+    pub(crate) prefix: Option<Bytes>,
 }
 
 impl Default for SstIteratorOptions {
@@ -87,6 +46,7 @@ impl Default for SstIteratorOptions {
             cache_blocks: true,
             eager_spawn: false,
             order: IterationOrder::Ascending,
+            prefix: None,
         }
     }
 }
@@ -195,7 +155,7 @@ enum FilterState {
 }
 
 struct FilterEvaluator {
-    key: Bytes,
+    query: FilterQuery,
     db_stats: Option<DbStats>,
     state: FilterState,
     found_key: bool,
@@ -203,9 +163,9 @@ struct FilterEvaluator {
 }
 
 impl FilterEvaluator {
-    fn new(key: Bytes, db_stats: Option<DbStats>) -> Self {
+    fn new_point(key: Bytes, db_stats: Option<DbStats>) -> Self {
         Self {
-            key,
+            query: FilterQuery::point(key),
             db_stats,
             state: FilterState::NotChecked,
             found_key: false,
@@ -213,9 +173,20 @@ impl FilterEvaluator {
         }
     }
 
-    /// Evaluate the filters against the key using AND logic.
+    fn new_prefix(prefix: Bytes, db_stats: Option<DbStats>) -> Self {
+        Self {
+            query: FilterQuery::prefix(prefix),
+            db_stats,
+            state: FilterState::NotChecked,
+            found_key: false,
+            false_positive_recorded: false,
+        }
+    }
+
+    /// Evaluate the filters against the query using AND logic.
     ///
-    /// If any filter returns `false` for `might_match`, the key is filtered out.
+    /// All filters must agree the query might match for the read to proceed.
+    /// If any filter says the query is absent, the SST is skipped.
     /// If no filters are provided, the state is set to `NoFilter`.
     async fn evaluate(&mut self, filters: &[NamedFilter]) {
         if self.state != FilterState::NotChecked {
@@ -227,23 +198,42 @@ impl FilterEvaluator {
             return;
         }
 
-        let query = FilterQuery::point(self.key.clone());
-
         // AND logic: if any filter says the key is NOT present, filter it out.
-        // All filters reaching here are decoded — TableStore::read_filters
+        // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters.iter().all(|nf| nf.filter.might_match(&query));
+        let might_match = filters.iter().all(|nf| nf.filter.might_match(&self.query));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_positives.increment(1);
+                self.positives_counter(stats).increment(1);
             }
             self.state = FilterState::Positive;
         } else {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_negatives.increment(1);
+                self.negatives_counter(stats).increment(1);
             }
             self.state = FilterState::Negative;
+        }
+    }
+
+    fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+        }
+    }
+
+    fn negatives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_negatives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+        }
+    }
+
+    fn false_positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_false_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
         }
     }
 
@@ -252,15 +242,17 @@ impl FilterEvaluator {
     }
 
     fn notify_key_found(&mut self, key: &[u8]) {
-        if key == self.key.as_ref() {
-            self.found_key = true;
+        match &self.query.target {
+            FilterTarget::Point(k) if key == k.as_ref() => self.found_key = true,
+            FilterTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            _ => {}
         }
     }
 
     fn notify_finished_iteration(&mut self) {
         if self.state == FilterState::Positive && !self.found_key && !self.false_positive_recorded {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_false_positives.increment(1);
+                self.false_positives_counter(stats).increment(1);
             }
             self.false_positive_recorded = true;
         }
@@ -391,46 +383,6 @@ impl<'a> InternalSstIterator<'a> {
     ) -> Result<Option<Self>, SlateDBError> {
         let iter = Self::for_key(table, key, table_store, options)?;
         init_optional_iterator(iter).await
-    }
-
-    fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
-        partitioned_keyspace::last_partition_including_key(index, key)
-    }
-
-    fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
-        partitioned_keyspace::first_partition_including_or_after_key(index, key)
-    }
-
-    fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
-        let start_block_id = match view.start_key() {
-            Included(k) | Excluded(k) => {
-                Self::first_block_with_data_including_or_after_key(index, k)
-            }
-            Unbounded => 0,
-        };
-
-        let end_block_id_exclusive = match view.end_key() {
-            Included(k) => Self::last_block_with_data_including_key(index, k)
-                .map(|b| b + 1)
-                .unwrap_or(start_block_id),
-            Excluded(k) => {
-                let block_index = Self::last_block_with_data_including_key(index, k);
-                match block_index {
-                    None => start_block_id,
-                    Some(block_index) => {
-                        let block = index.block_meta().get(block_index);
-                        if k == block.first_key().bytes() {
-                            block_index
-                        } else {
-                            block_index + 1
-                        }
-                    }
-                }
-            }
-            Unbounded => index.block_meta().len(),
-        };
-
-        start_block_id..end_block_id_exclusive
     }
 
     /// Spawns fetch tasks for blocks based on iteration order.
@@ -618,8 +570,11 @@ impl<'a> InternalSstIterator<'a> {
                 .table_store
                 .read_index(&self.view.table_as_ref().sst, self.options.cache_blocks)
                 .await?;
-            let block_idx_range =
-                InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
+            let block_idx_range = partitioned_keyspace::partitions_covering_range(
+                &index.borrow(),
+                self.view.start_key(),
+                self.view.end_key(),
+            );
             self.block_idx_range = block_idx_range.clone();
             // For descending order, start from the end and work backwards
             self.next_block_idx_to_fetch = match self.options.order {
@@ -788,10 +743,13 @@ impl RowEntryIterator for InternalSstIterator<'_> {
             // For ascending order, find the first block with or after the key
             let block_idx = match self.options.order {
                 IterationOrder::Ascending => {
-                    Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key)
+                    partitioned_keyspace::first_partition_including_or_after_key(
+                        &index.borrow(),
+                        next_key,
+                    )
                 }
                 IterationOrder::Descending => {
-                    Self::last_block_with_data_including_key(&index.borrow(), next_key)
+                    partitioned_keyspace::last_partition_including_key(&index.borrow(), next_key)
                         .unwrap_or(self.block_idx_range.start)
                 }
             };
@@ -918,11 +876,12 @@ pub(crate) struct SstIterator<'a> {
 impl<'a> SstIterator<'a> {
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
-        let delegate = match point_key {
-            Some(key) => {
-                let filter = FilterEvaluator::new(key, db_stats);
-                SstIteratorDelegate::Filter(FilterIterator::new(internal, filter))
-            }
+        let prefix = internal.options.prefix.clone();
+        let filter_evaluator = point_key
+            .map(|key| FilterEvaluator::new_point(key, db_stats.clone()))
+            .or_else(|| prefix.map(|p| FilterEvaluator::new_prefix(p, db_stats)));
+        let delegate = match filter_evaluator {
+            Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
             None => SstIteratorDelegate::Direct(internal),
         };
         Self { delegate }
@@ -1125,7 +1084,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
 
@@ -1241,11 +1200,25 @@ mod tests {
             other => panic!("expected value, found {other:?}"),
         }
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(0)
         );
     }
@@ -1273,11 +1246,25 @@ mod tests {
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(0)
         );
     }
@@ -1325,16 +1312,32 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
+        let point_labels = &[(
+            crate::db_stats::FILTER_KIND_LABEL,
+            crate::db_stats::FILTER_KIND_POINT,
+        )];
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                point_labels,
+            ),
             Some(0)
         );
     }
@@ -1783,6 +1786,7 @@ mod tests {
                 cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
+                prefix: None,
             },
         )
         .await
@@ -1799,6 +1803,7 @@ mod tests {
                 cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
+                prefix: None,
             },
         )
         .await
@@ -2370,6 +2375,7 @@ mod tests {
             cache_blocks: true,
             eager_spawn: false,
             order,
+            prefix: None,
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2654,6 +2660,7 @@ mod tests {
                 cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
+                prefix: None,
             },
         )
         .await

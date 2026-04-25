@@ -630,6 +630,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     uncached_table_store.clone(),
                     manifest_store.clone(),
                     compactions_store.clone(),
+                    retrying_main_object_store.clone(),
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = async_channel::unbounded();
@@ -825,11 +826,13 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         table_store: Arc<TableStore>,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
+        object_store: Arc<dyn ObjectStore>,
     ) -> GarbageCollector {
         GarbageCollector::new(
             manifest_store,
             compactions_store,
             table_store,
+            object_store,
             self.options,
             &self.recorder,
             self.system_clock,
@@ -867,7 +870,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
-                retrying_main_object_store,
+                retrying_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
@@ -878,6 +881,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             manifest_store,
             compactions_store,
             table_store,
+            retrying_main_object_store,
             self.options,
             &self.recorder,
             self.system_clock,
@@ -1439,7 +1443,7 @@ impl CloneSourceSpec<(Bound<Bytes>, Bound<Bytes>)> {
 /// A builder for configuring database clone operations.
 pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Bytes>)> {
     clone_path: Path,
-    source: CloneSourceSpec<R>,
+    sources: Vec<CloneSourceSpec<R>>,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Option<Arc<dyn SystemClock>>,
@@ -1455,7 +1459,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     ) -> Self {
         CloneBuilder {
             clone_path,
-            source,
+            sources: vec![source],
             object_store,
             wal_object_store: None,
             system_clock: None,
@@ -1470,7 +1474,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     }
 
     pub fn with_source(mut self, source: CloneSourceSpec<R>) -> Self {
-        self.source = source;
+        self.sources.push(source);
         self
     }
 
@@ -1502,7 +1506,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     /// Build and execute the clone operation.
     pub async fn build(self) -> Result<(), Box<dyn std::error::Error>> {
         crate::clone::create_clone(
-            self.source,
+            self.sources,
             self.clone_path,
             ObjectStores::new(self.object_store, self.wal_object_store),
             Arc::new(FailPointRegistry::new()),

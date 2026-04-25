@@ -50,6 +50,17 @@ impl BytesRange {
         Self { inner }
     }
 
+    /// Build a `BytesRange` without panicking on empty ranges. Returns `None`
+    /// when the bounds describe an empty key interval.
+    pub(crate) fn try_new(start_bound: Bound<Bytes>, end_bound: Bound<Bytes>) -> Option<Self> {
+        let inner = ComparableRange::new(start_bound, end_bound);
+        inner.non_empty().then_some(Self { inner })
+    }
+
+    pub(crate) fn unbounded() -> Self {
+        Self::new(Unbounded, Unbounded)
+    }
+
     pub(crate) fn new_empty() -> Self {
         Self {
             inner: ComparableRange::new(

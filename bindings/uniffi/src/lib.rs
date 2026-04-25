@@ -1,6 +1,8 @@
+mod admin;
 mod builder;
 mod config;
 mod db;
+mod db_cache;
 mod db_reader;
 mod db_snapshot;
 mod db_transaction;
@@ -16,7 +18,8 @@ mod validation;
 mod wal_reader;
 mod write_batch;
 
-pub use builder::{DbBuilder, DbReaderBuilder};
+pub use admin::Admin;
+pub use builder::{AdminBuilder, DbBuilder, DbReaderBuilder};
 pub use config::{
     DurabilityLevel, FlushOptions, FlushType, IsolationLevel, IterationOrder, MergeOptions,
     PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
@@ -35,7 +38,12 @@ pub use metrics::{
 };
 pub use object_store::ObjectStore;
 pub use settings::Settings;
-pub use types::{DbStatus, KeyRange, KeyValue, RowEntry, RowEntryKind, WriteHandle};
+pub use types::{
+    Checkpoint, Compaction, CompactionSpec, CompactionStatus, CompactorStateView, CompressionCodec,
+    DbStatus, ExternalDb, FilterFormat, KeyRange, KeyValue, RowEntry, RowEntryKind, SortedRun,
+    SourceId, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType, VersionedCompactions,
+    VersionedManifest, WriteHandle,
+};
 pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
 pub use write_batch::WriteBatch;
 

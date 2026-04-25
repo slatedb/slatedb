@@ -13,9 +13,10 @@ use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
+use crate::reader::ScanContext;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
-use crate::DbRead;
+use crate::DbReadOps;
 
 /// A database transaction that provides atomic read-write operations with
 /// configurable isolation levels. This is the main interface for transactional
@@ -59,7 +60,7 @@ pub struct DbTransaction {
     ///
     /// DbTransaction is not intended for concurrent use; we use `RwLock` (not `RefCell`) for
     /// interior mutability to preserve `Sync` in async contexts. `RefCell` is `!Sync` and would
-    /// make `DbTransaction` `!Sync`, which is incompatible with async code using the `DbRead`
+    /// make `DbTransaction` `!Sync`, which is incompatible with async code using the `DbReadOps`
     /// trait.
     write_batch: RwLock<WriteBatch>,
     /// Reference to the database
@@ -223,44 +224,8 @@ impl DbTransaction {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
-
-        // Track read range for SSI conflict detection if needed
-        let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
-            let tracker = Arc::new(DbIteratorRangeTracker::new());
-            self.range_trackers.lock().push(tracker.clone());
-            Some(tracker)
-        } else {
-            None
-        };
-
-        self.db_inner.check_closed()?;
-        let db_state = self.db_inner.state.read().view();
-
-        // Build the write batch iterator synchronously while holding the read
-        // guard, avoiding a clone of the full batch. The iterator materializes
-        // only the entries in the scan range.
-        let range = BytesRange::from(range);
-        let write_batch_iter = {
-            let guard = self.write_batch.read();
-            Some(WriteBatchIterator::new(
-                &guard,
-                range.clone(),
-                options.order,
-            ))
-        };
-
-        self.db_inner
-            .reader
-            .scan_with_options(
-                range,
-                options,
-                &db_state,
-                write_batch_iter,
-                Some(self.started_seq),
-                range_tracker,
-            )
+        self.scan_inner(BytesRange::from(range), options, None)
             .await
-            .map_err(Into::into)
     }
 
     /// Scan all keys that share the provided prefix using the default scan options.
@@ -296,8 +261,56 @@ impl DbTransaction {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        self.scan_inner(range, options, Some(prefix)).await
+    }
+
+    async fn scan_inner(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+        prefix: Option<Bytes>,
+    ) -> Result<DbIterator, crate::Error> {
+        // Track read range for SSI conflict detection if needed
+        let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            let tracker = Arc::new(DbIteratorRangeTracker::new());
+            self.range_trackers.lock().push(tracker.clone());
+            Some(tracker)
+        } else {
+            None
+        };
+
+        self.db_inner.check_closed()?;
+        let db_state = self.db_inner.state.read().view();
+
+        // Build the write batch iterator synchronously while holding the read
+        // guard, avoiding a clone of the full batch. The iterator materializes
+        // only the entries in the scan range.
+        let write_batch_iter = {
+            let guard = self.write_batch.read();
+            Some(WriteBatchIterator::new(
+                &guard,
+                range.clone(),
+                options.order,
+            ))
+        };
+
+        self.db_inner
+            .reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter,
+                    max_seq: Some(self.started_seq),
+                    range_tracker,
+                    prefix,
+                },
+            )
             .await
+            .map_err(Into::into)
     }
 
     /// Put a key-value pair into the transaction.
@@ -435,6 +448,9 @@ impl DbTransaction {
     }
 
     /// Merge a key-value pair into the transaction.
+    ///
+    /// ## Errors
+    /// - `Error`: if no merge operator is configured for the database.
     pub fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
@@ -444,6 +460,9 @@ impl DbTransaction {
     }
 
     /// Merge a key-value pair into the transaction with custom options.
+    ///
+    /// ## Errors
+    /// - `Error`: if no merge operator is configured for the database.
     pub fn merge_with_options<K, V>(
         &self,
         key: K,
@@ -454,6 +473,10 @@ impl DbTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        if self.db_inner.flush_merge_operator.is_none() {
+            return Err(SlateDBError::MergeOperatorMissing.into());
+        }
+
         self.write_batch
             .write()
             .merge_with_options(key, value, options);
@@ -586,13 +609,13 @@ impl DbTransaction {
 }
 
 #[async_trait::async_trait]
-impl DbRead for DbTransaction {
+impl DbReadOps for DbTransaction {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, options).await
+        DbTransaction::get_with_options(self, key, options).await
     }
 
     async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
@@ -600,7 +623,7 @@ impl DbRead for DbTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, options).await
+        DbTransaction::get_key_value_with_options(self, key, options).await
     }
 
     async fn scan_with_options<K, T>(
@@ -612,7 +635,18 @@ impl DbRead for DbTransaction {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, options).await
+        DbTransaction::scan_with_options(self, range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        DbTransaction::scan_prefix_with_options(self, prefix, options).await
     }
 }
 
@@ -1677,6 +1711,23 @@ mod tests {
         let value = db.get(b"counter").await.unwrap().unwrap();
         let total = u64::from_le_bytes(value.as_ref().try_into().unwrap());
         assert_eq!(total, EXPECTED);
+    }
+
+    #[tokio::test]
+    async fn test_txn_merge_requires_merge_operator() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_txn_merge_requires_merge_operator", object_store)
+            .await
+            .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let err = txn
+            .merge_with_options(b"counter", 1u64.to_le_bytes(), &MergeOptions::default())
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+
+        txn.commit().await.unwrap();
+        assert_eq!(db.get(b"counter").await.unwrap(), None);
     }
 
     fn test_db_options(

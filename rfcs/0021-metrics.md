@@ -1,6 +1,6 @@
 # SlateDB Metrics 
 
-Status: Draft
+Status: Accepted
 
 Authors:
 

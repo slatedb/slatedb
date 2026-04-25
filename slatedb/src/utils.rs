@@ -10,7 +10,7 @@ use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
-use bytes::{BufMut, Bytes};
+use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
 use log::{error, warn};
 use rand::{Rng, RngCore};
@@ -625,12 +625,11 @@ pub(crate) fn encode_varint(buf: &mut Vec<u8>, mut value: u32) {
 /// Reads bytes from the buffer, advancing the slice, until a byte
 /// without the continuation bit (high bit = 0) is found.
 #[allow(dead_code)]
-pub(crate) fn decode_varint(buf: &mut &[u8]) -> u32 {
+pub(crate) fn decode_varint(buf: &mut impl Buf) -> u32 {
     let mut result = 0u32;
     let mut shift = 0;
     loop {
-        let byte = buf[0];
-        *buf = &buf[1..];
+        let byte = buf.get_u8();
         result |= ((byte & 0x7F) as u32) << shift;
         if byte & 0x80 == 0 {
             break;

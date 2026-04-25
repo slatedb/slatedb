@@ -6,7 +6,6 @@ use crate::error::SlateDBError::{
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
-use crate::rand::DbRand;
 use chrono::Utc;
 use log::debug;
 use object_store::path::Path;
@@ -198,18 +197,12 @@ impl StoredManifest {
         Self::init(store, manifest, clock).await
     }
 
-    /// Create a new manifest for a new cloned database. The initial manifest
-    /// will be written with the `initialized` field set to false in order to allow
-    /// for the rest of the clone state to be initialized
-    pub(crate) async fn create_uninitialized_clone(
+    /// Store a new manifest (for a new cloned database).
+    pub(crate) async fn store_uninitialized_clone(
         clone_manifest_store: Arc<ManifestStore>,
-        parent_manifest: &Manifest,
-        parent_path: String,
-        source_checkpoint_id: Uuid,
-        rand: Arc<DbRand>,
+        manifest: Manifest,
         clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest::cloned(parent_manifest, parent_path, source_checkpoint_id, rand);
         Self::init(clone_manifest_store, manifest, clock).await
     }
 
