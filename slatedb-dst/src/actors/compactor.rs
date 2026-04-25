@@ -8,6 +8,7 @@ use slatedb::compactor::stats::COMPACTOR_EPOCH;
 use slatedb::config::CompactorOptions;
 use slatedb::{CloseReason, CompactorBuilder, Error, ErrorKind};
 use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
+use tokio::task::JoinHandle;
 use tracing::instrument;
 
 use crate::{Actor, ActorCtx};
@@ -24,21 +25,25 @@ pub struct CompactorActorOptions {
 
 pub struct CompactorActor {
     actor_options: CompactorActorOptions,
+    current_task: Option<JoinHandle<Result<(), Error>>>,
 }
 
 impl CompactorActor {
     pub fn new(actor_options: CompactorActorOptions) -> Result<Self, Error> {
-        Ok(Self { actor_options })
+        Ok(Self {
+            actor_options,
+            current_task: None,
+        })
     }
 }
 
 /// Spawns a standalone compactor in a loop, fencing any existing ones.
-/// 
+///
 /// - Create new compactor
 /// - Wait for new compactor to claim an epoch (i.e. fence old)
 /// - Assert old compactor is fenced
 /// - Wait for restart interval before returning.
-/// 
+///
 /// If the new compactor fails to start with `Unavailable`, it is retried indefinitely
 /// until it succeeds (disregarding the shutdown token). This is because the compactor
 /// can fail due to a timeout (outside of RetryingObjectStore) on startup. With toxics
@@ -82,19 +87,30 @@ impl CompactorActor {
             }
         }
 
+        // Swap in the new compactor and take the old task to verify it was fenced.
+        let _ = ctx.swap_compactor(next.clone());
+        let old_task = self.current_task.take();
+
         // Verify the previous compactor is fenced.
-        if let Some(old) = ctx.swap_compactor(next.clone()) {
+        if let Some(old_task) = old_task {
             info!("spawned replacement compactor [name={}]", ctx.name());
-            match old.stop().await {
-                Err(err) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => (),
+            match old_task.await {
+                Ok(Err(err)) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => (),
                 result => panic!("compactor was not fenced as expected [result={result:?}]"),
             }
         }
 
+        // Install the new compactor task so we can verify it's fenced in the next iteration.
+        self.current_task = Some(new_task);
+        let current_task = self
+            .current_task
+            .as_mut()
+            .expect("compactor task must be installed");
+
         // Wait for the restart interval before allowing the next generation to start.
         tokio::select! {
             biased;
-            result = &mut new_task => panic!("compactor exited unexpectedly: {result:?}"),
+            result = current_task => panic!("compactor exited unexpectedly: {result:?}"),
             _ = shutdown_token.cancelled() => {}
             _ = system_clock.sleep(self.actor_options.restart_interval) => {}
         }
