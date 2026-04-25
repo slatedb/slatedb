@@ -126,7 +126,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
                 compactor_options,
             })?,
         )
-        .actor("shutdown", ShutdownActor::new(20_000)?);
+        .actor("shutdown", ShutdownActor::new(2_000_000)?);
 
     harness.run()?;
 
