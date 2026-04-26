@@ -58,38 +58,35 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         l0_max_ssts,
         max_unflushed_bytes,
         compression_codec,
-        garbage_collector_options: Some(GarbageCollectorOptions {
-            manifest_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
-            }),
-            wal_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
-            }),
-            compacted_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
-            }),
-            compactions_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
-            }),
-        }),
+        garbage_collector_options: Some(build_settings_gc(&mut *rng)),
         #[cfg(feature = "wal_disable")]
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     };
 
     settings
+}
+
+/// Builds randomized deterministic garbage collector options for DST scenarios.
+pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
+    GarbageCollectorOptions {
+        manifest_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+        wal_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+        compacted_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+        compactions_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+    }
 }
 
 /// Adds a deterministic randomized set of object-store toxics to `failures`.
