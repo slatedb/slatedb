@@ -75,14 +75,14 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
             // The auditor scans account ranges and needs SSTs to stay live for
             // the duration of the scan. Keep compacted GC from deleting SSTs
             // out from under it when they are less than 5s old.
-            let compacted_options = settings
+            let gc_compacted_options = settings
                 .garbage_collector_options
                 .as_mut()
                 .expect("build_settings should configure garbage collection")
                 .compacted_options
                 .as_mut()
                 .expect("build_settings should configure compacted garbage collection");
-            compacted_options.min_age = compacted_options.min_age.max(Duration::from_secs(5));
+            gc_compacted_options.min_age = gc_compacted_options.min_age.max(Duration::from_secs(5));
 
             // The test registers the standalone compactor actor below.
             settings.compactor_options = None;
