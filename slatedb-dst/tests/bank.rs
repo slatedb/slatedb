@@ -17,7 +17,6 @@ use slatedb_dst::{
     },
     utils::{build_settings, build_settings_compactor, build_toxic},
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -40,14 +39,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
     let failures = FailingObjectStoreController::new(failure_rand.clone());
     for index in 0..10 {
         let toxic = build_toxic(failure_rand.as_ref(), "bank", index);
-
-        // Bandwidth toxics cause long stalls that trigger "FileNotFound"
-        // auditor failures during long scans (>15m). Skip them until #319
-        // is done.
-        match &toxic.kind {
-            ToxicKind::Bandwidth { .. } => {}
-            _ => failures.add_toxic(toxic),
-        }
+        failures.add_toxic(toxic);
     }
 
     let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
@@ -72,18 +64,17 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
             let db_seed = ctx.rand().rng().next_u64();
             let mut settings = build_settings(ctx.rand()).await;
 
-            // The auditor scans account ranges and needs SSTs to stay live for
-            // the duration of the scan. Keep compacted GC from deleting SSTs
-            // out from under it when they are less than 60s old.
-            let gc_compacted_options = settings
+            // Clock ticks in the harness and `Toxic` clock advances go _very_ fast.
+            // This can cause the auditor's scan to appear to take longer than 15
+            // minutes. Since the compactor sets a checkpoint with a 15m timeout before
+            // updating the manifest, scans that take longer than 15m can result in a
+            // "FileNotFound" if the GC removes an SST in the scan after the checkpoint
+            // expires. Disable `compacted` GC until #319 is done.
+            settings
                 .garbage_collector_options
                 .as_mut()
                 .expect("build_settings should configure garbage collection")
-                .compacted_options
-                .as_mut()
-                .expect("build_settings should configure compacted garbage collection");
-            gc_compacted_options.min_age =
-                gc_compacted_options.min_age.max(Duration::from_secs(60));
+                .compacted_options = None;
 
             // The test registers the standalone compactor actor below.
             settings.compactor_options = None;
