@@ -44,17 +44,14 @@ pub struct WorkloadActor {
 
 impl WorkloadActor {
     pub fn new(options: WorkloadActorOptions) -> Result<Self, Error> {
-        if options.key_count == 0 {
-            return Err(Error::invalid(
-                "workload actor key_count must be greater than zero".to_string(),
-            ));
-        }
-        if options.min_value_size > options.max_value_size {
-            return Err(Error::invalid(
-                "workload actor min_value_size must be less than or equal to max_value_size"
-                    .to_string(),
-            ));
-        }
+        assert!(
+            options.key_count > 0,
+            "workload actor key_count must be greater than zero"
+        );
+        assert!(
+            options.min_value_size <= options.max_value_size,
+            "workload actor min_value_size must be less than or equal to max_value_size"
+        );
 
         Ok(Self {
             options,

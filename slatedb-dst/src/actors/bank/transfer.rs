@@ -52,12 +52,9 @@ impl Actor for TransferActor {
                 if transfer_amount == 0 {
                     break;
                 }
-                let updated_to_balance =
-                    to_balance.checked_add(transfer_amount).ok_or_else(|| {
-                        Error::invalid(
-                            "bank transfer overflowed destination account balance".to_string(),
-                        )
-                    })?;
+                let updated_to_balance = to_balance
+                    .checked_add(transfer_amount)
+                    .expect("bank transfer overflowed destination account balance");
 
                 let updated_from_value = encode_balance(
                     from_balance - transfer_amount,

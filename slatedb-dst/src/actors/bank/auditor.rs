@@ -51,10 +51,10 @@ impl Actor for AuditorActor {
                 self.options.account_count,
             )?;
             if seen[account_id] {
-                return Err(Error::invalid(format!(
+                panic!(
                     "duplicate bank account key observed during audit: {}",
                     String::from_utf8_lossy(kv.key.as_ref()),
-                )));
+                );
             }
 
             seen[account_id] = true;
@@ -65,18 +65,16 @@ impl Actor for AuditorActor {
         }
 
         let observed_count = seen.iter().filter(|present| **present).count();
-        if observed_count != self.options.account_count {
-            return Err(Error::invalid(format!(
-                "bank audit observed {} accounts but expected {}",
-                observed_count, self.options.account_count,
-            )));
-        }
-        if total != self.expected_total {
-            return Err(Error::invalid(format!(
-                "bank audit total mismatch: observed {} expected {}",
-                total, self.expected_total,
-            )));
-        }
+        assert_eq!(
+            observed_count, self.options.account_count,
+            "bank audit observed {} accounts but expected {}",
+            observed_count, self.options.account_count,
+        );
+        assert_eq!(
+            total, self.expected_total,
+            "bank audit total mismatch: observed {} expected {}",
+            total, self.expected_total,
+        );
 
         self.step += 1;
         info!(

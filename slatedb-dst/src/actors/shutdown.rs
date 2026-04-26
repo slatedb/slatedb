@@ -16,7 +16,7 @@ pub struct ShutdownActor {
 impl ShutdownActor {
     pub fn new(shutdown_at_ms: i64) -> Result<Self, Error> {
         let shutdown_at = DateTime::from_timestamp_millis(shutdown_at_ms)
-            .ok_or_else(|| Error::invalid("shutdown timestamp must be valid".to_string()))?;
+            .expect("shutdown timestamp must be valid");
         Ok(Self { shutdown_at })
     }
 }

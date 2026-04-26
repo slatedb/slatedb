@@ -21,11 +21,10 @@ pub struct FlusherActor {
 
 impl FlusherActor {
     pub fn new(sleep_interval_range_ms: RangeInclusive<u64>) -> Result<Self, Error> {
-        if sleep_interval_range_ms.is_empty() {
-            return Err(Error::invalid(
-                "flusher actor sleep interval range must be non-empty".to_string(),
-            ));
-        }
+        assert!(
+            !sleep_interval_range_ms.is_empty(),
+            "flusher actor sleep interval range must be non-empty"
+        );
 
         Ok(Self {
             sleep_interval_range_ms,
