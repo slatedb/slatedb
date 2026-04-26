@@ -707,10 +707,11 @@ impl Db {
         // Mark the database as closed before flushing.
         self.inner.status_manager.write_result(Ok(()));
 
+        let mut result = Ok(());
         if should_flush {
             // Flush memtables to L0 so that the WAL does not need to be
             // replayed on the next startup.
-            if let Err(e) = self
+            result = self
                 .inner
                 .flush(
                     FlushOptions {
@@ -719,7 +720,9 @@ impl Db {
                     false,
                 )
                 .await
-            {
+                .map_err(Into::into);
+
+            if let Err(e) = &result {
                 warn!("failed to flush db during close [error={:?}]", e);
             }
         }
@@ -751,7 +754,7 @@ impl Db {
         }
 
         info!("db closed");
-        Ok(())
+        result
     }
 
     /// Create a snapshot of the database.
@@ -4507,7 +4510,8 @@ mod tests {
         .await
         .unwrap();
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // Disable the failpoint so the restored DB can flush normally.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
@@ -4938,7 +4942,8 @@ mod tests {
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
         reader.close().await.unwrap();
     }
 
@@ -4968,7 +4973,8 @@ mod tests {
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
         // Let background flush attempts fail while WAL durability preserves recovery.
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // pause write-compacted-sst-io-error to prevent immutable tables
         // from being flushed, so we can snapshot the state when there is
@@ -5467,10 +5473,10 @@ mod tests {
         )
         .await
         .expect("write batch failed");
-
         // close the db to flush the manifest
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
