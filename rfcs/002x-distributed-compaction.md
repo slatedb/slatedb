@@ -104,7 +104,7 @@ Separates the **Compaction Coordinator** (scheduler + manifest committer) from o
    +--------+-----------+ +--------------------+
             ^
             |
-            | poll (worker read) 
+            | poll (worker read)
             | claim / heartbeat / complete (worker write)
             |
       +-----+-----+-----+
@@ -139,7 +139,7 @@ Via settings:
 
 ```toml
 [compactor_options]
-worker_heartbeat_timeout_ms = 30000
+worker_heartbeat_timeout_ms = 10000
 max_concurrent_compactions = 2
 embedded_worker = true
 ```
@@ -150,13 +150,38 @@ The coordinator always uses `RemoteCompactionExecutor`. `embedded_worker = true`
 
 #### Workers
 
-Workers don't use `CompactorOptions`. The primary setting is `worker_poll_interval_ms`, which controls how often a worker checks `.compactions` for new jobs. Each poll sleeps for `worker_poll_interval_ms + random(0, worker_poll_interval_ms * 0.1)` to prevent workers from synchronizing on `.compactions` reads, which would cause unnecessary claim conflicts. This jitter is applied on every poll and requires no configuration.
+Workers use `CompactorWorkerOptions` instead of `CompactorOptions`. The primary settings are:
+
+```rust
+pub struct CompactionWorkerOptions {
+  // How often a worker checks `.compactions` for new jobs.
+  pub poll_interval_ms: u64,
+
+  // How many bytes a worker must process before emitting a heartbeat.
+  pub heartbeat_bytes: u64,
+
+  // Minimum wall-clock time between heartbeat writes.
+  pub heartbeat_min_interval_ms: u64,
+}
+```
+
+- `poll_interval_ms` is used for polling frequency. Each poll sleeps for `poll_interval_ms + random(0, poll_interval_ms * 0.1)` to prevent workers from synchronizing on `.compactions` reads. This jitter is applied on every poll and requires no configuration.
+
+- `heartbeat_bytes` is used to tie heartbeats to compaction progress and gives the coordinator a minimum throughput guarantee. A worker that falls behind this rate will be reclaimed and its job handed off, regardless of whether its event loop is still alive.
+
+- `heartbeat_min_interval_ms` suppresses heartbeats triggered by `heartbeat_bytes` when processing is fast and should be set well below the coordinator's `worker_heartbeat_timeout_ms`.
 
 New `CompactionWorkerBuilder` entrypoint for `CompactionWorker` processes:
 
 ```rust
+let options = CompactionWorkerOptions {
+    poll_interval_ms: 1000,
+    heartbeat_bytes: 100_000,
+    heartbeat_min_interval_ms: 10000,
+};
+
 let worker = CompactionWorkerBuilder::new("/path/to/db", object_store.clone())
-    .with_poll_interval_ms(5000)
+    .with_options(options)
     .build()
     .await?;
 
@@ -202,19 +227,22 @@ Workers claim up to `max_concurrent_compactions` jobs at a time, limiting the nu
 
 Workers update `last_heartbeat_ms` in two ways:
 
-1. **On SST flush:** piggybacked on the RFC-0013 progress-persistence write each time an output SST is written (~256MB boundaries).
-2. **On poll:** workers continue polling `.compactions` every `worker_poll_interval_ms` even when they have active jobs (to pick up additional work up to `max_concurrent_compactions`). When a worker has at least one `Running` job, each poll write includes an updated `last_heartbeat_ms`. This ensures liveness when SST output is slow (e.g. low-throughput or large single-SST jobs that take longer than the timeout to produce their first output), without requiring a separate heartbeat config on the worker. `worker_poll_interval_ms` must be well below `worker_heartbeat_timeout_ms` for this to work; a reasonable constraint is `worker_poll_interval_ms <= worker_heartbeat_timeout_ms / 2`.
+1. **On SST flush:** piggybacked on the RFC-0013 progress-persistence write each time an output SST is written.
+2. **On bytes processed:** every `heartbeat_bytes` bytes processed, a worker writes an updated `last_heartbeat_ms` to `.compactions`. This ties liveness directly to compaction throughput. A degraded machine that is alive but slow will miss the threshold and be reclaimed, preventing it from holding L0 compaction indefinitely. To avoid excessive object store writes when processing is fast, heartbeats are suppressed if less than `heartbeat_min_interval_ms` has elapsed since the last one.
+
+Polls do not emit heartbeats. Workers continue polling every `worker_poll_interval_ms` to pick up additional work, but liveness is driven entirely by compaction progress.
 
 The coordinator detects stale workers during its periodic poll: for each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`, reset `status = Submitted` and clear `worker_id`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator` (seeks input iterators past the last written key, avoiding re-processing already compacted data).
 
 ### Worker Lifecycle
 
 1. **Start:** generate a ULID `worker_id`, load config.
-2. **Poll:** read `.compactions`. If the worker has fewer than `max_concurrent_compactions` active jobs, look for `Submitted` entries to claim. If the worker has active jobs, write an updated `last_heartbeat_ms` as part of this poll (heartbeat piggyback).
+2. **Poll:** read `.compactions`. If the worker has fewer than `max_concurrent_compactions` active jobs, look for `Submitted` entries to claim. Polls do not write heartbeats.
 3. **Claim:** optimistic transition to `Running` (see claim protocol).
 4. **Execute:** run `execute_compaction_job`: build iterators from `CompactionSpec`, apply filters/merge ops, write output SSTs to `compacted/`, persist progress at each SST boundary.
 5. **Complete:** write `status = Completed` with final `output_ssts` to `.compactions`.
 6. **Loop:** return to step 2.
+7. **Graceful shutdown:** on cancellation, reset all `Running` compactions owned by this worker back to `Submitted` and clear their `worker_id` in object storage. This lets other workers reclaim the jobs immediately rather than waiting for the heartbeat timeout to expire.
 
 ### Manifest Commit Protocol
 
@@ -263,7 +291,13 @@ let db = Db::builder("db", object_store)
 
 // Worker process(es)
 let worker = CompactionWorkerBuilder::new("db", object_store)
-    .with_poll_interval_ms(1_000)
+    .with_options(
+      CompactionWorkerOptions {
+        poll_interval_ms: 1000,
+        heartbeat_bytes: 100_000,
+        heartbeat_min_interval_ms: 5000,
+      }
+    )
     .build()
     .await?;
 worker.run().await?;
@@ -309,7 +343,13 @@ compactor.run().await?;
 
 // Worker process(es)
 let worker = CompactionWorkerBuilder::new("db", object_store)
-    .with_poll_interval_ms(1_000)
+    .with_options(
+      CompactionWorkerOptions {
+        poll_interval_ms: 1000,
+        heartbeat_bytes: 100_000,
+        heartbeat_min_interval_ms: 5000,
+      }
+    )
     .build()
     .await?;
 worker.run().await?;
@@ -437,18 +477,18 @@ Phases:
 
 ### Status quo (single compactor)
 
-Only run one compaction process per instance of SlateDb, either embedded or standalone.  
+Only run one compaction process per instance of SlateDb, either embedded or standalone.
 **Rejected:** Can't meet the scaling goal. Introduces complexity around offloading compute from embedded to standalone-compactor at runtime (see [PR #1529](https://github.com/slatedb/slatedb/pull/1529)).
 
 
 ### Peer-to-peer leader election via object store
 
-All compactors are peers; optimistic concurrency on a numbered file elects a leader to run the scheduler.  
+All compactors are peers; optimistic concurrency on a numbered file elects a leader to run the scheduler.
 **Rejected:** Adds complexity around leader transitions and scheduler handoff. Could be a future evolution.
 
 ### chitchat for work distribution/discovery
 
-Use gossip to distribute jobs directly.  
+Use gossip to distribute jobs directly.
 **Rejected:** couples correctness to gossip consistency; chitchat is better as an optional discovery/health layer.
 
 ## Open Questions
@@ -459,9 +499,9 @@ Use gossip to distribute jobs directly.
   - **Resolved:** GC already handles this by inspecting the compactions file, tracking the creation time of the oldest compaction, and retaining any SSTs newer than that time.
 - ~~Should workers validate their `CompactionSpec` against the current manifest before executing? Validating catches stale specs but adds a manifest read per claim.~~
   - **Resolved:** The coordinator already validates that it never writes a bad spec and always makes safe updates to the manifest.
-- ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~ 
+- ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~
   - **Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `worker_poll_interval_ms`, spreading poll timing across workers without any additional configuration.
-- ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~ 
+- ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~
   - **Resolved:** Workers should have the same metrics infrastructure introduced by the metrics RFC and users can wire in reporting as they'd like. The worker should tag the metrics with the worker id.
 - ~~What happens when a worker is reclaimed due to a missed heartbeat but is still executing (zombie worker)? Both the zombie and the new worker may write `Completed` to `.compactions`. Both writes can succeed as new numbered files. If the zombie finishes first, the new worker wastes its work and the coordinator may process the zombie's `Completed` entry; if the new worker finishes first, the zombie's `Completed` write becomes an orphaned entry the coordinator must ignore. The coordinator needs to be idempotent when processing `Completed` entries to handle this correctly.~~
   - **Resolved:** A job's status can only be updated by the worker that claimed it. A worker trying to write `Completed` status to a compaction must present the same worker_id that is tied to the `Running` job. Zombie processes attempting to update the job status with a mismatched worker_id are unsuccessful and no operation occurs.
