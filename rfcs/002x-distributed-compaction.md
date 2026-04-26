@@ -381,12 +381,29 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Observability
 
-New metrics, all tracked by the coordinator from `.compactions` state:
-- `slatedb_compaction_jobs_running` — count of jobs currently in `Running` state
-- `slatedb_compaction_jobs_claimed_total` — incremented when the coordinator observes a `Submitted` → `Running` transition
-- `slatedb_compaction_jobs_reclaimed_total` — incremented when the coordinator resets a stale job back to `Submitted`
+Both the coordinator and workers use the `MetricsRecorder` infrastructure introduced in RFC-21.
 
-Worker lifecycle events logged at INFO.
+**Coordinator metrics**:
+
+The following metrics are additive. In distributed deployment, `slatedb.compactor.bytes_compacted` and `slatedb.compactor.running_compactions` from `CompactionStats` will no longer be updated by the coordinator since the executor runs out-of-process. Per-worker equivalents are emitted by workers instead (see below).
+
+| Metric | Instrument | Labels | Description |
+|--------|------------|--------|-------------|
+| `slatedb.compactor.jobs_claimed` | Counter | | `Submitted` → `Running` transitions observed by the coordinator |
+| `slatedb.compactor.jobs_reclaimed` | Counter | | Stale jobs reset from `Running` → `Submitted` by the coordinator |
+| `slatedb.compactor.worker_last_heartbeat_ms` | Gauge | `{worker_id=<id>}` | Last seen heartbeat timestamp for each known worker |
+
+**Worker metrics**:
+
+`CompactorWorkerBuilder` accepts its own `MetricsRecorder`. Workers emit the following per-worker metrics tagged with `{worker_id=<id>}`:
+
+| Metric | Instrument | Labels | Description |
+|--------|------------|--------|-------------|
+| `slatedb.compactor.bytes_compacted` | Counter | `{worker_id=<id>}` | Bytes compacted by this worker |
+| `slatedb.compactor.running_compactions` | UpDownCounter | `{worker_id=<id>}` | Compaction jobs currently running on this worker |
+| `slatedb.compactor.ssts_written` | Counter | `{worker_id=<id>}` | Output SSTs written by this worker |
+
+Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at INFO.
 
 ### Compatibility
 
@@ -444,7 +461,7 @@ Use gossip to distribute jobs directly.
   - **Resolved:** The coordinator already validates that it never writes a bad spec and always makes safe updates to the manifest.
 - ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~ 
   - **Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `worker_poll_interval_ms`, spreading poll timing across workers without any additional configuration.
-- ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`, `job_duration_seconds`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~ 
+- ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~ 
   - **Resolved:** Workers should have the same metrics infrastructure introduced by the metrics RFC and users can wire in reporting as they'd like. The worker should tag the metrics with the worker id.
 - ~~What happens when a worker is reclaimed due to a missed heartbeat but is still executing (zombie worker)? Both the zombie and the new worker may write `Completed` to `.compactions`. Both writes can succeed as new numbered files. If the zombie finishes first, the new worker wastes its work and the coordinator may process the zombie's `Completed` entry; if the new worker finishes first, the zombie's `Completed` write becomes an orphaned entry the coordinator must ignore. The coordinator needs to be idempotent when processing `Completed` entries to handle this correctly.~~
   - **Resolved:** A job's status can only be updated by the worker that claimed it. A worker trying to write `Completed` status to a compaction must present the same worker_id that is tied to the `Running` job. Zombie processes attempting to update the job status with a mismatched worker_id are unsuccessful and no operation occurs.
