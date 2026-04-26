@@ -11,7 +11,7 @@ use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
-use crate::{FailingObjectStoreController, Operation, StreamDirection, Toxic, ToxicKind};
+use crate::{Operation, StreamDirection, Toxic, ToxicKind};
 
 const KIB_8: usize = 8 * 1024;
 const MIB_1: usize = 1024 * 1024;
@@ -113,7 +113,7 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
     }
 }
 
-/// Adds a deterministic randomized set of object-store toxics to `failures`.
+/// Builds a deterministic randomized object-store toxic.
 ///
 /// Generated toxics may be:
 /// - `Latency`: 1 to 5 ms base latency, 0 to 15 ms jitter, and 0.35 to 0.95
@@ -123,124 +123,116 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
 /// - `ResetPeer`: connection reset failures with 0.005 to 0.035 toxicity.
 ///
 /// ## Arguments
-/// - `failures`: The controller to append generated toxics to.
 /// - `rand`: The deterministic RNG used to choose each toxic's kind, operation
 ///   filter, path filter, direction, and toxicity.
 /// - `root_path`: The object-store root path used by the scenario. When non-empty,
 ///   generated path filters may target the root itself or one of SlateDB's standard
 ///   subdirectories: `wal`, `manifest`, `compacted`, or `compactions`.
-/// - `toxic_count`: The number of toxics to add.
+/// - `index`: The index used in the generated toxic name.
 ///
 /// ## Returns
-/// Returns `()` after adding exactly `toxic_count` toxics to `failures`.
-pub fn add_toxics(
-    failures: &FailingObjectStoreController,
-    rand: &DbRand,
-    root_path: &str,
-    toxic_count: usize,
-) {
+/// Returns a generated toxic.
+pub fn build_toxic(rand: &DbRand, root_path: &str, index: usize) -> Toxic {
     let mut rng = rand.rng();
     let root_path = root_path.trim_matches('/');
 
-    for index in 0..toxic_count {
-        let (kind_name, kind, direction, toxicity) = match rng.random_range(0..10) {
-            0..=4 => {
-                let direction = if rng.random_bool(0.5) {
-                    StreamDirection::Upstream
-                } else {
-                    StreamDirection::Downstream
-                };
-                (
-                    "latency",
-                    ToxicKind::Latency {
-                        latency: Duration::from_millis(rng.random_range(1_u64..=5)),
-                        jitter: Duration::from_millis(rng.random_range(0_u64..=15)),
-                    },
-                    direction,
-                    rng.random_range(0.35..=0.95),
-                )
-            }
-            5..=6 => {
-                let direction = if rng.random_bool(0.5) {
-                    StreamDirection::Upstream
-                } else {
-                    StreamDirection::Downstream
-                };
-                (
-                    "bandwidth",
-                    ToxicKind::Bandwidth {
-                        bytes_per_sec: rng.random_range(16_u64..=256) * 1024,
-                    },
-                    direction,
-                    rng.random_range(0.20..=0.80),
-                )
-            }
-            7 => (
-                "slow-close",
-                ToxicKind::SlowClose {
-                    delay: Duration::from_millis(rng.random_range(1_u64..=10)),
+    let (kind_name, kind, direction, toxicity) = match rng.random_range(0..10) {
+        0..=4 => {
+            let direction = if rng.random_bool(0.5) {
+                StreamDirection::Upstream
+            } else {
+                StreamDirection::Downstream
+            };
+            (
+                "latency",
+                ToxicKind::Latency {
+                    latency: Duration::from_millis(rng.random_range(1_u64..=5)),
+                    jitter: Duration::from_millis(rng.random_range(0_u64..=15)),
                 },
-                StreamDirection::Downstream,
-                rng.random_range(0.30..=0.90),
-            ),
-            _ => {
-                let direction = if rng.random_bool(0.5) {
-                    StreamDirection::Upstream
-                } else {
-                    StreamDirection::Downstream
-                };
-                (
-                    "reset-peer",
-                    ToxicKind::ResetPeer,
-                    direction,
-                    rng.random_range(0.005..=0.035),
-                )
-            }
-        };
+                direction,
+                rng.random_range(0.35..=0.95),
+            )
+        }
+        5..=6 => {
+            let direction = if rng.random_bool(0.5) {
+                StreamDirection::Upstream
+            } else {
+                StreamDirection::Downstream
+            };
+            (
+                "bandwidth",
+                ToxicKind::Bandwidth {
+                    bytes_per_sec: rng.random_range(16_u64..=256) * 1024,
+                },
+                direction,
+                rng.random_range(0.20..=0.80),
+            )
+        }
+        7 => (
+            "slow-close",
+            ToxicKind::SlowClose {
+                delay: Duration::from_millis(rng.random_range(1_u64..=10)),
+            },
+            StreamDirection::Downstream,
+            rng.random_range(0.30..=0.90),
+        ),
+        _ => {
+            let direction = if rng.random_bool(0.5) {
+                StreamDirection::Upstream
+            } else {
+                StreamDirection::Downstream
+            };
+            (
+                "reset-peer",
+                ToxicKind::ResetPeer,
+                direction,
+                rng.random_range(0.005..=0.035),
+            )
+        }
+    };
 
-        let operations = match rng.random_range(0..8) {
-            0 => vec![],
-            1 => vec![Operation::PutOpts],
-            2 => vec![
-                Operation::GetOpts,
-                Operation::GetRange,
-                Operation::GetRanges,
-            ],
-            3 => vec![Operation::GetOpts, Operation::GetRange, Operation::Head],
-            4 => vec![Operation::List, Operation::ListWithOffset],
-            5 => vec![Operation::Delete],
-            6 => vec![Operation::Copy, Operation::Rename],
-            _ => vec![
-                Operation::PutOpts,
-                Operation::GetOpts,
-                Operation::GetRange,
-                Operation::GetRanges,
-                Operation::Head,
-                Operation::List,
-                Operation::ListWithOffset,
-            ],
-        };
+    let operations = match rng.random_range(0..8) {
+        0 => vec![],
+        1 => vec![Operation::PutOpts],
+        2 => vec![
+            Operation::GetOpts,
+            Operation::GetRange,
+            Operation::GetRanges,
+        ],
+        3 => vec![Operation::GetOpts, Operation::GetRange, Operation::Head],
+        4 => vec![Operation::List, Operation::ListWithOffset],
+        5 => vec![Operation::Delete],
+        6 => vec![Operation::Copy, Operation::Rename],
+        _ => vec![
+            Operation::PutOpts,
+            Operation::GetOpts,
+            Operation::GetRange,
+            Operation::GetRanges,
+            Operation::Head,
+            Operation::List,
+            Operation::ListWithOffset,
+        ],
+    };
 
-        let path_prefix = if root_path.is_empty() || rng.random_bool(0.15) {
-            None
-        } else {
-            Some(match rng.random_range(0..5) {
-                0 => root_path.to_string(),
-                1 => format!("{root_path}/wal"),
-                2 => format!("{root_path}/manifest"),
-                3 => format!("{root_path}/compacted"),
-                _ => format!("{root_path}/compactions"),
-            })
-        };
+    let path_prefix = if root_path.is_empty() || rng.random_bool(0.15) {
+        None
+    } else {
+        Some(match rng.random_range(0..5) {
+            0 => root_path.to_string(),
+            1 => format!("{root_path}/wal"),
+            2 => format!("{root_path}/manifest"),
+            3 => format!("{root_path}/compacted"),
+            _ => format!("{root_path}/compactions"),
+        })
+    };
 
-        failures.add_toxic(Toxic {
-            name: format!("random-{index:02}-{kind_name}"),
-            kind,
-            direction,
-            toxicity,
-            operations,
-            path_prefix,
-        });
+    Toxic {
+        name: format!("random-{index:02}-{kind_name}"),
+        kind,
+        direction,
+        toxicity,
+        operations,
+        path_prefix,
     }
 }
 

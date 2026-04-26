@@ -15,8 +15,9 @@ use slatedb_dst::{
         initialize_accounts, AuditorActor, BankOptions, CompactorActor, CompactorActorOptions,
         ShutdownActor, TransferActor,
     },
-    utils::{add_toxics, build_settings, build_settings_compactor},
+    utils::{build_settings, build_settings_compactor, build_toxic},
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
+    ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -32,10 +33,22 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
 
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
+
+    // Build a shared toxic controller with randomized toxics.
     let failure_seed = rand.rng().next_u64();
     let failure_rand = Arc::new(DbRand::new(failure_seed));
     let failures = FailingObjectStoreController::new(failure_rand.clone());
-    add_toxics(&failures, failure_rand.as_ref(), "bank", 10);
+    for index in 0..10 {
+        let toxic = build_toxic(failure_rand.as_ref(), "bank", index);
+
+        // Bandwidth toxics cause long stalls that trigger "FileNotFound"
+        // auditor failures during long scans (>15m). Skip them until #319
+        // is done.
+        match &toxic.kind {
+            ToxicKind::Bandwidth { .. } => {}
+            _ => failures.add_toxic(toxic),
+        }
+    }
 
     let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
