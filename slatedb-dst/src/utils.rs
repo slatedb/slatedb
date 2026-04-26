@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use rand::Rng;
 use slatedb::config::{
-    CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -12,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{FailingObjectStoreController, Operation, StreamDirection, Toxic, ToxicKind};
 
+const KIB_8: usize = 8 * 1024;
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
 const GIB_2: usize = 2048 * MIB_1;
@@ -58,6 +60,7 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         l0_max_ssts,
         max_unflushed_bytes,
         compression_codec,
+        compactor_options: Some(build_settings_compactor(&mut *rng)),
         garbage_collector_options: Some(build_settings_gc(&mut *rng)),
         #[cfg(feature = "wal_disable")]
         wal_enabled: rng.random_bool(0.5),
@@ -65,6 +68,27 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     };
 
     settings
+}
+
+/// Builds randomized deterministic compactor options for DST scenarios.
+pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
+    let min_compaction_sources = rng.random_range(2..=4);
+    let max_compaction_sources = rng.random_range(min_compaction_sources..=16);
+
+    CompactorOptions {
+        poll_interval: rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)),
+        manifest_update_timeout: rng
+            .random_range(Duration::from_millis(100)..Duration::from_secs(60)),
+        max_sst_size: rng.random_range(KIB_8..GIB_2),
+        max_concurrent_compactions: rng.random_range(1..=4),
+        max_fetch_tasks: rng.random_range(1..=8),
+        scheduler_options: SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources,
+            max_compaction_sources,
+            include_size_threshold: rng.random_range(2.0..=8.0),
+        }
+        .into(),
+    }
 }
 
 /// Builds randomized deterministic garbage collector options for DST scenarios.

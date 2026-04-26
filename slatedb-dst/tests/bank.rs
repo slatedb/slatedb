@@ -8,7 +8,6 @@ use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::{Rng, RngCore};
-use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
@@ -16,7 +15,7 @@ use slatedb_dst::{
         initialize_accounts, AuditorActor, BankOptions, CompactorActor, CompactorActorOptions,
         ShutdownActor, TransferActor,
     },
-    utils::{add_toxics, build_settings},
+    utils::{add_toxics, build_settings, build_settings_compactor},
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
 };
 use tempfile::TempDir;
@@ -52,19 +51,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
     let bank_options = random_bank_options(&rand);
     info!("dst bank options: {bank_options:?}");
     let audit_interval = Duration::from_millis(1000);
-    let compactor_options = CompactorOptions {
-        poll_interval: Duration::from_millis(5),
-        manifest_update_timeout: Duration::from_millis(250),
-        max_sst_size: 8 * 1024,
-        max_concurrent_compactions: 2,
-        max_fetch_tasks: 4,
-        scheduler_options: SizeTieredCompactionSchedulerOptions {
-            min_compaction_sources: 2,
-            max_compaction_sources: 16,
-            include_size_threshold: 4.0,
-        }
-        .into(),
-    };
+    let compactor_options = build_settings_compactor(&mut *rand.rng());
 
     let harness = Harness::new("bank", seed, {
         let bank_options = bank_options.clone();
