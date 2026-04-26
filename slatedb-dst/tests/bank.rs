@@ -138,8 +138,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
 
 fn random_bank_options(rand: &DbRand) -> BankOptions {
     let mut rng = rand.rng();
-    let account_magnitude = 10usize.pow(rng.random_range(1..=7));
-    let account_count = rng.random_range(2..=7) * account_magnitude;
+    let account_count = rng.random_range(2..999);
     let initial_balance = rng.random_range(1_000..=100_000);
     let max_transfer = rng.random_range(1..=initial_balance.min(1_000));
     let value_size_bytes = rng.random_range(8..=8192);
