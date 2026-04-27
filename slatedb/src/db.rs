@@ -22,8 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
-use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
-use crate::db_metadata::DbMetadataOps;
+use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -53,7 +52,6 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -76,6 +74,7 @@ use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
@@ -1714,6 +1713,67 @@ impl DbMetadataOps for Db {
     }
 }
 
+#[async_trait::async_trait]
+impl DbWriteOps for Db {
+    type Transaction = DbTransaction;
+
+    async fn put_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::put_with_options(self, key, value, put_opts, write_opts).await
+    }
+
+    async fn delete_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::delete_with_options(self, key, options).await
+    }
+
+    async fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::merge_with_options(self, key, value, merge_opts, write_opts).await
+    }
+
+    async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::write_with_options(self, batch, options).await
+    }
+
+    async fn flush(&self) -> Result<(), crate::Error> {
+        Db::flush(self).await
+    }
+
+    async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        Db::flush_with_options(self, options).await
+    }
+
+    async fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
+        Db::begin(self, isolation_level).await
+    }
+}
+
 impl Db {
     /// See [`DbMetadataOps::manifest`].
     pub fn manifest(&self) -> VersionedManifest {
@@ -1758,7 +1818,7 @@ pub struct WriteHandle {
 }
 
 impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
+    pub fn new(seq: u64, create_ts: i64) -> Self {
         Self { seq, create_ts }
     }
 
@@ -2807,6 +2867,7 @@ mod tests {
             cache_stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let cached_object_store = CachedObjectStore::new(
@@ -6756,6 +6817,150 @@ mod tests {
             db.get(b"k1").await.unwrap(),
             Some(Bytes::from_static(b"v2"))
         );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_txn_conflict_commit_seq_gap_does_not_block_l0_retirement() {
+        const REPRO_SEED: u64 = 2_985_011_763_506_195_159;
+        const MAX_UNFLUSHED_BYTES: usize = 8 * 1024;
+        const LARGE_VALUE_BYTES: usize = 16 * 1024;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024, None);
+        options.flush_interval = None;
+        options.manifest_poll_interval = Duration::from_millis(10);
+        options.max_unflushed_bytes = MAX_UNFLUSHED_BYTES;
+        options.l0_max_ssts = 16;
+
+        let db = Db::builder(
+            "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
+            object_store,
+        )
+        .with_seed(REPRO_SEED)
+        .with_settings(options)
+        .build()
+        .await
+        .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Establish and flush seq=1 so the L0 manifest writer has a known
+        // contiguous frontier before the conflict sequence gap is created.
+        db.put_with_options(b"conflict-key", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing base memtable")
+        .expect("base memtable flush should succeed");
+
+        // Start a serializable transaction at seq=1 and record a read on
+        // conflict-key. The next committed write to that key will conflict
+        // with this transaction when it tries to commit.
+        let txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        assert_eq!(
+            txn.get(b"conflict-key").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+
+        // Commit and flush seq=2 for the same key. This advances the L0
+        // manifest writer through seq=2 and creates the transaction conflict.
+        db.put_with_options(b"conflict-key", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing conflict-producing write")
+        .expect("conflict-producing write flush should succeed");
+
+        // The transaction commit must fail, but the bug is that write_batch
+        // allocates commit_seq=3 before conflict detection and never writes it
+        // into a memtable. This leaves a durable-memtable sequence hole.
+        txn.put(b"txn-write", b"will-conflict").unwrap();
+        let err = txn.commit().await.expect_err("transaction should conflict");
+        assert_eq!(err.kind(), crate::ErrorKind::Transaction);
+
+        // Write enough data to freeze an immutable memtable. Its first sequence
+        // is 4 because seq=3 was consumed by the failed transaction commit.
+        let large_value = vec![b'x'; LARGE_VALUE_BYTES];
+        let large_handle = db
+            .put_with_options(
+                b"large-after-conflict",
+                &large_value,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .expect("large write after conflict should be accepted");
+        assert_eq!(
+            large_handle.seqnum(),
+            4,
+            "the conflicted commit should have consumed commit_seq=3"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            }),
+        )
+        .await
+        .expect("timed out flushing WAL after large write")
+        .expect("WAL flush after large write should succeed");
+
+        // Wait until the large write either reaches L0 or is visible as an
+        // immutable memtable. On the buggy path it is uploaded, but cannot be
+        // retired because the manifest writer is still waiting for seq=3.
+        let large_seq = large_handle.seqnum();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (last_l0_seq, has_immutable_memtable) = {
+                    let guard = db.inner.state.read();
+                    (
+                        guard.state().core().last_l0_seq,
+                        !guard.state().imm_memtable.is_empty(),
+                    )
+                };
+                if last_l0_seq >= large_seq || has_immutable_memtable {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("large write never froze or flushed");
+
+        // This write enters backpressure because the stuck immutable memtable
+        // remains charged against max_unflushed_bytes. The expected failure is
+        // this timeout, which proves the hang without letting the test run
+        // forever.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.put_with_options(
+                b"write-after-gap",
+                b"v",
+                &PutOptions::default(),
+                &write_opts,
+            ),
+        )
+        .await
+        .expect("timed out waiting for write after conflicted transaction consumed commit_seq=3")
+        .expect("write after conflicted commit sequence gap should succeed");
 
         db.close().await.unwrap();
     }
