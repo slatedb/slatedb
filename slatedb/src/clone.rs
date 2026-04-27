@@ -1001,7 +1001,7 @@ mod tests {
         parent_db.flush().await.unwrap();
         let manifest = parent_db.manifest();
         assert!(
-            !manifest.manifest.core.l0.is_empty(),
+            !manifest.manifest.core.tree.l0.is_empty(),
             "expected cloned state to include L0 data"
         );
         assert!(
@@ -1091,7 +1091,7 @@ mod tests {
         parent_db.flush().await.unwrap();
         let manifest = parent_db.manifest();
         assert!(
-            !manifest.manifest.core.l0.is_empty(),
+            !manifest.manifest.core.tree.l0.is_empty(),
             "expected cloned state to include L0 data"
         );
         assert!(

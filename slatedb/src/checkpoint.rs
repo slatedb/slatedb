@@ -327,7 +327,7 @@ mod tests {
             ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, |manifest| {
-            manifest.core.l0.front().unwrap().clone()
+            manifest.core.tree.l0.front().unwrap().clone()
         })
         .await;
     }
@@ -357,7 +357,7 @@ mod tests {
         let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
 
         assert_eq!(latest_manifest.id, checkpoint.manifest_id);
-        assert_eq!(latest_manifest.manifest.core.l0.len(), 1);
+        assert_eq!(latest_manifest.manifest.core.tree.l0.len(), 1);
         assert!(
             latest_manifest.manifest.core.last_l0_seq >= 2,
             "expected checkpoint flush to advance last_l0_seq, got {}",
@@ -367,7 +367,15 @@ mod tests {
         assert_flushed_entry(
             Arc::clone(&object_store),
             path,
-            &latest_manifest.manifest.core.l0.front().unwrap().sst.id,
+            &latest_manifest
+                .manifest
+                .core
+                .tree
+                .l0
+                .front()
+                .unwrap()
+                .sst
+                .id,
             (&Bytes::from_static(b"k2"), &Bytes::from_static(b"v2")),
         )
         .await;
@@ -384,7 +392,7 @@ mod tests {
             ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, |manifest| {
-            manifest.core.l0.front().unwrap().clone()
+            manifest.core.tree.l0.front().unwrap().clone()
         })
         .await;
     }

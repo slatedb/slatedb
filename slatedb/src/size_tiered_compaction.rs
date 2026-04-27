@@ -213,6 +213,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let sources_logical_order: Vec<SourceId> = state
             .manifest()
             .core()
+            .tree
             .l0
             .iter()
             .map(|view| SourceId::SstView(view.id))
@@ -220,6 +221,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
                 state
                     .manifest()
                     .core()
+                    .tree
                     .compacted
                     .iter()
                     .map(|sr| SourceId::SortedRun(sr.id)),
@@ -376,6 +378,7 @@ impl SizeTieredCompactionScheduler {
         db_state: &ManifestCore,
     ) -> (Vec<CompactionSource>, Vec<CompactionSource>) {
         let collected_l0: Vec<CompactionSource> = db_state
+            .tree
             .l0
             .iter()
             .map(|l0| CompactionSource {
@@ -385,6 +388,7 @@ impl SizeTieredCompactionScheduler {
             .collect();
 
         let collected_sr = db_state
+            .tree
             .compacted
             .iter()
             .map(|sr| CompactionSource {
@@ -433,7 +437,7 @@ mod tests {
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{LsmTreeState, ManifestCore};
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::{
         SizeTieredCompactionScheduler, SizeTieredCompactionSchedulerSupplier,
@@ -838,7 +842,7 @@ mod tests {
         let state =
             &create_compactor_state(create_db_state(VecDeque::new(), vec![create_sr2(0, 2)]));
 
-        let mut l0 = state.db_state().l0.clone();
+        let mut l0 = state.db_state().tree.l0.clone();
         let request = create_l0_compaction(l0.make_contiguous(), 0);
         let mut new_sources: Vec<SourceId> = request.sources().clone();
         new_sources.push(SourceId::SortedRun(5));
@@ -859,7 +863,7 @@ mod tests {
             vec![create_sr2(0, 2), create_sr2(1, 2)],
         ));
 
-        let srs = state.db_state().compacted.clone();
+        let srs = state.db_state().tree.compacted.clone();
         let compaction = create_sr_compaction(srs.iter().map(|sr| sr.id).collect());
         // when:
         let result = scheduler.validate(&state.into(), &compaction);
@@ -905,10 +909,12 @@ mod tests {
     fn create_db_state(l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> ManifestCore {
         ManifestCore {
             initialized: true,
-            last_compacted_l0_sst_view_id: None,
-            last_compacted_l0_sst_id: None,
-            l0,
-            compacted: srs,
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0,
+                compacted: srs,
+            },
             next_wal_sst_id: 0,
             replay_after_wal_id: 0,
             last_l0_seq: 0,

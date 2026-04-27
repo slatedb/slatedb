@@ -152,8 +152,11 @@ impl Reader {
             })
             .collect::<Vec<_>>();
 
-        let max_parallel =
-            compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
+        let max_parallel = compute_max_parallel(
+            db_state.core().tree.l0.len(),
+            &db_state.core().tree.compacted,
+            4,
+        );
 
         let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point() {
             let l0 = self.build_point_l0_iters(
@@ -195,7 +198,7 @@ impl Reader {
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
-        for sst in &db_state.core().l0 {
+        for sst in &db_state.core().tree.l0 {
             let iterator = SstIterator::new_owned_with_stats(
                 range.clone(),
                 sst.clone(),
@@ -219,7 +222,7 @@ impl Reader {
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
-        for sr in &db_state.core().compacted {
+        for sr in &db_state.core().tree.compacted {
             for handle in sr.tables_covering_point_key(key) {
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
@@ -247,7 +250,7 @@ impl Reader {
         let table_store = self.table_store.clone();
         let sst_iter_options = sst_iter_options.clone();
         build_concurrent(
-            db_state.core().l0.iter().cloned(),
+            db_state.core().tree.l0.iter().cloned(),
             max_parallel,
             move |sst| {
                 let table_store = table_store.clone();
@@ -281,6 +284,7 @@ impl Reader {
         let table_store = self.table_store.clone();
         let overlapping: Vec<_> = db_state
             .core()
+            .tree
             .compacted
             .iter()
             .filter(|sr| sr.overlaps_range(range))
@@ -566,7 +570,10 @@ mod tests {
                 return Ok(());
             }
             let sst_handle = self.build_sst(entries).await?;
-            self.core.l0.push_front(SsTableView::identity(sst_handle));
+            self.core
+                .tree
+                .l0
+                .push_front(SsTableView::identity(sst_handle));
             Ok(())
         }
 
@@ -582,14 +589,20 @@ mod tests {
             let sst_handle = self.build_sst(entries).await?;
 
             // Find or create the sorted run
-            if let Some(sr) = self.core.compacted.iter_mut().find(|sr| sr.id == sr_id) {
+            if let Some(sr) = self
+                .core
+                .tree
+                .compacted
+                .iter_mut()
+                .find(|sr| sr.id == sr_id)
+            {
                 sr.sst_views.push(SsTableView::identity(sst_handle));
             } else {
                 let new_sr = SortedRun {
                     id: sr_id,
                     sst_views: vec![SsTableView::identity(sst_handle)],
                 };
-                self.core.compacted.push(new_sr);
+                self.core.tree.compacted.push(new_sr);
             }
             Ok(())
         }

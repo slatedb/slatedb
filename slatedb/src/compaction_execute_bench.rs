@@ -277,6 +277,7 @@ impl CompactionExecuteBench {
         let state = manifest.db_state();
         let spec = job.spec();
         let srs_by_id: HashMap<_, _> = state
+            .tree
             .compacted
             .iter()
             .map(|sr| (sr.id, sr.clone()))
