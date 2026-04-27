@@ -3157,6 +3157,7 @@ dependencies = [
  "object_store",
  "parking_lot",
  "rand",
+ "rstest",
  "slatedb",
  "slatedb-common",
  "tempfile",

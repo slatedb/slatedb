@@ -8,6 +8,7 @@ use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::{Rng, RngCore};
+use rstest::rstest;
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
@@ -20,8 +21,12 @@ use slatedb_dst::{
 };
 use tempfile::TempDir;
 
-#[test]
-fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
+#[rstest]
+#[cfg_attr(not(slow), case::regular(200_000))]
+#[cfg_attr(slow, case::slow(2_000_000))]
+fn test_dst_bank_with_toxics(
+    #[case] shutdown_at_ms: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
     let seed = rand::random::<u64>();
     info!("dst bank seed: {seed}");
     let tempdir = TempDir::new()?;
@@ -121,7 +126,7 @@ fn test_dst_bank_with_toxics() -> Result<(), Box<dyn std::error::Error>> {
                 compactor_options,
             })?,
         )
-        .actor("shutdown", ShutdownActor::new(200_000)?);
+        .actor("shutdown", ShutdownActor::new(shutdown_at_ms)?);
 
     harness.run()?;
 

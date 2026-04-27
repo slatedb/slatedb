@@ -35,6 +35,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 walkdir = { workspace = true }
 
 [dev-dependencies]
+rstest = { workspace = true }
 tempfile = { workspace = true }
 [lints]
 workspace = true

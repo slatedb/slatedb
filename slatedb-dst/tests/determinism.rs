@@ -24,6 +24,7 @@ use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
+use rstest::rstest;
 use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
@@ -51,9 +52,13 @@ type TestResult<T> = Result<T, TestError>;
 /// still made by comparing multiple runs of the same seed against one another.
 /// Printing the seed and core gives a direct reproduction handle when a worker
 /// fails or panics.
-#[test]
-fn test_dst_is_deterministic() -> TestResult<()> {
-    let simulations = 4;
+#[rstest]
+#[cfg_attr(not(slow), case::regular(4, 200))]
+#[cfg_attr(slow, case::slow(4, 2_000))]
+fn test_dst_is_deterministic(
+    #[case] simulations: u32,
+    #[case] shutdown_at_ms: i64,
+) -> TestResult<()> {
     let num_cores = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(1);
@@ -67,7 +72,9 @@ fn test_dst_is_deterministic() -> TestResult<()> {
             (
                 core,
                 seed,
-                std::thread::spawn(move || run_seed_is_deterministic(core, seed, simulations)),
+                std::thread::spawn(move || {
+                    run_seed_is_deterministic(core, seed, simulations, shutdown_at_ms)
+                }),
             )
         })
         .collect::<Vec<_>>();
@@ -92,12 +99,17 @@ fn test_dst_is_deterministic() -> TestResult<()> {
 /// mock-clock time. Later simulations with the same seed must produce the same
 /// values. The `core` argument is diagnostic context only; it identifies which
 /// worker thread owned the seed when reporting assertion failures.
-fn run_seed_is_deterministic(core: usize, seed: u64, simulations: u32) -> TestResult<()> {
+fn run_seed_is_deterministic(
+    core: usize,
+    seed: u64,
+    simulations: u32,
+    shutdown_at_ms: i64,
+) -> TestResult<()> {
     let mut expected_u64: Option<u64> = None;
     let mut expected_time: Option<DateTime<Utc>> = None;
 
     for simulation_count in 0..simulations {
-        let (next_u64, next_time) = run_seed_once(seed)?;
+        let (next_u64, next_time) = run_seed_once(seed, shutdown_at_ms)?;
 
         if let Some(expected_u64) = expected_u64 {
             assert_eq!(
@@ -142,7 +154,7 @@ fn run_seed_is_deterministic(core: usize, seed: u64, simulations: u32) -> TestRe
 /// Returning the next root RNG value and current mock-clock time gives callers a
 /// compact fingerprint of the deterministic execution path.
 #[instrument(level = "debug", skip_all, fields(seed = seed))]
-fn run_seed_once(seed: u64) -> TestResult<(u64, DateTime<Utc>)> {
+fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Utc>)> {
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
     let wal_dir = tempdir.path().join("wal");
@@ -226,7 +238,7 @@ fn run_seed_once(seed: u64) -> TestResult<(u64, DateTime<Utc>)> {
                 compactor_options,
             })?,
         )
-        .actor("shutdown", ShutdownActor::new(200)?);
+        .actor("shutdown", ShutdownActor::new(shutdown_at_ms)?);
 
     harness.run()?;
 
