@@ -1430,7 +1430,7 @@ mod tests {
         visible_range: BytesRange,
     ) -> Manifest {
         let mut core = ManifestCore::new();
-        core.compacted.push(SortedRun {
+        core.tree.compacted.push(SortedRun {
             id: 0,
             sst_views: vec![SsTableView::new_projected(
                 sst_id.unwrap_compacted_id(),
