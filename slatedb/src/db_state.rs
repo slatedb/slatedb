@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
-use crate::manifest::{Manifest, ManifestCore};
+use crate::manifest::{LsmTreeState, Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::wal_id::WalIdStore;
@@ -632,13 +632,18 @@ impl<'a> StateModifier<'a> {
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted_view_id = &remote_manifest.value.core.last_compacted_l0_sst_view_id;
-        let l0_last_compacted_sst_id = &remote_manifest.value.core.last_compacted_l0_sst_id;
+        let l0_last_compacted_view_id = &remote_manifest
+            .value
+            .core
+            .tree
+            .last_compacted_l0_sst_view_id;
+        let l0_last_compacted_sst_id = &remote_manifest.value.core.tree.last_compacted_l0_sst_id;
         let new_l0 = if l0_last_compacted_view_id.is_some() || l0_last_compacted_sst_id.is_some() {
             self.state
                 .manifest
                 .value
                 .core
+                .tree
                 .l0
                 .iter()
                 .cloned()
@@ -658,16 +663,30 @@ impl<'a> StateModifier<'a> {
                 })
                 .collect()
         } else {
-            self.state.manifest.value.core.l0.iter().cloned().collect()
+            self.state
+                .manifest
+                .value
+                .core
+                .tree
+                .l0
+                .iter()
+                .cloned()
+                .collect()
         };
 
         let my_db_state = self.state.core();
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
-            last_compacted_l0_sst_view_id: remote_manifest.value.core.last_compacted_l0_sst_view_id,
-            last_compacted_l0_sst_id: remote_manifest.value.core.last_compacted_l0_sst_id,
-            l0: new_l0,
-            compacted: remote_manifest.value.core.compacted,
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: remote_manifest
+                    .value
+                    .core
+                    .tree
+                    .last_compacted_l0_sst_view_id,
+                last_compacted_l0_sst_id: remote_manifest.value.core.tree.last_compacted_l0_sst_id,
+                l0: new_l0,
+                compacted: remote_manifest.value.core.tree.compacted,
+            },
             next_wal_sst_id: my_db_state.next_wal_sst_id,
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
@@ -754,8 +773,12 @@ mod tests {
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
         compactor_state.value.core = db_state.state.core().clone();
-        let last_compacted = compactor_state.value.core.l0.pop_back().unwrap();
-        compactor_state.value.core.last_compacted_l0_sst_view_id = Some(last_compacted.id);
+        let last_compacted = compactor_state.value.core.tree.l0.pop_back().unwrap();
+        compactor_state
+            .value
+            .core
+            .tree
+            .last_compacted_l0_sst_view_id = Some(last_compacted.id);
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());
@@ -764,6 +787,7 @@ mod tests {
         let expected: Vec<SsTableId> = compactor_state
             .value
             .core
+            .tree
             .l0
             .iter()
             .map(|l0| l0.sst.id)
@@ -771,6 +795,7 @@ mod tests {
         let merged: Vec<SsTableId> = db_state
             .state
             .core()
+            .tree
             .l0
             .iter()
             .map(|l0| l0.sst.id)
@@ -783,7 +808,7 @@ mod tests {
         // given:
         let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
-        let l0s = db_state.state.core().l0.clone();
+        let l0s = db_state.state.core().tree.l0.clone();
 
         // when:
         db_state.merge_remote_manifest(new_dirty_manifest());
@@ -793,6 +818,7 @@ mod tests {
         let merged: Vec<SsTableId> = db_state
             .state
             .core()
+            .tree
             .l0
             .iter()
             .map(|l0| l0.sst.id)
@@ -855,7 +881,7 @@ mod tests {
             );
             let view: SsTableView = SsTableView::identity(handle);
             db_state.modify(|modifier| {
-                modifier.state.manifest.value.core.l0.push_front(view);
+                modifier.state.manifest.value.core.tree.l0.push_front(view);
                 modifier.state.manifest.value.core.replay_after_wal_id =
                     imm.recent_flushed_wal_id();
             });

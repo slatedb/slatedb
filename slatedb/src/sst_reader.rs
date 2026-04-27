@@ -312,10 +312,10 @@ mod tests {
         let reader = SstReader::new(path, store, None, None);
 
         assert!(
-            !manifest.manifest.core.l0.is_empty(),
+            !manifest.manifest.core.tree.l0.is_empty(),
             "expected at least one L0 SST"
         );
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader
             .open(view.sst.id.unwrap_compacted_id())
             .await
@@ -331,7 +331,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
 
         assert_eq!(sst_file.id(), view.sst.id.unwrap_compacted_id());
@@ -343,7 +343,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let stats = sst_file.stats().await.unwrap();
 
@@ -361,7 +361,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let index = sst_file.index().await.unwrap();
 
@@ -382,7 +382,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
 
         let stats = sst_file
@@ -408,7 +408,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let index = sst_file.index().await.unwrap();
         assert!(!index.is_empty());
@@ -447,7 +447,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let num_blocks = sst_file.index().await.unwrap().len();
 
@@ -460,7 +460,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let index = sst_file.index().await.unwrap();
 
@@ -477,7 +477,7 @@ mod tests {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let metadata = sst_file.metadata().await.unwrap();
 
@@ -558,7 +558,7 @@ mod tests {
 
         // Reading with the correct transformer should succeed
         let reader = SstReader::new(path, object_store.clone(), None, Some(transformer));
-        let view = &manifest.manifest.core.l0[0];
+        let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let stats = sst_file.stats().await.unwrap().expect("expected stats");
         assert_eq!(stats.num_puts, 5);

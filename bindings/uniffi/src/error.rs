@@ -29,6 +29,9 @@ pub(crate) enum SlateDbError {
     #[error("invalid compaction_id ULID: {source}")]
     InvalidCompactionId { source: ulid::DecodeError },
 
+    #[error("invalid SST ULID: {source}")]
+    InvalidSsTableId { source: ulid::DecodeError },
+
     #[error("invalid timestamp seconds: {timestamp_secs}")]
     InvalidTimestampSeconds { timestamp_secs: i64 },
 

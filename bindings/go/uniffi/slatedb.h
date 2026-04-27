@@ -791,6 +791,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_delete(uint64_t ptr, RustBuffer key
 uint64_t uniffi_slatedb_uniffi_fn_method_db_delete_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_EVICT_CACHED_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_EVICT_CACHED_SST
+uint64_t uniffi_slatedb_uniffi_fn_method_db_evict_cached_sst(uint64_t ptr, RustBuffer sst_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
 uint64_t uniffi_slatedb_uniffi_fn_method_db_flush(uint64_t ptr
@@ -876,6 +881,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_snapshot(uint64_t ptr
 RustBuffer uniffi_slatedb_uniffi_fn_method_db_status(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WARM_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WARM_SST
+uint64_t uniffi_slatedb_uniffi_fn_method_db_warm_sst(uint64_t ptr, RustBuffer sst_id, RustBuffer targets
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE
 uint64_t uniffi_slatedb_uniffi_fn_method_db_write(uint64_t ptr, uint64_t batch
@@ -921,9 +931,24 @@ uint64_t uniffi_slatedb_uniffi_fn_clone_dbreader(uint64_t handle, RustCallStatus
 void uniffi_slatedb_uniffi_fn_free_dbreader(uint64_t handle, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_EVICT_CACHED_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_EVICT_CACHED_SST
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_evict_cached_sst(uint64_t ptr, RustBuffer sst_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET
 uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get(uint64_t ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_KEY_VALUE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_KEY_VALUE
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get_key_value(uint64_t ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_KEY_VALUE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_KEY_VALUE_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get_key_value_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_WITH_OPTIONS
@@ -959,6 +984,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_shutdown(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_STATUS
 RustBuffer uniffi_slatedb_uniffi_fn_method_dbreader_status(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_WARM_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_WARM_SST
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_warm_sst(uint64_t ptr, RustBuffer sst_id, RustBuffer targets
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBSNAPSHOT
@@ -1986,6 +2016,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_delete_with_options(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_EVICT_CACHED_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_EVICT_CACHED_SST
+uint16_t uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_FLUSH
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_FLUSH
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_flush(void
@@ -2088,6 +2124,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_status(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WARM_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WARM_SST
+uint16_t uniffi_slatedb_uniffi_checksum_method_db_warm_sst(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WRITE
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_write(void
@@ -2100,9 +2142,27 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_write_with_options(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_EVICT_CACHED_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_EVICT_CACHED_SST
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_get(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET_KEY_VALUE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET_KEY_VALUE
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET_KEY_VALUE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET_KEY_VALUE_WITH_OPTIONS
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value_with_options(void
     
 );
 #endif
@@ -2145,6 +2205,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_STATUS
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_WARM_SST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_WARM_SST
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst(void
     
 );
 #endif

@@ -43,7 +43,7 @@ use crate::flatbuffer_types::root_generated::{
     UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
-use crate::manifest::{ExternalDb, Manifest, ManifestCore};
+use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
@@ -305,11 +305,13 @@ impl FlatBufferManifestCodec {
             .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            // In V1, view IDs are SST IDs, so both fields are the same.
-            last_compacted_l0_sst_view_id: l0_last_compacted,
-            last_compacted_l0_sst_id: l0_last_compacted,
-            l0,
-            compacted,
+            tree: LsmTreeState {
+                // In V1, view IDs are SST IDs, so both fields are the same.
+                last_compacted_l0_sst_view_id: l0_last_compacted,
+                last_compacted_l0_sst_id: l0_last_compacted,
+                l0,
+                compacted,
+            },
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             replay_after_wal_id: manifest.replay_after_wal_id(),
             last_l0_seq: manifest.last_l0_seq(),
@@ -423,11 +425,13 @@ impl FlatBufferManifestCodec {
             .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            last_compacted_l0_sst_view_id: l0_last_compacted,
-            // Not persisted in V2; populated at runtime by finish_compaction.
-            last_compacted_l0_sst_id: None,
-            l0,
-            compacted,
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: l0_last_compacted,
+                // Not persisted in V2; populated at runtime by finish_compaction.
+                last_compacted_l0_sst_id: None,
+                l0,
+                compacted,
+            },
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             replay_after_wal_id: manifest.replay_after_wal_id(),
             last_l0_seq: manifest.last_l0_seq(),
@@ -960,12 +964,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
         // Collect all unique SSTs from l0 and compacted runs.
         let mut unique_ssts: std::collections::HashMap<Ulid, &SsTableHandle> =
             std::collections::HashMap::new();
-        for view in core.l0.iter() {
+        for view in core.tree.l0.iter() {
             if let SsTableId::Compacted(ulid) = view.sst.id {
                 unique_ssts.entry(ulid).or_insert(&view.sst);
             }
         }
-        for sr in core.compacted.iter() {
+        for sr in core.tree.compacted.iter() {
             for view in sr.sst_views.iter() {
                 if let SsTableId::Compacted(ulid) = view.sst.id {
                     unique_ssts.entry(ulid).or_insert(&view.sst);
@@ -980,12 +984,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
             self.builder.create_vector(sst_offsets.as_ref())
         };
 
-        let l0 = self.add_compacted_sst_views(core.l0.iter());
+        let l0 = self.add_compacted_sst_views(core.tree.l0.iter());
         let mut l0_last_compacted = None;
-        if let Some(ulid) = core.last_compacted_l0_sst_view_id.as_ref() {
+        if let Some(ulid) = core.tree.last_compacted_l0_sst_view_id.as_ref() {
             l0_last_compacted = Some(self.add_compacted_sst_id(ulid))
         }
-        let compacted = self.add_sorted_runs_v2(&core.compacted);
+        let compacted = self.add_sorted_runs_v2(&core.tree.compacted);
         let checkpoints = self.add_checkpoints(&core.checkpoints);
         let external_dbs = if manifest.external_dbs.is_empty() {
             None
@@ -1043,6 +1047,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let core = &manifest.core;
 
         let l0: Vec<WIPOffset<CompactedSsTable>> = core
+            .tree
             .l0
             .iter()
             .map(|view| self.add_compacted_sst_from_view(view))
@@ -1051,10 +1056,10 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
         // V1's l0_last_compacted is an SST ID, not a view ID.
         let mut l0_last_compacted = None;
-        if let Some(sst_id) = core.last_compacted_l0_sst_id.as_ref() {
+        if let Some(sst_id) = core.tree.last_compacted_l0_sst_id.as_ref() {
             l0_last_compacted = Some(self.add_compacted_sst_id(sst_id))
         }
-        let compacted = self.add_sorted_runs_v1(&core.compacted);
+        let compacted = self.add_sorted_runs_v1(&core.tree.compacted);
         let checkpoints = self.add_checkpoints(&core.checkpoints);
         let external_dbs = if manifest.external_dbs.is_empty() {
             None
@@ -1333,11 +1338,11 @@ mod tests {
 
         // given:
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.l0 = VecDeque::from(vec![
+        manifest.core.tree.l0 = VecDeque::from(vec![
             new_sst_handle(b"a", None),
             new_sst_handle(b"a", Some(BytesRange::from_ref("c"..="d"))),
         ]);
-        manifest.core.compacted = vec![
+        manifest.core.tree.compacted = vec![
             SortedRun {
                 id: 0,
                 sst_views: vec![
@@ -1716,7 +1721,7 @@ mod tests {
     fn test_should_encode_decode_manifest_sst_with_version_set() {
         // given: a manifest with one L0 SST and one sorted run SST
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.l0 = VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
+        manifest.core.tree.l0 = VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
@@ -1724,7 +1729,7 @@ mod tests {
                 ..Default::default()
             },
         ))]);
-        manifest.core.compacted = vec![SortedRun {
+        manifest.core.tree.compacted = vec![SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),
@@ -1743,11 +1748,13 @@ mod tests {
 
         // then:
         assert_eq!(
-            decoded.core.l0[0].sst.format_version,
+            decoded.core.tree.l0[0].sst.format_version,
             SST_FORMAT_VERSION_LATEST
         );
         assert_eq!(
-            decoded.core.compacted[0].sst_views[0].sst.format_version,
+            decoded.core.tree.compacted[0].sst_views[0]
+                .sst
+                .format_version,
             SST_FORMAT_VERSION_LATEST
         );
         assert_eq!(manifest, decoded);
@@ -1847,11 +1854,13 @@ mod tests {
 
         // then: format_version should default to ORIGINAL_SST_FORMAT_VERSION
         assert_eq!(
-            decoded.core.l0[0].sst.format_version,
+            decoded.core.tree.l0[0].sst.format_version,
             super::ORIGINAL_SST_FORMAT_VERSION
         );
         assert_eq!(
-            decoded.core.compacted[0].sst_views[0].sst.format_version,
+            decoded.core.tree.compacted[0].sst_views[0]
+                .sst
+                .format_version,
             super::ORIGINAL_SST_FORMAT_VERSION
         );
     }
@@ -2011,11 +2020,11 @@ mod tests {
         }
 
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.l0 = VecDeque::from(vec![
+        manifest.core.tree.l0 = VecDeque::from(vec![
             new_view(b"a", None),
             new_view(b"b", Some(BytesRange::from_ref("c"..="d"))),
         ]);
-        manifest.core.compacted = vec![
+        manifest.core.tree.compacted = vec![
             SortedRun {
                 id: 1,
                 sst_views: vec![
@@ -2031,9 +2040,9 @@ mod tests {
                 ],
             },
         ];
-        manifest.core.last_compacted_l0_sst_view_id = Some(manifest.core.l0[0].id);
-        manifest.core.last_compacted_l0_sst_id =
-            Some(manifest.core.l0[0].sst.id.unwrap_compacted_id());
+        manifest.core.tree.last_compacted_l0_sst_view_id = Some(manifest.core.tree.l0[0].id);
+        manifest.core.tree.last_compacted_l0_sst_id =
+            Some(manifest.core.tree.l0[0].sst.id.unwrap_compacted_id());
         manifest.writer_epoch = 42;
         manifest.compactor_epoch = 7;
         manifest.core.next_wal_sst_id = 10;
@@ -2080,7 +2089,7 @@ mod tests {
         // When view IDs equal SST IDs (identity views), V1 and V2 should decode
         // to the same in-memory Manifest.
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.l0 = VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
+        manifest.core.tree.l0 = VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
@@ -2088,7 +2097,7 @@ mod tests {
                 ..Default::default()
             },
         ))]);
-        manifest.core.compacted = vec![SortedRun {
+        manifest.core.tree.compacted = vec![SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),

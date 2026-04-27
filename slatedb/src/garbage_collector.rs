@@ -1039,13 +1039,15 @@ mod tests {
         // Create a manifest
         let mut state = ManifestCore::new();
         state
+            .tree
             .l0
             .push_back(SsTableView::identity(l0_sst_handle.clone()));
         state
+            .tree
             .l0
             .push_back(SsTableView::identity(active_expired_l0_sst_handle.clone()));
         // Dont' push inactive_expired_l0_sst_handle
-        state.compacted.push(SortedRun {
+        state.tree.compacted.push(SortedRun {
             id: 1,
             // Don't add inactive_expired_sst_handle
             sst_views: vec![
@@ -1080,10 +1082,12 @@ mod tests {
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(current_manifest.manifest.core.tree.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.tree.compacted.len(), 1);
         assert_eq!(
-            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            current_manifest.manifest.core.tree.compacted[0]
+                .sst_views
+                .len(),
             2
         );
 
@@ -1115,10 +1119,12 @@ mod tests {
         assert!(!remaining_ids.contains(&inactive_expired_l0_sst_handle.id));
         assert!(!remaining_ids.contains(&inactive_expired_sst_handle.id));
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(current_manifest.manifest.core.tree.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.tree.compacted.len(), 1);
         assert_eq!(
-            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            current_manifest.manifest.core.tree.compacted[0]
+                .sst_views
+                .len(),
             2
         );
     }
@@ -1154,16 +1160,17 @@ mod tests {
         // Create an initial manifest with active and active checkpoint tables
         let mut state = ManifestCore::new();
         state
+            .tree
             .l0
             .push_back(SsTableView::identity(active_l0_sst_handle.clone()));
-        state.l0.push_back(SsTableView::identity(
+        state.tree.l0.push_back(SsTableView::identity(
             active_checkpoint_l0_sst_handle.clone(),
         ));
-        state.compacted.push(SortedRun {
+        state.tree.compacted.push(SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(active_sst_handle.clone())],
         });
-        state.compacted.push(SortedRun {
+        state.tree.compacted.push(SortedRun {
             id: 2,
             sst_views: vec![SsTableView::identity(active_checkpoint_sst_handle.clone())],
         });
@@ -1181,8 +1188,8 @@ mod tests {
 
         // Now drop the active tables from the checkpoint
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.truncate(1);
-        dirty.value.core.compacted.truncate(1);
+        dirty.value.core.tree.l0.truncate(1);
+        dirty.value.core.tree.compacted.truncate(1);
         stored_manifest.update(dirty).await.unwrap();
 
         // Start the garbage collector
@@ -1337,11 +1344,11 @@ mod tests {
                 assert!(wal_ssts.contains(&SsTableId::Wal(wal_sst_id)));
             }
 
-            for view in &manifest.core.l0 {
+            for view in &manifest.core.tree.l0 {
                 assert!(compacted_ssts.contains(&view.sst.id));
             }
 
-            for sr in &manifest.core.compacted {
+            for sr in &manifest.core.tree.compacted {
                 for view in &sr.sst_views {
                     assert!(compacted_ssts.contains(&view.sst.id));
                 }
@@ -1775,8 +1782,11 @@ mod tests {
         let inactive_expired_handle = create_sst(table_store.clone(), expired_ms).await;
 
         let mut state = ManifestCore::new();
-        state.l0.push_back(SsTableView::identity(active_l0_handle));
-        state.compacted.push(SortedRun {
+        state
+            .tree
+            .l0
+            .push_back(SsTableView::identity(active_l0_handle));
+        state.tree.compacted.push(SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(active_handle)],
         });

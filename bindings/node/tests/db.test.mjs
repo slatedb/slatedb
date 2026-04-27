@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AdminBuilder,
+  CacheTarget,
   CloseReason,
   FlushType,
   IsolationLevel,
+  SsTableId,
   WriteBatch,
 } from "../index.js";
 import {
   ConcatMergeOperator,
+  TEST_DB_PATH,
   bytes,
   createCleanup,
   drainIterator,
@@ -362,4 +366,47 @@ test("db writer fencing reports closed reason", async (t) => {
     { reason: CloseReason.Fenced },
   );
   assert.match(error.message, /detected newer DB client/);
+});
+
+test("db warm_sst and evict_cached_sst", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  const db = await openDb(store, { cleanup });
+  const admin = cleanup.track(new AdminBuilder(TEST_DB_PATH, store).build(), {
+    shutdown: false,
+  });
+
+  await db.put_with_options(
+    bytes("alpha"),
+    bytes("one"),
+    putOptions(),
+    writeOptions(false),
+  );
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const manifest = await admin.read_manifest(undefined);
+  assert.ok(manifest.l0.length > 0);
+  const sstId = manifest.l0[0].sst.id;
+
+  await db.warm_sst(sstId, [
+    CacheTarget.Filters(),
+    CacheTarget.Index(),
+    CacheTarget.Stats(),
+    CacheTarget.Data(fullRange()),
+  ]);
+
+  // Empty-range Data target is a no-op (not an invalid-range error).
+  await db.warm_sst(sstId, [
+    CacheTarget.Data({
+      start: bytes("z"),
+      start_inclusive: true,
+      end: bytes("a"),
+      end_inclusive: true,
+    }),
+  ]);
+
+  // Unknown SST is a no-op, not an error.
+  await db.warm_sst(SsTableId.Wal(999_999n), [CacheTarget.Index()]);
+
+  await db.evict_cached_sst(sstId);
 });

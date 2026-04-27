@@ -71,12 +71,12 @@ impl CompactedGcTask {
             .await?;
         let mut active_ssts = HashSet::new();
         for manifest in active_manifests.values() {
-            for sr in manifest.core.compacted.iter() {
+            for sr in manifest.core.tree.compacted.iter() {
                 for view in sr.sst_views.iter() {
                     active_ssts.insert(view.sst.id);
                 }
             }
-            for view in manifest.core.l0.iter() {
+            for view in manifest.core.tree.l0.iter() {
                 active_ssts.insert(view.sst.id);
             }
         }
@@ -101,15 +101,16 @@ impl CompactedGcTask {
     /// - The newest L0 timestamp if any L0s exist, otherwise a conservative fallback
     ///   (last compacted L0 or Unix epoch).
     async fn newest_l0_dt(&self, manifest: &Manifest) -> Result<DateTime<Utc>, SlateDBError> {
-        let l0_timestamps = if !manifest.core.l0.is_empty() {
+        let l0_timestamps = if !manifest.core.tree.l0.is_empty() {
             // Use active L0's if some exist
             manifest
                 .core
+                .tree
                 .l0
                 .iter()
                 .map(|view| DateTime::<Utc>::from(view.sst.id.unwrap_compacted_id().datetime()))
                 .collect::<Vec<_>>()
-        } else if let Some(l0_last_compacted) = manifest.core.last_compacted_l0_sst_view_id {
+        } else if let Some(l0_last_compacted) = manifest.core.tree.last_compacted_l0_sst_view_id {
             // Else fall back to the last compacted L0, which can serve as a conservative barrier
             vec![DateTime::<Utc>::from(l0_last_compacted.datetime())]
         } else {
@@ -316,6 +317,7 @@ mod tests {
         dirty
             .value
             .core
+            .tree
             .l0
             .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
@@ -421,6 +423,7 @@ mod tests {
         dirty
             .value
             .core
+            .tree
             .l0
             .push_back(SsTableView::identity(manifest_handle));
         stored_manifest.update(dirty).await.unwrap();
@@ -514,6 +517,7 @@ mod tests {
         dirty
             .value
             .core
+            .tree
             .l0
             .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
@@ -607,6 +611,7 @@ mod tests {
         dirty_manifest
             .value
             .core
+            .tree
             .l0
             .push_back(SsTableView::identity(l0_handle));
         stored_manifest.update(dirty_manifest).await.unwrap();

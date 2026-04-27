@@ -1990,8 +1990,8 @@ mod tests {
 
         // estimate_size on L0 views should return non-zero
         let manifest = db.manifest();
-        assert!(!manifest.manifest.core.l0.is_empty());
-        for view in &manifest.manifest.core.l0 {
+        assert!(!manifest.manifest.core.tree.l0.is_empty());
+        for view in &manifest.manifest.core.tree.l0 {
             assert!(view.estimate_size() > 0);
         }
 
@@ -2002,7 +2002,7 @@ mod tests {
             loop {
                 {
                     let state = db_poll.inner.state.read();
-                    if !state.state().core().compacted.is_empty() {
+                    if !state.state().core().tree.compacted.is_empty() {
                         return;
                     }
                 }
@@ -2013,9 +2013,9 @@ mod tests {
         .unwrap();
 
         let manifest = db.manifest();
-        assert!(!manifest.manifest.core.compacted.is_empty());
+        assert!(!manifest.manifest.core.tree.compacted.is_empty());
 
-        for sr in &manifest.manifest.core.compacted {
+        for sr in &manifest.manifest.core.tree.compacted {
             // A range covering all keys returns results
             let covering = sr
                 .tables_covering_range(Bytes::from_static(b"k0000")..Bytes::from_static(b"k0100"));
@@ -2617,8 +2617,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.value.core.l0.len());
-        let view = state.state.manifest.value.core.l0.front().unwrap();
+        assert_eq!(1, state.state.manifest.value.core.tree.l0.len());
+        let view = state.state.manifest.value.core.tree.l0.front().unwrap();
         let index = db
             .inner
             .table_store
@@ -3418,13 +3418,13 @@ mod tests {
 
         let state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| !s.l0.is_empty(),
+            |s| !s.tree.l0.is_empty(),
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(state.l0.len(), 1);
+        assert_eq!(state.tree.l0.len(), 1);
 
-        let l0 = state.l0.front().unwrap();
+        let l0 = state.tree.l0.front().unwrap();
         let mut iter = SstIterator::new_borrowed_initialized(
             ..,
             l0,
@@ -3494,7 +3494,7 @@ mod tests {
         }
 
         let manifest = stored_manifest.refresh().await.unwrap();
-        let l0 = &manifest.core.l0;
+        let l0 = &manifest.core.tree.l0;
         assert_eq!(l0.len(), 3);
         let sst_iter_options = SstIteratorOptions::default();
 
@@ -3563,7 +3563,7 @@ mod tests {
         {
             let guard = kv_store.inner.state.read();
             assert!(guard.state().imm_memtable.is_empty());
-            assert_eq!(guard.state().core().l0.len(), 0);
+            assert_eq!(guard.state().core().tree.l0.len(), 0);
         }
 
         // This put() triggers a freeze.
@@ -3585,7 +3585,7 @@ mod tests {
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(db_state.l0.len(), 1);
+        assert_eq!(db_state.tree.l0.len(), 1);
 
         // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
         // and see if the threshold triggers again.
@@ -3601,7 +3601,7 @@ mod tests {
         // Verify no more memtables were frozen or L0 flush happened.
         {
             let guard = kv_store.inner.state.read();
-            assert_eq!(guard.state().core().l0.len(), 1);
+            assert_eq!(guard.state().core().tree.l0.len(), 1);
         }
 
         // This put() triggers a freeze.
@@ -3619,7 +3619,7 @@ mod tests {
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(db_state.l0.len(), 2); // We should have two L0 flushes.
+        assert_eq!(db_state.tree.l0.len(), 2); // We should have two L0 flushes.
 
         kv_store.close().await.unwrap();
     }
@@ -3685,7 +3685,7 @@ mod tests {
 
         // Get initial state
         let initial_manifest = stored_manifest.refresh().await.unwrap();
-        let initial_l0_count = initial_manifest.core.l0.len();
+        let initial_l0_count = initial_manifest.core.tree.l0.len();
 
         let initial_flush_count =
             lookup_metric(&metrics_recorder, IMMUTABLE_MEMTABLE_FLUSHES).unwrap();
@@ -3701,13 +3701,13 @@ mod tests {
         // Wait for the flush to complete and manifest to be updated
         let db_state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| s.l0.len() > initial_l0_count,
+            |s| s.tree.l0.len() > initial_l0_count,
             Duration::from_secs(30),
         )
         .await;
 
         // Verify that a new SST was created in L0
-        assert_eq!(db_state.l0.len(), initial_l0_count + 1);
+        assert_eq!(db_state.tree.l0.len(), initial_l0_count + 1);
 
         // Verify that the flush metrics were updated
         let final_flush_count =
@@ -3727,7 +3727,7 @@ mod tests {
         assert_eq!(retrieved_value2.as_ref(), value2);
 
         // Verify the data exists in the newly created SST
-        let latest_sst = db_state.l0.back().unwrap();
+        let latest_sst = db_state.tree.l0.back().unwrap();
         let sst_iter_options = SstIteratorOptions::default();
         let mut iter = SstIterator::new_borrowed_initialized(
             ..,
@@ -4580,7 +4580,7 @@ mod tests {
             loop {
                 {
                     let db_state = db_poll.inner.state.read();
-                    if !db_state.state().core().compacted.is_empty() {
+                    if !db_state.state().core().tree.compacted.is_empty() {
                         return;
                     }
                 }
@@ -4999,8 +4999,8 @@ mod tests {
         assert_eq!(db_state.state.imm_memtable.len(), 1);
 
         // verify that we have no L0 SSTs because memtables should have failed to flush
-        assert_eq!(db_state.state.core().l0.len(), 0);
-        assert_eq!(db_state.state.core().compacted.len(), 0);
+        assert_eq!(db_state.state.core().tree.l0.len(), 0);
+        assert_eq!(db_state.state.core().tree.compacted.len(), 0);
 
         // one empty wal and one wal for the first put
         assert_eq!(
@@ -5127,7 +5127,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
+                s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5135,8 +5135,8 @@ mod tests {
         let manifest = db.manifest();
         info!(
             "1 l0: {} {}",
-            manifest.manifest.core.l0.len(),
-            manifest.manifest.core.compacted.len()
+            manifest.manifest.core.tree.l0.len(),
+            manifest.manifest.core.tree.compacted.len()
         );
 
         // write more l0s and wait for compaction
@@ -5153,7 +5153,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
+                s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5161,8 +5161,8 @@ mod tests {
         let manifest = db.manifest();
         info!(
             "2 l0: {} {}",
-            manifest.manifest.core.l0.len(),
-            manifest.manifest.core.compacted.len()
+            manifest.manifest.core.tree.l0.len(),
+            manifest.manifest.core.tree.compacted.len()
         );
         // write another l0
         db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
@@ -5176,8 +5176,8 @@ mod tests {
             let manifest = db.manifest();
             info!(
                 "3 l0: {} {}",
-                manifest.manifest.core.l0.len(),
-                manifest.manifest.core.compacted.len()
+                manifest.manifest.core.tree.l0.len(),
+                manifest.manifest.core.tree.compacted.len()
             );
             let val = db.get([b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
@@ -6468,11 +6468,11 @@ mod tests {
             .await
             .expect("failed to read latest manifest");
         assert_eq!(
-            manifest.manifest.core.l0.len(),
+            manifest.manifest.core.tree.l0.len(),
             1,
             "expected exactly one L0 SST in manifest"
         );
-        let l0_id = manifest.manifest.core.l0[0].sst.id;
+        let l0_id = manifest.manifest.core.tree.l0[0].sst.id;
         assert_eq!(
             l0_id, ssts[0].id,
             "expected SST {:?} but found SST {:?}",
@@ -7183,6 +7183,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .l0
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7193,6 +7194,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .compacted
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7201,6 +7203,7 @@ mod tests {
                     if state
                         .state()
                         .core()
+                        .tree
                         .compacted
                         .first()
                         .is_some_and(|sr| sr.sst_views.len() > 1)
@@ -7332,6 +7335,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .l0
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7342,6 +7346,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .compacted
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7350,6 +7355,7 @@ mod tests {
                     if state
                         .state()
                         .core()
+                        .tree
                         .compacted
                         .first()
                         .is_some_and(|sr| sr.sst_views.len() > 1)

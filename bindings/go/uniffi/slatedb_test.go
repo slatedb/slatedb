@@ -2170,3 +2170,41 @@ func TestDbReaderBuilderWithDefaultMetricsRecorder(t *testing.T) {
 		t.Fatalf("counter %q: got %d, want 1", dbRequestCountMetricName, counterValue.Field0)
 	}
 }
+
+func TestDbTtl(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	key, value := []byte("alpha"), []byte("one")
+
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAt{Field0: 1}}
+	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	_, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
+	if err != nil {
+		t.Fatalf("Put(alpha): %v", err)
+	}
+
+	readerHandle := openTestReader(t, store, nil)
+
+	type getKeyValue interface {
+		GetKeyValue([]byte) (*slatedb.KeyValue, error)
+	}
+
+	for _, tc := range []struct {
+		name string
+		db   getKeyValue
+	}{{"db", handle.db}, {"reader", readerHandle.reader}} {
+		t.Run(tc.name, func(t *testing.T) {
+			kv, err := tc.db.GetKeyValue(key)
+			if err != nil {
+				t.Fatalf("Get(alpha): %v", err)
+			}
+			if kv == nil {
+				t.Fatalf("Get(alpha): got nil kv")
+			}
+			if !bytes.Equal(value, kv.Value) {
+				t.Fatalf("Get(alpha): got %v, want %v", kv.Value, value)
+			}
+		})
+	}
+}

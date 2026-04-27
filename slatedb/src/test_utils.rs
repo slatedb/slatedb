@@ -374,13 +374,14 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
 
         // Create a compaction of all SSTs from L0 and all sorted runs
         let mut sources: Vec<SourceId> = db_state
+            .tree
             .l0
             .iter()
             .map(|view| SourceId::SstView(view.id))
             .collect();
 
         // Add SSTs from all sorted runs
-        for sr in &db_state.compacted {
+        for sr in &db_state.tree.compacted {
             sources.push(SourceId::SortedRun(sr.id));
         }
 
