@@ -505,18 +505,17 @@ Use gossip to distribute jobs directly.
 
 ## Open Questions
 
-- ~~What is the right default for `worker_poll_interval_ms`? Should it be adaptive (e.g. exponential backoff when no work is available)?~~
-  - **Resolved:** Exponential backoff does not make sense for `worker_poll_interval_ms` because GETs to object storage are cheap and it is critical that L0 compactions are started as soon as possible. A reasonable default is one second (e.g. `worker_poll_interval_ms=1000`).
-- ~~How should GC handle the window between a worker writing output SSTs and the coordinator committing the manifest? GC must not delete SSTs that are not yet manifest-referenced.~~
-  - **Resolved:** GC already handles this by inspecting the compactions file, tracking the creation time of the oldest compaction, and retaining any SSTs newer than that time.
-- ~~Should workers validate their `CompactionSpec` against the current manifest before executing? Validating catches stale specs but adds a manifest read per claim.~~
-  - **Resolved:** The coordinator already validates that it never writes a bad spec and always makes safe updates to the manifest.
-- ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~
-  - **Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `worker_poll_interval_ms`, spreading poll timing across workers without any additional configuration.
-- ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~
-  - **Resolved:** Workers should have the same metrics infrastructure introduced by the metrics RFC and users can wire in reporting as they'd like. The worker should tag the metrics with the worker id.
-- ~~What happens when a worker is reclaimed due to a missed heartbeat but is still executing (zombie worker)? Both the zombie and the new worker may write `Completed` to `.compactions`. Both writes can succeed as new numbered files. If the zombie finishes first, the new worker wastes its work and the coordinator may process the zombie's `Completed` entry; if the new worker finishes first, the zombie's `Completed` write becomes an orphaned entry the coordinator must ignore. The coordinator needs to be idempotent when processing `Completed` entries to handle this correctly.~~
-  - **Resolved:** A job's status can only be updated by the worker that claimed it. A worker trying to write `Completed` status to a compaction must present the same worker_id that is tied to the `Running` job. Zombie processes attempting to update the job status with a mismatched worker_id are unsuccessful and no operation occurs.
+1. ~~What is the right default for `worker_poll_interval_ms`? Should it be adaptive (e.g. exponential backoff when no work is available)?~~
+**Resolved:** Exponential backoff does not make sense for `worker_poll_interval_ms` because GETs to object storage are cheap and it is critical that L0 compactions are started as soon as possible. A reasonable default is one second (e.g. `worker_poll_interval_ms=1000`).
+
+2. ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~
+**Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `worker_poll_interval_ms`, spreading poll timing across workers without any additional configuration.
+
+3. ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~
+**Resolved:** Workers should have the same metrics infrastructure introduced by the metrics RFC and users can wire in reporting as they'd like. The worker tags the metrics with the worker id.
+
+4. ~~What happens when a worker is reclaimed due to a missed heartbeat but is still executing (zombie worker)? Both the zombie and the new worker may write `Completed` to `.compactions`. Both writes can succeed as new numbered files. If the zombie finishes first, the new worker wastes its work and the coordinator may process the zombie's `Completed` entry; if the new worker finishes first, the zombie's `Completed` write becomes an orphaned entry the coordinator must ignore. The coordinator needs to be idempotent when processing `Completed` entries to handle this correctly.~~
+**Resolved:** Reviewers mentioned that a zombie wasting work is not a major issue and expected. The coordinator doesn't need to be idempotent when processing as long as job status can only be updated by the worker that claimed it. A worker trying to write `Completed` status to a compaction must present the same worker_id that is tied to the `Running` job. Zombie processes attempting to update the job status with a mismatched worker_id are unsuccessful and no operation occurs.
 
 ## References
 
