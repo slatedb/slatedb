@@ -26,7 +26,7 @@ log = { workspace = true }
 object_store = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
-slatedb = { workspace = true }
+slatedb = { workspace = true, features = ["all"] }
 slatedb-common = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 tokio-util = { workspace = true, default-features = false, features = ["rt"] }
