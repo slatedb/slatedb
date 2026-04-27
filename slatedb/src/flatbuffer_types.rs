@@ -361,13 +361,12 @@ impl FlatBufferManifestCodec {
                 (ulid, handle)
             })
             .collect();
-        let l0_last_compacted = manifest.last_compacted_l0_sst_view_id().map(|id| id.ulid());
-        let l0: VecDeque<SsTableView> = manifest
-            .l0()
-            .iter()
-            .map(|view| Self::decode_compacted_sst_view(&view, &sst_lookup))
-            .collect::<Result<_, _>>()?;
-        let compacted = Self::decode_sorted_runs_v2(manifest.compacted(), &sst_lookup)?;
+        let tree = Self::decode_lsm_tree_v2(
+            manifest.last_compacted_l0_sst_view_id(),
+            manifest.l0(),
+            manifest.compacted(),
+            &sst_lookup,
+        )?;
         let segments = manifest
             .segments()
             .map(|fb_segments| {
@@ -423,13 +422,7 @@ impl FlatBufferManifestCodec {
             .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            tree: LsmTreeState {
-                last_compacted_l0_sst_view_id: l0_last_compacted,
-                // Not persisted in V2; populated at runtime by finish_compaction.
-                last_compacted_l0_sst_id: None,
-                l0,
-                compacted,
-            },
+            tree,
             segments,
             segment_extractor_name,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
@@ -475,24 +468,37 @@ impl FlatBufferManifestCodec {
         sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
     ) -> Result<Segment, Box<dyn std::error::Error + Send + Sync>> {
         let prefix = Bytes::copy_from_slice(fb_segment.prefix().bytes());
-        let last_compacted_l0_sst_view_id = fb_segment
-            .last_compacted_l0_sst_view_id()
-            .map(|id| id.ulid());
-        let l0: VecDeque<SsTableView> = fb_segment
-            .l0()
+        let tree = Self::decode_lsm_tree_v2(
+            fb_segment.last_compacted_l0_sst_view_id(),
+            fb_segment.l0(),
+            fb_segment.compacted(),
+            sst_lookup,
+        )?;
+        Ok(Segment { prefix, tree })
+    }
+
+    /// Decode the V2 wire shape shared by the unsegmented tree (`ManifestV2`)
+    /// and each `Segment`: an optional last-compacted view id, an L0 vector,
+    /// and a sorted-runs vector.
+    fn decode_lsm_tree_v2(
+        last_compacted_l0_sst_view_id: Option<FbUlid>,
+        l0: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableView<'_>>>,
+        compacted: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2<'_>>>,
+        sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
+    ) -> Result<LsmTreeState, Box<dyn std::error::Error + Send + Sync>> {
+        let last_compacted_l0_sst_view_id = last_compacted_l0_sst_view_id.map(|id| id.ulid());
+        let l0: VecDeque<SsTableView> = l0
             .iter()
             .map(|view| Self::decode_compacted_sst_view(&view, sst_lookup))
             .collect::<Result<_, _>>()?;
-        let compacted = Self::decode_sorted_runs_v2(fb_segment.compacted(), sst_lookup)?;
-        Ok(Segment {
-            prefix,
-            tree: LsmTreeState {
-                last_compacted_l0_sst_view_id,
-                // Not persisted in V2; populated at runtime by finish_compaction.
-                last_compacted_l0_sst_id: None,
-                l0,
-                compacted,
-            },
+        let compacted = Self::decode_sorted_runs_v2(compacted, sst_lookup)?;
+        Ok(LsmTreeState {
+            last_compacted_l0_sst_view_id,
+            // `last_compacted_l0_sst_id` is V1-only (see LsmTreeState) and has
+            // no V2 wire representation, so it stays `None` after decode.
+            last_compacted_l0_sst_id: None,
+            l0,
+            compacted,
         })
     }
 
@@ -631,6 +637,14 @@ impl FbUlid<'_> {
 
 struct DbFlatBufferBuilder<'b> {
     builder: FlatBufferBuilder<'b>,
+}
+
+/// Offsets for the V2 wire shape shared by the unsegmented tree (`ManifestV2`)
+/// and each `Segment`. Produced by `add_lsm_tree_v2`.
+struct LsmTreeV2Offsets<'b> {
+    l0: WIPOffset<Vector<'b, ForwardsUOffset<CompactedSsTableView<'b>>>>,
+    last_compacted_l0_sst_view_id: Option<WIPOffset<FbUlid<'b>>>,
+    compacted: WIPOffset<Vector<'b, ForwardsUOffset<SortedRunV2<'b>>>>,
 }
 
 impl<'b> DbFlatBufferBuilder<'b> {
@@ -838,22 +852,34 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
     fn add_segment(&mut self, segment: &Segment) -> WIPOffset<FbSegment<'b>> {
         let prefix = self.builder.create_vector(segment.prefix.as_ref());
-        let l0 = self.add_compacted_sst_views(segment.tree.l0.iter());
-        let last_compacted_l0_sst_view_id = segment
-            .tree
-            .last_compacted_l0_sst_view_id
-            .as_ref()
-            .map(|ulid| self.add_compacted_sst_id(ulid));
-        let compacted = self.add_sorted_runs_v2(&segment.tree.compacted);
+        let tree = self.add_lsm_tree_v2(&segment.tree);
         FbSegment::create(
             &mut self.builder,
             &FbSegmentArgs {
                 prefix: Some(prefix),
-                last_compacted_l0_sst_view_id,
-                l0: Some(l0),
-                compacted: Some(compacted),
+                last_compacted_l0_sst_view_id: tree.last_compacted_l0_sst_view_id,
+                l0: Some(tree.l0),
+                compacted: Some(tree.compacted),
             },
         )
+    }
+
+    /// Encode the V2 wire shape shared by the unsegmented tree and each
+    /// `Segment`. Returns the three offsets (l0, last-compacted view id,
+    /// compacted runs) so the caller can attach them to either a `ManifestV2`
+    /// or a `Segment` flatbuffer table.
+    fn add_lsm_tree_v2(&mut self, tree: &LsmTreeState) -> LsmTreeV2Offsets<'b> {
+        let l0 = self.add_compacted_sst_views(tree.l0.iter());
+        let last_compacted_l0_sst_view_id = tree
+            .last_compacted_l0_sst_view_id
+            .as_ref()
+            .map(|ulid| self.add_compacted_sst_id(ulid));
+        let compacted = self.add_sorted_runs_v2(&tree.compacted);
+        LsmTreeV2Offsets {
+            l0,
+            last_compacted_l0_sst_view_id,
+            compacted,
+        }
     }
 
     fn add_segments(
@@ -1063,12 +1089,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             self.builder.create_vector(sst_offsets.as_ref())
         };
 
-        let l0 = self.add_compacted_sst_views(core.tree.l0.iter());
-        let mut l0_last_compacted = None;
-        if let Some(ulid) = core.tree.last_compacted_l0_sst_view_id.as_ref() {
-            l0_last_compacted = Some(self.add_compacted_sst_id(ulid))
-        }
-        let compacted = self.add_sorted_runs_v2(&core.tree.compacted);
+        let tree = self.add_lsm_tree_v2(&core.tree);
         let segments = self.add_segments(&core.segments);
         let segment_extractor_name = core
             .segment_extractor_name
@@ -1109,10 +1130,10 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 compactor_epoch: manifest.compactor_epoch,
                 replay_after_wal_id: core.replay_after_wal_id,
                 wal_id_last_seen: core.next_wal_sst_id - 1,
-                last_compacted_l0_sst_view_id: l0_last_compacted,
+                last_compacted_l0_sst_view_id: tree.last_compacted_l0_sst_view_id,
                 ssts: Some(ssts),
-                l0: Some(l0),
-                compacted: Some(compacted),
+                l0: Some(tree.l0),
+                compacted: Some(tree.compacted),
                 last_l0_clock_tick: core.last_l0_clock_tick,
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
