@@ -130,6 +130,8 @@ impl DbInner {
         // Force the current timestamp for DST operations. See #719 for details.
         let now = options.now;
 
+        let commit_seq = self.oracle.next_seq();
+
         // Check for transaction conflicts before proceeding with the write batch
         // if this batch is part of a transaction.
         if let Some(txn_id) = batch.txn_id.as_ref() {
@@ -137,8 +139,6 @@ impl DbInner {
                 return Err(SlateDBError::TransactionConflict);
             }
         }
-
-        let commit_seq = self.oracle.next_seq();
 
         // Count batch-local merge folding on the flush path so DB-side merge
         // resolution uses one metric for both write batches and memtable flushes.
