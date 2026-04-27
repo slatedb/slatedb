@@ -225,14 +225,21 @@ Workers claim up to `max_concurrent_compactions` jobs at a time, limiting the nu
 
 ### Heartbeat and Failure Detection
 
-Workers update `last_heartbeat_ms` in two ways:
+**Heartbeat Protocol** (worker):
 
-1. **On SST flush:** piggybacked on the RFC-0013 progress-persistence write each time an output SST is written.
-2. **On bytes processed:** every `heartbeat_bytes` bytes processed, a worker writes an updated `last_heartbeat_ms` to `.compactions`. This ties liveness directly to compaction throughput. A degraded machine that is alive but slow will miss the threshold and be reclaimed, preventing it from holding L0 compaction indefinitely. To avoid excessive object store writes when processing is fast, heartbeats are suppressed if less than `heartbeat_min_interval_ms` has elapsed since the last one.
+1. On each output SST write, piggyback `last_heartbeat_ms = now()` onto the RFC-0013 progress-persistence write to `.compactions`.
+2. Additionally, after every `heartbeat_bytes` bytes processed: if `now() - last_heartbeat_ms >= heartbeat_min_interval_ms`, write updated `.compactions` with `last_heartbeat_ms = now()` for all `Running` jobs owned by this worker. This ties liveness directly to compaction throughput. A degraded machine that is alive but slow will miss the threshold and be reclaimed.
+3. On `AlreadyExists`: re-read latest and retry the write.
+4. Reset `bytes_since_last_heartbeat = 0` after a successful heartbeat write.
 
-Polls do not emit heartbeats. Workers continue polling every `worker_poll_interval_ms` to pick up additional work, but liveness is driven entirely by compaction progress.
+Polls do not emit heartbeats. Liveness is driven entirely by compaction progress.
 
-The coordinator detects stale workers during its periodic poll: for each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`, reset `status = Submitted` and clear `worker_id`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator` (seeks input iterators past the last written key, avoiding re-processing already compacted data).
+**Failure Detection Protocol** (coordinator):
+
+1. On each coordinator poll tick, read latest `.compactions`.
+2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
+3. If any compactions were reclaimed in step 2, write updated state via `write_compactions_safely()`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator`.
+4. On `AlreadyExists`: re-read latest and retry from step 1.
 
 ### Worker Lifecycle
 
