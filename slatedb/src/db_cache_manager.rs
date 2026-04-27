@@ -534,7 +534,7 @@ mod tests {
     }
 
     fn project_l0_view(manifest: &mut VersionedManifest, visible_range: BytesRange) {
-        let l0 = &mut manifest.manifest.core.l0;
+        let l0 = &mut manifest.manifest.core.tree.l0;
         let view = l0.pop_front().expect("expected at least one L0 view");
         l0.push_front(view.with_visible_range(visible_range));
     }
