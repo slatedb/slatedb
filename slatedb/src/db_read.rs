@@ -12,9 +12,6 @@ use std::ops::RangeBounds;
 /// This trait defines the interface for reading data from SlateDB,
 /// and can be implemented by `Db`, `DbReader` and `DbSnapshot`
 /// to provide a unified interface for read-only operations.
-///
-/// The trait is designed to be object-safe, allowing for dynamic dispatch
-/// when needed.
 #[async_trait::async_trait]
 pub trait DbReadOps {
     /// Get a value from the database with default read options.

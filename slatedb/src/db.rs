@@ -57,6 +57,7 @@ use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
+use crate::db_write::DbWriteOps;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
@@ -1711,6 +1712,67 @@ impl DbMetadataOps for Db {
 
     fn status(&self) -> DbStatus {
         self.inner.status()
+    }
+}
+
+#[async_trait::async_trait]
+impl DbWriteOps for Db {
+    type Transaction = DbTransaction;
+
+    async fn put_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::put_with_options(self, key, value, put_opts, write_opts).await
+    }
+
+    async fn delete_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::delete_with_options(self, key, options).await
+    }
+
+    async fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::merge_with_options(self, key, value, merge_opts, write_opts).await
+    }
+
+    async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::write_with_options(self, batch, options).await
+    }
+
+    async fn flush(&self) -> Result<(), crate::Error> {
+        Db::flush(self).await
+    }
+
+    async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        Db::flush_with_options(self, options).await
+    }
+
+    async fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
+        Db::begin(self, isolation_level).await
     }
 }
 
