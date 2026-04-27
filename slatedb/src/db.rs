@@ -2807,6 +2807,7 @@ mod tests {
             cache_stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let cached_object_store = CachedObjectStore::new(
