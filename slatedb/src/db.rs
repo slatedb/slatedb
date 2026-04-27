@@ -22,8 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
-use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
-use crate::db_metadata::DbMetadataOps;
+use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -53,7 +52,6 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -76,6 +74,7 @@ use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
@@ -1714,6 +1713,67 @@ impl DbMetadataOps for Db {
     }
 }
 
+#[async_trait::async_trait]
+impl DbWriteOps for Db {
+    type Transaction = DbTransaction;
+
+    async fn put_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::put_with_options(self, key, value, put_opts, write_opts).await
+    }
+
+    async fn delete_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::delete_with_options(self, key, options).await
+    }
+
+    async fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::merge_with_options(self, key, value, merge_opts, write_opts).await
+    }
+
+    async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::write_with_options(self, batch, options).await
+    }
+
+    async fn flush(&self) -> Result<(), crate::Error> {
+        Db::flush(self).await
+    }
+
+    async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        Db::flush_with_options(self, options).await
+    }
+
+    async fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
+        Db::begin(self, isolation_level).await
+    }
+}
+
 impl Db {
     /// See [`DbMetadataOps::manifest`].
     pub fn manifest(&self) -> VersionedManifest {
@@ -1758,7 +1818,7 @@ pub struct WriteHandle {
 }
 
 impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
+    pub fn new(seq: u64, create_ts: i64) -> Self {
         Self { seq, create_ts }
     }
 
