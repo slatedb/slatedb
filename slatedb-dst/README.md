@@ -27,7 +27,7 @@ an internal path dependency rather than from crates.io.
 - `actors`: reusable scenario actors, including workload, flusher, standalone
   compactor, shutdown, and bank-transfer/auditor actors
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
-  metadata, persisted attributes, and deterministic listing behavior
+  metadata, in-memory attribute preservation, and deterministic listing behavior
 - `FailingObjectStore`: `ObjectStore` wrapper that injects deterministic
   latency, bandwidth, reset-peer, slow-close, and synthetic HTTP failures
 - `FailingObjectStoreController`: controller used to install and clear
