@@ -448,15 +448,24 @@ impl<P: Into<Path>> DbBuilder<P> {
             None => retrying_main_object_store.clone(),
         };
 
-        // Setup the manifest store and load latest manifest
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            maybe_cached_main_object_store.clone(),
-        ));
-        let compactions_store = Arc::new(CompactionsStore::new(
-            &path,
-            maybe_cached_main_object_store.clone(),
-        ));
+        // Setup the manifest store and load latest manifest. If we're reading
+        // through a local disk cache, pass the cache in so a corrupt cached
+        // manifest (from an unclean shutdown, for example) self-heals by
+        // invalidating the entry and refetching from the remote store.
+        let manifest_store = {
+            let store = ManifestStore::new(&path, maybe_cached_main_object_store.clone());
+            match &cached_object_store {
+                Some(cache) => Arc::new(store.with_cache_invalidator(cache.clone())),
+                None => Arc::new(store),
+            }
+        };
+        let compactions_store = {
+            let store = CompactionsStore::new(&path, maybe_cached_main_object_store.clone());
+            match &cached_object_store {
+                Some(cache) => Arc::new(store.with_cache_invalidator(cache.clone())),
+                None => Arc::new(store),
+            }
+        };
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
@@ -473,13 +482,20 @@ impl<P: Into<Path>> DbBuilder<P> {
             None => HashMap::new(),
         };
 
-        // Create path resolver and table store
+        // Create path resolver and table store. When the main object store is
+        // served through a local disk cache, hand the cache to `ObjectStores`
+        // so SST readers can invalidate a corrupt entry and refetch from the
+        // remote object store on `ChecksumMismatch`.
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let mut object_stores = ObjectStores::new(
+            maybe_cached_main_object_store.clone(),
+            retrying_wal_object_store.clone(),
+        );
+        if let Some(cache) = &cached_object_store {
+            object_stores = object_stores.with_main_cache(cache.clone());
+        }
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(
-                maybe_cached_main_object_store.clone(),
-                retrying_wal_object_store.clone(),
-            ),
+            object_stores,
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
@@ -1344,7 +1360,13 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         };
 
         // Validate WAL object store configuration.
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = {
+            let store = ManifestStore::new(&path, object_store.clone());
+            match &maybe_cached {
+                Some(cache) => Arc::new(store.with_cache_invalidator(cache.clone())),
+                None => Arc::new(store),
+            }
+        };
         let latest_manifest =
             StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
         if let Some(latest_manifest) = &latest_manifest {
@@ -1359,6 +1381,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             wal_object_store: retrying_wal_object_store,
             block_cache: self.db_cache.clone(),
             block_transformer: self.block_transformer.clone(),
+            cached_object_store: maybe_cached.clone(),
         };
 
         let reader = DbReader::open_internal(

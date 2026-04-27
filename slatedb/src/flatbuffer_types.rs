@@ -49,8 +49,21 @@ use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
 use slatedb_txn_obj::ObjectCodec;
 
-pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 2;
-pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 1;
+pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 3;
+
+// On-disk manifest envelope versions. Version 3 wraps the same flatbuffer
+// payload as version 1 but adds a CRC32 so readers can detect corruption on
+// the transport (most relevantly, a manifest served from the local disk cache
+// after an unclean shutdown, where the page cache contents may have been
+// lost). Versions 1 and 2 remain readable for backward compatibility.
+const MANIFEST_CRC_PAYLOAD_OFFSET: usize = 6; // u16 version + u32 crc
+
+pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 2;
+
+// Compactions envelope versions. Version 2 wraps the v1 flatbuffer payload
+// with a CRC32, mirroring the manifest v3 envelope. Version 1 remains
+// readable for backward compatibility.
+const COMPACTIONS_CRC_PAYLOAD_OFFSET: usize = 6; // u16 version + u32 crc
 pub(crate) const ORIGINAL_SST_FORMAT_VERSION: u16 = SST_FORMAT_VERSION;
 
 /// FlatBuffer verifier options with increased table limit.
@@ -158,7 +171,7 @@ pub(crate) struct FlatBufferManifestCodec {}
 
 impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
-        Self::create_from_manifest_v1(manifest)
+        Self::create_from_manifest_v3(manifest)
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
@@ -166,25 +179,39 @@ impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
             return Err(Box::new(SlateDBError::EmptyManifest));
         }
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
-        let unversioned_bytes = bytes.slice(2..);
         match version {
             1 => {
                 let manifest = flatbuffers::root_with_opts::<ManifestV1>(
                     &verifier_options(),
-                    unversioned_bytes.as_ref(),
+                    bytes[2..].as_ref(),
                 )?;
                 Self::manifest_v1(&manifest)
             }
             2 => {
                 let manifest = flatbuffers::root_with_opts::<ManifestV2>(
                     &verifier_options(),
-                    unversioned_bytes.as_ref(),
+                    bytes[2..].as_ref(),
                 )?;
                 Self::manifest_v2(&manifest)
             }
+            3 => {
+                if bytes.len() < MANIFEST_CRC_PAYLOAD_OFFSET {
+                    return Err(Box::new(SlateDBError::ChecksumMismatch));
+                }
+                let expected_crc = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+                let payload = bytes.slice(MANIFEST_CRC_PAYLOAD_OFFSET..);
+                if crc32fast::hash(&payload) != expected_crc {
+                    return Err(Box::new(SlateDBError::ChecksumMismatch));
+                }
+                let manifest = flatbuffers::root_with_opts::<ManifestV1>(
+                    &verifier_options(),
+                    payload.as_ref(),
+                )?;
+                Self::manifest_v1(&manifest)
+            }
             _ => Err(Box::new(SlateDBError::InvalidVersion {
                 format_name: "manifest",
-                supported_versions: vec![1, 2],
+                supported_versions: vec![1, 2, 3],
                 actual_version: version,
             })),
         }
@@ -455,6 +482,26 @@ impl FlatBufferManifestCodec {
         db_fb_builder.create_manifest_v1(manifest)
     }
 
+    /// Encode a manifest as v3: a CRC-wrapped v1 flatbuffer. Layout is
+    /// `[u16 BE version = 3][u32 BE crc32 of payload][v1 flatbuffer bytes]`
+    /// where the CRC covers only the flatbuffer payload. Readers validate the
+    /// CRC before parsing so corruption (typically from a cache entry whose
+    /// dirty pages were lost in an unclean shutdown) surfaces as
+    /// `SlateDBError::ChecksumMismatch`, which upper layers turn into a
+    /// cache-invalidate-and-retry against the remote object store.
+    pub(crate) fn create_from_manifest_v3(manifest: &Manifest) -> Bytes {
+        let v1_bytes = Self::create_from_manifest_v1(manifest);
+        // v1_bytes = `[u16 BE = 1][flatbuffer payload]`; strip the v1 version
+        // byte and re-wrap with the v3 envelope.
+        let payload = &v1_bytes[2..];
+        let crc = crc32fast::hash(payload);
+        let mut bytes = BytesMut::with_capacity(MANIFEST_CRC_PAYLOAD_OFFSET + payload.len());
+        bytes.put_u16(MANIFEST_FORMAT_VERSION);
+        bytes.put_u32(crc);
+        bytes.put_slice(payload);
+        bytes.freeze()
+    }
+
     #[allow(unused)]
     pub(crate) fn create_from_manifest(manifest: &Manifest) -> Bytes {
         let builder = FlatBufferBuilder::new();
@@ -467,7 +514,7 @@ pub(crate) struct FlatBufferCompactionsCodec {}
 
 impl ObjectCodec<CompactorCompactions> for FlatBufferCompactionsCodec {
     fn encode(&self, compactions: &CompactorCompactions) -> Bytes {
-        Self::create_from_compactions(compactions)
+        Self::create_from_compactions_v2(compactions)
     }
 
     fn decode(
@@ -484,19 +531,35 @@ impl FlatBufferCompactionsCodec {
             return Err(SlateDBError::InvalidCompaction);
         }
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
-        if version != COMPACTIONS_FORMAT_VERSION {
-            return Err(SlateDBError::InvalidVersion {
+        match version {
+            1 => {
+                let fb = flatbuffers::root_with_opts::<CompactionsV1>(
+                    &verifier_options(),
+                    bytes[2..].as_ref(),
+                )?;
+                Self::compactions(&fb)
+            }
+            2 => {
+                if bytes.len() < COMPACTIONS_CRC_PAYLOAD_OFFSET {
+                    return Err(SlateDBError::ChecksumMismatch);
+                }
+                let expected_crc = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+                let payload = bytes.slice(COMPACTIONS_CRC_PAYLOAD_OFFSET..);
+                if crc32fast::hash(&payload) != expected_crc {
+                    return Err(SlateDBError::ChecksumMismatch);
+                }
+                let fb = flatbuffers::root_with_opts::<CompactionsV1>(
+                    &verifier_options(),
+                    payload.as_ref(),
+                )?;
+                Self::compactions(&fb)
+            }
+            _ => Err(SlateDBError::InvalidVersion {
                 format_name: "compactions",
-                supported_versions: vec![COMPACTIONS_FORMAT_VERSION],
+                supported_versions: vec![1, 2],
                 actual_version: version,
-            });
+            }),
         }
-        let unversioned_bytes = bytes.slice(2..);
-        let fb = flatbuffers::root_with_opts::<CompactionsV1>(
-            &verifier_options(),
-            unversioned_bytes.as_ref(),
-        )?;
-        Self::compactions(&fb)
     }
 
     pub(crate) fn compactions(
@@ -573,6 +636,22 @@ impl FlatBufferCompactionsCodec {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_compactions(compactions)
+    }
+
+    /// Encode compactions as v2: a CRC-wrapped v1 flatbuffer. Layout is
+    /// `[u16 BE version = 2][u32 BE crc32 of payload][v1 flatbuffer bytes]`.
+    /// Parallels `FlatBufferManifestCodec::create_from_manifest_v3`; the CRC
+    /// lets readers detect cache corruption after an unclean shutdown and
+    /// self-heal via invalidate-and-refetch at the fetching layer.
+    pub(crate) fn create_from_compactions_v2(compactions: &CompactorCompactions) -> Bytes {
+        let v1_bytes = Self::create_from_compactions(compactions);
+        let payload = &v1_bytes[2..];
+        let crc = crc32fast::hash(payload);
+        let mut bytes = BytesMut::with_capacity(COMPACTIONS_CRC_PAYLOAD_OFFSET + payload.len());
+        bytes.put_u16(COMPACTIONS_FORMAT_VERSION);
+        bytes.put_u32(crc);
+        bytes.put_slice(payload);
+        bytes.freeze()
     }
 }
 
@@ -953,7 +1032,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         );
         self.builder.finish(compactions, None);
         let mut bytes = BytesMut::new();
-        bytes.put_u16(COMPACTIONS_FORMAT_VERSION);
+        bytes.put_u16(1);
         bytes.put_slice(self.builder.finished_data());
         bytes.into()
     }
@@ -1038,7 +1117,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         );
         self.builder.finish(manifest, None);
         let mut bytes = BytesMut::new();
-        bytes.put_u16(MANIFEST_FORMAT_VERSION);
+        bytes.put_u16(2);
         bytes.put_slice(self.builder.finished_data());
         bytes.into()
     }
@@ -1250,7 +1329,7 @@ mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};
 
-    use super::{root_generated, COMPACTIONS_FORMAT_VERSION, MANIFEST_FORMAT_VERSION};
+    use super::{root_generated, MANIFEST_FORMAT_VERSION};
 
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
@@ -1436,10 +1515,10 @@ mod tests {
         let v1_bytes = bytes.freeze();
         codec.decode(&v1_bytes).expect("Should decode V1 manifest");
 
-        // Test encode/decode round-trip (currently writes V1 for forward compatibility)
+        // Default encode is v3 (CRC-wrapped v1 payload); confirm it round-trips.
         let manifest = Manifest::initial(ManifestCore::new());
         let encoded = codec.encode(&manifest);
-        assert_eq!(u16::from_be_bytes([encoded[0], encoded[1]]), 1);
+        assert_eq!(u16::from_be_bytes([encoded[0], encoded[1]]), 3);
         codec
             .decode(&encoded)
             .expect("Should decode manifest round-trip");
@@ -1461,7 +1540,7 @@ mod tests {
                     panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
                 };
                 assert_eq!(*format_name, "manifest");
-                assert_eq!(*supported_versions, vec![1u16, 2]);
+                assert_eq!(*supported_versions, vec![1u16, 2, 3]);
                 assert_eq!(*actual_version, MANIFEST_FORMAT_VERSION + 1);
             }
             _ => panic!("Should fail with version mismatch"),
@@ -1489,10 +1568,7 @@ mod tests {
         let bytes = FlatBufferManifestCodec::create_from_manifest(&manifest);
         let decoded = codec.decode(&bytes).unwrap();
 
-        assert_eq!(
-            u16::from_be_bytes([bytes[0], bytes[1]]),
-            MANIFEST_FORMAT_VERSION
-        );
+        assert_eq!(u16::from_be_bytes([bytes[0], bytes[1]]), 2);
 
         let mut expected = manifest.clone();
         expected.core.wal_object_store_uri = None;
@@ -1609,11 +1685,42 @@ mod tests {
                     panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
                 };
                 assert_eq!(*format_name, "compactions");
-                assert_eq!(*supported_versions, vec![COMPACTIONS_FORMAT_VERSION]);
+                assert_eq!(*supported_versions, vec![1u16, 2]);
                 assert_eq!(*actual_version, invalid_version);
             }
             _ => panic!("Should fail with version mismatch"),
         }
+    }
+
+    #[test]
+    fn test_should_detect_v2_compactions_payload_checksum_mismatch() {
+        let codec = FlatBufferCompactionsCodec {};
+        let mut bytes = codec.encode(&Compactions::new(1)).to_vec();
+        assert_eq!(u16::from_be_bytes([bytes[0], bytes[1]]), 2);
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+
+        let err = codec
+            .decode(&Bytes::from(bytes))
+            .expect_err("decode should fail on payload corruption");
+        assert!(matches!(
+            err.downcast_ref::<SlateDBError>(),
+            Some(SlateDBError::ChecksumMismatch)
+        ));
+    }
+
+    #[test]
+    fn test_should_decode_legacy_v1_compactions() {
+        // v1 envelope: `[u16 = 1][flatbuffer bytes]`, no CRC. Must remain
+        // readable so upgrades that still have on-remote v1 compactions work.
+        let codec = FlatBufferCompactionsCodec {};
+        let compactions = Compactions::new(7);
+        let v1_bytes = FlatBufferCompactionsCodec::create_from_compactions(&compactions);
+        assert_eq!(u16::from_be_bytes([v1_bytes[0], v1_bytes[1]]), 1);
+        let decoded = codec
+            .decode(&v1_bytes)
+            .expect("v1 compactions should decode");
+        assert_eq!(decoded.compactor_epoch, 7);
     }
 
     #[test]
@@ -1984,7 +2091,7 @@ mod tests {
         );
         fbb.finish(compactions, None);
         let mut bytes = BytesMut::new();
-        bytes.put_u16(COMPACTIONS_FORMAT_VERSION);
+        bytes.put_u16(1);
         bytes.put_slice(fbb.finished_data());
         let bytes = bytes.freeze();
 
@@ -2082,6 +2189,63 @@ mod tests {
             .expect("failed to decode V1 manifest");
 
         assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_detect_v3_payload_checksum_mismatch() {
+        let manifest = Manifest::initial(ManifestCore::new());
+        let codec = FlatBufferManifestCodec {};
+        let mut bytes = codec.encode(&manifest).to_vec();
+        assert_eq!(u16::from_be_bytes([bytes[0], bytes[1]]), 3);
+
+        // Flip a byte inside the flatbuffer payload.
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+
+        let err = codec
+            .decode(&Bytes::from(bytes))
+            .expect_err("decode should fail on payload corruption");
+        assert!(
+            matches!(
+                err.downcast_ref::<SlateDBError>(),
+                Some(SlateDBError::ChecksumMismatch)
+            ),
+            "expected ChecksumMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_detect_v3_crc_field_corruption() {
+        let manifest = Manifest::initial(ManifestCore::new());
+        let codec = FlatBufferManifestCodec {};
+        let mut bytes = codec.encode(&manifest).to_vec();
+        // Flip a bit inside the CRC field itself.
+        bytes[2] ^= 0x01;
+
+        let err = codec
+            .decode(&Bytes::from(bytes))
+            .expect_err("decode should fail when the CRC field is tampered");
+        assert!(matches!(
+            err.downcast_ref::<SlateDBError>(),
+            Some(SlateDBError::ChecksumMismatch)
+        ));
+    }
+
+    #[test]
+    fn test_should_detect_v3_truncated_envelope() {
+        let manifest = Manifest::initial(ManifestCore::new());
+        let codec = FlatBufferManifestCodec {};
+        // Only the version byte is present; the CRC/payload are missing.
+        let mut truncated = BytesMut::new();
+        truncated.put_u16(3);
+        let err = codec
+            .decode(&truncated.freeze())
+            .expect_err("decode should fail on a truncated v3 envelope");
+        assert!(matches!(
+            err.downcast_ref::<SlateDBError>(),
+            Some(SlateDBError::ChecksumMismatch)
+        ));
+        let _ = manifest;
     }
 
     #[test]

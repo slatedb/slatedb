@@ -105,6 +105,36 @@ impl TableStore {
         }
     }
 
+    /// Run an SST read and, if it fails with `ChecksumMismatch`, invalidate
+    /// the local disk cache entry for this SST and retry once. Cache writes
+    /// no longer fsync, so after an unclean shutdown a cached part can come
+    /// back truncated or with lost pages; the SST format's own CRC catches
+    /// that and we convert the error into a self-healing refetch from the
+    /// remote object store. `invalidate_cache_for` is a no-op when there is
+    /// no cache, so this wrapper is safe to use unconditionally.
+    async fn read_with_cache_retry<F, Fut, T>(
+        &self,
+        id: &SsTableId,
+        path: &Path,
+        op: F,
+    ) -> Result<T, SlateDBError>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, SlateDBError>>,
+    {
+        match op().await {
+            Err(SlateDBError::ChecksumMismatch) => {
+                warn!(
+                    "SST failed checksum on read, invalidating cache and retrying once [path={}]",
+                    path
+                );
+                self.object_stores.invalidate_cache_for(id, path).await;
+                op().await
+            }
+            other => other,
+        }
+    }
+
     /// Get the number of blocks for a size specified in bytes.
     /// The returned value will be rounded down to the nearest block.
     pub(crate) fn bytes_to_blocks(&self, bytes: usize) -> usize {
@@ -377,7 +407,11 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
-        let (info, version) = self.sst_format.read_info_and_version(&obj).await?;
+        let (info, version) = self
+            .read_with_cache_retry(id, &obj.path, || {
+                self.sst_format.read_info_and_version(&obj)
+            })
+            .await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 
@@ -419,7 +453,11 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let named_filters = self.sst_format.read_filters(&handle.info, &obj).await?;
+        let named_filters = self
+            .read_with_cache_retry(&handle.id, &obj.path, || {
+                self.sst_format.read_filters(&handle.info, &obj)
+            })
+            .await?;
         if cache_blocks && !named_filters.is_empty() {
             if let Some(ref cache) = self.cache {
                 cache
@@ -452,7 +490,11 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let stats = self.sst_format.read_stats(&handle.info, &obj).await?;
+        let stats = self
+            .read_with_cache_retry(&handle.id, &obj.path, || {
+                self.sst_format.read_stats(&handle.info, &obj)
+            })
+            .await?;
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 if let Some(ref stats) = stats {
@@ -491,7 +533,12 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
+        let index = Arc::new(
+            self.read_with_cache_retry(&handle.id, &obj.path, || {
+                self.sst_format.read_index(&handle.info, &obj)
+            })
+            .await?,
+        );
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 cache
@@ -514,10 +561,16 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
-        self.sst_format
-            .read_blocks(&handle.info, &index, blocks, &obj)
-            .await
+        let index = self
+            .read_with_cache_retry(&handle.id, &obj.path, || {
+                self.sst_format.read_index(&handle.info, &obj)
+            })
+            .await?;
+        self.read_with_cache_retry(&handle.id, &obj.path, || {
+            self.sst_format
+                .read_blocks(&handle.info, &index, blocks.clone(), &obj)
+        })
+        .await
     }
 
     /// Reads specified blocks from an SSTable using the provided index.
@@ -527,6 +580,33 @@ impl TableStore {
     /// using an async fetch for each contiguous range that blocks are not cached.
     /// It can optionally cache newly read blocks.
     pub(crate) async fn read_blocks_using_index(
+        &self,
+        handle: &SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        blocks: Range<usize>,
+        cache_blocks: bool,
+    ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        match self
+            .read_blocks_using_index_impl(handle, index.clone(), blocks.clone(), cache_blocks)
+            .await
+        {
+            Err(SlateDBError::ChecksumMismatch) => {
+                let path = self.path(&handle.id);
+                log::warn!(
+                    "SST failed checksum on read, invalidating cache and retrying once [path={}]",
+                    path
+                );
+                self.object_stores
+                    .invalidate_cache_for(&handle.id, &path)
+                    .await;
+                self.read_blocks_using_index_impl(handle, index, blocks, cache_blocks)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    async fn read_blocks_using_index_impl(
         &self,
         handle: &SsTableHandle,
         index: Arc<SsTableIndexOwned>,
@@ -631,10 +711,16 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
-        self.sst_format
-            .read_block(&handle.info, &index, block, &obj)
-            .await
+        let index = self
+            .read_with_cache_retry(&handle.id, &obj.path, || {
+                self.sst_format.read_index(&handle.info, &obj)
+            })
+            .await?;
+        self.read_with_cache_retry(&handle.id, &obj.path, || {
+            self.sst_format
+                .read_block(&handle.info, &index, block, &obj)
+        })
+        .await
     }
 
     fn path(&self, id: &SsTableId) -> Path {
