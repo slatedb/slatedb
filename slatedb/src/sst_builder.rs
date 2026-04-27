@@ -1700,10 +1700,10 @@ mod tests {
             fn name(&self) -> &str {
                 "fixed3"
             }
-            fn prefix_len(&self, target: &crate::prefix_extractor::FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
                 let input = match target {
-                    crate::prefix_extractor::FilterTarget::Point(k) => k.as_ref(),
-                    crate::prefix_extractor::FilterTarget::Prefix(p) => p.as_ref(),
+                    crate::prefix_extractor::PrefixTarget::Point(k) => k.as_ref(),
+                    crate::prefix_extractor::PrefixTarget::Prefix(p) => p.as_ref(),
                 };
                 (input.len() >= 3).then_some(3)
             }

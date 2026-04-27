@@ -61,7 +61,7 @@ pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
 pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
-pub use prefix_extractor::{FilterTarget, PrefixExtractor};
+pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
 pub use rand::DbRand;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;

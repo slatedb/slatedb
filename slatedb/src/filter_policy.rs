@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::{BufMut, Bytes};
 
 use crate::filter::{BloomFilter, BloomFilterBuilder};
-use crate::prefix_extractor::{FilterTarget, PrefixExtractor};
+use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::RowEntry;
 
 /// A named, configurable filter policy.
@@ -83,21 +83,21 @@ pub trait Filter: Send + Sync {
 /// A membership query passed to [`Filter::might_match`].
 pub struct FilterQuery {
     /// The target of this query (a specific key or a prefix).
-    pub target: FilterTarget,
+    pub target: PrefixTarget,
 }
 
 impl FilterQuery {
     /// Creates a point-lookup query for the given key.
     pub fn point(key: Bytes) -> Self {
         Self {
-            target: FilterTarget::Point(key),
+            target: PrefixTarget::Point(key),
         }
     }
 
     /// Creates a prefix-scan query for the given prefix.
     pub fn prefix(prefix: Bytes) -> Self {
         Self {
-            target: FilterTarget::Prefix(prefix),
+            target: PrefixTarget::Prefix(prefix),
         }
     }
 }
@@ -346,14 +346,14 @@ mod tests {
             &self.name
         }
 
-        fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
             // A fixed-length extractor is truncation-safe: the first `len`
             // bytes fully determine the extracted prefix, so both the
             // `Point` and `Prefix` variants return the same answer. We
             // only require the input to be at least `len` bytes.
             let input = match target {
-                FilterTarget::Point(k) => k.as_ref(),
-                FilterTarget::Prefix(p) => p.as_ref(),
+                PrefixTarget::Point(k) => k.as_ref(),
+                PrefixTarget::Prefix(p) => p.as_ref(),
             };
             (input.len() >= self.len).then_some(self.len)
         }
@@ -574,10 +574,10 @@ mod tests {
             fn name(&self) -> &str {
                 "user-only"
             }
-            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
                 let input = match target {
-                    FilterTarget::Point(k) => k.as_ref(),
-                    FilterTarget::Prefix(p) => p.as_ref(),
+                    PrefixTarget::Point(k) => k.as_ref(),
+                    PrefixTarget::Prefix(p) => p.as_ref(),
                 };
                 (input.len() >= 5 && input.starts_with(b"user:")).then_some(5)
             }
@@ -628,7 +628,7 @@ mod tests {
             fn name(&self) -> &str {
                 "too-long"
             }
-            fn prefix_len(&self, _target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, _target: &PrefixTarget) -> Option<usize> {
                 Some(usize::MAX)
             }
         }
@@ -641,7 +641,7 @@ mod tests {
     /// A "last-delimiter" extractor depends on bytes beyond any proper
     /// prefix, so it cannot make a truncation-safe promise for `Prefix`
     /// inputs. The trait contract says such an extractor must return `None`
-    /// for `FilterTarget::Prefix`; the bloom filter then conservatively
+    /// for `PrefixTarget::Prefix`; the bloom filter then conservatively
     /// returns `true` for prefix scans. `Point` inputs still work.
     #[test]
     fn test_last_delimiter_extractor_skips_prefix_scan() {
@@ -650,15 +650,15 @@ mod tests {
             fn name(&self) -> &str {
                 "last-colon"
             }
-            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
                 match target {
                     // For a complete key, extract up to and including the last ':'.
-                    FilterTarget::Point(k) => {
+                    PrefixTarget::Point(k) => {
                         k.as_ref().iter().rposition(|&b| b == b':').map(|i| i + 1)
                     }
                     // For a scan prefix, the final ':' could land anywhere in
                     // an unseen extension, so no truncation is safe.
-                    FilterTarget::Prefix(_) => None,
+                    PrefixTarget::Prefix(_) => None,
                 }
             }
         }
@@ -748,7 +748,7 @@ mod tests {
             fn name(&self) -> &str {
                 "empty"
             }
-            fn prefix_len(&self, _target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, _target: &PrefixTarget) -> Option<usize> {
                 Some(0)
             }
         }
@@ -788,10 +788,10 @@ mod tests {
             fn name(&self) -> &str {
                 "full-key"
             }
-            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
                 let input = match target {
-                    FilterTarget::Point(k) => k.as_ref(),
-                    FilterTarget::Prefix(p) => p.as_ref(),
+                    PrefixTarget::Point(k) => k.as_ref(),
+                    PrefixTarget::Prefix(p) => p.as_ref(),
                 };
                 Some(input.len())
             }

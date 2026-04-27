@@ -12,11 +12,11 @@ use bytes::Bytes;
 /// `prefix_len(target)` returns `Some(n)`, then the bytes inside `target`
 /// sliced to `..n` are the extracted prefix.
 ///
-/// # `FilterTarget` variants
+/// # `PrefixTarget` variants
 ///
 /// The `target` argument distinguishes two different semantic questions:
 ///
-/// - [`FilterTarget::Point`] — the input is a complete key (a stored key
+/// - [`PrefixTarget::Point`] — the input is a complete key (a stored key
 ///   during SST construction, or the target of a point lookup).
 ///   `prefix_len` returns the extraction length that was / will be hashed
 ///   into the filter. **Invariant**: if `prefix_len(Point(k)) = Some(n)`,
@@ -24,7 +24,7 @@ use bytes::Bytes;
 ///   `prefix_len(Point(k')) = Some(n)`. The extraction depends only on
 ///   the first `n` bytes.
 ///
-/// - [`FilterTarget::Prefix`] — the input is a scan prefix. `prefix_len`
+/// - [`PrefixTarget::Prefix`] — the input is a scan prefix. `prefix_len`
 ///   returns `Some(n)` only if probing with the first `n` bytes is safe
 ///   for *every* possible extension of the input. **Invariant**: if
 ///   `prefix_len(Prefix(p)) = Some(n)`, then for every extension `q` of
@@ -52,12 +52,12 @@ pub trait PrefixExtractor: Send + Sync {
     ///
     /// Called on three paths, distinguished by the variant of `target`:
     /// - **Build time** — policy wraps each stored key in
-    ///   `FilterTarget::Point` and hashes `key[..n]` into the filter when
+    ///   `PrefixTarget::Point` and hashes `key[..n]` into the filter when
     ///   this returns `Some(n)`.
     /// - **Point reads** — policy forwards the incoming
-    ///   `FilterTarget::Point` and probes with `hash(key[..n])`.
+    ///   `PrefixTarget::Point` and probes with `hash(key[..n])`.
     /// - **Prefix reads** — policy forwards the incoming
-    ///   `FilterTarget::Prefix` and probes with `hash(prefix[..n])`; a
+    ///   `PrefixTarget::Prefix` and probes with `hash(prefix[..n])`; a
     ///   `None` result causes the filter to be skipped so no false
     ///   negative can occur.
     ///
@@ -82,12 +82,12 @@ pub trait PrefixExtractor: Send + Sync {
     /// The returned length must be ≤ the length of the bytes inside
     /// `target`. Returning a longer value is a contract violation and
     /// will panic when the length is used to slice the target bytes.
-    fn prefix_len(&self, target: &FilterTarget) -> Option<usize>;
+    fn prefix_len(&self, target: &PrefixTarget) -> Option<usize>;
 }
 
-/// The target of a filter query.
+/// The target of a prefix extraction or filter query.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilterTarget {
+pub enum PrefixTarget {
     /// Used to test whether a specific key might exist in the SST.
     Point(Bytes),
     /// Used to test whether any key with the given prefix might exist in the SST.
