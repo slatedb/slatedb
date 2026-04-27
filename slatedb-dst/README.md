@@ -1,11 +1,11 @@
 # SlateDB DST Harness
 
-`slatedb-dst` is SlateDB's deterministic scenario testing crate.
+`slatedb-dst` is SlateDB's deterministic simulation testing crate.
 
 It packages the pieces needed to run seeded, reproducible simulations against a
 real `slatedb::Db`:
 
-- a seeded current-thread Tokio runtime
+- a seeded, deterministic, current-thread Tokio runtime
 - a shared `MockSystemClock`
 - a shared `FailPointRegistry`
 - deterministic main and optional WAL object-store stacks
@@ -13,27 +13,20 @@ real `slatedb::Db`:
 - actor-local `slatedb::DbRand` instances derived from the root seed
 
 This is primarily a test crate for SlateDB itself and is currently
-`publish = false`, so it is intended to be used from a workspace checkout or as
-an internal path dependency rather than from crates.io.
+`publish = false`. It is intended to be used from a workspace checkout or as an
+internal path dependency rather than from crates.io.
 
 ## What the crate provides
 
 - `Harness`: builder and executor for deterministic simulations
 - `Actor`: async actor trait run by the harness
-- `StartupCtx`: context passed to the database factory configured with
-  `Harness::new`
-- `ActorCtx`: per-actor context with deterministic RNG, DB access, shared
-  clock, failpoint registry, and harness object stores
 - `actors`: reusable scenario actors, including workload, flusher, standalone
   compactor, shutdown, and bank-transfer/auditor actors
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
   metadata, in-memory attribute preservation, and deterministic listing behavior
 - `FailingObjectStore`: `ObjectStore` wrapper that injects deterministic
   latency, bandwidth, reset-peer, slow-close, and synthetic HTTP failures
-- `FailingObjectStoreController`: controller used to install and clear
-  object-store faults on any wrapped store
-- `Toxic`, `ToxicKind`, `StreamDirection`, `Operation`: fault-injection
-  building blocks
+- `Toxic`: fault-injection building blocks
 - `HttpFailBefore` and `HttpStatusError`: synthetic HTTP failures injected
   before request dispatch
 - `utils`: helpers for generating randomized deterministic settings,
@@ -59,7 +52,7 @@ The harness is built around one root seed:
    toxic adds latency/bandwidth/slow-close delay.
 
 Given the same seed and the same DST-compatible code paths, the harness is
-designed to replay the same scenario.
+designed to replay the exact same sequence of events every single time.
 
 For reproducible tests, keep randomness and time inside the harness:
 
@@ -198,15 +191,6 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
   clock task, opens the DB, spawns one Tokio task per registered actor, and
   runs until all actors finish or an actor fails. The bundled looping actors
   normally finish after the shared shutdown token is cancelled.
-
-If `with_path(...)` is not set, the harness uses:
-
-```text
-dst/<name>/seed-<seed-hex>
-```
-
-The seed in that default path comes from the root `DbRand`, so `with_rand(...)`
-also changes the default path seed.
 
 ### `StartupCtx`
 
