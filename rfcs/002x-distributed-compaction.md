@@ -424,7 +424,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-- **Latency**: No change to read/write latency. Compaction latency decreases with more workers.
+- **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to `poll_interval_ms`. Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `poll_interval_ms`.
 - **Throughput**: Scales roughly linearly with worker count, bounded by per-worker object store bandwidth.
 - **Object-store requests**: ~1 GET per poll interval + ~1 PUT per claim + ~1 PUT per output SST. At N=10 workers polling every 5s: ~120 GETs/min overhead.
 - **Space/write/read amplification**: Unchanged.
@@ -474,7 +474,7 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 ### Implementation
 
 Phases:
-1. **Schema extension:** add `worker_id` and `last_heartbeat_ms` to `compactor.fbs`; no behavior change.
+1. **Schema extension:** add `WorkerSpec` containing `worker_id` and `last_heartbeat_ms` to `Compaction` in `compactor.fbs`.
 2. **Worker implementation:** implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`.
 3. **Failure detection:** heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
 
