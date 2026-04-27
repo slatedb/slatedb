@@ -22,8 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
-use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
-use crate::db_metadata::DbMetadataOps;
+use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -53,11 +52,9 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
-use crate::db_write::DbWriteOps;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
@@ -77,6 +74,7 @@ use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
@@ -1820,7 +1818,7 @@ pub struct WriteHandle {
 }
 
 impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
+    pub fn new(seq: u64, create_ts: i64) -> Self {
         Self { seq, create_ts }
     }
 

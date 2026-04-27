@@ -16,8 +16,7 @@ use crate::iter::IterationOrder;
 use crate::reader::ScanContext;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
-use crate::DbReadOps;
-use crate::DbTransactionOps;
+use crate::{DbReadOps, DbTransactionOps};
 
 /// A database transaction that provides atomic read-write operations with
 /// configurable isolation levels. This is the main interface for transactional
