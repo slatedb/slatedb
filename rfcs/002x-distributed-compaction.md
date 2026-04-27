@@ -74,9 +74,7 @@ The design in this RFC sidesteps this complexity by separating coordination (sch
 ## Non-Goals
 
 - **Changing the compaction scheduling strategy.** The scheduler logic is unchanged; only execution is distributed.
-- **Peer-to-peer or leaderless compaction.** A dedicated coordinator is required; no peer election mechanism is introduced (see Alternatives).
-- **Sharding `.compactions` across multiple files.** Write contention at very high worker counts (50+) is an open question, but multi-file sharding is out of scope for this RFC.
-- **Multi-coordinator support.** The single-coordinator invariant is preserved; leader election across coordinators is a future concern.
+- **Multi-coordinator support.** The single-coordinator invariant is preserved; leader election across coordinators or purely distributed coordination is a future concern.
 - **Changes to the public read/write API.** Distributed compaction is transparent to DB clients.
 - **Compaction routing.** Routing compactions to specific workers or worker classes (e.g. L0 jobs to an embedded worker, major compactions to a beefy short-lived node) is out of scope. The claim protocol is designed so that selectivity can be added entirely on the worker side without coordinator or schema changes.
 
