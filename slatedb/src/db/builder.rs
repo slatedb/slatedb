@@ -630,6 +630,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     uncached_table_store.clone(),
                     manifest_store.clone(),
                     compactions_store.clone(),
+                    retrying_main_object_store.clone(),
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = async_channel::unbounded();
@@ -825,11 +826,13 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         table_store: Arc<TableStore>,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
+        object_store: Arc<dyn ObjectStore>,
     ) -> GarbageCollector {
         GarbageCollector::new(
             manifest_store,
             compactions_store,
             table_store,
+            object_store,
             self.options,
             &self.recorder,
             self.system_clock,
@@ -867,7 +870,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
-                retrying_main_object_store,
+                retrying_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
@@ -878,6 +881,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             manifest_store,
             compactions_store,
             table_store,
+            retrying_main_object_store,
             self.options,
             &self.recorder,
             self.system_clock,

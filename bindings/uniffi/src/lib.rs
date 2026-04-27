@@ -2,6 +2,7 @@ mod admin;
 mod builder;
 mod config;
 mod db;
+mod db_cache;
 mod db_reader;
 mod db_snapshot;
 mod db_transaction;

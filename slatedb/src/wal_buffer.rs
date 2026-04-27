@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
 use log::{error, trace};
-use tokio::{runtime::Handle, select, sync::oneshot};
+use tokio::{runtime::Handle, sync::oneshot};
 use tracing::instrument;
 
 use crate::clock::MonotonicClock;
@@ -323,11 +323,7 @@ impl WalBufferManager {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
         let (result_tx, result_rx) = oneshot::channel();
         self.send_flush_request(Some(result_tx))?;
-        select! {
-            result = result_rx => {
-                result?
-            }
-        }
+        result_rx.await?
     }
 
     /// Returns the list of immutable WALs that need to be flushed.

@@ -175,7 +175,7 @@ impl WalReplayIterator<'_> {
 
         let handle = task::spawn(load_iter(
             next_wal_id,
-            self.options.sst_iter_options,
+            self.options.sst_iter_options.clone(),
             Arc::clone(&self.table_store),
         ));
         self.next_iters.push_back(handle);

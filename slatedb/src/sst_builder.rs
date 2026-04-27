@@ -423,7 +423,7 @@ mod tests {
     use crate::block_iterator::{BlockIteratorLatest, BlockLike};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{SsTableId, SsTableView};
-    use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
+    use crate::filter_policy::{BloomFilterPolicy, FilterQuery, PrefixExtractor};
     use crate::format::block::Block;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -1688,5 +1688,110 @@ mod tests {
         assert_eq!(stats.block_stats[2].num_puts, 0);
         assert_eq!(stats.block_stats[2].num_deletes, 0);
         assert_eq!(stats.block_stats[2].num_merges, 1);
+    }
+
+    #[tokio::test]
+    async fn test_multi_policy_composite_filter_round_trip() {
+        // Minimal fixed-prefix extractor defined inline so this test has no
+        // dependency on the private test helper in filter_policy.rs.
+        struct Fixed3Extractor;
+        impl PrefixExtractor for Fixed3Extractor {
+            fn name(&self) -> &str {
+                "fixed3"
+            }
+            fn prefix_len(&self, target: &crate::filter_policy::FilterTarget) -> Option<usize> {
+                let input = match target {
+                    crate::filter_policy::FilterTarget::Point(k) => k.as_ref(),
+                    crate::filter_policy::FilterTarget::Prefix(p) => p.as_ref(),
+                };
+                (input.len() >= 3).then_some(3)
+            }
+        }
+
+        let policy1 = Arc::new(BloomFilterPolicy::new(10)); // name "_bf"
+        let policy2 = Arc::new(
+            BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(Fixed3Extractor)), // name "_bf:p=fixed3"
+        );
+
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            filter_policies: vec![policy1.clone(), policy2.clone()],
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            format,
+            root_path.clone(),
+            None,
+        );
+
+        // Write keys whose 3-byte prefix is "key".
+        let mut builder = table_store.table_builder();
+        for i in 0u32..5 {
+            let key = format!("key{:04}", i);
+            builder
+                .add_value(key.as_bytes(), b"value", Some(i as i64), None)
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .await
+            .unwrap();
+        let handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+
+        // --- Both sub-filters decoded correctly ---
+        let filters = table_store.read_filters(&handle, false).await.unwrap();
+        assert_eq!(
+            filters.len(),
+            2,
+            "composite block should contain two sub-filters"
+        );
+
+        let f1 = filters
+            .iter()
+            .find(|nf| nf.name == "_bf")
+            .expect("policy1 filter missing");
+        let f2 = filters
+            .iter()
+            .find(|nf| nf.name == "_bf:p=fixed3")
+            .expect("policy2 filter missing");
+
+        // policy1 answers point queries for inserted keys.
+        let q = FilterQuery::point(Bytes::from_static(b"key0000"));
+        assert!(f1.filter.might_match(&q));
+
+        // policy2 answers 3-byte prefix queries for inserted keys.
+        let q = FilterQuery::prefix(Bytes::from_static(b"key"));
+        assert!(f2.filter.might_match(&q));
+
+        // --- Graceful skip of unrecognized policy ---
+        // A reader that only knows policy1 should silently drop policy2's
+        // sub-filter and return exactly one filter.
+        let format_partial = SsTableFormat {
+            min_filter_keys: 1,
+            filter_policies: vec![policy1.clone()],
+            ..SsTableFormat::default()
+        };
+        let store_partial = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format_partial,
+            root_path,
+            None,
+        );
+        let handle_partial = store_partial.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let partial = store_partial
+            .read_filters(&handle_partial, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            partial.len(),
+            1,
+            "unknown policy sub-filter should be silently dropped"
+        );
+        assert_eq!(partial[0].name, "_bf");
     }
 }

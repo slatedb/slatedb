@@ -2,8 +2,10 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
 use crate::db_metadata::DbMetadataOps;
 use crate::db_read::DbReadOps;
+use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -16,7 +18,7 @@ use crate::merge_operator::MergeOperatorType;
 use crate::oracle::DbReaderOracle;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
-use crate::reader::{DbStateReader, Reader};
+use crate::reader::{DbStateReader, Reader, ScanContext};
 use crate::sst_iter::SstIteratorOptions;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
@@ -224,11 +226,22 @@ impl DbReaderInner {
         &self,
         range: BytesRange,
         options: &ScanOptions,
+        prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, db_state.as_ref(), None, None, None)
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: db_state.as_ref(),
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix,
+                },
+            )
             .await
     }
 
@@ -445,6 +458,7 @@ impl DbReaderInner {
             cache_blocks: true,
             eager_spawn: true,
             order: IterationOrder::Ascending,
+            prefix: None,
         };
 
         let (mut replay_after_wal_id, mut last_committed_seq) =
@@ -981,7 +995,7 @@ impl DbReader {
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = BytesRange::from((start, end));
         self.inner
-            .scan_with_options(range, options)
+            .scan_with_options(range, options, None)
             .await
             .map_err(Into::into)
     }
@@ -1017,8 +1031,12 @@ impl DbReader {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        self.inner
+            .scan_with_options(range, options, Some(prefix))
             .await
+            .map_err(Into::into)
     }
 
     /// Close the database reader.
@@ -1065,7 +1083,7 @@ impl DbReadOps for DbReader {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, options).await
+        DbReader::get_with_options(self, key, options).await
     }
 
     async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
@@ -1073,7 +1091,7 @@ impl DbReadOps for DbReader {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, options).await
+        DbReader::get_key_value_with_options(self, key, options).await
     }
 
     async fn scan_with_options<K, T>(
@@ -1085,7 +1103,18 @@ impl DbReadOps for DbReader {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, options).await
+        DbReader::scan_with_options(self, range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        DbReader::scan_prefix_with_options(self, prefix, options).await
     }
 }
 
@@ -1118,6 +1147,24 @@ impl DbReader {
     /// See [`DbMetadataOps::status`].
     pub fn status(&self) -> DbStatus {
         <Self as DbMetadataOps>::status(self)
+    }
+}
+
+#[async_trait]
+impl DbCacheManagerOps for DbReader {
+    async fn warm_sst(
+        &self,
+        sst_id: SsTableId,
+        targets: &[CacheTarget],
+    ) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        let manifest = self.manifest();
+        db_cache_manager::warm_sst_impl(&self.inner.table_store, &manifest, sst_id, targets).await
+    }
+
+    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, sst_id).await
     }
 }
 

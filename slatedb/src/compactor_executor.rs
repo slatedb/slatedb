@@ -282,21 +282,25 @@ impl TokioCompactionExecutorInner {
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
             order: IterationOrder::Ascending,
+            prefix: None,
         };
 
         let max_parallel = compute_max_parallel(job_args.sst_views.len(), &job_args.sorted_runs, 4);
         // L0 (borrowed)
         let l0_iters_futures = build_concurrent(job_args.sst_views.iter(), max_parallel, |h| {
+            let sst_iter_options = sst_iter_options.clone();
             SstIterator::new_borrowed_initialized(.., h, self.table_store.clone(), sst_iter_options)
         });
 
         // SR (borrowed)
-        let sr_iters_futures =
-            build_concurrent(job_args.sorted_runs.iter(), max_parallel, |sr| async {
+        let sr_iters_futures = build_concurrent(job_args.sorted_runs.iter(), max_parallel, |sr| {
+            let sst_iter_options = sst_iter_options.clone();
+            async move {
                 SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
                     .await
                     .map(Some)
-            });
+            }
+        });
 
         let (l0_iters_res, sr_iters_res) = join(l0_iters_futures, sr_iters_futures).await;
         let l0_iters = l0_iters_res?;
@@ -559,10 +563,11 @@ mod tests {
     use proptest::prelude::Just;
     use proptest::strategy::Strategy;
     use proptest::test_runner::Config;
-    use proptest::{prop_oneof, proptest};
+    use proptest::{prop_assume, prop_oneof, proptest};
     use rstest::rstest;
     use slatedb_common::clock::DefaultSystemClock;
     use std::cmp::Ordering;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     async fn write_sst(
@@ -599,6 +604,18 @@ mod tests {
 
         output_ssts.push(writer.close().await.unwrap());
         output_ssts
+    }
+
+    fn has_duplicate_key_seq_specs(
+        l0_specs: &[Vec<(Bytes, u64, ValueDeletable)>],
+        sr_specs: &[Vec<(Bytes, u64, ValueDeletable)>],
+    ) -> bool {
+        let mut seen = HashSet::new();
+        l0_specs
+            .iter()
+            .chain(sr_specs.iter())
+            .flatten()
+            .any(|(key, seq, _value)| !seen.insert((key.clone(), *seq)))
     }
 
     #[rstest]
@@ -1149,6 +1166,7 @@ mod tests {
                 RESUME_POINTS_MIN..=RESUME_POINTS_MAX,
             ),
         )| {
+            prop_assume!(!has_duplicate_key_seq_specs(&l0_specs, &sr_specs));
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let l0_entry_sets = l0_specs

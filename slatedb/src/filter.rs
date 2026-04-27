@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget};
+use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget, PrefixExtractor};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes};
@@ -8,20 +8,56 @@ use siphasher::sip::SipHasher13;
 
 pub struct BloomFilterBuilder {
     bits_per_key: u32,
+    whole_key_filtering: bool,
+    prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
     key_hashes: Vec<u64>,
+    last_prefix: Option<Vec<u8>>,
 }
 
-#[derive(PartialEq, Eq)]
 pub struct BloomFilter {
     num_probes: u16,
+    whole_key_filtering: bool,
+    prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
     buffer: Bytes,
 }
 
 impl BloomFilterBuilder {
-    pub(crate) fn new(bits_per_key: u32) -> Self {
+    pub(crate) fn new(
+        bits_per_key: u32,
+        whole_key_filtering: bool,
+        prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
+    ) -> Self {
         Self {
             bits_per_key,
+            whole_key_filtering,
+            prefix_extractor,
             key_hashes: Vec::new(),
+            last_prefix: None,
+        }
+    }
+
+    pub(crate) fn add_key(&mut self, key: &Bytes) {
+        // Keys must arrive in sorted order (as in SST construction) for the
+        // deduplication of prefix hashes to work.
+        if let Some(ref extractor) = self.prefix_extractor {
+            let target = FilterTarget::Point(key.clone());
+            if let Some(len) = extractor.prefix_len(&target) {
+                assert!(
+                    len <= key.len(),
+                    "PrefixExtractor returned a prefix length ({len}) greater than the key length ({})",
+                    key.len()
+                );
+                let prefix = &key[..len];
+                let is_same_prefix = self.last_prefix.as_deref() == Some(prefix);
+                if !is_same_prefix {
+                    self.key_hashes.push(filter_hash(prefix));
+                    self.last_prefix = Some(prefix.to_vec());
+                }
+            }
+        }
+        // Add full-key hash if whole_key_filtering is enabled
+        if self.whole_key_filtering {
+            self.key_hashes.push(filter_hash(key));
         }
     }
 
@@ -46,30 +82,38 @@ impl BloomFilterBuilder {
         }
         BloomFilter {
             num_probes,
+            whole_key_filtering: self.whole_key_filtering,
+            prefix_extractor: self.prefix_extractor.clone(),
             buffer: Bytes::from(buffer),
         }
-    }
-
-    fn add_key(&mut self, key: &[u8]) {
-        self.key_hashes.push(filter_hash(key))
     }
 }
 
 impl BloomFilter {
-    pub(crate) fn decode(mut buf: &[u8]) -> BloomFilter {
+    pub fn decode(
+        mut buf: &[u8],
+        whole_key_filtering: bool,
+        prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
+    ) -> BloomFilter {
         let num_probes = buf.get_u16();
         BloomFilter {
             num_probes,
+            whole_key_filtering,
+            prefix_extractor,
             buffer: Bytes::copy_from_slice(buf),
         }
     }
 
-    /// estimate the size of BloomFilter encoded in SST
+    /// Estimates the size in bytes that [`Filter::encode`] will write for a
+    /// bloom filter with `num_keys` entries.
+    ///
+    /// This is the per-filter payload size only. It does not include composite
+    /// block framing (name, data-length prefix) or the per-composite-block CRC32
+    /// checksum, which are accounted for at the SST level.
     pub(crate) fn estimate_encoded_size(num_keys: u32, filter_bits_per_key: u32) -> usize {
         let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, filter_bits_per_key);
         let num_probes_size = std::mem::size_of::<u16>();
-        let checksum_len = std::mem::size_of::<u32>();
-        filter_bytes + num_probes_size + checksum_len
+        filter_bytes + num_probes_size
     }
 
     fn filter_bits(&self) -> u32 {
@@ -98,11 +142,30 @@ impl FilterBuilder for BloomFilterBuilder {
 
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
-        match &query.target {
-            FilterTarget::Point(key) => self.might_contain(filter_hash(key.as_ref())),
-            // No prefix extractor configured — cannot answer prefix queries
-            FilterTarget::Prefix(_) => true,
+        // Full-key hash gives the tightest answer whenever it was stored.
+        if let (FilterTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
+            return self.might_contain(filter_hash(key.as_ref()));
         }
+
+        // Otherwise defer to the extractor.
+        //   - For `Point` with whole_key_filtering=false: we probe with the
+        //     extracted prefix of the queried key. If the prefix is in the
+        //     filter, the full key might be present; if not, it cannot be.
+        //   - For `Prefix`: the extractor answers whether the scan prefix is
+        //     safe to probe. Returning `None` (e.g., the scan prefix is
+        //     shorter than the extractor's output, or the extractor can't
+        //     make a truncation-safe guarantee) forces us to return `true`.
+        let Some(ref extractor) = self.prefix_extractor else {
+            return true;
+        };
+        let Some(n) = extractor.prefix_len(&query.target) else {
+            return true;
+        };
+        let bytes = match &query.target {
+            FilterTarget::Point(k) => k.as_ref(),
+            FilterTarget::Prefix(p) => p.as_ref(),
+        };
+        self.might_contain(filter_hash(&bytes[..n]))
     }
 
     fn encode(&self, writer: &mut dyn BufMut) {
@@ -117,6 +180,8 @@ impl Filter for BloomFilter {
     fn clamp_allocated_size(&self) -> Arc<dyn Filter> {
         Arc::new(BloomFilter {
             num_probes: self.num_probes,
+            whole_key_filtering: self.whole_key_filtering,
+            prefix_extractor: self.prefix_extractor.clone(),
             buffer: clamp_allocated_size_bytes(&self.buffer),
         })
     }
@@ -171,6 +236,10 @@ fn optimal_num_probes(bits_per_key: u32) -> u16 {
 mod tests {
     use super::*;
     use bytes::BytesMut;
+
+    fn point_builder(bits_per_key: u32) -> BloomFilterBuilder {
+        BloomFilterBuilder::new(bits_per_key, true, None)
+    }
 
     #[test]
     fn test_set_specified_bit_only() {
@@ -257,12 +326,12 @@ mod tests {
     fn test_filter_effective() {
         let keys_to_test = 100000;
         let key_sz = size_of::<u32>();
-        let mut builder = BloomFilterBuilder::new(10);
+        let mut builder = point_builder(10);
         for i in 0..keys_to_test {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            builder.add_key(bytes.freeze().as_ref());
+            builder.add_key(&bytes.freeze());
         }
         let filter = builder.build_filter();
 
@@ -293,8 +362,8 @@ mod tests {
 
     #[test]
     fn test_bloom_filter_size() {
-        let mut builder = BloomFilterBuilder::new(10);
-        builder.add_key(b"test_key");
+        let mut builder = point_builder(10);
+        builder.add_key(&Bytes::from_static(b"test_key"));
         let filter = builder.build_filter();
 
         // The exact size may vary, so we'll check if it's greater than zero
@@ -313,9 +382,9 @@ mod tests {
 
     #[test]
     fn test_should_clamp_allocated_bytes() {
-        let mut builder = BloomFilterBuilder::new(10);
+        let mut builder = point_builder(10);
         for i in 0..100 {
-            builder.add_key(format!("{}", i).as_bytes());
+            builder.add_key(&Bytes::from(format!("{}", i)));
         }
         let filter = builder.build_filter();
         let original_size = filter.size();
@@ -340,13 +409,13 @@ mod tests {
 
     #[test]
     fn test_estimate_encoded_size() {
-        // Test with zero keys
-        assert_eq!(BloomFilter::estimate_encoded_size(0, 10), 6); // 0 bytes + 2 bytes probes + 4 bytes checksum
+        // With zero keys the only overhead is the 2-byte num_probes header.
+        assert_eq!(BloomFilter::estimate_encoded_size(0, 10), 2);
 
         // Test with one key
         let bits_per_key = 10;
         let filter_bytes = BloomFilterBuilder::filter_size_bytes(1, bits_per_key);
-        let expected_size = filter_bytes + 2 + 4; // filter_bytes + probes + checksum
+        let expected_size = filter_bytes + 2; // filter_bytes + num_probes header
         assert_eq!(
             BloomFilter::estimate_encoded_size(1, bits_per_key),
             expected_size
@@ -356,7 +425,7 @@ mod tests {
         let num_keys = 100;
         let bits_per_key = 10;
         let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, bits_per_key);
-        let expected_size = filter_bytes + 2 + 4; // filter_bytes + probes + checksum
+        let expected_size = filter_bytes + 2; // filter_bytes + num_probes header
         assert_eq!(
             BloomFilter::estimate_encoded_size(num_keys, bits_per_key),
             expected_size
@@ -366,7 +435,7 @@ mod tests {
         let num_keys = 100_000_000;
         let bits_per_key = 10;
         let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, bits_per_key);
-        let expected_size = filter_bytes + 2 + 4; // filter_bytes + probes + checksum
+        let expected_size = filter_bytes + 2; // filter_bytes + num_probes header
         assert_eq!(
             BloomFilter::estimate_encoded_size(num_keys, bits_per_key),
             expected_size

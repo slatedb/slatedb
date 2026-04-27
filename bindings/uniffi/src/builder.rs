@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use uuid::Uuid;
-
 use crate::admin::Admin;
 use crate::config::{ReaderOptions, SstBlockSize};
 use crate::db::Db;
+use crate::db_cache::DbCache;
 use crate::db_reader::DbReader;
 use crate::error::{Error, SlateDbError};
 use crate::merge_operator::{adapt_merge_operator, MergeOperator};
@@ -13,6 +11,8 @@ use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
 use crate::settings::Settings;
 use crate::MetricsRecorder;
+use parking_lot::Mutex;
+use uuid::Uuid;
 
 /// Builder for opening a writable [`crate::Db`].
 ///
@@ -65,6 +65,12 @@ impl DbBuilder {
     /// Disables the SST block and metadata cache.
     pub fn with_db_cache_disabled(&self) -> Result<(), Error> {
         self.update_builder(slatedb::DbBuilder::with_db_cache_disabled)
+            .map_err(Into::into)
+    }
+
+    /// Sets DB cache.
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone()))
             .map_err(Into::into)
     }
 

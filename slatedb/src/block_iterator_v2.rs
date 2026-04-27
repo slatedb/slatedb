@@ -93,7 +93,7 @@ impl<B: BlockLike> AscendingState<B> {
     }
 
     fn decode_entry_at_current_offset(&self) -> Result<(RowEntry, usize), SlateDBError> {
-        let mut data = &self.block.data()[self.offset_in_block..];
+        let mut data = self.block.data().slice(self.offset_in_block..);
         let codec = SstRowCodecV2::new();
         let entry = codec.decode(&mut data)?;
         let bytes_consumed = self.block.data().len() - self.offset_in_block - data.len();
@@ -216,7 +216,7 @@ impl<B: BlockLike> AscendingState<B> {
     }
 
     fn advance_past_current_entry(&mut self) -> Result<(), SlateDBError> {
-        let mut data = &self.block.data()[self.offset_in_block..];
+        let mut data = self.block.data().slice(self.offset_in_block..);
         let codec = SstRowCodecV2::new();
         codec.decode(&mut data)?;
         let bytes_consumed = self.block.data().len() - self.offset_in_block - data.len();
@@ -1372,6 +1372,31 @@ mod tests {
         // next should be "a"
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"a");
+    }
+
+    #[tokio::test]
+    async fn should_return_entry_without_copying() {
+        // given: a block with entries
+        let block = build_test_block(
+            &[(b"apple", b"1"), (b"banana", b"2"), (b"cherry", b"3")],
+            16,
+        );
+        let mut iter = BlockIteratorV2::new_ascending(&block);
+        let data_start = block.data().as_ptr();
+        let data_end = unsafe { data_start.add(block.data().len() - 1) };
+
+        // when/then: assert values reside within block allocation
+        loop {
+            let Some(kv) = iter.next().await.unwrap() else {
+                break;
+            };
+            let Some(v) = kv.value.as_bytes() else {
+                continue;
+            };
+            let v_data = v.as_ptr();
+            assert!(v_data >= data_start);
+            assert!(v_data < data_end);
+        }
     }
 
     // ==================== Property-Based Tests ====================
