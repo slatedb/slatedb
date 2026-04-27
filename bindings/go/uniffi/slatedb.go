@@ -508,6 +508,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache()
+		})
+		if checksum != 61829 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled()
 		})
 		if checksum != 17477 {
@@ -828,6 +837,24 @@ func uniffiCheckChecksums() {
 		if checksum != 53337 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value()
+		})
+		if checksum != 12260 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value_with_options()
+		})
+		if checksum != 19895 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1476,6 +1503,33 @@ func uniffiCheckChecksums() {
 		if checksum != 20397 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_foyer_cache()
+		})
+		if checksum != 16480 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_foyer_cache: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_moka_cache()
+		})
+		if checksum != 35589 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_moka_cache: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache()
+		})
+		if checksum != 44755 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3459,6 +3513,8 @@ func (_ FfiDestroyerDb) Destroy(value *Db) {
 type DbBuilderInterface interface {
 	// Opens the database and consumes this builder.
 	Build() (*Db, error)
+	// Sets DB cache.
+	WithDbCache(dbCache *DbCache) error
 	// Disables the SST block and metadata cache.
 	WithDbCacheDisabled() error
 	// Installs an application-defined merge operator.
@@ -3521,6 +3577,18 @@ func (_self *DbBuilder) Build() (*Db, error) {
 	}
 
 	return res, err
+}
+
+// Sets DB cache.
+func (_self *DbBuilder) WithDbCache(dbCache *DbCache) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(
+			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
 }
 
 // Disables the SST block and metadata cache.
@@ -3659,6 +3727,110 @@ func LowerToExternalDbBuilder(value *DbBuilder) uint64 {
 type FfiDestroyerDbBuilder struct{}
 
 func (_ FfiDestroyerDbBuilder) Destroy(value *DbBuilder) {
+	value.Destroy()
+}
+
+// Database cache used to store blocks in memory.
+type DbCacheInterface interface {
+}
+
+// Database cache used to store blocks in memory.
+type DbCache struct {
+	ffiObject FfiObject
+}
+
+// Creates a new Foyer based DB cache.
+func DbCacheNewFoyerCache(options FoyerCacheOptions) (*DbCache, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_foyer_cache(FfiConverterFoyerCacheOptionsINSTANCE.Lower(options), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *DbCache
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Creates a new Moka based DB cache.
+func DbCacheNewMokaCache(options MokaCacheOptions) (*DbCache, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_moka_cache(FfiConverterMokaCacheOptionsINSTANCE.Lower(options), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *DbCache
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Creates a new split cache with separate block and metadata capacities.
+func DbCacheNewSplitCache(blockCache *DbCache, metaCache *DbCache) (*DbCache, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_split_cache(FfiConverterDbCacheINSTANCE.Lower(blockCache), FfiConverterDbCacheINSTANCE.Lower(metaCache), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *DbCache
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+func (object *DbCache) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterDbCache struct{}
+
+var FfiConverterDbCacheINSTANCE = FfiConverterDbCache{}
+
+func (c FfiConverterDbCache) Lift(handle C.uint64_t) *DbCache {
+	result := &DbCache{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_dbcache(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_dbcache(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*DbCache).Destroy)
+	return result
+}
+
+func (c FfiConverterDbCache) Read(reader io.Reader) *DbCache {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterDbCache) Lower(value *DbCache) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*DbCache")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterDbCache) Write(writer io.Writer, value *DbCache) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalDbCache(handle uint64) *DbCache {
+	return FfiConverterDbCacheINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalDbCache(value *DbCache) uint64 {
+	return uint64(FfiConverterDbCacheINSTANCE.Lower(value))
+}
+
+type FfiDestroyerDbCache struct{}
+
+func (_ FfiDestroyerDbCache) Destroy(value *DbCache) {
 	value.Destroy()
 }
 
@@ -3802,6 +3974,10 @@ func (_ FfiDestroyerDbIterator) Destroy(value *DbIterator) {
 type DbReaderInterface interface {
 	// Reads the current value for `key`.
 	Get(key []byte) (*[]byte, error)
+	// Reads the current row version for `key`, including metadata.
+	GetKeyValue(key []byte) (*KeyValue, error)
+	// Reads the current row version for `key` using custom read options.
+	GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyValue, error)
 	// Reads the current value for `key` using custom read options.
 	GetWithOptions(key []byte, options ReadOptions) (*[]byte, error)
 	// Scans rows inside `range`.
@@ -3842,6 +4018,78 @@ func (_self *DbReader) Get(key []byte) (*[]byte, error) {
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_get(
 			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Reads the current row version for `key`, including metadata.
+func (_self *DbReader) GetKeyValue(key []byte) (*KeyValue, error) {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *KeyValue {
+			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_dbreader_get_key_value(
+			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Reads the current row version for `key` using custom read options.
+func (_self *DbReader) GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyValue, error) {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *KeyValue {
+			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_dbreader_get_key_value_with_options(
+			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -7794,6 +8042,51 @@ func (_ FfiDestroyerFlushOptions) Destroy(value FlushOptions) {
 	value.Destroy()
 }
 
+// Options for configuring Foyer DB cache.
+type FoyerCacheOptions struct {
+	MaxCapacity uint64
+	Shards      uint64
+}
+
+func (r *FoyerCacheOptions) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.MaxCapacity)
+	FfiDestroyerUint64{}.Destroy(r.Shards)
+}
+
+type FfiConverterFoyerCacheOptions struct{}
+
+var FfiConverterFoyerCacheOptionsINSTANCE = FfiConverterFoyerCacheOptions{}
+
+func (c FfiConverterFoyerCacheOptions) Lift(rb RustBufferI) FoyerCacheOptions {
+	return LiftFromRustBuffer[FoyerCacheOptions](c, rb)
+}
+
+func (c FfiConverterFoyerCacheOptions) Read(reader io.Reader) FoyerCacheOptions {
+	return FoyerCacheOptions{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterFoyerCacheOptions) Lower(value FoyerCacheOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[FoyerCacheOptions](c, value)
+}
+
+func (c FfiConverterFoyerCacheOptions) LowerExternal(value FoyerCacheOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FoyerCacheOptions](c, value))
+}
+
+func (c FfiConverterFoyerCacheOptions) Write(writer io.Writer, value FoyerCacheOptions) {
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxCapacity)
+	FfiConverterUint64INSTANCE.Write(writer, value.Shards)
+}
+
+type FfiDestroyerFoyerCacheOptions struct{}
+
+func (_ FfiDestroyerFoyerCacheOptions) Destroy(value FoyerCacheOptions) {
+	value.Destroy()
+}
+
 // Histogram payload captured in a metric snapshot.
 type HistogramMetricValue struct {
 	// Total number of recorded observations.
@@ -8190,6 +8483,55 @@ func (c FfiConverterMetricLabel) Write(writer io.Writer, value MetricLabel) {
 type FfiDestroyerMetricLabel struct{}
 
 func (_ FfiDestroyerMetricLabel) Destroy(value MetricLabel) {
+	value.Destroy()
+}
+
+// Options for configuring Moka DB cache.
+type MokaCacheOptions struct {
+	MaxCapacity uint64
+	TimeToLive  *uint64
+	TimeToIdle  *uint64
+}
+
+func (r *MokaCacheOptions) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.MaxCapacity)
+	FfiDestroyerOptionalUint64{}.Destroy(r.TimeToLive)
+	FfiDestroyerOptionalUint64{}.Destroy(r.TimeToIdle)
+}
+
+type FfiConverterMokaCacheOptions struct{}
+
+var FfiConverterMokaCacheOptionsINSTANCE = FfiConverterMokaCacheOptions{}
+
+func (c FfiConverterMokaCacheOptions) Lift(rb RustBufferI) MokaCacheOptions {
+	return LiftFromRustBuffer[MokaCacheOptions](c, rb)
+}
+
+func (c FfiConverterMokaCacheOptions) Read(reader io.Reader) MokaCacheOptions {
+	return MokaCacheOptions{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterMokaCacheOptions) Lower(value MokaCacheOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[MokaCacheOptions](c, value)
+}
+
+func (c FfiConverterMokaCacheOptions) LowerExternal(value MokaCacheOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[MokaCacheOptions](c, value))
+}
+
+func (c FfiConverterMokaCacheOptions) Write(writer io.Writer, value MokaCacheOptions) {
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxCapacity)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeToLive)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeToIdle)
+}
+
+type FfiDestroyerMokaCacheOptions struct{}
+
+func (_ FfiDestroyerMokaCacheOptions) Destroy(value MokaCacheOptions) {
 	value.Destroy()
 }
 
