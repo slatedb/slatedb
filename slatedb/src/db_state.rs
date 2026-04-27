@@ -830,6 +830,42 @@ mod tests {
     }
 
     #[test]
+    fn test_should_keep_local_segments_on_merge() {
+        use crate::manifest::Segment;
+
+        // Local writer has a segment extractor configured and one populated segment.
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|modifier| {
+            let core = &mut modifier.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour-bucket".to_string());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: crate::manifest::LsmTreeState::default(),
+            }];
+        });
+
+        // Remote (compactor-authored) state echoes the local core but blanks
+        // out segment configuration — simulating a regression where the
+        // compactor failed to carry segments forward.
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![];
+        remote_state.value.core.segment_extractor_name = None;
+
+        db_state.merge_remote_manifest(remote_state);
+
+        // The writer is the source of truth for segment config, so local
+        // segments must survive the merge.
+        let merged = db_state.state.core();
+        assert_eq!(
+            merged.segment_extractor_name.as_deref(),
+            Some("hour-bucket")
+        );
+        assert_eq!(merged.segments.len(), 1);
+        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
+    }
+
+    #[test]
     fn test_should_keep_local_sequence_tracker_on_merge() {
         let mut db_state = DbState::new(new_dirty_manifest());
         db_state.modify(|modifier| {

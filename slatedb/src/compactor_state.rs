@@ -1266,6 +1266,48 @@ mod tests {
     }
 
     #[test]
+    fn test_should_adopt_remote_segments_on_merge() {
+        use crate::manifest::Segment;
+        use bytes::Bytes;
+
+        // Local compactor state starts with no segment configuration.
+        let manifest = new_dirty_manifest();
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
+        assert!(state.db_state().segments.is_empty());
+        assert!(state.db_state().segment_extractor_name.is_none());
+
+        // Remote (writer-authored) manifest configures an extractor with two
+        // populated segments.
+        let mut dirty = new_dirty_manifest();
+        dirty.value.core.segment_extractor_name = Some("hour-bucket".to_string());
+        dirty.value.core.segments = vec![
+            Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState::default(),
+            },
+            Segment {
+                prefix: Bytes::from_static(b"hour=11/"),
+                tree: LsmTreeState::default(),
+            },
+        ];
+
+        // when:
+        state.merge_remote_manifest(dirty);
+
+        // then: the compactor adopts the writer's segment configuration. A
+        // regression that drops segments on merge would surface here.
+        let merged = state.db_state();
+        assert_eq!(
+            merged.segment_extractor_name.as_deref(),
+            Some("hour-bucket")
+        );
+        assert_eq!(merged.segments.len(), 2);
+        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
+        assert_eq!(merged.segments[1].prefix, Bytes::from_static(b"hour=11/"));
+    }
+
+    #[test]
     fn test_should_submit_correct_compaction() {
         // given:
         let rt = build_runtime();
