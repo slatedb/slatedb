@@ -21,8 +21,7 @@ pub(crate) mod store;
 pub use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
 
 /// Per-LSM-tree state. Shared shape between the unsegmented tree (held directly
-/// on `ManifestCore`) and — once segmented compaction is wired up — each named
-/// segment.
+/// on `ManifestCore`) and each named segment held in `ManifestCore::segments`.
 #[derive(Clone, Default, PartialEq, Serialize, Debug)]
 pub(crate) struct LsmTreeState {
     /// The last compacted l0 SstView ID.
@@ -40,6 +39,19 @@ pub(crate) struct LsmTreeState {
     pub compacted: Vec<SortedRun>,
 }
 
+/// Per-segment LSM state (RFC-0024). Each segment owns the contiguous key
+/// interval `[prefix, prefix++)` and is compacted as an independent logical
+/// LSM tree. Segments share the manifest-level WAL state and SST identity
+/// counter with the unsegmented tree.
+#[derive(Clone, PartialEq, Serialize, Debug)]
+pub(crate) struct Segment {
+    /// The segment's key prefix.
+    pub prefix: Bytes,
+
+    /// LSM state for this segment.
+    pub tree: LsmTreeState,
+}
+
 /// Internal immutable in-memory view of a `.manifest` file.
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub(crate) struct ManifestCore {
@@ -50,11 +62,20 @@ pub(crate) struct ManifestCore {
     pub initialized: bool,
 
     /// LSM state for data that is not associated with any named segment. When
-    /// segmentation is not configured this is the only tree; once segmented
-    /// compaction is wired up, named segments will sit alongside it as a
-    /// sibling `segments` list.
+    /// segmentation is not configured this is the only tree; otherwise it sits
+    /// alongside the named segments in `segments`.
     #[serde(flatten)]
     pub tree: LsmTreeState,
+
+    /// Per-segment LSM state (RFC-0024). Empty when no segment extractor is
+    /// configured. Each segment carries the LSM state for the keys whose
+    /// extracted prefix matches the segment's `prefix`.
+    pub segments: Vec<Segment>,
+
+    /// Name of the configured segment extractor (RFC-0024). Persisted so the
+    /// writer can detect accidental reconfiguration on startup. `None` when
+    /// no extractor is configured.
+    pub segment_extractor_name: Option<String>,
 
     /// The next WAL SST ID to be assigned when creating a new WAL SST. The manifest FlatBuffer
     /// contains `wal_id_last_seen`, which is always one less than this value.
@@ -97,6 +118,8 @@ impl ManifestCore {
         Self {
             initialized: true,
             tree: LsmTreeState::default(),
+            segments: vec![],
+            segment_extractor_name: None,
             next_wal_sst_id: 1,
             replay_after_wal_id: 0,
             last_l0_clock_tick: i64::MIN,

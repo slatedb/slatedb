@@ -607,6 +607,10 @@ impl CompactorState {
                 l0: merged_l0s,
                 compacted: my_db_state.tree.compacted.clone(),
             },
+            // Segment configuration is stable across writer/compactor; carry it
+            // forward from the freshly-loaded remote state.
+            segments: remote_manifest.value.core.segments.clone(),
+            segment_extractor_name: remote_manifest.value.core.segment_extractor_name.clone(),
             next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
             replay_after_wal_id: remote_manifest.value.core.replay_after_wal_id,
             last_l0_clock_tick: remote_manifest.value.core.last_l0_clock_tick,

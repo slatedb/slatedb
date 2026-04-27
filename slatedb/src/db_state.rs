@@ -687,6 +687,9 @@ impl<'a> StateModifier<'a> {
                 l0: new_l0,
                 compacted: remote_manifest.value.core.tree.compacted,
             },
+            // Segment configuration is stable; carry it from the local writer.
+            segments: my_db_state.segments.clone(),
+            segment_extractor_name: my_db_state.segment_extractor_name.clone(),
             next_wal_sst_id: my_db_state.next_wal_sst_id,
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
