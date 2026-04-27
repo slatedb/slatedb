@@ -6761,6 +6761,150 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_txn_conflict_commit_seq_gap_does_not_block_l0_retirement() {
+        const REPRO_SEED: u64 = 2_985_011_763_506_195_159;
+        const MAX_UNFLUSHED_BYTES: usize = 8 * 1024;
+        const LARGE_VALUE_BYTES: usize = 16 * 1024;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024, None);
+        options.flush_interval = None;
+        options.manifest_poll_interval = Duration::from_millis(10);
+        options.max_unflushed_bytes = MAX_UNFLUSHED_BYTES;
+        options.l0_max_ssts = 16;
+
+        let db = Db::builder(
+            "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
+            object_store,
+        )
+        .with_seed(REPRO_SEED)
+        .with_settings(options)
+        .build()
+        .await
+        .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Establish and flush seq=1 so the L0 manifest writer has a known
+        // contiguous frontier before the conflict sequence gap is created.
+        db.put_with_options(b"conflict-key", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing base memtable")
+        .expect("base memtable flush should succeed");
+
+        // Start a serializable transaction at seq=1 and record a read on
+        // conflict-key. The next committed write to that key will conflict
+        // with this transaction when it tries to commit.
+        let txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        assert_eq!(
+            txn.get(b"conflict-key").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+
+        // Commit and flush seq=2 for the same key. This advances the L0
+        // manifest writer through seq=2 and creates the transaction conflict.
+        db.put_with_options(b"conflict-key", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing conflict-producing write")
+        .expect("conflict-producing write flush should succeed");
+
+        // The transaction commit must fail, but the bug is that write_batch
+        // allocates commit_seq=3 before conflict detection and never writes it
+        // into a memtable. This leaves a durable-memtable sequence hole.
+        txn.put(b"txn-write", b"will-conflict").unwrap();
+        let err = txn.commit().await.expect_err("transaction should conflict");
+        assert_eq!(err.kind(), crate::ErrorKind::Transaction);
+
+        // Write enough data to freeze an immutable memtable. Its first sequence
+        // is 4 because seq=3 was consumed by the failed transaction commit.
+        let large_value = vec![b'x'; LARGE_VALUE_BYTES];
+        let large_handle = db
+            .put_with_options(
+                b"large-after-conflict",
+                &large_value,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .expect("large write after conflict should be accepted");
+        assert_eq!(
+            large_handle.seqnum(),
+            4,
+            "the conflicted commit should have consumed commit_seq=3"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            }),
+        )
+        .await
+        .expect("timed out flushing WAL after large write")
+        .expect("WAL flush after large write should succeed");
+
+        // Wait until the large write either reaches L0 or is visible as an
+        // immutable memtable. On the buggy path it is uploaded, but cannot be
+        // retired because the manifest writer is still waiting for seq=3.
+        let large_seq = large_handle.seqnum();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (last_l0_seq, has_immutable_memtable) = {
+                    let guard = db.inner.state.read();
+                    (
+                        guard.state().core().last_l0_seq,
+                        !guard.state().imm_memtable.is_empty(),
+                    )
+                };
+                if last_l0_seq >= large_seq || has_immutable_memtable {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("large write never froze or flushed");
+
+        // This write enters backpressure because the stuck immutable memtable
+        // remains charged against max_unflushed_bytes. The expected failure is
+        // this timeout, which proves the hang without letting the test run
+        // forever.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.put_with_options(
+                b"write-after-gap",
+                b"v",
+                &PutOptions::default(),
+                &write_opts,
+            ),
+        )
+        .await
+        .expect("timed out waiting for write after conflicted transaction consumed commit_seq=3")
+        .expect("write after conflicted commit sequence gap should succeed");
+
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn should_notify_seq_watcher_on_wal_flush() {
         // Given: a DB with WAL enabled and a seq watcher
