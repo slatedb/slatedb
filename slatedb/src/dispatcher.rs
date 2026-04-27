@@ -128,7 +128,6 @@ use log::error;
 use parking_lot::Mutex;
 use tokio::{runtime::Handle, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
-use tracing::{Instrument, Span};
 
 use crate::{
     db_status::ClosedResultWriter,
@@ -685,13 +684,11 @@ impl MessageHandlerExecutor {
             let dispatcher =
                 MessageDispatcher::new(handler, rx.clone(), self.clock.clone(), token.clone())
                     .with_fp_registry(self.fp_registry.clone());
-            let future = dispatcher
-                .run_lifecycle(
-                    name.clone(),
-                    self.closed_result.clone(),
-                    self.fp_registry.clone(),
-                )
-                .instrument(Span::current());
+            let future = dispatcher.run_lifecycle(
+                name.clone(),
+                self.closed_result.clone(),
+                self.fp_registry.clone(),
+            );
             futures.push(MessageHandlerFuture {
                 name: name.clone(),
                 group_index,
@@ -762,7 +759,7 @@ impl MessageHandlerExecutor {
             results: self.results.clone(),
             tokens: self.tokens.iter().map(|e| e.value().clone()).collect(),
         };
-        Ok(handle.spawn(monitor.run().instrument(Span::current())))
+        Ok(handle.spawn(monitor.run()))
     }
 
     /// Cancels a task by name.
