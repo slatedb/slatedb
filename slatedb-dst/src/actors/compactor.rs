@@ -18,6 +18,10 @@ use crate::{Actor, ActorCtx};
 pub struct CompactorActorOptions {
     /// How long the actor waits before spawning a replacement compactor and
     /// asserting that the previous one was fenced.
+    ///
+    /// If the restart interval is shorter than the time it takes to complete
+    /// a compaction, the compactor might never make progress. In such a case,
+    /// the test will likely deadlock due to backpressure.
     pub restart_interval: Duration,
     /// The options to use when constructing each standalone compactor.
     pub compactor_options: CompactorOptions,
