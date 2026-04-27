@@ -240,7 +240,7 @@ The coordinator detects stale workers during its periodic poll: for each `Runnin
 2. **Poll:** read `.compactions`. If the worker has fewer than `max_concurrent_compactions` active jobs, look for `Submitted` entries to claim. Polls do not write heartbeats.
 3. **Claim:** optimistic transition to `Running` (see claim protocol).
 4. **Execute:** run `execute_compaction_job`: build iterators from `CompactionSpec`, apply filters/merge ops, write output SSTs to `compacted/`, persist progress at each SST boundary.
-5. **Complete:** write `status = Completed` with final `output_ssts` to `.compactions`.
+5. **Complete:** write `status = Compacted` with final `output_ssts` to `.compactions`.
 6. **Loop:** return to step 2.
 7. **Graceful shutdown:** on cancellation, reset all `Running` compactions owned by this worker back to `Submitted` and clear their `worker_id` in object storage. This lets other workers reclaim the jobs immediately rather than waiting for the heartbeat timeout to expire.
 
@@ -248,11 +248,15 @@ The coordinator detects stale workers during its periodic poll: for each `Runnin
 
 Only the coordinator commits manifest updates (preserves single-writer invariant):
 
-1. Observe a `Completed` compaction in `.compactions`.
-2. Update the manifest: remove source SRs/SSTs, insert output SR, update `l0_last_compacted`.
-3. Trim the finished compaction from `.compactions` (per RFC-0013 GC conventions).
+1. Observe a `Compacted` entry in `.compactions` (written by the worker on job completion).
+2. Update `.manifest` via `write_manifest_safely()`.
+3. Update `.compactions` via `write_compactions_safely()`, transitioning `Compacted` → `Completed`.
 
-If the coordinator crashes between steps 2 and 3, the `Completed` entry is trimmed on the next cycle with no further action needed.
+On coordinator restart, the recovery logic is:
+
+1. Transition any `Running` jobs → `Submitted` so they can be reclaimed by a worker.
+2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the job is marked `Failed` in `.compactions`. This is safe: the manifest was already updated, the output SSTs are already referenced and protected from GC, and the scheduler has no dependency on whether the entry reads `Completed` or `Failed`.
+3. Retain active (`Submitted`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
 
 ### Deployment Shapes
 
