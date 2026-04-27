@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget, PrefixExtractor};
+use crate::filter_policy::{Filter, FilterBuilder, FilterQuery};
+use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes};
@@ -40,7 +41,7 @@ impl BloomFilterBuilder {
         // Keys must arrive in sorted order (as in SST construction) for the
         // deduplication of prefix hashes to work.
         if let Some(ref extractor) = self.prefix_extractor {
-            let target = FilterTarget::Point(key.clone());
+            let target = PrefixTarget::Point(key.clone());
             if let Some(len) = extractor.prefix_len(&target) {
                 assert!(
                     len <= key.len(),
@@ -143,7 +144,7 @@ impl FilterBuilder for BloomFilterBuilder {
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
         // Full-key hash gives the tightest answer whenever it was stored.
-        if let (FilterTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
+        if let (PrefixTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
             return self.might_contain(filter_hash(key.as_ref()));
         }
 
@@ -162,8 +163,8 @@ impl Filter for BloomFilter {
             return true;
         };
         let bytes = match &query.target {
-            FilterTarget::Point(k) => k.as_ref(),
-            FilterTarget::Prefix(p) => p.as_ref(),
+            PrefixTarget::Point(k) => k.as_ref(),
+            PrefixTarget::Prefix(p) => p.as_ref(),
         };
         self.might_contain(filter_hash(&bytes[..n]))
     }
