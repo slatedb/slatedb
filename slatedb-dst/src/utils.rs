@@ -5,7 +5,7 @@ use std::time::Duration;
 use rand::Rng;
 use slatedb::config::{
     CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-    SizeTieredCompactionSchedulerOptions,
+    GarbageCollectorScheduleOptions, SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -112,7 +112,6 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
         }),
         detach_options: Some(GarbageCollectorScheduleOptions {
             interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
-            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
         }),
     }
 }

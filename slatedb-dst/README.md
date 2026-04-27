@@ -24,35 +24,39 @@ an internal path dependency rather than from crates.io.
   `Harness::new`
 - `ActorCtx`: per-actor context with deterministic RNG, DB access, shared
   clock, failpoint registry, and harness object stores
+- `actors`: reusable scenario actors, including workload, flusher, standalone
+  compactor, shutdown, and bank-transfer/auditor actors
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
-  metadata and deterministic listing behavior
+  metadata, persisted attributes, and deterministic listing behavior
+- `FailingObjectStore`: `ObjectStore` wrapper that injects deterministic
+  latency, bandwidth, reset-peer, slow-close, and synthetic HTTP failures
 - `FailingObjectStoreController`: controller used to install and clear
   object-store faults on any wrapped store
 - `Toxic`, `ToxicKind`, `StreamDirection`, `Operation`: fault-injection
   building blocks
 - `HttpFailBefore` and `HttpStatusError`: synthetic HTTP failures injected
   before request dispatch
-- `utils::build_settings`: helper for generating randomized but deterministic
-  `slatedb::Settings`
+- `utils`: helpers for generating randomized deterministic settings,
+  compactor/GC options, object-store toxics, and test logging
 
 ## Determinism model
 
 The harness is built around one root seed:
 
 1. `Harness::new(name, seed, factory)` creates the root `DbRand`.
-2. The harness derives a Tokio runtime seed from that root seed and runs the
-   simulation on a current-thread runtime.
-3. The harness derives additional deterministic seeds for:
-   - database startup (`StartupCtx::rand()`)
-   - each actor instance (`ActorCtx::rand()`)
-   - the harness-owned background clock task
-4. The harness wraps the configured object stores with:
-   - a clock-aware layer that reports deterministic `last_modified` metadata
-5. If your scenario uses `FailingObjectStore`, seed its controller explicitly
+2. The harness derives seeds for the Tokio runtime, database startup
+   (`StartupCtx::rand()`), and the harness-owned background clock task.
+3. The simulation runs on a seeded current-thread Tokio runtime.
+4. After startup, the harness derives one actor-local seed per registered actor
+   (`ActorCtx::rand()`).
+5. The harness wraps the configured main and optional WAL object stores with an
+   internal clock-aware layer that reports deterministic `last_modified`
+   metadata.
+6. If your scenario uses `FailingObjectStore`, seed its controller explicitly
    so fault sampling stays reproducible.
-6. The shared `MockSystemClock` advances from the harness-owned background
+7. The shared `MockSystemClock` advances from the harness-owned background
    clock task, when your test advances it explicitly, or when a configured
-   toxic adds latency/bandwidth delay.
+   toxic adds latency/bandwidth/slow-close delay.
 
 Given the same seed and the same DST-compatible code paths, the harness is
 designed to replay the same scenario.
@@ -192,13 +196,17 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 - `actor(name, actor)`: registers one actor instance under a unique name
 - `run()`: builds the seeded runtime, starts the harness-owned background
   clock task, opens the DB, spawns one Tokio task per registered actor, and
-  runs until the shared shutdown token is cancelled or an actor fails
+  runs until all actors finish or an actor fails. The bundled looping actors
+  normally finish after the shared shutdown token is cancelled.
 
 If `with_path(...)` is not set, the harness uses:
 
 ```text
 dst/<name>/seed-<seed-hex>
 ```
+
+The seed in that default path comes from the root `DbRand`, so `with_rand(...)`
+also changes the default path seed.
 
 ### `StartupCtx`
 
@@ -251,8 +259,9 @@ The harness owns the outer actor loop:
 - once the shared shutdown token is cancelled, the harness stops calling
   `run()` and then calls `Actor::finish(&mut self, &ActorCtx)` once
 
-If an actor returns `Err(e)`, the harness cancels shutdown, aborts the
-remaining tasks, and returns `Err(e)`.
+If an actor returns `Err(e)`, the harness cancels shutdown, aborts the remaining
+tasks, and returns `Err(e)`. Aborted actors do not get a graceful `finish(...)`
+callback.
 
 ## Failure injection
 
@@ -286,7 +295,8 @@ Supported `ToxicKind` values:
   sampled jitter
 - `Bandwidth { bytes_per_sec }`: advances the clock based on transfer size
 - `ResetPeer`: returns a connection-reset style object-store error
-- `SlowClose { delay }`: delays stream shutdown on the response side
+- `SlowClose { delay }`: advances the clock on the response side. It is useful
+  with `StreamDirection::Downstream`.
 
 `Operation` lets you target specific request types:
 
@@ -337,6 +347,7 @@ predictable:
 - it performs filesystem operations synchronously on the current task
 - it avoids Tokio's blocking thread pool
 - it synthesizes stable `last_modified` metadata
+- it preserves object-store attributes in memory for the life of the store
 - it returns sorted listing results
 - it can optionally clean up empty parent directories on delete
 
@@ -352,7 +363,7 @@ Useful methods:
 Use this when you want real filesystem semantics without giving up deterministic
 metadata or stable listing order.
 
-## `utils::build_settings`
+## `utils` helpers
 
 `utils::build_settings(rand)` produces a randomized deterministic
 `slatedb::Settings` value from a supplied `DbRand`.
@@ -365,11 +376,26 @@ It currently randomizes several useful dimensions of a SlateDB run, including:
 - L0 SST size and count thresholds
 - maximum unflushed bytes
 - compression codec selection
+- compactor options
 - garbage collection intervals and minimum ages
-- whether the object-store cache is enabled
+- optional WAL enablement when the `wal_disable` feature is compiled
 
-Because the settings are derived entirely from the supplied RNG, they expand
-scenario coverage without sacrificing reproducibility.
+Object-store caching is intentionally left at its default disabled state. The
+cache uses local filesystem state and blocking-task wakeups outside the seeded
+current-thread runtime, which would undermine the harness's logical-clock
+determinism.
+
+Other helpers expose the pieces separately:
+
+- `utils::build_settings_compactor(rng)`: randomized deterministic
+  `CompactorOptions`
+- `utils::build_settings_gc(rng)`: randomized deterministic
+  `GarbageCollectorOptions`
+- `utils::build_toxic(rand, root_path, index)`: randomized deterministic
+  `Toxic` values for object-store fault injection
+
+Because these values are derived from supplied RNGs, they expand scenario
+coverage without sacrificing reproducibility.
 
 ## Guidance for writing stable scenarios
 
