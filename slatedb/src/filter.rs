@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget, PrefixExtractor};
+use crate::filter_policy::{Filter, FilterBuilder, FilterQuery};
+use crate::prefix_extractor::{FilterTarget, PrefixExtractor};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes};

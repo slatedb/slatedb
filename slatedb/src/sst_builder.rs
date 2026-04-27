@@ -423,9 +423,10 @@ mod tests {
     use crate::block_iterator::{BlockIteratorLatest, BlockLike};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{SsTableId, SsTableView};
-    use crate::filter_policy::{BloomFilterPolicy, FilterQuery, PrefixExtractor};
+    use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
     use crate::format::block::Block;
     use crate::object_stores::ObjectStores;
+    use crate::prefix_extractor::PrefixExtractor;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
@@ -1699,10 +1700,10 @@ mod tests {
             fn name(&self) -> &str {
                 "fixed3"
             }
-            fn prefix_len(&self, target: &crate::filter_policy::FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &crate::prefix_extractor::FilterTarget) -> Option<usize> {
                 let input = match target {
-                    crate::filter_policy::FilterTarget::Point(k) => k.as_ref(),
-                    crate::filter_policy::FilterTarget::Prefix(p) => p.as_ref(),
+                    crate::prefix_extractor::FilterTarget::Point(k) => k.as_ref(),
+                    crate::prefix_extractor::FilterTarget::Prefix(p) => p.as_ref(),
                 };
                 (input.len() >= 3).then_some(3)
             }

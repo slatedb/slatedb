@@ -54,16 +54,14 @@ pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
-pub use filter_policy::{
-    BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery, FilterTarget,
-    PrefixExtractor,
-};
+pub use filter_policy::{BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery};
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
 pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use prefix_extractor::{FilterTarget, PrefixExtractor};
 pub use rand::DbRand;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
@@ -85,6 +83,7 @@ pub mod config;
 pub mod db_cache;
 pub mod db_stats;
 pub mod manifest;
+pub mod prefix_extractor;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
 

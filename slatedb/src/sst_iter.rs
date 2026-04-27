@@ -13,9 +13,10 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterQuery, FilterTarget, NamedFilter};
+use crate::filter_policy::{FilterQuery, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
+use crate::prefix_extractor::FilterTarget;
 use crate::{
     iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
     partitioned_keyspace,
