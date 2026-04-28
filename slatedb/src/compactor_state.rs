@@ -8,7 +8,7 @@ use ulid::Ulid;
 
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
-use crate::manifest::{LsmTreeState, Manifest, ManifestCore};
+use crate::manifest::{Manifest, ManifestCore};
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
@@ -579,37 +579,16 @@ impl CompactorState {
     /// compacted marker, existing compacted runs) while pulling in newly created L0 SSTs
     /// and other writer-updated fields.
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
-        // the writer may have added more l0 SSTs. Add these to our l0 list.
         let my_db_state = self.db_state();
-        let last_compacted_l0 = my_db_state.tree.last_compacted_l0_sst_view_id;
-        let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.value.core.tree.l0;
-        for writer_l0_sst in writer_l0 {
-            // todo: this is brittle. we are relying on the l0 list always being updated in
-            //       an expected order. We should instead encode the ordering in the l0 SST IDs
-            //       and assert that it follows the order
-            if match &last_compacted_l0 {
-                None => true,
-                Some(last_compacted_l0_id) => writer_l0_sst.id != *last_compacted_l0_id,
-            } {
-                merged_l0s.push_back(writer_l0_sst.clone());
-            } else {
-                break;
-            }
-        }
-
-        // write out the merged core db state and manifest
+        let remote = &remote_manifest.value.core;
+        let tree = my_db_state.tree.merge_from_writer(&remote.tree);
+        let segments =
+            crate::manifest::merge_segments_from_writer(&my_db_state.segments, &remote.segments);
+        // Segment configuration is stable; the writer is the source of truth.
         let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
-            tree: LsmTreeState {
-                last_compacted_l0_sst_view_id: my_db_state.tree.last_compacted_l0_sst_view_id,
-                last_compacted_l0_sst_id: my_db_state.tree.last_compacted_l0_sst_id,
-                l0: merged_l0s,
-                compacted: my_db_state.tree.compacted.clone(),
-            },
-            // Segment configuration is stable across writer/compactor; carry it
-            // forward from the freshly-loaded remote state.
-            segments: remote_manifest.value.core.segments.clone(),
+            tree,
+            segments,
             segment_extractor_name: remote_manifest.value.core.segment_extractor_name.clone(),
             next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
             replay_after_wal_id: remote_manifest.value.core.replay_after_wal_id,
@@ -778,6 +757,7 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::LsmTreeState;
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use object_store::memory::InMemory;
@@ -1305,6 +1285,74 @@ mod tests {
         assert_eq!(merged.segments.len(), 2);
         assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
         assert_eq!(merged.segments[1].prefix, Bytes::from_static(b"hour=11/"));
+    }
+
+    #[test]
+    fn test_should_merge_segment_with_writer_added_l0() {
+        use crate::db_state::SsTableInfo;
+        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+        use crate::manifest::Segment;
+        use bytes::Bytes;
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+        let v2 = view(2);
+        let v3 = view(3);
+
+        // Local compactor: segment "hour=12/" already compacted v1; marker
+        // points at v1 and there's a sorted run for it.
+        let mut manifest = new_dirty_manifest();
+        manifest.value.core.segment_extractor_name = Some("hour".into());
+        manifest.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 0,
+                    sst_views: vec![v1.clone()],
+                }],
+            },
+        }];
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
+
+        // Remote writer: same segment, added v3, v2 to L0 since the compactor
+        // last looked. Writer's L0 still includes v1 (writer hasn't trimmed it
+        // yet — only the compactor's marker reflects compaction).
+        let mut dirty = new_dirty_manifest();
+        dirty.value.core.segment_extractor_name = Some("hour".into());
+        dirty.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![v3.clone(), v2.clone(), v1.clone()]),
+                compacted: vec![],
+            },
+        }];
+
+        state.merge_remote_manifest(dirty);
+
+        let merged = state.db_state();
+        assert_eq!(merged.segments.len(), 1);
+        let segment = &merged.segments[0];
+        assert_eq!(segment.prefix, Bytes::from_static(b"hour=12/"));
+        // Writer's L0 (from remote) trimmed at the compactor's marker.
+        let l0_ids: Vec<_> = segment.tree.l0.iter().map(|v| v.id).collect();
+        assert_eq!(l0_ids, vec![v3.id, v2.id]);
+        // Compactor's marker and sorted run are preserved.
+        assert_eq!(segment.tree.last_compacted_l0_sst_view_id, Some(v1.id));
+        assert_eq!(segment.tree.compacted.len(), 1);
+        assert_eq!(segment.tree.compacted[0].id, 0);
     }
 
     #[test]

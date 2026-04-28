@@ -39,6 +39,70 @@ pub(crate) struct LsmTreeState {
     pub compacted: Vec<SortedRun>,
 }
 
+impl LsmTreeState {
+    /// Compactor-side merge: combine the writer's view of this tree (`writer`)
+    /// into the compactor's view (`self`). The compactor keeps its compacted
+    /// runs and `last_compacted_l0_*` markers (which only change when a
+    /// compaction completes) and adopts the writer's L0, trimmed to drop
+    /// entries the compactor has already absorbed.
+    pub(crate) fn merge_from_writer(&self, writer: &Self) -> Self {
+        Self::merge_writer_and_compactor(writer, self)
+    }
+
+    /// Writer-side merge: combine the compactor's view of this tree
+    /// (`compactor`) into the writer's view (`self`). The writer keeps its L0
+    /// (trimmed at the compactor's `last_compacted_l0_*` markers) and adopts
+    /// the compactor's compacted runs and markers.
+    pub(crate) fn merge_from_compactor(&self, compactor: &Self) -> Self {
+        Self::merge_writer_and_compactor(self, compactor)
+    }
+
+    /// Canonical merge of a single LSM tree, called by both
+    /// [`Self::merge_from_writer`] and [`Self::merge_from_compactor`]. The
+    /// writer owns L0 and the compactor owns compacted runs / markers, so the
+    /// merge keeps each side's authoritative state and drops L0 entries the
+    /// compactor has already absorbed.
+    fn merge_writer_and_compactor(writer: &Self, compactor: &Self) -> Self {
+        let last_compacted_view = compactor.last_compacted_l0_sst_view_id;
+        let last_compacted_sst = compactor.last_compacted_l0_sst_id;
+        // todo: this is brittle. we are relying on the l0 list always being
+        //       updated in an expected order. We should instead encode the
+        //       ordering in the l0 SST IDs and assert that it follows the
+        //       order.
+        let l0: VecDeque<SsTableView> =
+            if last_compacted_view.is_some() || last_compacted_sst.is_some() {
+                writer
+                    .l0
+                    .iter()
+                    .cloned()
+                    .take_while(|view| {
+                        // Match by view ID first (V2 manifests), then fall back
+                        // to SST ID (V1).
+                        if let Some(id) = last_compacted_view {
+                            if view.id == id {
+                                return false;
+                            }
+                        }
+                        if let Some(id) = last_compacted_sst {
+                            if view.sst.id.unwrap_compacted_id() == id {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                    .collect()
+            } else {
+                writer.l0.clone()
+            };
+        Self {
+            last_compacted_l0_sst_view_id: last_compacted_view,
+            last_compacted_l0_sst_id: last_compacted_sst,
+            l0,
+            compacted: compactor.compacted.clone(),
+        }
+    }
+}
+
 /// Per-segment LSM state (RFC-0024). Each segment owns the contiguous key
 /// interval `[prefix, prefix++)` and is compacted as an independent logical
 /// LSM tree. Segments share the manifest-level WAL state and SST identity
@@ -50,6 +114,44 @@ pub(crate) struct Segment {
 
     /// LSM state for this segment.
     pub tree: LsmTreeState,
+}
+
+/// Compactor-side merge of segment lists: combine the writer's segments
+/// (`writer`) into the compactor's segments (`local`).
+pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) -> Vec<Segment> {
+    merge_writer_and_compactor_segments(writer, local)
+}
+
+/// Writer-side merge of segment lists: combine the compactor's segments
+/// (`compactor`) into the writer's segments (`local`).
+pub(crate) fn merge_segments_from_compactor(
+    local: &[Segment],
+    compactor: &[Segment],
+) -> Vec<Segment> {
+    merge_writer_and_compactor_segments(local, compactor)
+}
+
+/// Canonical segment-list merge. The writer is the source of truth for which
+/// segments exist (and their prefixes); for each writer segment, its tree
+/// state is merged with the compactor's view of the same prefix. Compactor
+/// segments whose prefix doesn't appear in the writer's list are dropped —
+/// the writer has reconfigured.
+fn merge_writer_and_compactor_segments(writer: &[Segment], compactor: &[Segment]) -> Vec<Segment> {
+    let compactor_by_prefix: HashMap<&Bytes, &LsmTreeState> =
+        compactor.iter().map(|s| (&s.prefix, &s.tree)).collect();
+    writer
+        .iter()
+        .map(|w| {
+            let merged_tree = match compactor_by_prefix.get(&w.prefix) {
+                Some(c_tree) => w.tree.merge_from_compactor(c_tree),
+                None => w.tree.clone(),
+            };
+            Segment {
+                prefix: w.prefix.clone(),
+                tree: merged_tree,
+            }
+        })
+        .collect()
 }
 
 /// Internal immutable in-memory view of a `.manifest` file.
@@ -963,6 +1065,102 @@ mod tests {
         let union = Manifest::cloned_from_union(sources, rand);
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+    }
+
+    #[test]
+    fn test_lsm_tree_merge_invariants() {
+        use crate::manifest::LsmTreeState;
+        use proptest::proptest;
+        use std::collections::VecDeque;
+
+        // Build a writer L0 with `n` views whose view IDs and SST IDs are all
+        // distinct, so we can tell V2 (view-id) and V1 (sst-id) marker
+        // matching apart.
+        fn build_writer_l0(n: usize) -> VecDeque<SsTableView> {
+            (0..n)
+                .map(|i| {
+                    let view_id = Ulid::from_parts(i as u64, 0);
+                    let sst_id = Ulid::from_parts(i as u64, 1);
+                    let handle = SsTableHandle::new(
+                        SsTableId::Compacted(sst_id),
+                        SST_FORMAT_VERSION_LATEST,
+                        SsTableInfo::default(),
+                    );
+                    SsTableView::new(view_id, handle)
+                })
+                .collect()
+        }
+
+        proptest!(|(
+            n in 1usize..10,
+            // 0 = no marker, 1 = V2 (view id) only, 2 = V1 (sst id) only, 3 = both
+            marker_kind in 0u8..4,
+            // Resolved against [0, n] below: index `n` means "marker doesn't
+            // match any L0 entry," exercising the no-trim path even with a
+            // marker present.
+            cutoff_idx_raw in 0usize..32,
+        )| {
+            let writer_l0 = build_writer_l0(n);
+            let cutoff_idx = cutoff_idx_raw % (n + 1);
+
+            let (last_view, last_sst) = if marker_kind == 0 {
+                (None, None)
+            } else if cutoff_idx == n {
+                // Marker that doesn't match any entry.
+                let nonmatch = Ulid::from_parts(u64::MAX, 0);
+                match marker_kind {
+                    1 => (Some(nonmatch), None),
+                    2 => (None, Some(nonmatch)),
+                    _ => (Some(nonmatch), Some(nonmatch)),
+                }
+            } else {
+                let target = &writer_l0[cutoff_idx];
+                let view_id = target.id;
+                let sst_id = target.sst.id.unwrap_compacted_id();
+                match marker_kind {
+                    1 => (Some(view_id), None),
+                    2 => (None, Some(sst_id)),
+                    _ => (Some(view_id), Some(sst_id)),
+                }
+            };
+
+            let writer = LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: writer_l0.clone(),
+                compacted: vec![],
+            };
+            let compactor_compacted = vec![SortedRun { id: 42, sst_views: vec![] }];
+            let compactor = LsmTreeState {
+                last_compacted_l0_sst_view_id: last_view,
+                last_compacted_l0_sst_id: last_sst,
+                l0: VecDeque::new(),
+                compacted: compactor_compacted.clone(),
+            };
+
+            let merged = writer.merge_from_compactor(&compactor);
+
+            // Effective trim point: cutoff_idx if a matching marker is set,
+            // otherwise n (everything passes through).
+            let effective_cutoff = if marker_kind == 0 || cutoff_idx == n {
+                n
+            } else {
+                cutoff_idx
+            };
+            let expected_l0: Vec<_> = writer_l0.iter().take(effective_cutoff).cloned().collect();
+            let actual_l0: Vec<_> = merged.l0.iter().cloned().collect();
+            assert_eq!(actual_l0, expected_l0);
+
+            // Markers and compacted are taken from the compactor unchanged.
+            assert_eq!(merged.last_compacted_l0_sst_view_id, last_view);
+            assert_eq!(merged.last_compacted_l0_sst_id, last_sst);
+            assert_eq!(merged.compacted, compactor_compacted);
+
+            // The two wrappers must agree for any (writer, compactor) pair —
+            // catches accidental arg-swapping in the wrappers.
+            let merged_via_writer_side = compactor.merge_from_writer(&writer);
+            assert_eq!(merged, merged_via_writer_side);
+        });
     }
 
     #[test]
