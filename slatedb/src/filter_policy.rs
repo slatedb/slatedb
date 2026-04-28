@@ -124,16 +124,17 @@ impl FilterQuery {
 /// query time.
 ///
 /// Carries raw bytes that a custom filter policy knows how to decode.
-/// Built-in policies ignore this entirely. The two variants exist to keep
-/// small payloads (e.g., a pair of `u64` version bounds) free of heap allocation
-/// on the hot path while still supporting larger payloads via [`Bytes`].
+/// Built-in policies ignore this entirely.
+///
+/// Marked `#[non_exhaustive]` so new variants can be added (e.g., a heap
+/// `Bytes` variant for larger payloads, or typed variants) as concrete
+/// user use cases emerge, without it being a breaking change.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum FilterContext {
     /// Inline 64-byte payload with no heap allocation. Suitable for
     /// pairs of `u64`s, `u128`s, and other fixed-layout small structs.
     Inline([u8; 64]),
-    /// Heap-allocated payload for anything larger or variable-sized.
-    Bytes(Bytes),
 }
 
 // ---------------------------------------------------------------------------
@@ -973,18 +974,6 @@ mod tests {
                 assert_eq!(u64::from_be_bytes(buf[8..16].try_into().unwrap()), 100);
             }
             other => panic!("expected Inline variant, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_filter_query_with_bytes_context() {
-        let payload = Bytes::copy_from_slice(&[1, 2, 3, 4, 5]);
-        let ctx = FilterContext::Bytes(payload.clone());
-
-        let query = FilterQuery::prefix(Bytes::from_static(b"p")).with_context(Some(ctx));
-        match query.context {
-            Some(FilterContext::Bytes(b)) => assert_eq!(b, payload),
-            other => panic!("expected Bytes variant, got {:?}", other),
         }
     }
 }
