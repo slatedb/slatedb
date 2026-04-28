@@ -4,10 +4,10 @@ members = [
     "bindings/uniffi",
     "examples",
     "slatedb",
+    "slatedb-dst",
     "slatedb-common",
     "slatedb-bencher",
     "slatedb-cli",
-    "slatedb-dst",
     "slatedb-txn-obj",
 ]
 

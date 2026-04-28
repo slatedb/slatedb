@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::thread;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
@@ -420,6 +421,7 @@ pub(crate) struct FlakyObjectStore {
     // Put options: transient failures on first N attempts
     fail_first_put_opts: AtomicUsize,
     put_opts_attempts: AtomicUsize,
+    put_opts_attempt_notify: Notify,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
     // Put options: if set, write succeeds but returns AlreadyExists error
@@ -451,6 +453,7 @@ impl FlakyObjectStore {
             inner,
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
+            put_opts_attempt_notify: Notify::new(),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
             put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
@@ -504,6 +507,16 @@ impl FlakyObjectStore {
 
     pub(crate) fn put_attempts(&self) -> usize {
         self.put_opts_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn wait_for_put_attempts(&self, expected: usize) {
+        loop {
+            let notified = self.put_opts_attempt_notify.notified();
+            if self.put_attempts() >= expected {
+                return;
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn head_attempts(&self) -> usize {
@@ -627,6 +640,7 @@ impl ObjectStore for FlakyObjectStore {
         opts: OS_PutOptions,
     ) -> object_store::Result<PutResult> {
         self.put_opts_attempts.fetch_add(1, Ordering::SeqCst);
+        self.put_opts_attempt_notify.notify_waiters();
         if self.put_precondition_always.load(Ordering::SeqCst) {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),

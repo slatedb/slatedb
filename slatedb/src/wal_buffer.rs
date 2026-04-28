@@ -580,9 +580,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         let WalFlushWork { result_tx } = message;
         if let Some(result_tx) = result_tx {
             let result = self.wal_buffer_manager.do_flush().await;
-            result_tx
-                .send(result.clone())
-                .expect("failed to send flush result");
+            let _ = result_tx.send(result.clone());
             result
         } else {
             self.wal_buffer_manager.do_flush().await
@@ -599,9 +597,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         // drain remaining messages
         while let Some(WalFlushWork { result_tx }) = messages.next().await {
             if let Some(result_tx) = result_tx {
-                result_tx
-                    .send(Err(error.clone()))
-                    .expect("failed to send flush result");
+                let _ = result_tx.send(Err(error.clone()));
             }
         }
 
