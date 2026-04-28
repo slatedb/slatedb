@@ -3,6 +3,7 @@ use std::sync::Arc;
 use bytes::{BufMut, Bytes};
 
 use crate::filter::{BloomFilter, BloomFilterBuilder};
+use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::RowEntry;
 
 /// A named, configurable filter policy.
@@ -82,32 +83,23 @@ pub trait Filter: Send + Sync {
 /// A membership query passed to [`Filter::might_match`].
 pub struct FilterQuery {
     /// The target of this query (a specific key or a prefix).
-    pub target: FilterTarget,
+    pub target: PrefixTarget,
 }
 
 impl FilterQuery {
     /// Creates a point-lookup query for the given key.
     pub fn point(key: Bytes) -> Self {
         Self {
-            target: FilterTarget::Point(key),
+            target: PrefixTarget::Point(key),
         }
     }
 
     /// Creates a prefix-scan query for the given prefix.
     pub fn prefix(prefix: Bytes) -> Self {
         Self {
-            target: FilterTarget::Prefix(prefix),
+            target: PrefixTarget::Prefix(prefix),
         }
     }
-}
-
-/// The target of a filter query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilterTarget {
-    /// Used to test whether a specific key might exist in the SST.
-    Point(Bytes),
-    /// Used to test whether any key with the given prefix might exist in the SST.
-    Prefix(Bytes),
 }
 
 // ---------------------------------------------------------------------------
@@ -130,91 +122,6 @@ impl std::fmt::Debug for NamedFilter {
 // ---------------------------------------------------------------------------
 // Built-in implementation: BloomFilterPolicy
 // ---------------------------------------------------------------------------
-
-/// Extractor for a prefix from a byte string, used to build and probe
-/// prefix-based bloom filters.
-///
-/// This trait is specific to `BloomFilterPolicy` — it is not part of the core
-/// `FilterPolicy`/`FilterBuilder`/`Filter` traits. Custom filter policies that
-/// need prefix-based filtering can implement their own logic directly in
-/// `add_entry`/`might_match`.
-///
-/// The extractor's output is always a *prefix* of its input — if
-/// `prefix_len(target)` returns `Some(n)`, then the bytes inside `target`
-/// sliced to `..n` are the extracted prefix.
-///
-/// # `FilterTarget` variants
-///
-/// The `target` argument distinguishes two different semantic questions:
-///
-/// - [`FilterTarget::Point`] — the input is a complete key (a stored key
-///   during SST construction, or the target of a point lookup).
-///   `prefix_len` returns the extraction length that was / will be hashed
-///   into the filter. **Invariant**: if `prefix_len(Point(k)) = Some(n)`,
-///   then for every `k'` with `k'[..n] == k[..n]`, also
-///   `prefix_len(Point(k')) = Some(n)`. The extraction depends only on
-///   the first `n` bytes.
-///
-/// - [`FilterTarget::Prefix`] — the input is a scan prefix. `prefix_len`
-///   returns `Some(n)` only if probing with the first `n` bytes is safe
-///   for *every* possible extension of the input. **Invariant**: if
-///   `prefix_len(Prefix(p)) = Some(n)`, then for every extension `q` of
-///   `p`, `prefix_len(Point(q)) = Some(n)` and `q[..n] == p[..n]`. When
-///   this cannot be guaranteed (e.g., the extractor inspects later bytes
-///   of the key, as a "last-delimiter" extractor would), the extractor
-///   must return `None` for the `Prefix` variant.
-///
-/// For most extractors — fixed-length, first-delimiter, anchored-prefix —
-/// the two variants return the same answer. The split matters for
-/// extractors whose extraction depends on the full input; those can still
-/// be used for the build and point paths while conservatively disabling
-/// prefix-scan filtering.
-pub trait PrefixExtractor: Send + Sync {
-    /// A unique name identifying this extractor's configuration.
-    ///
-    /// Changing the extractor changes which hashes are stored in the
-    /// filter, so existing filters become invalid. `BloomFilterPolicy`
-    /// includes this name in the policy name it writes to SST metadata.
-    fn name(&self) -> &str;
-
-    /// Returns the length `n` such that the bytes of `target` sliced to
-    /// `..n` are the extracted prefix, or `None` if this target has no
-    /// extractable prefix under this extractor.
-    ///
-    /// Called on three paths, distinguished by the variant of `target`:
-    /// - **Build time** — policy wraps each stored key in
-    ///   `FilterTarget::Point` and hashes `key[..n]` into the filter when
-    ///   this returns `Some(n)`.
-    /// - **Point reads** — policy forwards the incoming
-    ///   `FilterTarget::Point` and probes with `hash(key[..n])`.
-    /// - **Prefix reads** — policy forwards the incoming
-    ///   `FilterTarget::Prefix` and probes with `hash(prefix[..n])`; a
-    ///   `None` result causes the filter to be skipped so no false
-    ///   negative can occur.
-    ///
-    /// # Worked example
-    ///
-    /// A 3-byte fixed extractor with an SST containing keys `abc_1`,
-    /// `abc_2`, `abx_1` stores hashes of `abc` and `abx`. Then:
-    /// - `Prefix("ab")` → `None` (2 < 3; filter skipped).
-    /// - `Prefix("abc")` → `Some(3)` → probe `hash("abc")`.
-    /// - `Prefix("abcd")` → `Some(3)` → probe `hash("abc")` (truncation
-    ///   safe by the `Prefix` invariant).
-    /// - `Point("abc_1")` → `Some(3)` → probe `hash("abc")`.
-    ///
-    /// For a *last-delimiter* extractor (extract up to and including the
-    /// last `:`), the `Prefix` variant must return `None` always — the
-    /// last delimiter's position can change as bytes are appended, so no
-    /// scan prefix is safe to probe. The `Point` variant still returns
-    /// the position correctly for complete keys.
-    ///
-    /// # Panics
-    ///
-    /// The returned length must be ≤ the length of the bytes inside
-    /// `target`. Returning a longer value is a contract violation and
-    /// will panic when the length is used to slice the target bytes.
-    fn prefix_len(&self, target: &FilterTarget) -> Option<usize>;
-}
 
 /// A filter policy backed by the existing bloom filter implementation.
 ///
@@ -439,14 +346,14 @@ mod tests {
             &self.name
         }
 
-        fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
             // A fixed-length extractor is truncation-safe: the first `len`
             // bytes fully determine the extracted prefix, so both the
             // `Point` and `Prefix` variants return the same answer. We
             // only require the input to be at least `len` bytes.
             let input = match target {
-                FilterTarget::Point(k) => k.as_ref(),
-                FilterTarget::Prefix(p) => p.as_ref(),
+                PrefixTarget::Point(k) => k.as_ref(),
+                PrefixTarget::Prefix(p) => p.as_ref(),
             };
             (input.len() >= self.len).then_some(self.len)
         }
@@ -667,10 +574,10 @@ mod tests {
             fn name(&self) -> &str {
                 "user-only"
             }
-            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
                 let input = match target {
-                    FilterTarget::Point(k) => k.as_ref(),
-                    FilterTarget::Prefix(p) => p.as_ref(),
+                    PrefixTarget::Point(k) => k.as_ref(),
+                    PrefixTarget::Prefix(p) => p.as_ref(),
                 };
                 (input.len() >= 5 && input.starts_with(b"user:")).then_some(5)
             }
@@ -721,7 +628,7 @@ mod tests {
             fn name(&self) -> &str {
                 "too-long"
             }
-            fn prefix_len(&self, _target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, _target: &PrefixTarget) -> Option<usize> {
                 Some(usize::MAX)
             }
         }
@@ -734,7 +641,7 @@ mod tests {
     /// A "last-delimiter" extractor depends on bytes beyond any proper
     /// prefix, so it cannot make a truncation-safe promise for `Prefix`
     /// inputs. The trait contract says such an extractor must return `None`
-    /// for `FilterTarget::Prefix`; the bloom filter then conservatively
+    /// for `PrefixTarget::Prefix`; the bloom filter then conservatively
     /// returns `true` for prefix scans. `Point` inputs still work.
     #[test]
     fn test_last_delimiter_extractor_skips_prefix_scan() {
@@ -743,15 +650,15 @@ mod tests {
             fn name(&self) -> &str {
                 "last-colon"
             }
-            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
                 match target {
                     // For a complete key, extract up to and including the last ':'.
-                    FilterTarget::Point(k) => {
+                    PrefixTarget::Point(k) => {
                         k.as_ref().iter().rposition(|&b| b == b':').map(|i| i + 1)
                     }
                     // For a scan prefix, the final ':' could land anywhere in
                     // an unseen extension, so no truncation is safe.
-                    FilterTarget::Prefix(_) => None,
+                    PrefixTarget::Prefix(_) => None,
                 }
             }
         }
@@ -841,7 +748,7 @@ mod tests {
             fn name(&self) -> &str {
                 "empty"
             }
-            fn prefix_len(&self, _target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, _target: &PrefixTarget) -> Option<usize> {
                 Some(0)
             }
         }
@@ -881,10 +788,10 @@ mod tests {
             fn name(&self) -> &str {
                 "full-key"
             }
-            fn prefix_len(&self, target: &FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
                 let input = match target {
-                    FilterTarget::Point(k) => k.as_ref(),
-                    FilterTarget::Prefix(p) => p.as_ref(),
+                    PrefixTarget::Point(k) => k.as_ref(),
+                    PrefixTarget::Prefix(p) => p.as_ref(),
                 };
                 Some(input.len())
             }

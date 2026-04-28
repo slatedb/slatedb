@@ -180,10 +180,8 @@ struct ManifestWriterHandler {
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
     tracker_tx: SafeSender<TrackerMessage>,
-    /// Uploaded memtables waiting for contiguous ordering, keyed by first_seq.
+    /// Uploaded memtables waiting to retire in immutable-memtable order, keyed by first_seq.
     ready: BTreeMap<u64, UploadedMemtable>,
-    /// The first_seq we expect for the next memtable to process.
-    next_seq: u64,
     /// Highest last_seq that has been durably written to the manifest (inclusive).
     durable_seq: u64,
     /// Watches the database status so the manifest write can wait for
@@ -271,7 +269,6 @@ impl ManifestWriterHandler {
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Self {
         let durable_seq = db.oracle.last_remote_persisted_seq();
-        let next_seq = db.oracle.peek_next_seq();
         let db_status_rx = db.status_manager.subscribe();
         Self {
             db,
@@ -280,7 +277,6 @@ impl ManifestWriterHandler {
             tracker_tx,
             pending_flushes: Vec::new(),
             ready: BTreeMap::new(),
-            next_seq,
             durable_seq,
             db_status_rx,
             pending_checkpoints: Vec::new(),
@@ -291,12 +287,6 @@ impl ManifestWriterHandler {
         &mut self,
         uploaded_memtable: UploadedMemtable,
     ) -> Result<(), SlateDBError> {
-        assert!(
-            uploaded_memtable.first_seq >= self.next_seq,
-            "uploaded memtable first_seq ({}) is behind next_seq ({})",
-            uploaded_memtable.first_seq,
-            self.next_seq,
-        );
         if self
             .ready
             .insert(uploaded_memtable.first_seq, uploaded_memtable)
@@ -372,24 +362,37 @@ impl ManifestWriterHandler {
 
     fn take_next_ready_batch(&mut self) -> Option<Vec<UploadedMemtable>> {
         let durable_seq = self.db_status_rx.borrow().durable_seq;
-        let mut next_seq = self.next_seq;
+        let imm_memtables: Vec<_> = {
+            let guard = self.db.state.read();
+            guard.state().imm_memtable.iter().rev().cloned().collect()
+        };
         let mut batch = Vec::new();
-        // WAL SSTs must be durable before the manifest is updated (see #1255).
-        while self
-            .ready
-            .get(&next_seq)
-            .filter(|u| !self.db.wal_enabled || u.last_seq <= durable_seq)
-            .is_some()
-        {
-            let uploaded = self.ready.remove(&next_seq).expect("peeked entry missing");
-            next_seq = uploaded.last_seq + 1;
+
+        for imm_memtable in imm_memtables {
+            let first_seq = imm_memtable
+                .table()
+                .first_seq()
+                .expect("immutable memtable has no entries");
+            let Some(uploaded) = self.ready.get(&first_seq) else {
+                break;
+            };
+            assert!(
+                Arc::ptr_eq(&uploaded.imm_memtable, &imm_memtable),
+                "uploaded memtable identity mismatch for first_seq {}",
+                first_seq
+            );
+            // WAL SSTs must be durable before the manifest is updated (see #1255).
+            if self.db.wal_enabled && uploaded.last_seq > durable_seq {
+                break;
+            }
+
+            let uploaded = self.ready.remove(&first_seq).expect("peeked entry missing");
             batch.push(uploaded);
         }
 
         if batch.is_empty() {
             None
         } else {
-            self.next_seq = next_seq;
             Some(batch)
         }
     }
@@ -497,7 +500,9 @@ impl ManifestWriterHandler {
                     });
                 }
 
-                assert!(uploaded.last_seq >= modifier.state.manifest.value.core.last_l0_seq);
+                // The same sequence number can't span multiple L0' SSTs--only SSTs in SRs
+                // can do that. So assert `>` rather than `>=`.
+                assert!(uploaded.last_seq > modifier.state.manifest.value.core.last_l0_seq);
                 modifier.state.manifest.value.core.last_l0_seq = uploaded.last_seq;
                 modifier.state.manifest.value.core.recent_snapshot_min_seq =
                     min_active_snapshot_seq.unwrap_or(uploaded.last_seq);
@@ -1077,9 +1082,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_wait_for_missing_seq_before_flushing() {
+    async fn should_flush_after_skipped_seq() {
         let harness = setup_harness(
-            "/tmp/test_parallel_l0_flush_manifest_writer_gap",
+            "/tmp/test_parallel_l0_flush_manifest_writer_skipped_seq",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        let uploaded1 = next_uploaded_memtable(&inner, b"k1", b"v1").await;
+        started.notify_uploaded(uploaded1).await.unwrap();
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, 1);
+
+        let skipped_seq = inner.oracle.next_seq();
+        assert_eq!(skipped_seq, 2);
+
+        let uploaded2 = next_uploaded_memtable(&inner, b"k3", b"v3").await;
+        assert_eq!(uploaded2.first_seq, 3);
+        started.notify_uploaded(uploaded2).await.unwrap();
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, 3);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_wait_for_older_imm_before_flushing() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_oldest_imm",
             Arc::new(FailPointRegistry::new()),
         )
         .await;
