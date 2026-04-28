@@ -62,7 +62,7 @@ impl LsmTreeState {
     /// writer owns L0 and the compactor owns compacted runs / markers, so the
     /// merge keeps each side's authoritative state and drops L0 entries the
     /// compactor has already absorbed.
-    fn merge_writer_and_compactor(writer: &Self, compactor: &Self) -> Self {
+    pub(crate) fn merge_writer_and_compactor(writer: &Self, compactor: &Self) -> Self {
         let last_compacted_view = compactor.last_compacted_l0_sst_view_id;
         let last_compacted_sst = compactor.last_compacted_l0_sst_id;
         // todo: this is brittle. we are relying on the l0 list always being
@@ -131,27 +131,54 @@ pub(crate) fn merge_segments_from_compactor(
     merge_writer_and_compactor_segments(local, compactor)
 }
 
-/// Canonical segment-list merge. The writer is the source of truth for which
-/// segments exist (and their prefixes); for each writer segment, its tree
-/// state is merged with the compactor's view of the same prefix. Compactor
-/// segments whose prefix doesn't appear in the writer's list are dropped —
-/// the writer has reconfigured.
+/// Canonical segment-list merge. Walks the union of segment prefixes from
+/// both sides and applies the per-tree merge for each prefix, treating any
+/// missing side as empty. Segments are derived from data: the writer adds
+/// L0 (creating segments implicitly), the compactor advances its watermark
+/// and authors `compacted` (consuming L0 and producing or removing runs).
+/// A segment is retained iff its merged tree has any L0 or any compacted
+/// runs — segments that the compactor has drained to empty fall out
+/// naturally, and a writer L0 with an ID above the compactor's watermark
+/// re-creates a previously-drained segment.
 fn merge_writer_and_compactor_segments(writer: &[Segment], compactor: &[Segment]) -> Vec<Segment> {
+    let writer_by_prefix: HashMap<&Bytes, &LsmTreeState> =
+        writer.iter().map(|s| (&s.prefix, &s.tree)).collect();
     let compactor_by_prefix: HashMap<&Bytes, &LsmTreeState> =
         compactor.iter().map(|s| (&s.prefix, &s.tree)).collect();
-    writer
-        .iter()
-        .map(|w| {
-            let merged_tree = match compactor_by_prefix.get(&w.prefix) {
-                Some(c_tree) => w.tree.merge_from_compactor(c_tree),
-                None => w.tree.clone(),
-            };
-            Segment {
+    // Iterate writer's segments first to preserve their order, then append
+    // compactor-only prefixes (those carry compactor work the writer hasn't
+    // observed yet, e.g., a freshly committed run).
+    let empty = LsmTreeState::default();
+    let mut merged: Vec<Segment> = Vec::with_capacity(writer.len() + compactor.len());
+    let mut seen: HashSet<&Bytes> = HashSet::with_capacity(writer.len());
+    for w in writer {
+        let c_tree = compactor_by_prefix
+            .get(&w.prefix)
+            .copied()
+            .unwrap_or(&empty);
+        let merged_tree = LsmTreeState::merge_writer_and_compactor(&w.tree, c_tree);
+        if !merged_tree.l0.is_empty() || !merged_tree.compacted.is_empty() {
+            merged.push(Segment {
                 prefix: w.prefix.clone(),
                 tree: merged_tree,
-            }
-        })
-        .collect()
+            });
+        }
+        seen.insert(&w.prefix);
+    }
+    for c in compactor {
+        if seen.contains(&c.prefix) {
+            continue;
+        }
+        let w_tree = writer_by_prefix.get(&c.prefix).copied().unwrap_or(&empty);
+        let merged_tree = LsmTreeState::merge_writer_and_compactor(w_tree, &c.tree);
+        if !merged_tree.l0.is_empty() || !merged_tree.compacted.is_empty() {
+            merged.push(Segment {
+                prefix: c.prefix.clone(),
+                tree: merged_tree,
+            });
+        }
+    }
+    merged
 }
 
 /// Internal immutable in-memory view of a `.manifest` file.

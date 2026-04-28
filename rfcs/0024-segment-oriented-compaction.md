@@ -268,7 +268,7 @@ The manifest is responsible for tracking the logical structure of the LSM tree: 
 
 Today, the manifest holds a single LSM state consisting of:
 
-- `l0_last_compacted: Ulid` — the last L0 SST that has been compacted (gates L0 visibility).
+- `l0_last_compacted: Ulid` — the last L0 SST observed and consumed by the compactor (gates L0 visibility). The watermark advances whenever the compactor consumes L0, regardless of whether the consumed data was folded into a sorted run, merged into an existing run, or discarded by a drain.
 - `l0: [CompactedSsTable]` — the set of L0 SSTs visible above `l0_last_compacted`.
 - `compacted: [SortedRun]` — the set of sorted runs, ordered by descending `u32` ID (list position encodes read precedence).
 
@@ -383,14 +383,14 @@ Databases that use the extractor consistently (i.e. all keys segmented) can conf
 Segmentation extends the existing compaction model in two small ways:
 
 1. The existing `TieredCompactionSpec` gains an optional `segment` field identifying the target tree. A spec whose `segment` is absent or empty targets the unsegmented tree (same as today); a spec whose `segment` is a named prefix targets that segment.
-2. A new `DropSegmentSpec` variant is added to the top-level `CompactionSpec` union, expressing wholesale segment retention as a distinct operation from merge.
+2. A new `DrainSegmentSpec` variant is added to the top-level `CompactionSpec` union, expressing wholesale segment retention as a distinct operation from merge.
 
 The schema changes are:
 
 ```flatbuffer
 union CompactionSpec {
     TieredCompactionSpec,
-    DropSegmentSpec,           // new
+    DrainSegmentSpec,          // new
 }
 
 table TieredCompactionSpec {
@@ -400,12 +400,14 @@ table TieredCompactionSpec {
     segment: [ubyte];          // new — absent/empty = unsegmented tree
 }
 
-table DropSegmentSpec {
+table DrainSegmentSpec {
     segment: [ubyte] (required);
+    l0_view_ids: [Ulid];       // L0s observed by the compactor and drained
+    sorted_runs: [uint32];     // sorted runs observed by the compactor and drained
 }
 ```
 
-On the Rust side, `CompactionSpec` gains an optional `segment` field alongside its existing `sources` and `destination`. A new `DropSegmentSpec` type is introduced:
+On the Rust side, `CompactionSpec` gains an optional `segment` field alongside its existing `sources` and `destination`. A new `DrainSegmentSpec` type is introduced:
 
 ```rust
 pub struct CompactionSpec {
@@ -416,8 +418,12 @@ pub struct CompactionSpec {
     destination: u32,
 }
 
-pub struct DropSegmentSpec {
+pub struct DrainSegmentSpec {
     segment: Bytes,
+    /// L0s and sorted runs the compactor has observed in this segment
+    /// and is draining. The watermark advances to the newest L0 in
+    /// `sources`; runs in `sources` are removed from `compacted`.
+    sources: Vec<SourceId>,
 }
 ```
 
@@ -436,7 +442,9 @@ impl ManifestCore {
 
   The helper is a convenience — the scheduler could equivalently track the counter itself — but centralizing allocation in `ManifestCore` keeps the counter authoritative and avoids drift between planning and commit.
 
-- `DropSegmentSpec` targets a named segment wholesale. The executor drops whatever L0 SSTs and sorted runs are currently in that segment at commit time and removes the segment entry from the manifest. There is no partial drop — retention is atomic over the whole segment. Only the latest manifest's references are removed; the garbage collector is responsible for cleaning up the underlying SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them. The unsegmented tree cannot be dropped by this operation.
+- `DrainSegmentSpec` targets a named segment for retention. The executor lists the specific L0 SSTs and sorted runs the compactor has observed in `sources`. On commit, it advances the segment's `l0_last_compacted` to the newest L0 named in `sources` and removes those sorted runs from `compacted`. Removal of the segment *entry* from the manifest is not an explicit operation: the merge protocol omits any segment whose merged tree is empty (no L0 above the watermark, no sorted runs), so a fully drained segment falls out of the manifest naturally. Only the latest manifest's references are removed; the garbage collector is responsible for cleaning up the underlying SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them. The unsegmented tree cannot be drained by this operation.
+
+  **Concurrent writes during drain.** The compactor never advances the watermark past an L0 it has not observed. If the writer flushes new L0s into the segment after the compactor planned the drain — or after the spec was queued but before it commits — those L0s have IDs above the watermark named in `sources`, so they survive the merge and the segment is not removed. The compactor's next pass observes them and decides whether to drain them. There is no implicit drop of unobserved data: every L0 the drain removes must appear by ID in the spec's `sources`. This is the same contract that L0→SR compaction follows today.
 
 **Segment-aware scheduling.** To support scheduling, `ManifestCore` exposes the segment list directly:
 
@@ -457,7 +465,8 @@ SlateDB provides a default segment-aware compaction scheduler so that databases 
 
 - **L0 → SR compaction** within each tree, using the existing tiered-policy config knobs scoped per tree.
 - **Intra-tree SR compaction** combining smaller sorted runs into larger ones, again using today's tiered rules scoped per tree.
-- **Empty segment cleanup.** When a named segment's `l0` and `compacted` lists are both empty, the default drops the segment entry from the manifest.
+
+The default scheduler does not issue `DrainSegmentSpec`s; retention is the application's responsibility (see below). Empty named segments are removed from the manifest by the writer/compactor merge protocol — a segment with no L0 above the watermark and no sorted runs is omitted from the merged manifest — so no scheduler action is needed to clean them up.
 
 **Alignment with backpressure.** The default scheduler's L0 compaction trigger is configured strictly below `l0_max_ssts` so that compaction fires before backpressure engages. A scheduler whose L0 trigger threshold is greater than or equal to `l0_max_ssts` would deadlock writes — backpressure engages before compaction can drain the segment. The existing alignment between the default tiered scheduler and `l0_max_ssts` carries over per tree; applications that replace the scheduler inherit responsibility for maintaining this invariant.
 
@@ -471,7 +480,7 @@ The resume mechanism is unchanged: the executor reads the last output SST to com
 
 ## Future Work
 
-This RFC focuses on segment-oriented planning and explicit drop semantics. Natural next steps include key-rewriting transforms and multi-stage timeseries rollups built on top of these primitives.
+This RFC focuses on segment-oriented planning and explicit drain semantics. Natural next steps include key-rewriting transforms and multi-stage timeseries rollups built on top of these primitives.
 
 **Finer-grained WAL tracking for partial multi-segment flushes.** The current design requires a multi-segment flush to become visible atomically via the manifest, which keeps a single WAL replay cursor but can extend flush latency for wide backfills (see [Write Path](#write-path)). A future iteration could track per-segment flush frontiers in the WAL or in the manifest, allowing partial flushes to become visible incrementally. This involves extending WAL replay to advance the frontier per segment and reconciling checkpoint semantics with per-segment progress; deferred until operational experience shows the wide-flush case is a real bottleneck.
 

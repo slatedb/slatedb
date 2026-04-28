@@ -1247,8 +1247,21 @@ mod tests {
 
     #[test]
     fn test_should_adopt_remote_segments_on_merge() {
+        use crate::db_state::SsTableInfo;
+        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
         use crate::manifest::Segment;
         use bytes::Bytes;
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v_a = view(1);
+        let v_b = view(2);
 
         // Local compactor state starts with no segment configuration.
         let manifest = new_dirty_manifest();
@@ -1264,19 +1277,29 @@ mod tests {
         dirty.value.core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState::default(),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v_a.clone()]),
+                    compacted: vec![],
+                },
             },
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
-                tree: LsmTreeState::default(),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v_b.clone()]),
+                    compacted: vec![],
+                },
             },
         ];
 
         // when:
         state.merge_remote_manifest(dirty);
 
-        // then: the compactor adopts the writer's segment configuration. A
-        // regression that drops segments on merge would surface here.
+        // then: the compactor adopts the writer's segment configuration with
+        // its L0s. A regression that drops segments on merge would surface here.
         let merged = state.db_state();
         assert_eq!(
             merged.segment_extractor_name.as_deref(),
@@ -1285,6 +1308,116 @@ mod tests {
         assert_eq!(merged.segments.len(), 2);
         assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
         assert_eq!(merged.segments[1].prefix, Bytes::from_static(b"hour=11/"));
+    }
+
+    #[test]
+    fn test_should_drop_segment_when_drained_by_compactor() {
+        // Compactor's local state has drained a segment (watermark above
+        // writer's L0, no compacted runs); after merging the writer's stale
+        // view, the segment must fall out of the result.
+        use crate::db_state::SsTableInfo;
+        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+        use crate::manifest::Segment;
+        use bytes::Bytes;
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+
+        // Local compactor: watermark at v1, no compacted runs.
+        let mut manifest = new_dirty_manifest();
+        manifest.value.core.segment_extractor_name = Some("hour".into());
+        manifest.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        }];
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
+
+        // Remote writer: still has v1 in L0 (hasn't observed compactor's drain).
+        let mut dirty = new_dirty_manifest();
+        dirty.value.core.segment_extractor_name = Some("hour".into());
+        dirty.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![v1.clone()]),
+                compacted: vec![],
+            },
+        }];
+
+        state.merge_remote_manifest(dirty);
+
+        let merged = state.db_state();
+        assert!(merged.segments.is_empty());
+    }
+
+    #[test]
+    fn test_should_keep_compactor_only_segment_on_writer_merge() {
+        // Compactor has a segment with a sorted run that the writer hasn't
+        // observed yet (writer's manifest predates the compactor's commit).
+        // The merge must preserve the compactor's run.
+        use crate::db_state::SsTableInfo;
+        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+        use crate::manifest::Segment;
+        use bytes::Bytes;
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+
+        // Local compactor: segment with a sorted run.
+        let mut manifest = new_dirty_manifest();
+        manifest.value.core.segment_extractor_name = Some("hour".into());
+        manifest.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 0,
+                    sst_views: vec![v1.clone()],
+                }],
+            },
+        }];
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
+
+        // Remote writer: doesn't have the segment yet.
+        let mut dirty = new_dirty_manifest();
+        dirty.value.core.segment_extractor_name = Some("hour".into());
+        dirty.value.core.segments = vec![];
+
+        state.merge_remote_manifest(dirty);
+
+        let merged = state.db_state();
+        assert_eq!(merged.segments.len(), 1);
+        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
+        assert!(merged.segments[0].tree.l0.is_empty());
+        assert_eq!(merged.segments[0].tree.compacted.len(), 1);
+        assert_eq!(
+            merged.segments[0].tree.last_compacted_l0_sst_view_id,
+            Some(v1.id)
+        );
     }
 
     #[test]

@@ -783,16 +783,31 @@ mod tests {
 
     #[test]
     fn test_should_keep_local_segments_on_merge() {
-        use crate::manifest::Segment;
+        use crate::manifest::{LsmTreeState, Segment};
 
-        // Local writer has a segment extractor configured and one populated segment.
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+
+        // Local writer has a segment extractor configured and a populated segment.
         let mut db_state = DbState::new(new_dirty_manifest());
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.segment_extractor_name = Some("hour-bucket".to_string());
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: crate::manifest::LsmTreeState::default(),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v1.clone()]),
+                    compacted: vec![],
+                },
             }];
         });
 
@@ -806,8 +821,8 @@ mod tests {
 
         db_state.merge_remote_manifest(remote_state);
 
-        // The writer is the source of truth for segment config, so local
-        // segments must survive the merge.
+        // The writer is the source of truth for segment config and for L0,
+        // so the local segment (with its L0) must survive the merge.
         let merged = db_state.state.core();
         assert_eq!(
             merged.segment_extractor_name.as_deref(),
@@ -815,6 +830,8 @@ mod tests {
         );
         assert_eq!(merged.segments.len(), 1);
         assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
+        let l0_ids: Vec<_> = merged.segments[0].tree.l0.iter().map(|v| v.id).collect();
+        assert_eq!(l0_ids, vec![v1.id]);
     }
 
     #[test]
@@ -883,6 +900,164 @@ mod tests {
         assert_eq!(segment.tree.last_compacted_l0_sst_view_id, Some(v1.id));
         assert_eq!(segment.tree.compacted.len(), 1);
         assert_eq!(segment.tree.compacted[0].id, 0);
+    }
+
+    #[test]
+    fn test_should_drop_segment_when_empty_after_merge() {
+        // The compactor has drained a segment to empty (watermark above all
+        // writer L0s, no compacted runs). The merge must drop the segment.
+        use crate::manifest::{LsmTreeState, Segment};
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+
+        // Local writer: segment "hour=12/" still has v1 in L0 (the writer
+        // hasn't yet observed the compactor's drain).
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v1.clone()]),
+                    compacted: vec![],
+                },
+            }];
+        });
+
+        // Remote compactor: watermark at v1, no compacted runs (drained).
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        }];
+
+        db_state.merge_remote_manifest(remote_state);
+
+        let merged = db_state.state.core();
+        assert!(merged.segments.is_empty());
+    }
+
+    #[test]
+    fn test_should_re_create_segment_on_late_backfill_after_drop() {
+        // After the compactor has drained a segment, a writer L0 with an ID
+        // above the watermark must keep the segment alive (re-creation).
+        use crate::manifest::{LsmTreeState, Segment};
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+        let v2 = view(2); // backfill, written after compactor's snapshot.
+
+        // Local writer: v1 (already absorbed by compactor) and v2 (backfill).
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v2.clone(), v1.clone()]),
+                    compacted: vec![],
+                },
+            }];
+        });
+
+        // Remote compactor: watermark at v1, drained.
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        }];
+
+        db_state.merge_remote_manifest(remote_state);
+
+        let merged = db_state.state.core();
+        assert_eq!(merged.segments.len(), 1);
+        let l0_ids: Vec<_> = merged.segments[0].tree.l0.iter().map(|v| v.id).collect();
+        assert_eq!(l0_ids, vec![v2.id]);
+    }
+
+    #[test]
+    fn test_should_keep_compactor_only_segment_on_merge() {
+        // The compactor publishes a segment the writer doesn't have locally
+        // (e.g., the compactor's view is causally ahead of the writer). The
+        // compactor's run must not be lost on merge.
+        use crate::manifest::{LsmTreeState, Segment};
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![];
+        });
+
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 0,
+                    sst_views: vec![v1.clone()],
+                }],
+            },
+        }];
+
+        db_state.merge_remote_manifest(remote_state);
+
+        let merged = db_state.state.core();
+        assert_eq!(merged.segments.len(), 1);
+        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
+        assert!(merged.segments[0].tree.l0.is_empty());
+        assert_eq!(merged.segments[0].tree.compacted.len(), 1);
+        assert_eq!(
+            merged.segments[0].tree.last_compacted_l0_sst_view_id,
+            Some(v1.id)
+        );
     }
 
     #[test]
