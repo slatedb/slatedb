@@ -726,15 +726,16 @@ mod tests {
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{LsmTreeState, ManifestCore};
     use crate::rand::DbRand;
     use crate::Checkpoint;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use proptest::proptest;
     use rstest::rstest;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
@@ -1096,10 +1097,6 @@ mod tests {
 
     #[test]
     fn test_lsm_tree_merge_invariants() {
-        use crate::manifest::LsmTreeState;
-        use proptest::proptest;
-        use std::collections::VecDeque;
-
         // Build a writer L0 with `n` views whose view IDs and SST IDs are all
         // distinct, so we can tell V2 (view-id) and V1 (sst-id) marker
         // matching apart.

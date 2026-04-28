@@ -754,12 +754,14 @@ mod tests {
     use crate::compactor_state::SourceId::SstView;
     use crate::config::{FlushOptions, FlushType, Settings};
     use crate::db::Db;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableId, SsTableInfo};
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::LsmTreeState;
+    use crate::manifest::{LsmTreeState, Segment};
     use crate::utils::IdGenerator;
     use crate::DbRand;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -1247,11 +1249,6 @@ mod tests {
 
     #[test]
     fn test_should_adopt_remote_segments_on_merge() {
-        use crate::db_state::SsTableInfo;
-        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-        use crate::manifest::Segment;
-        use bytes::Bytes;
-
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -1315,11 +1312,6 @@ mod tests {
         // Compactor's local state has drained a segment (watermark above
         // writer's L0, no compacted runs); after merging the writer's stale
         // view, the segment must fall out of the result.
-        use crate::db_state::SsTableInfo;
-        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-        use crate::manifest::Segment;
-        use bytes::Bytes;
-
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -1369,11 +1361,6 @@ mod tests {
         // Compactor has a segment with a sorted run that the writer hasn't
         // observed yet (writer's manifest predates the compactor's commit).
         // The merge must preserve the compactor's run.
-        use crate::db_state::SsTableInfo;
-        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-        use crate::manifest::Segment;
-        use bytes::Bytes;
-
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -1422,11 +1409,6 @@ mod tests {
 
     #[test]
     fn test_should_merge_segment_with_writer_added_l0() {
-        use crate::db_state::SsTableInfo;
-        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-        use crate::manifest::Segment;
-        use bytes::Bytes;
-
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(

@@ -680,6 +680,7 @@ mod tests {
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::{LsmTreeState, Segment};
     use crate::proptest_util::arbitrary;
     use crate::seq_tracker::{FindOption, SequenceTracker, TrackedSeq};
     use crate::test_utils;
@@ -783,8 +784,6 @@ mod tests {
 
     #[test]
     fn test_should_keep_local_segments_on_merge() {
-        use crate::manifest::{LsmTreeState, Segment};
-
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -836,8 +835,6 @@ mod tests {
 
     #[test]
     fn test_should_merge_segment_l0_with_remote_compaction_marker() {
-        use crate::manifest::{LsmTreeState, Segment};
-
         // Build three views with deterministic, ordered ulids so we can refer
         // to them from both sides of the merge.
         fn view(seq: u64) -> SsTableView {
@@ -906,8 +903,6 @@ mod tests {
     fn test_should_drop_segment_when_empty_after_merge() {
         // The compactor has drained a segment to empty (watermark above all
         // writer L0s, no compacted runs). The merge must drop the segment.
-        use crate::manifest::{LsmTreeState, Segment};
-
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -958,8 +953,6 @@ mod tests {
     fn test_should_re_create_segment_on_late_backfill_after_drop() {
         // After the compactor has drained a segment, a writer L0 with an ID
         // above the watermark must keep the segment alive (re-creation).
-        use crate::manifest::{LsmTreeState, Segment};
-
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -1013,8 +1006,6 @@ mod tests {
         // The compactor publishes a segment the writer doesn't have locally
         // (e.g., the compactor's view is causally ahead of the writer). The
         // compactor's run must not be lost on merge.
-        use crate::manifest::{LsmTreeState, Segment};
-
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
