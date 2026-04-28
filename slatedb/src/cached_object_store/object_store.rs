@@ -81,6 +81,7 @@ impl CachedObjectStore {
             stats.clone(),
             clock,
             rand,
+            options.max_open_file_handles,
         ));
         let cached = Self::new(
             object_store,
@@ -901,6 +902,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
         let prefixed: Arc<dyn ObjectStore> = Arc::new(object_store::prefix::PrefixStore::new(
             backing_store.clone(),
@@ -956,6 +958,7 @@ mod tests {
             },
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let store_a: Arc<dyn ObjectStore> = Arc::new(object_store::prefix::PrefixStore::new(
@@ -1052,6 +1055,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
         let cached_store =
             CachedObjectStore::new(bad_meta_store, cache_storage, 1024, false, stats).unwrap();
@@ -1098,6 +1102,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let part_size = 1024;
@@ -1176,6 +1181,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let cached_store =
@@ -1221,6 +1227,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let cached_store =
@@ -1311,6 +1318,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, false, stats).unwrap();
@@ -1334,6 +1342,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, false, stats).unwrap();
@@ -1365,6 +1374,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
         let cached_store =
             CachedObjectStore::new(object_store.clone(), cache_storage, 1024, false, stats)
@@ -1446,6 +1456,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let object_store = Arc::new(object_store::memory::InMemory::new());
@@ -1496,6 +1507,7 @@ mod tests {
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let object_store = Arc::new(object_store::memory::InMemory::new());

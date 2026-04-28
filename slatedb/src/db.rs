@@ -22,8 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
-use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
-use crate::db_metadata::DbMetadataOps;
+use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -53,7 +52,6 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -76,6 +74,7 @@ use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
@@ -1715,6 +1714,67 @@ impl DbMetadataOps for Db {
     }
 }
 
+#[async_trait::async_trait]
+impl DbWriteOps for Db {
+    type Transaction = DbTransaction;
+
+    async fn put_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::put_with_options(self, key, value, put_opts, write_opts).await
+    }
+
+    async fn delete_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::delete_with_options(self, key, options).await
+    }
+
+    async fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::merge_with_options(self, key, value, merge_opts, write_opts).await
+    }
+
+    async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::write_with_options(self, batch, options).await
+    }
+
+    async fn flush(&self) -> Result<(), crate::Error> {
+        Db::flush(self).await
+    }
+
+    async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        Db::flush_with_options(self, options).await
+    }
+
+    async fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
+        Db::begin(self, isolation_level).await
+    }
+}
+
 impl Db {
     /// See [`DbMetadataOps::manifest`].
     pub fn manifest(&self) -> VersionedManifest {
@@ -1759,7 +1819,7 @@ pub struct WriteHandle {
 }
 
 impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
+    pub fn new(seq: u64, create_ts: i64) -> Self {
         Self { seq, create_ts }
     }
 
@@ -1988,8 +2048,8 @@ mod tests {
 
         // estimate_size on L0 views should return non-zero
         let manifest = db.manifest();
-        assert!(!manifest.manifest.core.l0.is_empty());
-        for view in &manifest.manifest.core.l0 {
+        assert!(!manifest.manifest.core.tree.l0.is_empty());
+        for view in &manifest.manifest.core.tree.l0 {
             assert!(view.estimate_size() > 0);
         }
 
@@ -2000,7 +2060,7 @@ mod tests {
             loop {
                 {
                     let state = db_poll.inner.state.read();
-                    if !state.state().core().compacted.is_empty() {
+                    if !state.state().core().tree.compacted.is_empty() {
                         return;
                     }
                 }
@@ -2011,9 +2071,9 @@ mod tests {
         .unwrap();
 
         let manifest = db.manifest();
-        assert!(!manifest.manifest.core.compacted.is_empty());
+        assert!(!manifest.manifest.core.tree.compacted.is_empty());
 
-        for sr in &manifest.manifest.core.compacted {
+        for sr in &manifest.manifest.core.tree.compacted {
             // A range covering all keys returns results
             let covering = sr
                 .tables_covering_range(Bytes::from_static(b"k0000")..Bytes::from_static(b"k0100"));
@@ -2616,8 +2676,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.value.core.l0.len());
-        let view = state.state.manifest.value.core.l0.front().unwrap();
+        assert_eq!(1, state.state.manifest.value.core.tree.l0.len());
+        let view = state.state.manifest.value.core.tree.l0.front().unwrap();
         let index = db
             .inner
             .table_store
@@ -2809,6 +2869,7 @@ mod tests {
             cache_stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let cached_object_store = CachedObjectStore::new(
@@ -3417,13 +3478,13 @@ mod tests {
 
         let state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| !s.l0.is_empty(),
+            |s| !s.tree.l0.is_empty(),
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(state.l0.len(), 1);
+        assert_eq!(state.tree.l0.len(), 1);
 
-        let l0 = state.l0.front().unwrap();
+        let l0 = state.tree.l0.front().unwrap();
         let mut iter = SstIterator::new_borrowed_initialized(
             ..,
             l0,
@@ -3493,7 +3554,7 @@ mod tests {
         }
 
         let manifest = stored_manifest.refresh().await.unwrap();
-        let l0 = &manifest.core.l0;
+        let l0 = &manifest.core.tree.l0;
         assert_eq!(l0.len(), 3);
         let sst_iter_options = SstIteratorOptions::default();
 
@@ -3562,7 +3623,7 @@ mod tests {
         {
             let guard = kv_store.inner.state.read();
             assert!(guard.state().imm_memtable.is_empty());
-            assert_eq!(guard.state().core().l0.len(), 0);
+            assert_eq!(guard.state().core().tree.l0.len(), 0);
         }
 
         // This put() triggers a freeze.
@@ -3584,7 +3645,7 @@ mod tests {
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(db_state.l0.len(), 1);
+        assert_eq!(db_state.tree.l0.len(), 1);
 
         // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
         // and see if the threshold triggers again.
@@ -3600,7 +3661,7 @@ mod tests {
         // Verify no more memtables were frozen or L0 flush happened.
         {
             let guard = kv_store.inner.state.read();
-            assert_eq!(guard.state().core().l0.len(), 1);
+            assert_eq!(guard.state().core().tree.l0.len(), 1);
         }
 
         // This put() triggers a freeze.
@@ -3618,7 +3679,7 @@ mod tests {
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(db_state.l0.len(), 2); // We should have two L0 flushes.
+        assert_eq!(db_state.tree.l0.len(), 2); // We should have two L0 flushes.
 
         kv_store.close().await.unwrap();
     }
@@ -3684,7 +3745,7 @@ mod tests {
 
         // Get initial state
         let initial_manifest = stored_manifest.refresh().await.unwrap();
-        let initial_l0_count = initial_manifest.core.l0.len();
+        let initial_l0_count = initial_manifest.core.tree.l0.len();
 
         let initial_flush_count =
             lookup_metric(&metrics_recorder, IMMUTABLE_MEMTABLE_FLUSHES).unwrap();
@@ -3700,13 +3761,13 @@ mod tests {
         // Wait for the flush to complete and manifest to be updated
         let db_state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| s.l0.len() > initial_l0_count,
+            |s| s.tree.l0.len() > initial_l0_count,
             Duration::from_secs(30),
         )
         .await;
 
         // Verify that a new SST was created in L0
-        assert_eq!(db_state.l0.len(), initial_l0_count + 1);
+        assert_eq!(db_state.tree.l0.len(), initial_l0_count + 1);
 
         // Verify that the flush metrics were updated
         let final_flush_count =
@@ -3726,7 +3787,7 @@ mod tests {
         assert_eq!(retrieved_value2.as_ref(), value2);
 
         // Verify the data exists in the newly created SST
-        let latest_sst = db_state.l0.back().unwrap();
+        let latest_sst = db_state.tree.l0.back().unwrap();
         let sst_iter_options = SstIteratorOptions::default();
         let mut iter = SstIterator::new_borrowed_initialized(
             ..,
@@ -4578,7 +4639,7 @@ mod tests {
             loop {
                 {
                     let db_state = db_poll.inner.state.read();
-                    if !db_state.state().core().compacted.is_empty() {
+                    if !db_state.state().core().tree.compacted.is_empty() {
                         return;
                     }
                 }
@@ -4995,8 +5056,8 @@ mod tests {
         assert_eq!(db_state.state.imm_memtable.len(), 1);
 
         // verify that we have no L0 SSTs because memtables should have failed to flush
-        assert_eq!(db_state.state.core().l0.len(), 0);
-        assert_eq!(db_state.state.core().compacted.len(), 0);
+        assert_eq!(db_state.state.core().tree.l0.len(), 0);
+        assert_eq!(db_state.state.core().tree.compacted.len(), 0);
 
         // one empty wal and one wal for the first put
         assert_eq!(
@@ -5123,7 +5184,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
+                s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5131,8 +5192,8 @@ mod tests {
         let manifest = db.manifest();
         info!(
             "1 l0: {} {}",
-            manifest.manifest.core.l0.len(),
-            manifest.manifest.core.compacted.len()
+            manifest.manifest.core.tree.l0.len(),
+            manifest.manifest.core.tree.compacted.len()
         );
 
         // write more l0s and wait for compaction
@@ -5149,7 +5210,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
+                s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5157,8 +5218,8 @@ mod tests {
         let manifest = db.manifest();
         info!(
             "2 l0: {} {}",
-            manifest.manifest.core.l0.len(),
-            manifest.manifest.core.compacted.len()
+            manifest.manifest.core.tree.l0.len(),
+            manifest.manifest.core.tree.compacted.len()
         );
         // write another l0
         db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
@@ -5172,8 +5233,8 @@ mod tests {
             let manifest = db.manifest();
             info!(
                 "3 l0: {} {}",
-                manifest.manifest.core.l0.len(),
-                manifest.manifest.core.compacted.len()
+                manifest.manifest.core.tree.l0.len(),
+                manifest.manifest.core.tree.compacted.len()
             );
             let val = db.get([b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
@@ -6463,11 +6524,11 @@ mod tests {
             .await
             .expect("failed to read latest manifest");
         assert_eq!(
-            manifest.manifest.core.l0.len(),
+            manifest.manifest.core.tree.l0.len(),
             1,
             "expected exactly one L0 SST in manifest"
         );
-        let l0_id = manifest.manifest.core.l0[0].sst.id;
+        let l0_id = manifest.manifest.core.tree.l0[0].sst.id;
         assert_eq!(
             l0_id, ssts[0].id,
             "expected SST {:?} but found SST {:?}",
@@ -6757,6 +6818,150 @@ mod tests {
             db.get(b"k1").await.unwrap(),
             Some(Bytes::from_static(b"v2"))
         );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_txn_conflict_commit_seq_gap_does_not_block_l0_retirement() {
+        const REPRO_SEED: u64 = 2_985_011_763_506_195_159;
+        const MAX_UNFLUSHED_BYTES: usize = 8 * 1024;
+        const LARGE_VALUE_BYTES: usize = 16 * 1024;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024, None);
+        options.flush_interval = None;
+        options.manifest_poll_interval = Duration::from_millis(10);
+        options.max_unflushed_bytes = MAX_UNFLUSHED_BYTES;
+        options.l0_max_ssts = 16;
+
+        let db = Db::builder(
+            "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
+            object_store,
+        )
+        .with_seed(REPRO_SEED)
+        .with_settings(options)
+        .build()
+        .await
+        .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Establish and flush seq=1 so the L0 manifest writer has a known
+        // contiguous frontier before the conflict sequence gap is created.
+        db.put_with_options(b"conflict-key", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing base memtable")
+        .expect("base memtable flush should succeed");
+
+        // Start a serializable transaction at seq=1 and record a read on
+        // conflict-key. The next committed write to that key will conflict
+        // with this transaction when it tries to commit.
+        let txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        assert_eq!(
+            txn.get(b"conflict-key").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+
+        // Commit and flush seq=2 for the same key. This advances the L0
+        // manifest writer through seq=2 and creates the transaction conflict.
+        db.put_with_options(b"conflict-key", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing conflict-producing write")
+        .expect("conflict-producing write flush should succeed");
+
+        // The transaction commit must fail, but the bug is that write_batch
+        // allocates commit_seq=3 before conflict detection and never writes it
+        // into a memtable. This leaves a durable-memtable sequence hole.
+        txn.put(b"txn-write", b"will-conflict").unwrap();
+        let err = txn.commit().await.expect_err("transaction should conflict");
+        assert_eq!(err.kind(), crate::ErrorKind::Transaction);
+
+        // Write enough data to freeze an immutable memtable. Its first sequence
+        // is 4 because seq=3 was consumed by the failed transaction commit.
+        let large_value = vec![b'x'; LARGE_VALUE_BYTES];
+        let large_handle = db
+            .put_with_options(
+                b"large-after-conflict",
+                &large_value,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .expect("large write after conflict should be accepted");
+        assert_eq!(
+            large_handle.seqnum(),
+            4,
+            "the conflicted commit should have consumed commit_seq=3"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            }),
+        )
+        .await
+        .expect("timed out flushing WAL after large write")
+        .expect("WAL flush after large write should succeed");
+
+        // Wait until the large write either reaches L0 or is visible as an
+        // immutable memtable. On the buggy path it is uploaded, but cannot be
+        // retired because the manifest writer is still waiting for seq=3.
+        let large_seq = large_handle.seqnum();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (last_l0_seq, has_immutable_memtable) = {
+                    let guard = db.inner.state.read();
+                    (
+                        guard.state().core().last_l0_seq,
+                        !guard.state().imm_memtable.is_empty(),
+                    )
+                };
+                if last_l0_seq >= large_seq || has_immutable_memtable {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("large write never froze or flushed");
+
+        // This write enters backpressure because the stuck immutable memtable
+        // remains charged against max_unflushed_bytes. The expected failure is
+        // this timeout, which proves the hang without letting the test run
+        // forever.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.put_with_options(
+                b"write-after-gap",
+                b"v",
+                &PutOptions::default(),
+                &write_opts,
+            ),
+        )
+        .await
+        .expect("timed out waiting for write after conflicted transaction consumed commit_seq=3")
+        .expect("write after conflicted commit sequence gap should succeed");
 
         db.close().await.unwrap();
     }
@@ -7178,6 +7383,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .l0
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7188,6 +7394,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .compacted
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7196,6 +7403,7 @@ mod tests {
                     if state
                         .state()
                         .core()
+                        .tree
                         .compacted
                         .first()
                         .is_some_and(|sr| sr.sst_views.len() > 1)
@@ -7327,6 +7535,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .l0
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7337,6 +7546,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .compacted
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7345,6 +7555,7 @@ mod tests {
                     if state
                         .state()
                         .core()
+                        .tree
                         .compacted
                         .first()
                         .is_some_and(|sr| sr.sst_views.len() > 1)

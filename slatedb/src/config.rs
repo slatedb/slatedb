@@ -1327,6 +1327,11 @@ pub struct ObjectStoreCacheOptions {
         skip_serializing_if = "Option::is_none"
     )]
     pub scan_interval: Option<Duration>,
+
+    /// The maximum number of file handles to keep open in the file handle cache.
+    /// When the limit is reached, the least recently used handle is closed.
+    /// Default is 1000.
+    pub max_open_file_handles: usize,
 }
 
 impl Default for ObjectStoreCacheOptions {
@@ -1341,6 +1346,7 @@ impl Default for ObjectStoreCacheOptions {
             cache_puts: false,
             preload_disk_cache_on_startup: None,
             scan_interval: Some(Duration::from_secs(3600)),
+            max_open_file_handles: 1000,
         }
     }
 }

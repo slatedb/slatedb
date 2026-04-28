@@ -45,10 +45,8 @@ pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
-pub use db_cache_manager::{CacheTarget, DbCacheManagerOps};
+pub use db_cache_manager::CacheTarget;
 pub use db_iter::DbIterator;
-pub use db_metadata::DbMetadataOps;
-pub use db_read::DbReadOps;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
@@ -56,7 +54,6 @@ pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
 pub use filter_policy::{
     BloomFilterPolicy, Filter, FilterBuilder, FilterContext, FilterPolicy, FilterQuery,
-    FilterTarget, PrefixExtractor,
 };
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
@@ -64,6 +61,8 @@ pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
 pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
+pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
 pub use rand::DbRand;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
@@ -85,6 +84,7 @@ pub mod config;
 pub mod db_cache;
 pub mod db_stats;
 pub mod manifest;
+pub mod prefix_extractor;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
 
@@ -112,8 +112,6 @@ mod db;
 mod db_cache_manager;
 mod db_common;
 mod db_iter;
-mod db_metadata;
-mod db_read;
 mod db_reader;
 mod db_snapshot;
 mod db_state;
@@ -135,6 +133,7 @@ mod memtable_flusher;
 mod merge_iterator;
 mod merge_operator;
 mod object_stores;
+mod ops;
 mod oracle;
 mod partitioned_keyspace;
 mod paths;

@@ -13,9 +13,10 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter};
+use crate::filter_policy::{FilterContext, FilterQuery, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
+use crate::prefix_extractor::PrefixTarget;
 use crate::{
     iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
     partitioned_keyspace,
@@ -224,22 +225,22 @@ impl FilterEvaluator {
 
     fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            FilterTarget::Point(_) => &stats.sst_filter_point_positives,
-            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+            PrefixTarget::Point(_) => &stats.sst_filter_point_positives,
+            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
         }
     }
 
     fn negatives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            FilterTarget::Point(_) => &stats.sst_filter_point_negatives,
-            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+            PrefixTarget::Point(_) => &stats.sst_filter_point_negatives,
+            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
         }
     }
 
     fn false_positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            FilterTarget::Point(_) => &stats.sst_filter_point_false_positives,
-            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
+            PrefixTarget::Point(_) => &stats.sst_filter_point_false_positives,
+            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
         }
     }
 
@@ -249,8 +250,8 @@ impl FilterEvaluator {
 
     fn notify_key_found(&mut self, key: &[u8]) {
         match &self.query.target {
-            FilterTarget::Point(k) if key == k.as_ref() => self.found_key = true,
-            FilterTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            PrefixTarget::Point(k) if key == k.as_ref() => self.found_key = true,
+            PrefixTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
             _ => {}
         }
     }

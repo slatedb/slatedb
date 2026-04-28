@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AdminBuilder,
+  CacheTarget,
   CloseReason,
   DbReaderBuilder,
   ErrorData,
   FlushType,
+  SsTableId,
   WriteBatch,
 } from "../index.js";
 import {
@@ -371,4 +374,49 @@ test("reader rejects invalid key ranges", async (t) => {
     end_inclusive: false,
   }));
   requireRows(await drainIterator(emptyStartScan), ["seed"], ["value"]);
+});
+
+test("reader warm_sst and evict_cached_sst", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  const db = await openDb(store, { cleanup });
+
+  await db.put_with_options(
+    bytes("alpha"),
+    bytes("one"),
+    putOptions(),
+    writeOptions(false),
+  );
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const reader = await openReader(store, { cleanup });
+  const admin = cleanup.track(new AdminBuilder(TEST_DB_PATH, store).build(), {
+    shutdown: false,
+  });
+
+  const manifest = await admin.read_manifest(undefined);
+  assert.ok(manifest.l0.length > 0);
+  const sstId = manifest.l0[0].sst.id;
+
+  await reader.warm_sst(sstId, [
+    CacheTarget.Filters(),
+    CacheTarget.Index(),
+    CacheTarget.Stats(),
+    CacheTarget.Data(fullRange()),
+  ]);
+
+  // Empty-range Data target is a no-op (not an invalid-range error).
+  await reader.warm_sst(sstId, [
+    CacheTarget.Data({
+      start: bytes("z"),
+      start_inclusive: true,
+      end: bytes("a"),
+      end_inclusive: true,
+    }),
+  ]);
+
+  // Unknown SST is a no-op, not an error.
+  await reader.warm_sst(SsTableId.Wal(999_999n), [CacheTarget.Index()]);
+
+  await reader.evict_cached_sst(sstId);
 });
