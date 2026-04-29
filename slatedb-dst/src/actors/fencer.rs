@@ -80,7 +80,7 @@ impl Actor for DbFencerActor {
         let old_db = ctx.swap_db(next_db);
 
         // Verify the old DB is fenced.
-        match old_db.get(b"foo").await {
+        match old_db.put(b"foo", b"bar").await {
             Err(err) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {}
             result => panic!("old db was not fenced as expected [result={result:?}]"),
         }
