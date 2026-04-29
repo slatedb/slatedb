@@ -367,7 +367,7 @@ impl FlatBufferManifestCodec {
             manifest.compacted(),
             &sst_lookup,
         )?;
-        let segments = manifest
+        let mut segments = manifest
             .segments()
             .map(|fb_segments| {
                 fb_segments
@@ -377,6 +377,9 @@ impl FlatBufferManifestCodec {
             })
             .transpose()?
             .unwrap_or_default();
+        // Uphold the `ManifestCore::segments` invariant (sorted by prefix)
+        // even if the on-disk order happens to differ.
+        segments.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         let segment_extractor_name = manifest.segment_extractor_name().map(|s| s.to_string());
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
@@ -1630,19 +1633,9 @@ mod tests {
         // and sorted run state.
         let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.segment_extractor_name = Some("hour-bucket".to_string());
+        // Constructed in sorted-by-prefix order to match the
+        // `ManifestCore::segments` invariant.
         manifest.core.segments = vec![
-            Segment {
-                prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
-                    last_compacted_l0_sst_view_id: None,
-                    last_compacted_l0_sst_id: None,
-                    l0: VecDeque::from(vec![new_sst_view(), new_sst_view()]),
-                    compacted: vec![SortedRun {
-                        id: 1,
-                        sst_views: vec![new_sst_view()],
-                    }],
-                },
-            },
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
                 tree: LsmTreeState {
@@ -1652,6 +1645,18 @@ mod tests {
                     compacted: vec![SortedRun {
                         id: 0,
                         sst_views: vec![new_sst_view(), new_sst_view()],
+                    }],
+                },
+            },
+            Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![new_sst_view(), new_sst_view()]),
+                    compacted: vec![SortedRun {
+                        id: 1,
+                        sst_views: vec![new_sst_view()],
                     }],
                 },
             },

@@ -110,7 +110,8 @@ table ManifestV2 {
     // The last compacted l0
     last_compacted_l0_sst_view_id: Ulid;
 
-    // All compacted SSTs referenced by l0 and compacted (sorted runs) views.
+    // All compacted SSTs referenced by l0 and compacted (sorted runs) views,
+    // including those referenced by `segments` (RFC-0024) when set.
     ssts: [CompactedSsTableV2] (required);
 
     // A list of the L0 SSTs that are valid to read in the `compacted` folder.

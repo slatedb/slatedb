@@ -1268,25 +1268,26 @@ mod tests {
         assert!(state.db_state().segment_extractor_name.is_none());
 
         // Remote (writer-authored) manifest configures an extractor with two
-        // populated segments.
+        // populated segments. Constructed sorted by prefix to satisfy the
+        // `ManifestCore::segments` invariant.
         let mut dirty = new_dirty_manifest();
         dirty.value.core.segment_extractor_name = Some("hour-bucket".to_string());
         dirty.value.core.segments = vec![
-            Segment {
-                prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
-                    last_compacted_l0_sst_view_id: None,
-                    last_compacted_l0_sst_id: None,
-                    l0: VecDeque::from(vec![v_a.clone()]),
-                    compacted: vec![],
-                },
-            },
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
                 tree: LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v_b.clone()]),
+                    compacted: vec![],
+                },
+            },
+            Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v_a.clone()]),
                     compacted: vec![],
                 },
             },
@@ -1303,8 +1304,9 @@ mod tests {
             Some("hour-bucket")
         );
         assert_eq!(merged.segments.len(), 2);
-        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
-        assert_eq!(merged.segments[1].prefix, Bytes::from_static(b"hour=11/"));
+        // The merged list is sorted by prefix.
+        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=11/"));
+        assert_eq!(merged.segments[1].prefix, Bytes::from_static(b"hour=12/"));
     }
 
     #[test]

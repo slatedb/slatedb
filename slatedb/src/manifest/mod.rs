@@ -1,4 +1,4 @@
-use std::cmp::{max, min};
+use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::ops::Bound;
@@ -147,47 +147,52 @@ pub(crate) struct Segment {
 /// prune: when the compactor's local has a marker for a prefix that the
 /// writer's manifest no longer carries, that absence is the writer's
 /// signal that the marker has been observed and the segment can be dropped.
+///
+/// Both inputs are required to be sorted by `prefix`, and the output is
+/// sorted by `prefix` (see [`ManifestCore::segments`]). The walk is a
+/// linear two-cursor merge.
 pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) -> Vec<Segment> {
-    let local_by_prefix: HashMap<&Bytes, &LsmTreeState> =
-        local.iter().map(|s| (&s.prefix, &s.tree)).collect();
+    debug_assert!(
+        is_sorted_by_prefix(writer),
+        "writer segments must be sorted"
+    );
+    debug_assert!(is_sorted_by_prefix(local), "local segments must be sorted");
     let empty = LsmTreeState::default();
     let mut merged: Vec<Segment> = Vec::with_capacity(writer.len() + local.len());
-    let mut seen: HashSet<&Bytes> = HashSet::with_capacity(writer.len());
-    // Writer segments take ordering priority. The kernel merge takes the
-    // compactor's authoritative view of `compacted`/watermark and the
-    // writer's L0 (trimmed at the watermark). Markers are kept on the
-    // compactor side — only the writer prunes them.
-    for w in writer {
-        let c_tree = local_by_prefix.get(&w.prefix).copied().unwrap_or(&empty);
-        let merged_tree = LsmTreeState::merge_writer_and_compactor(&w.tree, c_tree);
-        if !merged_tree.is_empty() {
-            merged.push(Segment {
-                prefix: w.prefix.clone(),
-                tree: merged_tree,
-            });
+    for step in MergeIter::new(writer, local) {
+        match step {
+            MergeStep::WriterOnly(w) => {
+                // Compactor hasn't seen this prefix yet (newly-flushed).
+                let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &empty);
+                if !tree.is_empty() {
+                    merged.push(Segment {
+                        prefix: w.prefix.clone(),
+                        tree,
+                    });
+                }
+            }
+            MergeStep::CompactorOnly(c) => {
+                // Expected: writer has pruned a drain marker — drop to
+                // follow. Anything else is a protocol violation.
+                if !c.tree.is_drained() {
+                    unreachable!(
+                        "compactor-only segment with data: prefix={:?} tree={:?}",
+                        c.prefix, c.tree
+                    );
+                }
+            }
+            MergeStep::Both(w, c) => {
+                // Kernel merge. The compactor keeps markers in this
+                // branch — only the writer prunes.
+                let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &c.tree);
+                if !tree.is_empty() {
+                    merged.push(Segment {
+                        prefix: w.prefix.clone(),
+                        tree,
+                    });
+                }
+            }
         }
-        seen.insert(&w.prefix);
-    }
-    // Compactor-only prefixes: writer's manifest has no entry for this
-    // prefix, but the compactor's local still does. The expected case is a
-    // drain marker the writer has just pruned — drop it to follow. A
-    // non-marker compactor-only segment shouldn't arise (segments
-    // originate from writer flushes); preserve defensively if it does.
-    for c in local {
-        if seen.contains(&c.prefix) {
-            continue;
-        }
-        if c.tree.is_drained() {
-            continue;
-        }
-        // Compactor-only with non-marker state shouldn't arise: segments
-        // originate from writer flushes, so the compactor only ever holds a
-        // segment the writer also has, except transiently as a drain marker
-        // the writer has just pruned. Any other shape is a protocol violation.
-        unreachable!(
-            "compactor-only segment with data: prefix={:?} tree={:?}",
-            c.prefix, c.tree
-        );
     }
     merged
 }
@@ -199,53 +204,102 @@ pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) 
 /// result is a drain marker (no L0 above the watermark, no compacted runs,
 /// watermark set) the writer drops the segment from its commit. The
 /// compactor will observe the absence on its next read and follow.
+///
+/// Both inputs are required to be sorted by `prefix`, and the output is
+/// sorted by `prefix`. The walk is a linear two-cursor merge.
 pub(crate) fn merge_segments_from_compactor(
     local: &[Segment],
     compactor: &[Segment],
 ) -> Vec<Segment> {
-    let compactor_by_prefix: HashMap<&Bytes, &LsmTreeState> =
-        compactor.iter().map(|s| (&s.prefix, &s.tree)).collect();
+    debug_assert!(is_sorted_by_prefix(local), "local segments must be sorted");
+    debug_assert!(
+        is_sorted_by_prefix(compactor),
+        "compactor segments must be sorted"
+    );
     let empty = LsmTreeState::default();
     let mut merged: Vec<Segment> = Vec::with_capacity(local.len() + compactor.len());
-    let mut seen: HashSet<&Bytes> = HashSet::with_capacity(local.len());
-    for w in local {
-        let c_tree = compactor_by_prefix
-            .get(&w.prefix)
-            .copied()
-            .unwrap_or(&empty);
-        let merged_tree = LsmTreeState::merge_writer_and_compactor(&w.tree, c_tree);
-        seen.insert(&w.prefix);
-        // Writer prune: drop drain markers. Truly-empty results also fall
-        // out — they typically arise after the compactor has already
-        // pruned the marker and the writer's local view has nothing left.
-        if merged_tree.is_drained() || merged_tree.is_empty() {
-            continue;
-        }
-        merged.push(Segment {
-            prefix: w.prefix.clone(),
-            tree: merged_tree,
-        });
-    }
-    // Compactor-only prefixes: the compactor has segments the writer's
-    // local hasn't observed. A marker means there's nothing to add and
-    // the writer can prune (don't introduce). For non-marker entries,
-    // adopt the compactor's tree as the writer's new local view.
-    for c in compactor {
-        if seen.contains(&c.prefix) {
-            continue;
-        }
-        if c.tree.is_drained() {
-            continue;
-        }
-        let merged_tree = LsmTreeState::merge_writer_and_compactor(&empty, &c.tree);
-        if !merged_tree.is_empty() {
-            merged.push(Segment {
-                prefix: c.prefix.clone(),
-                tree: merged_tree,
-            });
+    for step in MergeIter::new(local, compactor) {
+        let (prefix, tree) = match step {
+            MergeStep::WriterOnly(w) => (
+                w.prefix.clone(),
+                LsmTreeState::merge_writer_and_compactor(&w.tree, &empty),
+            ),
+            MergeStep::CompactorOnly(c) => (
+                c.prefix.clone(),
+                LsmTreeState::merge_writer_and_compactor(&empty, &c.tree),
+            ),
+            MergeStep::Both(w, c) => (
+                w.prefix.clone(),
+                LsmTreeState::merge_writer_and_compactor(&w.tree, &c.tree),
+            ),
+        };
+        // Writer prune: drop drain markers (and truly-empty results, which
+        // arise after the compactor has already pruned).
+        if !tree.is_drained() && !tree.is_empty() {
+            merged.push(Segment { prefix, tree });
         }
     }
     merged
+}
+
+/// One step of a linear two-cursor merge over a pair of sorted-by-prefix
+/// segment slices. The first slice is interpreted as the writer's view and
+/// the second as the compactor's view, advancing whichever cursor has the
+/// smaller current prefix (or both, on a tie).
+enum MergeStep<'a> {
+    WriterOnly(&'a Segment),
+    CompactorOnly(&'a Segment),
+    Both(&'a Segment, &'a Segment),
+}
+
+/// Iterator over a sorted-by-prefix segment merge. Yields a [`MergeStep`]
+/// for each prefix that appears in either input, in sorted order.
+struct MergeIter<'a> {
+    writer: &'a [Segment],
+    compactor: &'a [Segment],
+    i: usize,
+    j: usize,
+}
+
+impl<'a> MergeIter<'a> {
+    fn new(writer: &'a [Segment], compactor: &'a [Segment]) -> Self {
+        Self {
+            writer,
+            compactor,
+            i: 0,
+            j: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for MergeIter<'a> {
+    type Item = MergeStep<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let step = match (self.writer.get(self.i), self.compactor.get(self.j)) {
+            (None, None) => return None,
+            (Some(w), None) => MergeStep::WriterOnly(w),
+            (None, Some(c)) => MergeStep::CompactorOnly(c),
+            (Some(w), Some(c)) => match w.prefix.cmp(&c.prefix) {
+                Ordering::Less => MergeStep::WriterOnly(w),
+                Ordering::Greater => MergeStep::CompactorOnly(c),
+                Ordering::Equal => MergeStep::Both(w, c),
+            },
+        };
+        match &step {
+            MergeStep::WriterOnly(_) => self.i += 1,
+            MergeStep::CompactorOnly(_) => self.j += 1,
+            MergeStep::Both(_, _) => {
+                self.i += 1;
+                self.j += 1;
+            }
+        }
+        Some(step)
+    }
+}
+
+fn is_sorted_by_prefix(segments: &[Segment]) -> bool {
+    segments.windows(2).all(|w| w[0].prefix < w[1].prefix)
 }
 
 /// Internal immutable in-memory view of a `.manifest` file.
@@ -266,6 +320,11 @@ pub(crate) struct ManifestCore {
     /// Per-segment LSM state (RFC-0024). Empty when no segment extractor is
     /// configured. Each segment carries the LSM state for the keys whose
     /// extracted prefix matches the segment's `prefix`.
+    ///
+    /// Invariant: sorted strictly ascending by `prefix`. Mutation sites
+    /// (FlatBuffer decode, merge functions, future writer-flush insertion)
+    /// must preserve this ordering. Lookup-by-prefix should use
+    /// `binary_search_by_key`; range queries use `partition_point`.
     pub segments: Vec<Segment>,
 
     /// Name of the configured segment extractor (RFC-0024). Persisted so the
@@ -802,7 +861,7 @@ mod tests {
     use object_store::ObjectStore;
     use proptest::proptest;
     use rstest::rstest;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{BTreeSet, HashMap, VecDeque};
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
@@ -1251,6 +1310,458 @@ mod tests {
             // catches accidental arg-swapping in the wrappers.
             let merged_via_writer_side = compactor.merge_from_writer(&writer);
             assert_eq!(merged, merged_via_writer_side);
+        });
+    }
+
+    #[test]
+    fn test_segment_merge_preserves_prefix_order() {
+        // Both directions of the segment-list merge must produce a result
+        // sorted by `prefix` for any well-formed sorted inputs. Compactor-
+        // only prefixes must be drain markers (anything else trips the
+        // merge's protocol-violation guard).
+        use crate::manifest::{
+            is_sorted_by_prefix, merge_segments_from_compactor, merge_segments_from_writer, Segment,
+        };
+
+        fn live_tree(seed: u64) -> LsmTreeState {
+            let view_id = Ulid::from_parts(seed, 0);
+            let handle = SsTableHandle::new(
+                SsTableId::Compacted(Ulid::from_parts(seed, 1)),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            );
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![SsTableView::new(view_id, handle)]),
+                compacted: vec![],
+            }
+        }
+        fn marker_tree(seed: u64) -> LsmTreeState {
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(Ulid::from_parts(seed, 0)),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            }
+        }
+
+        // Each `kind` value picks a (writer-has, compactor-has) pair for
+        // a given prefix:
+        //   0: writer-only
+        //   1: compactor-only (must be marker)
+        //   2: both (writer live, compactor live)
+        //   3: skip (prefix absent on both sides)
+        proptest!(|(kinds in proptest::collection::vec(0u8..4, 0..8))| {
+            let mut writer: Vec<Segment> = Vec::new();
+            let mut compactor: Vec<Segment> = Vec::new();
+            for (idx, kind) in kinds.iter().enumerate() {
+                let prefix = Bytes::from(format!("p{:02}/", idx));
+                match kind % 4 {
+                    0 => writer.push(Segment { prefix: prefix.clone(), tree: live_tree(idx as u64) }),
+                    1 => compactor.push(Segment { prefix: prefix.clone(), tree: marker_tree(idx as u64) }),
+                    2 => {
+                        writer.push(Segment { prefix: prefix.clone(), tree: live_tree(idx as u64) });
+                        compactor.push(Segment { prefix: prefix.clone(), tree: live_tree((idx as u64) + 100) });
+                    }
+                    _ => {}
+                }
+            }
+
+            // Both inputs are constructed in prefix order via the index.
+            assert!(is_sorted_by_prefix(&writer));
+            assert!(is_sorted_by_prefix(&compactor));
+
+            let merged_writer_side = merge_segments_from_compactor(&writer, &compactor);
+            let merged_compactor_side = merge_segments_from_writer(&compactor, &writer);
+
+            assert!(is_sorted_by_prefix(&merged_writer_side),
+                "writer-side merge must produce sorted output");
+            assert!(is_sorted_by_prefix(&merged_compactor_side),
+                "compactor-side merge must produce sorted output");
+        });
+    }
+
+    /// Simulator-based protocol check: drive a random interleaving of writer
+    /// flushes/commits and compactor compactions/drains/commits through the
+    /// segment merge protocol, and verify a battery of invariants on the
+    /// resulting manifest history. The strongest is that each L0 the writer
+    /// flushes appears in the committed manifest exactly once: never
+    /// fabricated, never lost, never resurrected after a drain. Other
+    /// invariants check L0 provenance, watermark monotonicity, watermark
+    /// trim correctness, and cross-segment L0 uniqueness.
+    #[test]
+    fn test_protocol_simulation_invariants() {
+        use crate::manifest::{merge_segments_from_compactor, merge_segments_from_writer, Segment};
+        use proptest::prelude::*;
+
+        const NUM_PREFIXES: u8 = 3;
+
+        #[derive(Debug, Clone)]
+        enum Op {
+            WriterFlush(u8),
+            WriterCommit,
+            CompactorReadCompact(u8, u8),
+            CompactorReadDrain(u8),
+            CompactorCommit,
+        }
+
+        fn arb_op() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                (0..NUM_PREFIXES).prop_map(Op::WriterFlush),
+                Just(Op::WriterCommit),
+                (0..NUM_PREFIXES, 1u8..4).prop_map(|(p, c)| Op::CompactorReadCompact(p, c)),
+                (0..NUM_PREFIXES).prop_map(Op::CompactorReadDrain),
+                Just(Op::CompactorCommit),
+            ]
+        }
+
+        fn make_prefix(idx: u8) -> Bytes {
+            Bytes::from(format!("p{:02}/", idx))
+        }
+
+        fn make_view(seq: u64) -> SsTableView {
+            let view_id = Ulid::from_parts(seq, 0);
+            SsTableView::new(
+                view_id,
+                SsTableHandle::new(
+                    SsTableId::Compacted(Ulid::from_parts(seq, 1)),
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo::default(),
+                ),
+            )
+        }
+
+        struct Simulator {
+            // Published manifest's segment list — what's currently durable.
+            store: Vec<Segment>,
+            // Writer's in-memory state. Mutated by flushes; merged with
+            // `store` on commit.
+            writer: Vec<Segment>,
+            // Compactor's in-memory state. Mutated by compactions/drains;
+            // merged with `store` on commit.
+            compactor: Vec<Segment>,
+            next_l0_seq: u64,
+            next_sr_id: u32,
+            // Every L0 view ID the writer has ever flushed — the
+            // provenance "ground truth."
+            flushed_l0s: BTreeSet<Ulid>,
+            // History of L0 view ID sets present in `store` after each
+            // published commit. The resurrection check walks this.
+            l0_history: Vec<BTreeSet<Ulid>>,
+            // For each segment prefix, the watermark observed at each
+            // commit (None if the prefix wasn't present). Used to
+            // verify watermark monotonicity.
+            watermark_history: Vec<HashMap<Bytes, Option<Ulid>>>,
+        }
+
+        impl Simulator {
+            fn new() -> Self {
+                Self {
+                    store: Vec::new(),
+                    writer: Vec::new(),
+                    compactor: Vec::new(),
+                    next_l0_seq: 0,
+                    next_sr_id: 0,
+                    flushed_l0s: BTreeSet::new(),
+                    l0_history: Vec::new(),
+                    watermark_history: Vec::new(),
+                }
+            }
+
+            fn writer_flush(&mut self, prefix_idx: u8) {
+                self.next_l0_seq += 1;
+                let view = make_view(self.next_l0_seq);
+                self.flushed_l0s.insert(view.id);
+                let prefix = make_prefix(prefix_idx);
+                match self
+                    .writer
+                    .binary_search_by(|s| s.prefix.as_ref().cmp(prefix.as_ref()))
+                {
+                    Ok(idx) => self.writer[idx].tree.l0.push_front(view),
+                    Err(idx) => self.writer.insert(
+                        idx,
+                        Segment {
+                            prefix,
+                            tree: LsmTreeState {
+                                last_compacted_l0_sst_view_id: None,
+                                last_compacted_l0_sst_id: None,
+                                l0: VecDeque::from(vec![view]),
+                                compacted: vec![],
+                            },
+                        },
+                    ),
+                }
+            }
+
+            fn writer_commit(&mut self) {
+                self.writer = merge_segments_from_compactor(&self.writer, &self.store);
+                self.store = self.writer.clone();
+                self.snapshot();
+            }
+
+            // Sync compactor's local state from the latest published manifest
+            // before applying a compactor mutation. This models the compactor
+            // reading writer's manifest at the start of each cycle.
+            fn compactor_sync(&mut self) {
+                self.compactor = merge_segments_from_writer(&self.compactor, &self.store);
+            }
+
+            fn compactor_read_compact(&mut self, prefix_idx: u8, count: u8) {
+                self.compactor_sync();
+                let prefix = make_prefix(prefix_idx);
+                if let Ok(idx) = self
+                    .compactor
+                    .binary_search_by(|s| s.prefix.as_ref().cmp(prefix.as_ref()))
+                {
+                    let seg = &mut self.compactor[idx];
+                    let count = (count as usize).min(seg.tree.l0.len());
+                    if count == 0 {
+                        return;
+                    }
+                    let newest = seg.tree.l0[0].id;
+                    let sr_views: Vec<_> = (0..count).map(|i| seg.tree.l0[i].clone()).collect();
+                    for _ in 0..count {
+                        seg.tree.l0.pop_front();
+                    }
+                    seg.tree.last_compacted_l0_sst_view_id = Some(newest);
+                    self.next_sr_id += 1;
+                    seg.tree.compacted.insert(
+                        0,
+                        SortedRun {
+                            id: self.next_sr_id,
+                            sst_views: sr_views,
+                        },
+                    );
+                }
+            }
+
+            fn compactor_read_drain(&mut self, prefix_idx: u8) {
+                self.compactor_sync();
+                let prefix = make_prefix(prefix_idx);
+                if let Ok(idx) = self
+                    .compactor
+                    .binary_search_by(|s| s.prefix.as_ref().cmp(prefix.as_ref()))
+                {
+                    let seg = &mut self.compactor[idx];
+                    if let Some(newest) = seg.tree.l0.front() {
+                        seg.tree.last_compacted_l0_sst_view_id = Some(newest.id);
+                    }
+                    seg.tree.l0.clear();
+                    seg.tree.compacted.clear();
+                }
+            }
+
+            fn compactor_commit(&mut self) {
+                self.compactor = merge_segments_from_writer(&self.compactor, &self.store);
+                self.store = self.compactor.clone();
+                self.snapshot();
+            }
+
+            fn snapshot(&mut self) {
+                let mut l0_ids = BTreeSet::new();
+                let mut watermarks: HashMap<Bytes, Option<Ulid>> = HashMap::new();
+                for seg in &self.store {
+                    for view in &seg.tree.l0 {
+                        l0_ids.insert(view.id);
+                    }
+                    watermarks.insert(seg.prefix.clone(), seg.tree.last_compacted_l0_sst_view_id);
+                }
+                self.l0_history.push(l0_ids);
+                self.watermark_history.push(watermarks);
+            }
+
+            // Drive any pending writer state into `store` and let the
+            // compactor follow, so that "added at least once" can be
+            // checked against `flushed_l0s`. Two cycles is enough for a
+            // pending flush to traverse Live → potential drain → prune.
+            fn settle(&mut self) {
+                self.writer_commit();
+                self.compactor_commit();
+                self.writer_commit();
+                self.compactor_commit();
+            }
+
+            fn check_invariants(&self) {
+                self.check_no_l0_resurrection();
+                self.check_l0_provenance();
+                self.check_l0_unique_across_segments();
+                self.check_watermark_trim();
+                self.check_watermark_monotonic();
+                self.check_l0_not_in_l0_and_sr_simultaneously();
+            }
+
+            // Each L0 ID has at most one NotSeen → Present transition;
+            // an Absent → Present transition is a resurrection.
+            fn check_no_l0_resurrection(&self) {
+                let mut all_ids = BTreeSet::new();
+                for snap in &self.l0_history {
+                    all_ids.extend(snap.iter().copied());
+                }
+                for id in all_ids {
+                    let mut state = 0u8; // 0 not seen, 1 present, 2 absent-after
+                    for snap in &self.l0_history {
+                        let present = snap.contains(&id);
+                        state = match (state, present) {
+                            (0, false) => 0,
+                            (0, true) | (1, true) => 1,
+                            (1, false) | (2, false) => 2,
+                            (2, true) => panic!(
+                                "L0 {} resurrected after removal; history={:?}",
+                                id, self.l0_history
+                            ),
+                            _ => unreachable!(),
+                        };
+                    }
+                }
+            }
+
+            // Every L0 ID appearing in any committed manifest must have
+            // come from a writer flush — the merge must not fabricate IDs.
+            fn check_l0_provenance(&self) {
+                for snap in &self.l0_history {
+                    for id in snap {
+                        assert!(
+                            self.flushed_l0s.contains(id),
+                            "L0 {} appeared in manifest but was never flushed",
+                            id
+                        );
+                    }
+                }
+                for seg in &self.store {
+                    for sr in &seg.tree.compacted {
+                        for view in &sr.sst_views {
+                            assert!(
+                                self.flushed_l0s.contains(&view.id),
+                                "SR {} references L0 {} that was never flushed",
+                                sr.id,
+                                view.id
+                            );
+                        }
+                    }
+                }
+            }
+
+            // No L0 ID may appear in two different segments' L0 lists
+            // simultaneously.
+            fn check_l0_unique_across_segments(&self) {
+                let mut seen: HashMap<Ulid, Bytes> = HashMap::new();
+                for seg in &self.store {
+                    for view in &seg.tree.l0 {
+                        if let Some(other) = seen.get(&view.id) {
+                            panic!(
+                                "L0 {} appears in segment {:?} and {:?} simultaneously",
+                                view.id, other, seg.prefix
+                            );
+                        }
+                        seen.insert(view.id, seg.prefix.clone());
+                    }
+                }
+            }
+
+            // Within a segment, no L0 in the L0 list may have an ID at
+            // or below the segment's watermark — those are supposed to
+            // be trimmed by the merge.
+            fn check_watermark_trim(&self) {
+                for seg in &self.store {
+                    if let Some(wm) = seg.tree.last_compacted_l0_sst_view_id {
+                        for view in &seg.tree.l0 {
+                            assert!(
+                                view.id > wm,
+                                "L0 {} survived in segment {:?} but watermark is {}",
+                                view.id,
+                                seg.prefix,
+                                wm
+                            );
+                        }
+                    }
+                }
+            }
+
+            // For each segment prefix, the watermark must only advance
+            // (or stay None) across the published-manifest history.
+            fn check_watermark_monotonic(&self) {
+                let mut all_prefixes = BTreeSet::new();
+                for snap in &self.watermark_history {
+                    all_prefixes.extend(snap.keys().cloned());
+                }
+                for prefix in all_prefixes {
+                    let mut prev: Option<Ulid> = None;
+                    for snap in &self.watermark_history {
+                        let cur = snap.get(&prefix).copied().flatten();
+                        if let (Some(p), Some(c)) = (prev, cur) {
+                            assert!(
+                                c >= p,
+                                "watermark for {:?} regressed: {} → {}",
+                                prefix,
+                                p,
+                                c
+                            );
+                        }
+                        // Once a segment is dropped (cur == None), the
+                        // next reincarnation starts fresh — don't carry
+                        // the old watermark forward as a constraint.
+                        if cur.is_some() {
+                            prev = cur;
+                        } else if !snap.contains_key(&prefix) {
+                            prev = None;
+                        }
+                    }
+                }
+            }
+
+            // Within any single committed manifest, an L0 ID present in
+            // a segment's `l0` list must not also appear in any of that
+            // segment's SRs.
+            fn check_l0_not_in_l0_and_sr_simultaneously(&self) {
+                for seg in &self.store {
+                    let l0_ids: BTreeSet<Ulid> = seg.tree.l0.iter().map(|v| v.id).collect();
+                    for sr in &seg.tree.compacted {
+                        for view in &sr.sst_views {
+                            assert!(
+                                !l0_ids.contains(&view.id),
+                                "L0 {} appears in both l0 list and SR {} of segment {:?}",
+                                view.id,
+                                sr.id,
+                                seg.prefix
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Every L0 the writer flushed must have appeared in at
+            // least one published manifest's L0 list. Combined with the
+            // resurrection check, this gives "added exactly once."
+            fn check_added_exactly_once(&self) {
+                for id in &self.flushed_l0s {
+                    let appeared = self.l0_history.iter().any(|s| s.contains(id));
+                    assert!(
+                        appeared,
+                        "L0 {} was flushed but never reached a committed manifest",
+                        id
+                    );
+                }
+            }
+        }
+
+        proptest!(|(ops in proptest::collection::vec(arb_op(), 0..40))| {
+            let mut sim = Simulator::new();
+            for op in &ops {
+                match op {
+                    Op::WriterFlush(p) => sim.writer_flush(*p),
+                    Op::WriterCommit => sim.writer_commit(),
+                    Op::CompactorReadCompact(p, c) => sim.compactor_read_compact(*p, *c),
+                    Op::CompactorReadDrain(p) => sim.compactor_read_drain(*p),
+                    Op::CompactorCommit => sim.compactor_commit(),
+                }
+                sim.check_invariants();
+            }
+            // Drain any pending writer state through the protocol so the
+            // "added at least once" half of "exactly once" can hold.
+            sim.settle();
+            sim.check_invariants();
+            sim.check_added_exactly_once();
         });
     }
 
