@@ -472,6 +472,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_not_split_one_commit_seq_across_replayed_memtables() {
+        let table_store = test_table_store();
+        let commit_seq = 42;
+
+        // Simulate one committed write batch. Every row gets the same commit
+        // sequence, which means replay must not split these rows into separate
+        // memtable layers.
+        let entries = (0..8)
+            .map(|i| {
+                RowEntry::new_value(format!("key_{i:03}").as_bytes(), &[b'x'; 128], commit_seq)
+            })
+            .collect::<Vec<_>>();
+
+        // Size replayed memtables so one real row fits, but the second row
+        // overflows into the next replayed memtable.
+        let max_memtable_bytes =
+            table_store.estimate_encoded_size_compacted(1, entries[0].estimated_size());
+
+        // Use the real WAL SST builder so the fixture matches WAL flushes.
+        let mut builder = table_store.wal_table_builder();
+        for entry in entries {
+            builder.add(entry).await.unwrap();
+        }
+        let encoded_sst = builder.build().await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(1), encoded_sst, false)
+            .await
+            .unwrap();
+
+        // Replay the single WAL SST into in-memory tables. If the replay code
+        // can split a single commit sequence, it will do so here.
+        let mut replay_iter = WalReplayIterator::new(
+            &ManifestCore::new(),
+            WalReplayOptions {
+                min_memtable_bytes: usize::MAX,
+                max_memtable_bytes,
+                ..WalReplayOptions::default()
+            },
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let mut replayed_seq_ranges = Vec::new();
+        while let Some(replayed_table) = replay_iter.next().await.unwrap() {
+            let metadata = replayed_table.table.metadata();
+            replayed_seq_ranges.push((metadata.first_seq, metadata.last_seq));
+        }
+
+        // The current implementation fails this by producing multiple replayed
+        // memtables with the same sequence range, which can make later replay
+        // logic treat part of the write batch as already committed.
+        assert_eq!(
+            replayed_seq_ranges,
+            vec![(commit_seq, commit_seq)],
+            "WAL replay split one commit seq across replayed memtables: {replayed_seq_ranges:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_replay_memtables_in_sequence_order() {
+        let table_store = test_table_store();
+
+        // Write one WAL with entries whose sequence numbers do not match key
+        // order. Replay must not expose a later memtable whose sequence range
+        // starts before the previous memtable's sequence range ends.
+        let entries = vec![
+            RowEntry::new_value(b"key_000", &[b'x'; 128], 100),
+            RowEntry::new_value(b"key_001", &[b'x'; 128], 10),
+            RowEntry::new_value(b"key_002", &[b'x'; 128], 110),
+        ];
+
+        // Size replayed memtables so one real row fits, but the second row
+        // overflows into the next replayed memtable.
+        let max_memtable_bytes =
+            table_store.estimate_encoded_size_compacted(1, entries[0].estimated_size());
+
+        // Use the real WAL SST builder so replay sees the same entry order as a
+        // flushed WAL.
+        let mut builder = table_store.wal_table_builder();
+        for entry in entries {
+            builder.add(entry).await.unwrap();
+        }
+        let encoded_sst = builder.build().await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(1), encoded_sst, false)
+            .await
+            .unwrap();
+
+        // Replay the single WAL SST into in-memory tables.
+        let mut replay_iter = WalReplayIterator::new(
+            &ManifestCore::new(),
+            WalReplayOptions {
+                min_memtable_bytes: usize::MAX,
+                max_memtable_bytes,
+                ..WalReplayOptions::default()
+            },
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let mut replayed_seq_ranges = Vec::new();
+        while let Some(replayed_table) = replay_iter.next().await.unwrap() {
+            let metadata = replayed_table.table.metadata();
+            replayed_seq_ranges.push((metadata.first_seq, metadata.last_seq));
+        }
+
+        // The current implementation fails this by returning the seq=10 row in
+        // a later replayed memtable after already returning seq=100.
+        for adjacent in replayed_seq_ranges.windows(2) {
+            let previous_last_seq = adjacent[0].1;
+            let later_first_seq = adjacent[1].0;
+            assert!(
+                later_first_seq >= previous_last_seq,
+                "WAL replay returned out-of-order memtable sequence ranges: {replayed_seq_ranges:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn should_only_replay_wals_after_last_l0_flushed_wal_id() {
         let table_store = test_table_store();
         let mut rng = rng::new_test_rng(None);
