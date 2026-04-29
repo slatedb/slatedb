@@ -181,13 +181,14 @@ pub trait Filter {
 pub struct FilterQuery {
     /// The target of this query (a specific key or a prefix).
     pub target: FilterTarget,
-    /// Opaque, caller-supplied context for custom filters.
+    /// Opaque, caller-supplied context for custom filters, forwarded from
+    /// `ScanOptions::filter_context` or `ReadOptions::filter_context`.
     ///
-    /// Custom filters downcast this to their expected type. For example,
-    /// a min/max version filter expects `Arc<VersionBounds>` and ignores
-    /// the query if the downcast fails. The built-in bloom filter ignores
+    /// Custom filters decode this according to their own byte layout. For
+    /// example, a min/max version filter might expect two big-endian `u64`s
+    /// packed into the `Inline` variant. The built-in bloom filter ignores
     /// this field entirely.
-    pub context: Option<Arc<dyn Any + Send + Sync>>,
+    pub context: Option<FilterContext>,
 }
 
 /// The target of a filter query.
@@ -198,19 +199,28 @@ pub enum FilterTarget {
     /// Used to test whether any key with the given prefix might exist in the SST.
     Prefix(Bytes),
 }
+
+/// Caller-supplied opaque context. Carries raw bytes that a custom filter
+/// decodes itself.
+///
+/// Marked `#[non_exhaustive]` so new variants can be added (e.g., a heap
+/// `Bytes` variant for larger payloads, or typed variants) as concrete
+/// user use cases emerge, without it being a breaking change.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum FilterContext {
+    /// Inline 64-byte payload with no heap allocation. Suitable for
+    /// pairs of `u64`s, `u128`s, and other fixed-layout small structs.
+    Inline([u8; 64]),
+}
 ```
 
 Key design decisions:
 
-1. **`FilterQuery` with opaque context**: `FilterQuery` is a struct rather than
-   a plain enum so it can carry caller-supplied context alongside the query kind.
-   The `context` field is an `Option<Arc<dyn Any + Send + Sync>>` cloned from
-   `ScanOptions::filter_context`. Custom filters downcast it to their expected
-   type — e.g., a min/max version filter downcasts to `VersionBounds`. If the
-   downcast fails or context is `None`, the filter returns `true` (cannot
-   answer). The `Arc` clone is cheap (reference count bump) and the object can
-   be reused across concurrent scans without per-call allocation. The built-in
-   bloom filter ignores context entirely.
+1. **`FilterQuery` with opaque context**: `FilterQuery` carries an optional
+   `FilterContext` forwarded from `ScanOptions` / `ReadOptions`. Custom filters
+   decode it to their expected layout; when it is `None` or undecodable, they
+   return `true`. The built-in bloom filter ignores it.
 
 2. **Filter applicability is expressed through `might_match` returning `true`**:
    Rather than adding a separate `applies_to` or `can_answer` method, filters
@@ -359,10 +369,6 @@ pub struct BloomFilterPolicy {
     name: String,
 }
 
-// `BloomFilterPolicy` has a manual `Debug` impl (not derived) because
-// `dyn PrefixExtractor` does not implement `Debug`; the manual impl surfaces
-// the extractor's name instead.
-
 impl BloomFilterPolicy {
     pub const NAME: &'static str = "_bf";
 
@@ -482,24 +488,33 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 }
 ```
 
-`ScanOptions` gets a `filter_context` field for passing opaque context to
-custom filters:
+Both `ScanOptions` and `ReadOptions` get a `filter_context` field for
+passing opaque context to custom filters:
 
 ```rust
 pub struct ScanOptions {
     // ... existing fields ...
 
-    /// Opaque context passed to custom filters at query time.
-    ///
-    /// Custom filters downcast this to their expected type inside
-    /// `might_match`. For example, a min/max version filter expects
-    /// `Arc<VersionBounds>`.
-    ///
-    /// `None` means no context is provided; filters that need context
-    /// return `true` (cannot rule out the SST).
-    pub filter_context: Option<Arc<dyn Any + Send + Sync>>,
+    /// Opaque context passed to custom filter policies at query time.
+    /// Built-in filters (including the default bloom filter) ignore this
+    /// field, so leaving it `None` is always safe.
+    pub filter_context: Option<FilterContext>,
+}
+
+pub struct ReadOptions {
+    // ... existing fields ...
+
+    /// Opaque context passed to custom filter policies at query time.
+    /// See `ScanOptions::filter_context`.
+    pub filter_context: Option<FilterContext>,
 }
 ```
+
+The two-variant shape lets callers choose their byte encoding:
+
+- `Inline([u8; 64])` covers the common fixed-layout case (e.g., a pair of
+  `u64`s for a min/max version filter) with zero heap allocation.
+- `Bytes(Bytes)` covers larger or variable-length payloads.
 
 **Configuration modes (for BloomFilterPolicy):**
 
@@ -551,16 +566,14 @@ let db = Db::builder("path", object_store)
     .build()
     .await?;
 
-// Passing context to custom filters at scan time
-// The Arc can be created once and reused across scans.
-let version_bounds: Arc<dyn Any + Send + Sync> = Arc::new(VersionBounds {
-    min_version: 0,
-    max_version: 42,
-});
-let scan_options = ScanOptions {
-    filter_context: Some(version_bounds),
-    ..ScanOptions::default()
-};
+// Passing context to custom filters at scan time. For a min/max version
+// filter that expects two big-endian u64s, the Inline variant gives a
+// no-heap-allocation path even when bounds change per scan:
+let mut payload = [0u8; 64];
+payload[..8].copy_from_slice(&min_version.to_be_bytes());
+payload[8..16].copy_from_slice(&max_version.to_be_bytes());
+let scan_options = ScanOptions::default()
+    .with_filter_context(Some(FilterContext::Inline(payload)));
 ```
 
 #### Write path: building the filter
@@ -806,9 +819,9 @@ SlateDB features and components that this RFC interacts with. Check all that app
   semantics map to `0`). See [SST Format Changes](#sst-format-changes).
 - **Public API**: `filter_bits_per_key` is removed from `Settings`.
   `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. See
-  [Configuration](#configuration) for migration examples. The
-  `ScanOptions::filter_context` field is deferred and not added in the
-  initial implementation.
+  [Configuration](#configuration) for migration examples. `ScanOptions`
+  and `ReadOptions` gain an optional `filter_context: Option<FilterContext>`
+  field; built-in filters ignore it, so existing callers need no changes.
 - **Rolling upgrades**: Old readers that don't understand the `filter_format`
   field will ignore it (FlatBuffers forward compatibility). They will continue
   to decode filters as bloom filters, which is correct as long as the bloom

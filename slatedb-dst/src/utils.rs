@@ -1,36 +1,19 @@
-//! This module contains helper functions to simplify deterministic simulation (DST).
-
-use log::{error, info};
-use rand::Rng;
-use slatedb::config::CompactorOptions;
-use slatedb::config::CompressionCodec;
-use slatedb::config::GarbageCollectorDirectoryOptions;
-use slatedb::config::GarbageCollectorOptions;
-use slatedb::config::GarbageCollectorScheduleOptions;
-use slatedb::config::SizeTieredCompactionSchedulerOptions;
-use slatedb::object_store::ObjectStore;
-use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-use slatedb::CompactorBuilder;
-use slatedb::Db;
-use slatedb::DbBuilder;
-use slatedb::DbRand;
-use slatedb::Error;
-use slatedb::Settings;
-use slatedb_common::clock::SystemClock;
-use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
+
+use rand::Rng;
+use slatedb::config::{
+    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    GarbageCollectorScheduleOptions, SizeTieredCompactionSchedulerOptions,
+};
+use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
-use crate::dst::DstDuration;
-use crate::object_store::ClockedObjectStore;
-use crate::DefaultDstDistribution;
-use crate::Dst;
-use crate::DstOptions;
+use crate::{Operation, StreamDirection, Toxic, ToxicKind};
 
+const KIB_8: usize = 8 * 1024;
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
 const GIB_2: usize = 2048 * MIB_1;
@@ -43,81 +26,21 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
     None,
 ];
 
-/// Builds a [Dst] instance (including its [Db]) with [Settings] that are selected
-/// at random.
+/// Builds a randomized deterministic [`Settings`] value for DST scenarios.
 ///
-/// All arguments are expected to be deterministic.
-pub async fn build_dst(
-    object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    rand: Rc<DbRand>,
-    dst_opts: DstOptions,
-) -> Result<Dst, Error> {
-    let db = build_db(object_store, system_clock.clone(), &rand).await;
-
-    Dst::new(
-        db,
-        system_clock.clone(),
-        rand.clone(),
-        Box::new(DefaultDstDistribution::new(
-            dst_opts.clone(),
-            system_clock,
-            rand,
-        )),
-        dst_opts,
-    )
-}
-
-/// Builds a DB instance with [Settings] that are selected at random.
-///
-/// All arguments are expected to be deterministic.
-pub async fn build_db(
-    object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    rand: &DbRand,
-) -> Db {
-    let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
-    let settings = build_settings(rand).await;
-    // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
-    // Otherwise, the compactor never runs and writers get blocked permanently.
-    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
-    // Prevent scheduler from having a higher min compaction sources than max compaction sources.
-    let max_compaction_sources = 8.max(min_compaction_sources);
-    let scheduler_options = SizeTieredCompactionSchedulerOptions {
-        min_compaction_sources,
-        max_compaction_sources,
-        ..Default::default()
-    }
-    .into();
-    let compactor_options = CompactorOptions {
-        scheduler_options,
-        ..Default::default()
-    };
-    let compaction_scheduler_supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
-    let mut builder = DbBuilder::new("test_db", object_store.clone());
-    builder = builder.with_settings(settings);
-    builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
-    builder = builder.with_system_clock(system_clock.clone());
-    builder = builder.with_compactor_builder(
-        CompactorBuilder::new("test_db", object_store)
-            .with_options(compactor_options)
-            .with_scheduler_supplier(compaction_scheduler_supplier),
-    );
-    builder.build().await.unwrap()
-}
-
-/// Builds a Settings instance with random values.
-///
-/// All arguments are expected to be deterministic.
+/// The returned settings are entirely derived from `rand`, except that
+/// object-store caching is always disabled. The cache implementation uses
+/// filesystem and blocking-task wakeups outside the seeded current-thread DST
+/// runtime, which breaks logical-clock determinism for the harness-managed
+/// clock.
 pub async fn build_settings(rand: &DbRand) -> Settings {
     let mut rng = rand.rng();
     let flush_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(60));
     let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let manifest_update_timeout = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let min_filter_keys = rng.random_range(100..1000);
-    let filter_bits_per_key = rng.random_range(1..20);
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
-    let l0_max_ssts = rng.random_range(4..8); // max L0 size of 4GiB (8 * 500MiB l0 sst size)
+    let l0_max_ssts = rng.random_range(4..8);
     let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
@@ -126,94 +49,191 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         } else {
             None
         };
-
-    Settings {
+    let settings = Settings {
         flush_interval: Some(flush_interval),
         manifest_poll_interval,
         manifest_update_timeout,
         min_filter_keys,
-        filter_bits_per_key,
         l0_sst_size_bytes,
         l0_max_ssts,
         max_unflushed_bytes,
         compression_codec,
-        garbage_collector_options: Some(GarbageCollectorOptions {
-            manifest_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-            wal_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-            compacted_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-            compactions_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-            detach_options: Some(GarbageCollectorScheduleOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-            }),
-        }),
-        compactor_options: None,
+        compactor_options: Some(build_settings_compactor(&mut *rng)),
+        garbage_collector_options: Some(build_settings_gc(&mut *rng)),
+        #[cfg(feature = "wal_disable")]
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
+    };
+
+    settings
+}
+
+/// Builds randomized deterministic compactor options for DST scenarios.
+pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
+    let min_compaction_sources = rng.random_range(2..=4);
+    let max_compaction_sources = rng.random_range(min_compaction_sources..=16);
+
+    CompactorOptions {
+        poll_interval: rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)),
+        manifest_update_timeout: rng
+            .random_range(Duration::from_millis(100)..Duration::from_secs(60)),
+        max_sst_size: rng.random_range(KIB_8..GIB_2),
+        max_concurrent_compactions: rng.random_range(1..=4),
+        max_fetch_tasks: rng.random_range(1..=8),
+        scheduler_options: SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources,
+            max_compaction_sources,
+            include_size_threshold: rng.random_range(2.0..=8.0),
+        }
+        .into(),
     }
 }
 
-/// Tokio's default Runtime is non-deterministic even if a single thread is used.
-/// Certain methods such as [tokio::select] pick a branch to poll at random (see
-/// [tokio::select!](https://docs.rs/tokio/latest/tokio/macro.select.html#fairness)).
-///
-/// This function uses a seed to build a deterministic Tokio runtime.
-///
-/// `RUSTFLAGS="--cfg tokio_unstable"` must be set, and Tokio's `rt` feature
-/// must be enabled to use this function. See [tokio::runtime::Builder::rng_seed] for
-/// more details.
-#[cfg(tokio_unstable)]
-pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
-    use tokio::runtime::RngSeed;
-
-    // https://pierrezemb.fr/posts/tokio-hidden-gems/
-    tokio::runtime::Builder::new_current_thread()
-        .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
-        .build_local(Default::default())
-        .unwrap()
+/// Builds randomized deterministic garbage collector options for DST scenarios.
+pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
+    GarbageCollectorOptions {
+        manifest_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+        wal_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+        compacted_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+        compactions_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+            min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
+        }),
+        detach_options: Some(GarbageCollectorScheduleOptions {
+            interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
+        }),
+    }
 }
 
-/// Builds a [Dst] instance (including its [Db]) with [Settings] that are selected
-/// at random. Then runs a simulation for the given number of iterations.
+/// Builds a deterministic randomized object-store toxic.
 ///
-/// All arguments are expected to be deterministic.
-pub async fn run_simulation(
-    object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    rand: Rc<DbRand>,
-    dst_duration: DstDuration,
-    dst_opts: DstOptions,
-) -> Result<(), Error> {
-    let seed = rand.seed();
-    info!("running simulation [seed={}]", seed);
-    let mut dst = build_dst(object_store, system_clock.clone(), rand.clone(), dst_opts).await?;
-    match dst.run_simulation(dst_duration).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            error!("simulation failed [seed={}, error={}]", seed, e);
-            Err(e)
+/// Generated toxics may be:
+/// - `Latency`: 1 to 5 ms base latency, 0 to 15 ms jitter, and 0.35 to 0.95
+///   toxicity.
+/// - `Bandwidth`: 16 to 256 KiB/s bandwidth and 0.20 to 0.80 toxicity.
+/// - `SlowClose`: 1 to 10 ms close delay and 0.30 to 0.90 toxicity.
+/// - `ResetPeer`: connection reset failures with 0.005 to 0.035 toxicity.
+///
+/// ## Arguments
+/// - `rand`: The deterministic RNG used to choose each toxic's kind, operation
+///   filter, path filter, direction, and toxicity.
+/// - `root_path`: The object-store root path used by the scenario. When non-empty,
+///   generated path filters may target the root itself or one of SlateDB's standard
+///   subdirectories: `wal`, `manifest`, `compacted`, or `compactions`.
+/// - `index`: The index used in the generated toxic name.
+///
+/// ## Returns
+/// Returns a generated toxic.
+pub fn build_toxic(rand: &DbRand, root_path: &str, index: usize) -> Toxic {
+    let mut rng = rand.rng();
+    let root_path = root_path.trim_matches('/');
+
+    let (kind_name, kind, direction, toxicity) = match rng.random_range(0..10) {
+        0..=4 => {
+            let direction = if rng.random_bool(0.5) {
+                StreamDirection::Upstream
+            } else {
+                StreamDirection::Downstream
+            };
+            (
+                "latency",
+                ToxicKind::Latency {
+                    latency: Duration::from_millis(rng.random_range(1_u64..=5)),
+                    jitter: Duration::from_millis(rng.random_range(0_u64..=15)),
+                },
+                direction,
+                rng.random_range(0.35..=0.95),
+            )
         }
+        5..=6 => {
+            let direction = if rng.random_bool(0.5) {
+                StreamDirection::Upstream
+            } else {
+                StreamDirection::Downstream
+            };
+            (
+                "bandwidth",
+                ToxicKind::Bandwidth {
+                    bytes_per_sec: rng.random_range(16_u64..=256) * 1024,
+                },
+                direction,
+                rng.random_range(0.20..=0.80),
+            )
+        }
+        7 => (
+            "slow-close",
+            ToxicKind::SlowClose {
+                delay: Duration::from_millis(rng.random_range(1_u64..=10)),
+            },
+            StreamDirection::Downstream,
+            rng.random_range(0.30..=0.90),
+        ),
+        _ => {
+            let direction = if rng.random_bool(0.5) {
+                StreamDirection::Upstream
+            } else {
+                StreamDirection::Downstream
+            };
+            (
+                "reset-peer",
+                ToxicKind::ResetPeer,
+                direction,
+                rng.random_range(0.005..=0.035),
+            )
+        }
+    };
+
+    let operations = match rng.random_range(0..8) {
+        0 => vec![],
+        1 => vec![Operation::PutOpts],
+        2 => vec![
+            Operation::GetOpts,
+            Operation::GetRange,
+            Operation::GetRanges,
+        ],
+        3 => vec![Operation::GetOpts, Operation::GetRange, Operation::Head],
+        4 => vec![Operation::List, Operation::ListWithOffset],
+        5 => vec![Operation::Delete],
+        6 => vec![Operation::Copy, Operation::Rename],
+        _ => vec![
+            Operation::PutOpts,
+            Operation::GetOpts,
+            Operation::GetRange,
+            Operation::GetRanges,
+            Operation::Head,
+            Operation::List,
+            Operation::ListWithOffset,
+        ],
+    };
+
+    let path_prefix = if root_path.is_empty() || rng.random_bool(0.15) {
+        None
+    } else {
+        Some(match rng.random_range(0..5) {
+            0 => root_path.to_string(),
+            1 => format!("{root_path}/wal"),
+            2 => format!("{root_path}/manifest"),
+            3 => format!("{root_path}/compacted"),
+            _ => format!("{root_path}/compactions"),
+        })
+    };
+
+    Toxic {
+        name: format!("random-{index:02}-{kind_name}"),
+        kind,
+        direction,
+        toxicity,
+        operations,
+        path_prefix,
     }
 }
 
@@ -232,11 +252,4 @@ fn init_tracing() {
             .with_test_writer()
             .init();
     });
-}
-
-pub(crate) fn truncate_bytes(bytes: &[u8]) -> &[u8] {
-    if bytes.len() < 8 {
-        return bytes;
-    }
-    &bytes[..8]
 }

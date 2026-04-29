@@ -48,7 +48,6 @@
 //! manifest_poll_interval = "1s"
 //! manifest_update_timeout = "300s"
 //! min_filter_keys = 1000
-//! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
 //! l0_flush_parallelism = 4
@@ -96,7 +95,6 @@
 //!  "manifest_poll_interval": "1s",
 //!  "manifest_update_timeout": "300s",
 //!  "min_filter_keys": 1000,
-//!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
 //!  "l0_flush_parallelism": 4,
@@ -147,7 +145,6 @@
 //! manifest_poll_interval: '1s'
 //! manifest_update_timeout: '300s'
 //! min_filter_keys: 1000
-//! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
 //! l0_flush_parallelism: 1
@@ -181,6 +178,7 @@
 //!     min_age: '86400s'
 //! ```
 //!
+use crate::filter_policy::FilterContext;
 use crate::iter::IterationOrder;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
@@ -273,6 +271,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ReadOptions {
@@ -281,6 +282,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            filter_context: None,
         }
     }
 }
@@ -307,6 +309,13 @@ impl ReadOptions {
             ..self
         }
     }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -328,6 +337,12 @@ pub struct ScanOptions {
     pub max_fetch_tasks: usize,
     /// The iteration order for the scan. Defaults to [`IterationOrder::Ascending`].
     pub order: IterationOrder,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    ///
+    /// Only consulted for `scan_prefix` today. Plain range scans do not
+    /// evaluate SST filters, so this field has no effect on `scan`.
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ScanOptions {
@@ -340,6 +355,7 @@ impl Default for ScanOptions {
             cache_blocks: false,
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
+            filter_context: None,
         }
     }
 }
@@ -383,6 +399,13 @@ impl ScanOptions {
 
     pub fn with_order(self, order: IterationOrder) -> Self {
         Self { order, ..self }
+    }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
     }
 }
 
@@ -609,13 +632,6 @@ pub struct Settings {
     /// faster without a bloom filter.
     pub min_filter_keys: u32,
 
-    /// The number of bits to use per key for bloom filters. We recommend setting this
-    /// to the default value of 10, which yields a filter with an expected fpp of ~.0082
-    /// Note that this is evaluated per-sorted-run, so the expected number of false positives
-    /// per request is the fpp * number of sorted runs. So for large dbs with lots of runs,
-    /// you may benefit from setting this higher (if you have enough memory available)
-    pub filter_bits_per_key: u32,
-
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
     /// (based on flush_interval) regardless of this value. Memtable sizes are checked
@@ -712,7 +728,6 @@ impl std::fmt::Debug for Settings {
                 &self.object_store_cache_options,
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
-            .field("filter_bits_per_key", &self.filter_bits_per_key)
             .field("default_ttl", &self.default_ttl);
         data.finish()
     }
@@ -907,7 +922,6 @@ impl Default for Settings {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
-            filter_bits_per_key: 10,
             default_ttl: None,
             #[cfg(test)]
             block_format: None,

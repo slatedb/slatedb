@@ -459,6 +459,7 @@ impl DbReaderInner {
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         };
 
         let (mut replay_after_wal_id, mut last_committed_seq) =
