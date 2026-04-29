@@ -449,6 +449,11 @@ pub struct WriteOptions {
     #[cfg(dst)]
     /// Force the current timestamp for DST operations. See #719 for details.
     pub now: i64,
+    /// An optional user-defined sequence number for this write. When non-zero, the
+    /// provided value is used instead of the internally generated sequence number.
+    /// The value must be strictly greater than the current maximum sequence number
+    /// or the write will fail with an `InvalidSequenceNumber` error.
+    pub seqnum: u64,
 }
 
 impl Default for WriteOptions {
@@ -458,6 +463,7 @@ impl Default for WriteOptions {
             await_durable: true,
             #[cfg(dst)]
             now: 0,
+            seqnum: 0,
         }
     }
 }
