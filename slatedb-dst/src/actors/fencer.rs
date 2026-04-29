@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use log::info;
-use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::{CloseReason, Db, Error, ErrorKind};
 use tracing::instrument;
 
@@ -74,16 +73,22 @@ impl DbFencerActor {
 impl Actor for DbFencerActor {
     #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        // Make a new DB, fencing the old one.
         let Some(next_db) = self.open_replacement_db(ctx).await? else {
             return Ok(());
         };
         let old_db = ctx.swap_db(next_db);
 
-        self.assert_old_db_fenced(ctx, &old_db).await;
+        // Verify the old DB is fenced.
+        match old_db.get(b"foo").await {
+            Err(err) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {}
+            result => panic!("old db was not fenced as expected [result={result:?}]"),
+        }
         old_db.close().await?;
 
         info!("db fencing complete [name={}]", ctx.name());
 
+        // Wait for the restart interval before allowing the next generation to start.
         let shutdown_token = ctx.shutdown_token();
         let system_clock = ctx.system_clock();
         tokio::select! {
@@ -116,23 +121,6 @@ impl DbFencerActor {
                 }
                 result => return result.map(Some),
             }
-        }
-    }
-
-    async fn assert_old_db_fenced(&self, ctx: &ActorCtx, old_db: &Db) {
-        let probe_key = format!("__slatedb_dst/db_fencer/{}/probe", ctx.name());
-        let result = old_db
-            .put_with_options(
-                probe_key.as_bytes(),
-                b"fence-probe",
-                &PutOptions::default(),
-                &WriteOptions::default(),
-            )
-            .await;
-
-        match result {
-            Err(err) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {}
-            result => panic!("old db was not fenced as expected [result={result:?}]"),
         }
     }
 }
