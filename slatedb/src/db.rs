@@ -707,11 +707,10 @@ impl Db {
         // Mark the database as closed before flushing.
         self.inner.status_manager.write_result(Ok(()));
 
-        if should_flush {
+        let result = if should_flush {
             // Flush memtables to L0 so that the WAL does not need to be
             // replayed on the next startup.
-            if let Err(e) = self
-                .inner
+            self.inner
                 .flush(
                     FlushOptions {
                         flush_type: FlushType::MemTable,
@@ -719,10 +718,11 @@ impl Db {
                     false,
                 )
                 .await
-            {
-                warn!("failed to flush db during close [error={:?}]", e);
-            }
-        }
+                .map_err(Into::into)
+                .inspect_err(|e| warn!("failed to flush db during close [error={:?}]", e))
+        } else {
+            Ok(())
+        };
 
         MemtableFlusher::shutdown(&self.task_executor).await;
 
@@ -751,7 +751,7 @@ impl Db {
         }
 
         info!("db closed");
-        Ok(())
+        result
     }
 
     /// Create a snapshot of the database.
@@ -4570,7 +4570,8 @@ mod tests {
         .await
         .unwrap();
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // Disable the failpoint so the restored DB can flush normally.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
@@ -4947,6 +4948,9 @@ mod tests {
             .unwrap();
         next_wal_id += 1;
 
+        // subscribe to status manager to get notified when db is closed
+        let mut rx = db.inner.status_manager.subscribe();
+
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
@@ -5001,6 +5005,16 @@ mod tests {
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        // wait for the background task to report the Fenced error
+        rx.wait_for(|status| status.close_reason.is_some())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.inner.status_manager.status().close_reason,
+            Some(crate::error::CloseReason::Fenced)
+        );
+
         db.close().await.unwrap();
         reader.close().await.unwrap();
     }
@@ -5031,7 +5045,8 @@ mod tests {
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
         // Let background flush attempts fail while WAL durability preserves recovery.
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // pause write-compacted-sst-io-error to prevent immutable tables
         // from being flushed, so we can snapshot the state when there is
@@ -5143,6 +5158,44 @@ mod tests {
         // in manifest is greater than the next_wal_sst_id based on what's currently in the object
         // store unless ALL the wals are flushed.
         assert!(manifest.manifest.core.next_wal_sst_id > next_wal_sst_id);
+    }
+
+    #[tokio::test]
+    async fn test_close_should_return_error_if_wal_flush_fails() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+
+        let mut settings = test_db_options(0, 128, None);
+        // Disable automatic flush
+        settings.flush_interval = None;
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Turn on the io error failpoint for WAL
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "return").unwrap();
+
+        // Write data without awaiting durable so it goes into the WAL buffer
+        db.put_with_options(
+            b"foo",
+            b"bar",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Close triggers the WAL flush, which should fail due to the io error
+        db.close()
+            .await
+            .expect_err("close should error out due to WAL IO error");
     }
 
     async fn do_test_should_read_compacted_db(mut options: Settings) {
@@ -5531,9 +5584,9 @@ mod tests {
         .await
         .expect("write batch failed");
 
-        // close the db to flush the manifest
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
