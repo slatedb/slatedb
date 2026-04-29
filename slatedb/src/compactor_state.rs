@@ -1308,10 +1308,11 @@ mod tests {
     }
 
     #[test]
-    fn test_should_drop_segment_when_drained_by_compactor() {
-        // Compactor's local state has drained a segment (watermark above
-        // writer's L0, no compacted runs); after merging the writer's stale
-        // view, the segment must fall out of the result.
+    fn test_compactor_preserves_marker_after_drain() {
+        // After the compactor drains a segment, its commit-time merge with
+        // the writer's manifest must preserve the drain marker (l0=[],
+        // compacted=[], watermark set). The compactor never prunes its own
+        // markers — pruning is the writer's responsibility.
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -1322,7 +1323,7 @@ mod tests {
         }
         let v1 = view(1);
 
-        // Local compactor: watermark at v1, no compacted runs.
+        // Local compactor: post-drain state — watermark at v1, no data.
         let mut manifest = new_dirty_manifest();
         manifest.value.core.segment_extractor_name = Some("hour".into());
         manifest.value.core.segments = vec![Segment {
@@ -1352,15 +1353,23 @@ mod tests {
 
         state.merge_remote_manifest(dirty);
 
+        // Marker is preserved on the compactor side.
         let merged = state.db_state();
-        assert!(merged.segments.is_empty());
+        assert_eq!(merged.segments.len(), 1);
+        let segment = &merged.segments[0];
+        assert!(segment.tree.is_drained());
+        assert_eq!(segment.tree.last_compacted_l0_sst_view_id, Some(v1.id));
+        assert!(segment.tree.l0.is_empty());
+        assert!(segment.tree.compacted.is_empty());
     }
 
     #[test]
-    fn test_should_keep_compactor_only_segment_on_writer_merge() {
-        // Compactor has a segment with a sorted run that the writer hasn't
-        // observed yet (writer's manifest predates the compactor's commit).
-        // The merge must preserve the compactor's run.
+    fn test_compactor_drops_marker_when_writer_has_pruned() {
+        // The compactor's local state holds a drain marker; the writer's
+        // latest manifest no longer carries the prefix (writer pruned).
+        // The compactor's commit-time merge must follow the prune and
+        // drop the marker — this is the only path that removes a segment
+        // from the compactor's manifest.
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
@@ -1371,7 +1380,7 @@ mod tests {
         }
         let v1 = view(1);
 
-        // Local compactor: segment with a sorted run.
+        // Local compactor: segment X is a marker (post-drain).
         let mut manifest = new_dirty_manifest();
         manifest.value.core.segment_extractor_name = Some("hour".into());
         manifest.value.core.segments = vec![Segment {
@@ -1380,16 +1389,13 @@ mod tests {
                 last_compacted_l0_sst_view_id: Some(v1.id),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
-                compacted: vec![SortedRun {
-                    id: 0,
-                    sst_views: vec![v1.clone()],
-                }],
+                compacted: vec![],
             },
         }];
         let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
         let mut state = CompactorState::new(manifest, compactions);
 
-        // Remote writer: doesn't have the segment yet.
+        // Remote writer: the writer has pruned the segment.
         let mut dirty = new_dirty_manifest();
         dirty.value.core.segment_extractor_name = Some("hour".into());
         dirty.value.core.segments = vec![];
@@ -1397,14 +1403,7 @@ mod tests {
         state.merge_remote_manifest(dirty);
 
         let merged = state.db_state();
-        assert_eq!(merged.segments.len(), 1);
-        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
-        assert!(merged.segments[0].tree.l0.is_empty());
-        assert_eq!(merged.segments[0].tree.compacted.len(), 1);
-        assert_eq!(
-            merged.segments[0].tree.last_compacted_l0_sst_view_id,
-            Some(v1.id)
-        );
+        assert!(merged.segments.is_empty());
     }
 
     #[test]
@@ -1468,6 +1467,73 @@ mod tests {
         assert_eq!(segment.tree.last_compacted_l0_sst_view_id, Some(v1.id));
         assert_eq!(segment.tree.compacted.len(), 1);
         assert_eq!(segment.tree.compacted[0].id, 0);
+    }
+
+    #[test]
+    fn test_segment_drain_lifecycle() {
+        // Walk the full Live → Marker → Pruned cycle across three commits:
+        //   V1: compactor commits drain; segment is a marker on compactor.
+        //   V2: writer's commit-time merge prunes the marker.
+        //   V3: compactor reads writer's V2, follows the prune, drops the
+        //       segment from its own manifest.
+        use crate::manifest::merge_segments_from_compactor;
+
+        fn view(seq: u64) -> SsTableView {
+            let ulid = Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+        let prefix = Bytes::from_static(b"hour=12/");
+
+        // V0: writer has X with l0=[v1]. Compactor matches.
+        let writer_v0 = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![v1.clone()]),
+                compacted: vec![],
+            },
+        }];
+
+        // V1: compactor's drain post-spec state. Watermark advanced to v1,
+        // l0 cleared, no compacted runs. Compactor commits — its compactor-
+        // side merge with writer.V0 keeps the marker.
+        let compactor_post_drain = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        }];
+        let v1_segments =
+            crate::manifest::merge_segments_from_writer(&compactor_post_drain, &writer_v0);
+        assert_eq!(v1_segments.len(), 1);
+        assert!(v1_segments[0].tree.is_drained());
+
+        // V2: writer reads V1 (compactor's manifest). Writer's local view
+        // is still V0 (l0=[v1]). The writer-side merge kernel produces a
+        // marker; the writer prunes it.
+        let v2_segments = merge_segments_from_compactor(&writer_v0, &v1_segments);
+        assert!(
+            v2_segments.is_empty(),
+            "writer should prune the drain marker"
+        );
+
+        // V3: compactor reads writer's V2 (no segments). Compactor's local
+        // still holds the marker from V1. The compactor-side merge follows
+        // the writer's prune and drops the segment.
+        let v3_segments = crate::manifest::merge_segments_from_writer(&v1_segments, &v2_segments);
+        assert!(
+            v3_segments.is_empty(),
+            "compactor should follow the writer's prune"
+        );
     }
 
     #[test]

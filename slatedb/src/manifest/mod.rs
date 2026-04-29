@@ -62,6 +62,28 @@ impl LsmTreeState {
     /// writer owns L0 and the compactor owns compacted runs / markers, so the
     /// merge keeps each side's authoritative state and drops L0 entries the
     /// compactor has already absorbed.
+    /// True iff this tree is a "drain marker": no L0, no compacted runs, but
+    /// the watermark is set. Drain markers are produced when the compactor
+    /// drains a segment (advances `last_compacted_l0_*` to cover all observed
+    /// L0s and clears `compacted`). They persist on the compactor's side and
+    /// propagate to the writer; the writer's side prunes them at merge time
+    /// once it has observed the marker and has no new data to add.
+    pub(crate) fn is_drained(&self) -> bool {
+        self.l0.is_empty()
+            && self.compacted.is_empty()
+            && (self.last_compacted_l0_sst_view_id.is_some()
+                || self.last_compacted_l0_sst_id.is_some())
+    }
+
+    /// True iff this tree carries no state at all — no L0, no compacted runs,
+    /// and no watermark. Truly-empty trees should not appear in the manifest.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.l0.is_empty()
+            && self.compacted.is_empty()
+            && self.last_compacted_l0_sst_view_id.is_none()
+            && self.last_compacted_l0_sst_id.is_none()
+    }
+
     pub(crate) fn merge_writer_and_compactor(writer: &Self, compactor: &Self) -> Self {
         let last_compacted_view = compactor.last_compacted_l0_sst_view_id;
         let last_compacted_sst = compactor.last_compacted_l0_sst_id;
@@ -116,48 +138,29 @@ pub(crate) struct Segment {
     pub tree: LsmTreeState,
 }
 
-/// Compactor-side merge of segment lists: combine the writer's segments
-/// (`writer`) into the compactor's segments (`local`).
+/// Compactor-side segment merge: combine the writer's segments (`writer`)
+/// into the compactor's segments (`local`).
+///
+/// The compactor never prunes its own drain markers — it preserves them
+/// until the writer has observed the marker and pruned its own copy. The
+/// only segment-removal action the compactor takes is to *follow* a writer
+/// prune: when the compactor's local has a marker for a prefix that the
+/// writer's manifest no longer carries, that absence is the writer's
+/// signal that the marker has been observed and the segment can be dropped.
 pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) -> Vec<Segment> {
-    merge_writer_and_compactor_segments(writer, local)
-}
-
-/// Writer-side merge of segment lists: combine the compactor's segments
-/// (`compactor`) into the writer's segments (`local`).
-pub(crate) fn merge_segments_from_compactor(
-    local: &[Segment],
-    compactor: &[Segment],
-) -> Vec<Segment> {
-    merge_writer_and_compactor_segments(local, compactor)
-}
-
-/// Canonical segment-list merge. Walks the union of segment prefixes from
-/// both sides and applies the per-tree merge for each prefix, treating any
-/// missing side as empty. Segments are derived from data: the writer adds
-/// L0 (creating segments implicitly), the compactor advances its watermark
-/// and authors `compacted` (consuming L0 and producing or removing runs).
-/// A segment is retained iff its merged tree has any L0 or any compacted
-/// runs — segments that the compactor has drained to empty fall out
-/// naturally, and a writer L0 with an ID above the compactor's watermark
-/// re-creates a previously-drained segment.
-fn merge_writer_and_compactor_segments(writer: &[Segment], compactor: &[Segment]) -> Vec<Segment> {
-    let writer_by_prefix: HashMap<&Bytes, &LsmTreeState> =
-        writer.iter().map(|s| (&s.prefix, &s.tree)).collect();
-    let compactor_by_prefix: HashMap<&Bytes, &LsmTreeState> =
-        compactor.iter().map(|s| (&s.prefix, &s.tree)).collect();
-    // Iterate writer's segments first to preserve their order, then append
-    // compactor-only prefixes (those carry compactor work the writer hasn't
-    // observed yet, e.g., a freshly committed run).
+    let local_by_prefix: HashMap<&Bytes, &LsmTreeState> =
+        local.iter().map(|s| (&s.prefix, &s.tree)).collect();
     let empty = LsmTreeState::default();
-    let mut merged: Vec<Segment> = Vec::with_capacity(writer.len() + compactor.len());
+    let mut merged: Vec<Segment> = Vec::with_capacity(writer.len() + local.len());
     let mut seen: HashSet<&Bytes> = HashSet::with_capacity(writer.len());
+    // Writer segments take ordering priority. The kernel merge takes the
+    // compactor's authoritative view of `compacted`/watermark and the
+    // writer's L0 (trimmed at the watermark). Markers are kept on the
+    // compactor side — only the writer prunes them.
     for w in writer {
-        let c_tree = compactor_by_prefix
-            .get(&w.prefix)
-            .copied()
-            .unwrap_or(&empty);
+        let c_tree = local_by_prefix.get(&w.prefix).copied().unwrap_or(&empty);
         let merged_tree = LsmTreeState::merge_writer_and_compactor(&w.tree, c_tree);
-        if !merged_tree.l0.is_empty() || !merged_tree.compacted.is_empty() {
+        if !merged_tree.is_empty() {
             merged.push(Segment {
                 prefix: w.prefix.clone(),
                 tree: merged_tree,
@@ -165,13 +168,77 @@ fn merge_writer_and_compactor_segments(writer: &[Segment], compactor: &[Segment]
         }
         seen.insert(&w.prefix);
     }
+    // Compactor-only prefixes: writer's manifest has no entry for this
+    // prefix, but the compactor's local still does. The expected case is a
+    // drain marker the writer has just pruned — drop it to follow. A
+    // non-marker compactor-only segment shouldn't arise (segments
+    // originate from writer flushes); preserve defensively if it does.
+    for c in local {
+        if seen.contains(&c.prefix) {
+            continue;
+        }
+        if c.tree.is_drained() {
+            continue;
+        }
+        // Compactor-only with non-marker state shouldn't arise: segments
+        // originate from writer flushes, so the compactor only ever holds a
+        // segment the writer also has, except transiently as a drain marker
+        // the writer has just pruned. Any other shape is a protocol violation.
+        unreachable!(
+            "compactor-only segment with data: prefix={:?} tree={:?}",
+            c.prefix, c.tree
+        );
+    }
+    merged
+}
+
+/// Writer-side segment merge: combine the compactor's segments (`compactor`)
+/// into the writer's segments (`local`).
+///
+/// The writer is the sole pruner. After the kernel per-tree merge, if the
+/// result is a drain marker (no L0 above the watermark, no compacted runs,
+/// watermark set) the writer drops the segment from its commit. The
+/// compactor will observe the absence on its next read and follow.
+pub(crate) fn merge_segments_from_compactor(
+    local: &[Segment],
+    compactor: &[Segment],
+) -> Vec<Segment> {
+    let compactor_by_prefix: HashMap<&Bytes, &LsmTreeState> =
+        compactor.iter().map(|s| (&s.prefix, &s.tree)).collect();
+    let empty = LsmTreeState::default();
+    let mut merged: Vec<Segment> = Vec::with_capacity(local.len() + compactor.len());
+    let mut seen: HashSet<&Bytes> = HashSet::with_capacity(local.len());
+    for w in local {
+        let c_tree = compactor_by_prefix
+            .get(&w.prefix)
+            .copied()
+            .unwrap_or(&empty);
+        let merged_tree = LsmTreeState::merge_writer_and_compactor(&w.tree, c_tree);
+        seen.insert(&w.prefix);
+        // Writer prune: drop drain markers. Truly-empty results also fall
+        // out — they typically arise after the compactor has already
+        // pruned the marker and the writer's local view has nothing left.
+        if merged_tree.is_drained() || merged_tree.is_empty() {
+            continue;
+        }
+        merged.push(Segment {
+            prefix: w.prefix.clone(),
+            tree: merged_tree,
+        });
+    }
+    // Compactor-only prefixes: the compactor has segments the writer's
+    // local hasn't observed. A marker means there's nothing to add and
+    // the writer can prune (don't introduce). For non-marker entries,
+    // adopt the compactor's tree as the writer's new local view.
     for c in compactor {
         if seen.contains(&c.prefix) {
             continue;
         }
-        let w_tree = writer_by_prefix.get(&c.prefix).copied().unwrap_or(&empty);
-        let merged_tree = LsmTreeState::merge_writer_and_compactor(w_tree, &c.tree);
-        if !merged_tree.l0.is_empty() || !merged_tree.compacted.is_empty() {
+        if c.tree.is_drained() {
+            continue;
+        }
+        let merged_tree = LsmTreeState::merge_writer_and_compactor(&empty, &c.tree);
+        if !merged_tree.is_empty() {
             merged.push(Segment {
                 prefix: c.prefix.clone(),
                 tree: merged_tree,

@@ -900,9 +900,12 @@ mod tests {
     }
 
     #[test]
-    fn test_should_drop_segment_when_empty_after_merge() {
-        // The compactor has drained a segment to empty (watermark above all
-        // writer L0s, no compacted runs). The merge must drop the segment.
+    fn test_writer_prunes_drain_marker_on_merge() {
+        // The compactor has published a drain marker for X (watermark above
+        // all writer L0s, no l0, no compacted). The writer's commit-time
+        // merge must prune the marker — that's the writer's signal back to
+        // the compactor that the drain has been observed and the segment
+        // can be removed.
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
