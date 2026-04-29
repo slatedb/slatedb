@@ -1,0 +1,166 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use log::info;
+use slatedb::config::{PutOptions, WriteOptions};
+use slatedb::{CloseReason, Db, Error, ErrorKind};
+use tracing::instrument;
+
+use crate::{Actor, ActorCtx};
+
+type DbFactoryFuture = Pin<Box<dyn Future<Output = Result<Arc<Db>, Error>> + Send + 'static>>;
+type DbFactory = Box<dyn Fn(ActorCtx) -> DbFactoryFuture + Send + Sync + 'static>;
+
+/// Wraps actors that may race with a DB replacement and observe the old handle
+/// after it has been fenced.
+pub struct SuppressFenced<A> {
+    inner: A,
+}
+
+impl<A> SuppressFenced<A> {
+    pub fn new(inner: A) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl<A> Actor for SuppressFenced<A>
+where
+    A: Actor,
+{
+    async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        match self.inner.run(ctx).await {
+            Err(error) if matches!(error.kind(), ErrorKind::Closed(CloseReason::Fenced)) => Ok(()),
+            result => result,
+        }
+    }
+
+    async fn finish(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        self.inner.finish(ctx).await
+    }
+}
+
+/// Configuration for the database fencing DST actor.
+#[derive(Clone, Debug)]
+pub struct DbFencerActorOptions {
+    /// How long the actor waits between DB replacement attempts.
+    pub restart_interval: Duration,
+    /// The minimum number of completed fencings required before shutdown.
+    pub min_fencings: u64,
+}
+
+/// Reopens the shared database in a loop and verifies each old handle is fenced.
+pub struct DbFencerActor {
+    actor_options: DbFencerActorOptions,
+    db_factory: DbFactory,
+    completed_fencings: u64,
+}
+
+impl DbFencerActor {
+    pub fn new<F, Fut>(actor_options: DbFencerActorOptions, db_factory: F) -> Result<Self, Error>
+    where
+        F: Fn(ActorCtx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Arc<Db>, Error>> + Send + 'static,
+    {
+        info!("db fencer actor created [options={:?}]", actor_options);
+        Ok(Self {
+            actor_options,
+            db_factory: Box::new(move |ctx| Box::pin(db_factory(ctx))),
+            completed_fencings: 0,
+        })
+    }
+}
+
+#[async_trait]
+impl Actor for DbFencerActor {
+    #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
+    async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        let Some(next_db) = self.open_replacement_db(ctx).await? else {
+            return Ok(());
+        };
+        let old_db = ctx.swap_db(next_db);
+
+        self.assert_old_db_fenced(ctx, &old_db).await;
+        old_db.close().await?;
+
+        self.completed_fencings += 1;
+        info!(
+            "db fencing complete [name={}, completed_fencings={}]",
+            ctx.name(),
+            self.completed_fencings
+        );
+
+        let shutdown_token = ctx.shutdown_token();
+        let system_clock = ctx.system_clock();
+        tokio::select! {
+            biased;
+            _ = shutdown_token.cancelled() => {}
+            _ = system_clock.sleep(self.actor_options.restart_interval) => {}
+        }
+
+        Ok(())
+    }
+
+    async fn finish(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+        assert!(
+            self.completed_fencings >= self.actor_options.min_fencings,
+            "db fencer completed {} fencings but expected at least {} [name={}]",
+            self.completed_fencings,
+            self.actor_options.min_fencings,
+            ctx.name(),
+        );
+        Ok(())
+    }
+}
+
+impl DbFencerActor {
+    async fn open_replacement_db(&self, ctx: &ActorCtx) -> Result<Option<Arc<Db>>, Error> {
+        loop {
+            let result = if self.completed_fencings >= self.actor_options.min_fencings {
+                let shutdown_token = ctx.shutdown_token();
+                let open_db = (self.db_factory)(ctx.clone());
+                tokio::select! {
+                    biased;
+                    _ = shutdown_token.cancelled() => return Ok(None),
+                    result = open_db => result,
+                }
+            } else {
+                (self.db_factory)(ctx.clone()).await
+            };
+
+            match result {
+                Err(err) if matches!(err.kind(), ErrorKind::Unavailable) => {
+                    info!(
+                        "db replacement open failed with unavailable, retrying [name={}]",
+                        ctx.name()
+                    );
+                }
+                result => return result.map(Some),
+            }
+        }
+    }
+
+    async fn assert_old_db_fenced(&self, ctx: &ActorCtx, old_db: &Db) {
+        let probe_key = format!(
+            "__slatedb_dst/db_fencer/{}/{}",
+            ctx.name(),
+            self.completed_fencings
+        );
+        let result = old_db
+            .put_with_options(
+                probe_key.as_bytes(),
+                b"fence-probe",
+                &PutOptions::default(),
+                &WriteOptions::default(),
+            )
+            .await;
+
+        match result {
+            Err(err) if matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)) => {}
+            result => panic!("old db was not fenced as expected [result={result:?}]"),
+        }
+    }
+}
