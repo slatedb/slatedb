@@ -17,25 +17,25 @@ bench = false
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 ctor = { workspace = true }
+fail-parallel = { workspace = true }
 futures = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
-rusqlite = { version = "0.37.0", features = ["bundled"] }
-slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_disable", "zlib", "zstd"] }
-slatedb-common = { workspace = true }
-thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "test-util", "rt"] }
+slatedb = { workspace = true, features = ["all"] }
+slatedb-common = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio-util = { workspace = true, default-features = false, features = ["rt"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
-slatedb-common = { workspace = true, features = ["test-util"] }
-sysinfo = { workspace = true }
-
+tempfile = { workspace = true }
 [lints]
 workspace = true

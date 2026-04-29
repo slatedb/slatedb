@@ -36,7 +36,7 @@ run-wrapper = "backtrace-on-timeout"
 # Nightly DST profile
 [profile.dst-nightly]
 slow-timeout = { period = "90m", terminate-after = 1 }
-default-filter = "package(slatedb-dst) & test(test_dst_nightly)"
+default-filter = "package(slatedb-dst) & test(test_dst)"
 
 [[profile.dst-nightly.scripts]]
 filter = "all()"

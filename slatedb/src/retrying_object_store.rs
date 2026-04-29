@@ -1,12 +1,14 @@
 use std::borrow::Cow;
+use std::future::Future;
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 
 use async_trait::async_trait;
-use backon::{ExponentialBuilder, Retryable};
+use backon::{ExponentialBuilder, Retryable, Sleeper};
 use futures::stream::BoxStream;
 use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
@@ -26,8 +28,27 @@ use slatedb_common::clock::SystemClock;
 /// with object stores that restrict metadata keys.
 const PUT_ID_ATTRIBUTE: &str = "slatedbputid";
 
+type SystemClockSleep = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Backon's sleeper interface backed by SlateDB's configured system clock.
+#[derive(Debug, Clone)]
+struct SystemClockSleeper {
+    clock: Arc<dyn SystemClock>,
+}
+
+impl Sleeper for SystemClockSleeper {
+    type Sleep = SystemClockSleep;
+
+    fn sleep(&self, dur: Duration) -> Self::Sleep {
+        let clock = Arc::clone(&self.clock);
+        Box::pin(async move {
+            clock.sleep(dur).await;
+        })
+    }
+}
+
 /// A thin wrapper around an `ObjectStore` that retries transient errors with
-/// exponential backoff forever.
+/// exponential backoff forever using the configured [`SystemClock`] for sleeps.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryingObjectStore {
     inner: Arc<dyn ObjectStore>,
@@ -50,6 +71,13 @@ impl RetryingObjectStore {
             .without_max_times()
             .with_min_delay(Duration::from_millis(100))
             .with_max_delay(Duration::from_secs(1))
+    }
+
+    #[inline]
+    fn sleeper(&self) -> SystemClockSleeper {
+        SystemClockSleeper {
+            clock: Arc::clone(&self.clock),
+        }
     }
 
     #[inline]
@@ -90,6 +118,7 @@ impl RetryingObjectStore {
         };
         let result = (|| async { self.inner.get_opts(location, get_opts.clone()).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await;
@@ -194,6 +223,7 @@ impl ObjectStore for RetryingObjectStore {
             self.inner.get_opts(location, options.clone()).await
         })
         .retry(Self::retry_builder())
+        .sleep(self.sleeper())
         .notify(Self::notify)
         .when(Self::should_retry)
         .await
@@ -202,6 +232,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn get_range(&self, location: &Path, range: Range<u64>) -> object_store::Result<Bytes> {
         (|| async { self.inner.get_range(location, range.clone()).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -214,6 +245,7 @@ impl ObjectStore for RetryingObjectStore {
     ) -> object_store::Result<Vec<Bytes>> {
         (|| async { self.inner.get_ranges(location, ranges).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -222,6 +254,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         (|| async { self.inner.head(location).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -259,6 +292,7 @@ impl ObjectStore for RetryingObjectStore {
                 .await
         })
         .retry(Self::retry_builder())
+        .sleep(self.sleeper())
         .notify(Self::notify)
         .when(Self::should_retry)
         .await;
@@ -275,6 +309,7 @@ impl ObjectStore for RetryingObjectStore {
                     .await
             })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await;
@@ -321,6 +356,7 @@ impl ObjectStore for RetryingObjectStore {
                 .await
         })
         .retry(Self::retry_builder())
+        .sleep(self.sleeper())
         .notify(Self::notify)
         .when(Self::should_retry)
         .await;
@@ -331,6 +367,7 @@ impl ObjectStore for RetryingObjectStore {
             Err(object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented) => {
                 (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
                     .retry(Self::retry_builder())
+                    .sleep(self.sleeper())
                     .notify(Self::notify)
                     .when(Self::should_retry)
                     .await?
@@ -349,6 +386,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
         (|| async { self.inner.delete(location).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -356,6 +394,7 @@ impl ObjectStore for RetryingObjectStore {
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         let inner = Arc::clone(&self.inner);
+        let sleeper = self.sleeper();
         let prefix_owned = prefix.cloned();
 
         // list() is a little more complex than the other functions because:
@@ -375,6 +414,7 @@ impl ObjectStore for RetryingObjectStore {
                 stream.try_collect::<Vec<_>>().await
             })
             .retry(Self::retry_builder())
+            .sleep(sleeper)
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -399,6 +439,7 @@ impl ObjectStore for RetryingObjectStore {
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         let inner = Arc::clone(&self.inner);
+        let sleeper = self.sleeper();
         let prefix_owned = prefix.cloned();
         let offset_owned = offset.clone();
 
@@ -409,6 +450,7 @@ impl ObjectStore for RetryingObjectStore {
                 stream.try_collect::<Vec<_>>().await
             })
             .retry(Self::retry_builder())
+            .sleep(sleeper)
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -428,6 +470,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
         (|| async { self.inner.list_with_delimiter(prefix).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -436,6 +479,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.copy(from, to).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -444,6 +488,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.rename(from, to).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -452,6 +497,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.copy_if_not_exists(from, to).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -460,6 +506,7 @@ impl ObjectStore for RetryingObjectStore {
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.rename_if_not_exists(from, to).await })
             .retry(Self::retry_builder())
+            .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -476,8 +523,10 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
-    use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::MockSystemClock;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn test_rand() -> Arc<DbRand> {
         Arc::new(DbRand::default())
@@ -504,6 +553,50 @@ mod tests {
             .expect("put should succeed after retries");
 
         // 1 failure + 1 success
+        assert_eq!(flaky.put_attempts(), 2);
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn test_put_opts_retry_sleep_uses_system_clock() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
+        let clock = Arc::new(MockSystemClock::new());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), clock.clone());
+        let path = Path::from("/data/obj");
+
+        let handle = tokio::spawn({
+            let retrying = retrying.clone();
+            let path = path.clone();
+            async move {
+                retrying
+                    .put_opts(
+                        &path,
+                        PutPayload::from_bytes(Bytes::from_static(b"hello")),
+                        PutOptions::default(),
+                    )
+                    .await
+            }
+        });
+
+        flaky.wait_for_put_attempts(1).await;
+        assert_eq!(flaky.put_attempts(), 1);
+        assert!(!handle.is_finished());
+
+        clock.advance(Duration::from_millis(99)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(flaky.put_attempts(), 1);
+        assert!(!handle.is_finished());
+
+        clock.advance(Duration::from_millis(1)).await;
+
+        let result = handle.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "put should succeed after clock-driven retry"
+        );
         assert_eq!(flaky.put_attempts(), 2);
 
         let got = retrying.get(&path).await.unwrap();

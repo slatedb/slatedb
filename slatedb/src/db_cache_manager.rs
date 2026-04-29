@@ -1,7 +1,6 @@
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use log::{debug, warn};
 use tokio::sync::OnceCell;
@@ -14,7 +13,7 @@ use crate::manifest::VersionedManifest;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::tablestore::TableStore;
 
-/// Cache content that [`DbCacheManagerOps::warm_sst`] should populate.
+/// Cache content that [`DbCacheManagerOps::warm_sst`](crate::DbCacheManagerOps::warm_sst) should populate.
 #[derive(Clone, Debug)]
 pub enum CacheTarget {
     /// Warm all filters on the SST, if any exist.
@@ -46,32 +45,6 @@ impl CacheTarget {
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         CacheTarget::Data((start, end))
     }
-}
-
-/// Trait for block-cache warming and eviction operations.
-#[async_trait]
-pub trait DbCacheManagerOps {
-    /// Warms selected cache content for one SST.
-    ///
-    /// Callers fan out over SSTs themselves (for example with
-    /// `FuturesUnordered`) to get the concurrency they want. Per-target
-    /// outcomes are reflected in cache-manager metrics, not the return value.
-    ///
-    /// Returns `Err` on the first failing target. If no block cache is
-    /// configured, or if the SST is not reachable from the current manifest,
-    /// the call is a no-op that returns `Ok(())`.
-    async fn warm_sst(
-        &self,
-        sst_id: SsTableId,
-        targets: &[CacheTarget],
-    ) -> Result<(), crate::Error>;
-
-    /// Best-effort eviction of block-cache entries for one SST.
-    ///
-    /// If no block cache is configured, logs a warning and returns `Ok(())`.
-    /// Does not check whether the SST is still live in the current manifest —
-    /// callers own that policy.
-    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error>;
 }
 
 pub(crate) async fn warm_sst_impl(
@@ -254,11 +227,9 @@ mod tests {
     use crate::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
     use crate::db::Db;
     use crate::db_cache::{CachedKey, DbCache};
+    use crate::DbCacheManagerOps;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
-
-    // Compile-time check: the trait is object-safe.
-    fn _assert_object_safe(_: &dyn DbCacheManagerOps) {}
 
     const PATH: &str = "/cache_manager_test";
 

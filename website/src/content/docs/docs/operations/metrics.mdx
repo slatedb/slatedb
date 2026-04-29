@@ -103,6 +103,7 @@ All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
 | Name | Type | Labels | Description |
 |------|------|--------|-------------|
 | `slatedb.compactor.bytes_compacted` | counter | | Total bytes compacted |
+| `slatedb.compactor.epoch` | gauge | | Current compactor epoch |
 | `slatedb.compactor.last_compaction_timestamp_sec` | gauge | | Last compaction time (epoch seconds) |
 | `slatedb.compactor.running_compactions` | up_down_counter | | Currently running compactions |
 | `slatedb.compactor.total_bytes_being_compacted` | gauge | | Bytes in active compactions |
@@ -290,4 +291,3 @@ impl MetricsRecorder for OtelRecorder {
     // ... other methods follow the same pattern
 }
 ```
-

@@ -4,10 +4,10 @@ members = [
     "bindings/uniffi",
     "examples",
     "slatedb",
+    "slatedb-dst",
     "slatedb-common",
     "slatedb-bencher",
     "slatedb-cli",
-    "slatedb-dst",
     "slatedb-txn-obj",
 ]
 
@@ -48,6 +48,7 @@ foyer = "0.22.3"
 futures = "0.3.30"
 humantime = "2.1.0"
 log = "0.4.27"
+lru = "0.18"
 lz4_flex = "0.11.5"
 moka = "0.12.8"
 object_store = "0.12.3"
