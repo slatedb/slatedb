@@ -18,10 +18,6 @@ pub(crate) struct WalReplayOptions {
     /// The number of SSTs to preload while replaying
     pub(crate) sst_batch_size: usize,
 
-    /// The minimum number of bytes in each returned table
-    /// (save the final table, which may be arbitrarily small).
-    pub(crate) min_memtable_bytes: usize,
-
     /// The target maximum number of bytes in each returned table. WAL replay only
     /// splits between complete WAL SSTs, so a returned table may exceed this if a
     /// single WAL SST is larger.
@@ -39,8 +35,7 @@ impl Default for WalReplayOptions {
     fn default() -> Self {
         Self {
             sst_batch_size: 4,
-            min_memtable_bytes: 64 * 1024 * 1024,
-            max_memtable_bytes: 128 * 1024 * 1024,
+            max_memtable_bytes: 64 * 1024 * 1024,
             sst_iter_options: SstIteratorOptions::default(),
             min_seq: None,
         }
@@ -206,12 +201,12 @@ impl WalReplayIterator<'_> {
         Ok(())
     }
 
-    /// Get the next table replayed from the WAL. The next table is guaranteed to
-    /// have a size at least as large as [`WalReplayOptions::min_memtable_bytes`]
-    /// unless it is the final table replayed from the WAL. The final table may
-    /// even be empty since writers use an empty WAL to fence zombie writers. The
-    /// empty table must still be returned so that replay logic can account for the
-    /// latest WAL ID.
+    /// Get the next table replayed from the WAL. Replay accumulates complete WAL
+    /// SSTs until the returned table reaches [`WalReplayOptions::max_memtable_bytes`],
+    /// unless it is the final table replayed from the WAL. The final table may even
+    /// be empty since writers use an empty WAL to fence zombie writers. The empty
+    /// table must still be returned so that replay logic can account for the latest
+    /// WAL ID.
     ///
     /// The returned table may exceed [`WalReplayOptions::max_memtable_bytes`] when
     /// a complete WAL SST is larger than the configured target, because replay
@@ -246,10 +241,7 @@ impl WalReplayIterator<'_> {
                 let estimated_bytes = self
                     .table_store
                     .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
-                if !table.is_empty()
-                    && (estimated_bytes > self.options.min_memtable_bytes
-                        || estimated_bytes >= self.options.max_memtable_bytes)
-                {
+                if !table.is_empty() && estimated_bytes >= self.options.max_memtable_bytes {
                     self.current_iter.reset();
                     break;
                 }
@@ -354,7 +346,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_enforce_min_memtable_bytes() {
+    async fn should_enforce_max_memtable_bytes() {
         let table_store = test_table_store();
         let mut rng = rng::new_test_rng(None);
         let num_entries = 5000;
@@ -363,11 +355,11 @@ mod tests {
             .await
             .unwrap();
 
-        let min_memtable_bytes = 1024;
+        let max_memtable_bytes = 1024;
         let mut replay_iter = WalReplayIterator::new(
             &ManifestCore::new(),
             WalReplayOptions {
-                min_memtable_bytes,
+                max_memtable_bytes,
                 ..WalReplayOptions::default()
             },
             Arc::clone(&table_store),
@@ -377,15 +369,20 @@ mod tests {
 
         let full_replayed_table = WritableKVTable::new();
         let mut last_wal_id = 0;
-        let mut replayed_entries = 0;
+        let mut replayed_entry_count = 0;
 
         while let Some(replayed_table) = replay_iter.next().await.unwrap() {
             last_wal_id = replayed_table.last_wal_id;
-            replayed_entries += replayed_table.table.metadata().entries_size_in_bytes;
+            let metadata = replayed_table.table.metadata();
+            replayed_entry_count += metadata.entry_num;
 
-            // The last table may be less than `min_memtable_bytes`
-            if replayed_entries < num_entries {
-                assert!(replayed_table.table.metadata().entries_size_in_bytes > min_memtable_bytes);
+            // The last table may be less than `max_memtable_bytes`.
+            if replayed_entry_count < num_entries {
+                let estimated_bytes = table_store.estimate_encoded_size_compacted(
+                    metadata.entry_num,
+                    metadata.entries_size_in_bytes,
+                );
+                assert!(estimated_bytes >= max_memtable_bytes);
             }
 
             let mut iter = replayed_table.table.table().iter();
@@ -432,7 +429,6 @@ mod tests {
         let mut replay_iter = WalReplayIterator::new(
             &ManifestCore::new(),
             WalReplayOptions {
-                min_memtable_bytes: usize::MAX,
                 max_memtable_bytes,
                 ..WalReplayOptions::default()
             },
@@ -501,7 +497,6 @@ mod tests {
         let mut replay_iter = WalReplayIterator::new(
             &ManifestCore::new(),
             WalReplayOptions {
-                min_memtable_bytes: usize::MAX,
                 max_memtable_bytes,
                 ..WalReplayOptions::default()
             },
@@ -516,9 +511,9 @@ mod tests {
             replayed_seq_ranges.push((metadata.first_seq, metadata.last_seq));
         }
 
-        // The current implementation fails this by producing multiple replayed
-        // memtables with the same sequence range, which can make later replay
-        // logic treat part of the write batch as already committed.
+        // This guards against producing multiple replayed memtables with the same
+        // sequence range, which can make later replay logic treat part of the write
+        // batch as already committed.
         assert_eq!(
             replayed_seq_ranges,
             vec![(commit_seq, commit_seq)],
@@ -560,7 +555,6 @@ mod tests {
         let mut replay_iter = WalReplayIterator::new(
             &ManifestCore::new(),
             WalReplayOptions {
-                min_memtable_bytes: usize::MAX,
                 max_memtable_bytes,
                 ..WalReplayOptions::default()
             },
@@ -575,8 +569,8 @@ mod tests {
             replayed_seq_ranges.push((metadata.first_seq, metadata.last_seq));
         }
 
-        // The current implementation fails this by returning the seq=10 row in
-        // a later replayed memtable after already returning seq=100.
+        // This guards against returning the seq=10 row in a later replayed
+        // memtable after already returning seq=100.
         for adjacent in replayed_seq_ranges.windows(2) {
             let previous_last_seq = adjacent[0].1;
             let later_first_seq = adjacent[1].0;

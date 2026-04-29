@@ -479,7 +479,6 @@ impl DbReaderInner {
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
             max_memtable_bytes: reader_options.max_memtable_bytes as usize,
-            min_memtable_bytes: usize::MAX,
             sst_iter_options,
             // Skip entries that we already have in `imm_memtable` (that might be above last_l0_seq).
             min_seq: Some(last_committed_seq),
