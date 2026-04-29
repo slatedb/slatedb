@@ -23,8 +23,8 @@ use slatedb_dst::{
 use tempfile::TempDir;
 
 #[rstest]
-#[cfg_attr(not(slow), case::regular(25_000))]
-#[cfg_attr(slow, case::slow(250_000))]
+#[cfg_attr(not(slow), case::regular(200_000))]
+#[cfg_attr(slow, case::slow(2_000_000))]
 fn test_dst_bank_with_toxics(
     #[case] shutdown_at_ms: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
