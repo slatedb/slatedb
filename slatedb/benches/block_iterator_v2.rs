@@ -8,12 +8,12 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use pprof::criterion::{Output, PProfProfiler};
-use slatedb::BlockIteratorV2BenchConfig;
+use slatedb::block_iterator_v2_benches::BlockIteratorV2BenchConfig;
 
 #[allow(clippy::redundant_closure)]
 fn criterion_benchmark(c: &mut Criterion) {
     // Small values: pool of 16B-key/512B-value entries filling a 4KB block.
-    slatedb::block_iterator_v2_bench(
+    slatedb::block_iterator_v2_benches::block_iterator_v2_bench(
         BlockIteratorV2BenchConfig {
             block_size: 4096,
             key_size: 16,
@@ -30,7 +30,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     // Single 100KB value in a nominally 4KB block. The builder's
     // oversized-entry rule accepts the first entry unconditionally, so the
     // block data expands to ~100KB with exactly one row.
-    slatedb::block_iterator_v2_bench(
+    slatedb::block_iterator_v2_benches::block_iterator_v2_bench(
         BlockIteratorV2BenchConfig {
             block_size: 4096,
             key_size: 16,

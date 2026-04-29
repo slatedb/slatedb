@@ -469,71 +469,76 @@ impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
 }
 
 #[cfg(feature = "bench-internal")]
-pub struct BlockIteratorV2BenchConfig {
-    /// Target block size passed to the builder. The builder accepts a first
-    /// entry that exceeds this (oversized-entry rule), so a single large value
-    /// will expand the block past `block_size`.
-    pub block_size: usize,
-    pub key_size: usize,
-    pub value_size: usize,
-    /// Upper bound on entries generated and fed to the builder. Fewer may
-    /// land in the block if it fills up first.
-    pub num_entries: usize,
-}
+pub mod benches {
+    use bytes::Bytes;
+    use super::BlockIteratorV2;
 
-#[cfg(feature = "bench-internal")]
-#[allow(clippy::panic)]
-pub fn block_iterator_v2_bench<F>(config: BlockIteratorV2BenchConfig, mut run_bench: F)
-where
-    F: FnMut(&mut dyn FnMut()),
-{
-    use crate::format::sst::BlockBuilder;
-    use crate::iter::RowEntryIterator;
-    use crate::types::{RowEntry, ValueDeletable};
-    use futures::executor::block_on;
-    use rand::RngCore;
-
-    const SEED: u64 = 0x51A7_EDBB_E4C4;
-
-    let rand = crate::rand::DbRand::new(SEED);
-    let mut rng = rand.rng();
-    let mut pool: Vec<(Bytes, Bytes)> = (0..config.num_entries)
-        .map(|_| {
-            let mut key = vec![0u8; config.key_size];
-            rng.fill_bytes(&mut key);
-            let mut value = vec![0u8; config.value_size];
-            rng.fill_bytes(&mut value);
-            (Bytes::from(key), Bytes::from(value))
-        })
-        .collect();
-    pool.sort_by(|a, b| a.0.cmp(&b.0));
-    pool.dedup_by(|a, b| a.0 == b.0);
-
-    let mut builder = BlockBuilder::new_v2(config.block_size);
-    for (seq, (key, value)) in pool.into_iter().enumerate() {
-        let entry = RowEntry::new(
-            key,
-            ValueDeletable::Value(value),
-            seq as u64 + 1,
-            None,
-            None,
-        );
-        match builder.add(entry) {
-            Ok(true) => {}
-            Ok(false) => break,
-            Err(e) => panic!("failed to add entry: {e:?}"),
-        }
+    #[cfg(feature = "bench-internal")]
+    pub struct BlockIteratorV2BenchConfig {
+        /// Target block size passed to the builder. The builder accepts a first
+        /// entry that exceeds this (oversized-entry rule), so a single large value
+        /// will expand the block past `block_size`.
+        pub block_size: usize,
+        pub key_size: usize,
+        pub value_size: usize,
+        /// Upper bound on entries generated and fed to the builder. Fewer may
+        /// land in the block if it fills up first.
+        pub num_entries: usize,
     }
-    let block = builder.build().expect("failed to build block");
 
-    run_bench(&mut || {
-        block_on(async {
-            let mut iter = BlockIteratorV2::new_ascending(&block);
-            while let Some(entry) = iter.next().await.expect("iterator error") {
-                std::hint::black_box(entry);
+    #[allow(clippy::panic)]
+    pub fn block_iterator_v2_bench<F>(config: BlockIteratorV2BenchConfig, mut run_bench: F)
+    where
+        F: FnMut(&mut dyn FnMut()),
+    {
+        use crate::format::sst::BlockBuilder;
+        use crate::iter::RowEntryIterator;
+        use crate::types::{RowEntry, ValueDeletable};
+        use futures::executor::block_on;
+        use rand::RngCore;
+
+        const SEED: u64 = 0x51A7_EDBB_E4C4;
+
+        let rand = crate::rand::DbRand::new(SEED);
+        let mut rng = rand.rng();
+        let mut pool: Vec<(Bytes, Bytes)> = (0..config.num_entries)
+            .map(|_| {
+                let mut key = vec![0u8; config.key_size];
+                rng.fill_bytes(&mut key);
+                let mut value = vec![0u8; config.value_size];
+                rng.fill_bytes(&mut value);
+                (Bytes::from(key), Bytes::from(value))
+            })
+            .collect();
+        pool.sort_by(|a, b| a.0.cmp(&b.0));
+        pool.dedup_by(|a, b| a.0 == b.0);
+
+        let mut builder = BlockBuilder::new_v2(config.block_size);
+        for (seq, (key, value)) in pool.into_iter().enumerate() {
+            let entry = RowEntry::new(
+                key,
+                ValueDeletable::Value(value),
+                seq as u64 + 1,
+                None,
+                None,
+            );
+            match builder.add(entry) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => panic!("failed to add entry: {e:?}"),
             }
+        }
+        let block = builder.build().expect("failed to build block");
+
+        run_bench(&mut || {
+            block_on(async {
+                let mut iter = BlockIteratorV2::new_ascending(&block);
+                while let Some(entry) = iter.next().await.expect("iterator error") {
+                    std::hint::black_box(entry);
+                }
+            });
         });
-    });
+    }
 }
 
 #[cfg(test)]
