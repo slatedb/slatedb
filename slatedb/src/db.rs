@@ -707,12 +707,10 @@ impl Db {
         // Mark the database as closed before flushing.
         self.inner.status_manager.write_result(Ok(()));
 
-        let mut result = Ok(());
-        if should_flush {
+        let result = if should_flush {
             // Flush memtables to L0 so that the WAL does not need to be
             // replayed on the next startup.
-            result = self
-                .inner
+            self.inner
                 .flush(
                     FlushOptions {
                         flush_type: FlushType::MemTable,
@@ -720,12 +718,11 @@ impl Db {
                     false,
                 )
                 .await
-                .map_err(Into::into);
-
-            if let Err(e) = &result {
-                warn!("failed to flush db during close [error={:?}]", e);
-            }
-        }
+                .map_err(Into::into)
+                .inspect_err(|e| warn!("failed to flush db during close [error={:?}]", e))
+        } else {
+            Ok(())
+        };
 
         MemtableFlusher::shutdown(&self.task_executor).await;
 
@@ -5536,7 +5533,7 @@ mod tests {
         )
         .await
         .expect("write batch failed");
-        // close the db to flush the manifest
+
         db.flush().await.unwrap();
         // expect to fail as l0 upload is blocked
         assert!(db.close().await.is_err());
