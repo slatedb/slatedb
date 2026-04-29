@@ -1669,7 +1669,7 @@ mod tests {
         write_wal_sst(
             Arc::clone(&table_store),
             2,
-            vec![wal_2_row_1.clone(), wal_2_row_2],
+            vec![wal_2_row_1.clone(), wal_2_row_2.clone()],
         )
         .await
         .unwrap();
@@ -1694,14 +1694,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(last_wal_id, 2);
-        assert_eq!(last_committed_seq, 2);
+        assert_eq!(last_committed_seq, 3);
         assert_eq!(into_tables.len(), 1);
 
         let replayed = into_tables.front().unwrap();
         assert_eq!(replayed.recent_flushed_wal_id(), 2);
 
         let mut replayed_iter = replayed.table().iter();
-        test_utils::assert_iterator(&mut replayed_iter, vec![wal_1_row, wal_2_row_1]).await;
+        test_utils::assert_iterator(
+            &mut replayed_iter,
+            vec![wal_1_row, wal_2_row_1, wal_2_row_2],
+        )
+        .await;
     }
 
     #[tokio::test]
