@@ -4345,6 +4345,87 @@ mod tests {
         let _ = join_handle.await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_backpressure_waiter_exits_when_db_is_fenced() {
+        // Build a DB whose WAL will not flush on a timer and whose backpressure
+        // threshold is low enough for one write to exceed it.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024 * 1024, None);
+        options.flush_interval = None;
+        options.max_unflushed_bytes = 1;
+
+        // Use a metrics recorder so the test can observe when the spawned task
+        // has actually entered maybe_apply_backpressure().
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_backpressure_waiter_exits_when_db_is_fenced",
+            object_store,
+        )
+        .with_settings(options)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Write enough data to leave bytes buffered in the WAL while avoiding
+        // any automatic WAL or memtable flush.
+        let large_value = vec![b'x'; 8 * 1024];
+        db.put_with_options(b"key1", &large_value, &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        // Start backpressure on a cloned inner handle. With the current bug, this
+        // task waits only on WAL/memtable progress and ignores later fencing.
+        let inner = db.inner.clone();
+        let mut backpressure_task =
+            tokio::spawn(async move { inner.maybe_apply_backpressure().await });
+
+        // Wait until the task has observed the buffered WAL bytes and incremented
+        // the backpressure counter, proving it is inside the wait path.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if lookup_metric(&metrics_recorder, crate::db_stats::BACKPRESSURE_COUNT)
+                    .is_some_and(|v| v > 0)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for backpressure to be applied");
+
+        // Simulate the DB being fenced while the writer is already parked in
+        // backpressure.
+        db.inner
+            .status_manager
+            .write_result(Err(SlateDBError::Fenced));
+
+        // A fixed implementation should wake promptly on the fence signal. The
+        // current implementation times out here because no WAL flush will notify it.
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut backpressure_task).await;
+        if result.is_err() {
+            backpressure_task.abort();
+            let _ = backpressure_task.await;
+        }
+        db.close().await.unwrap();
+
+        // Assert that the waiter exits with the terminal fenced error, not a
+        // successful write path or some unrelated task failure.
+        let backpressure_result = result
+            .expect("backpressure waiter did not exit after DB was fenced")
+            .expect("backpressure task panicked");
+        assert!(
+            matches!(backpressure_result, Err(SlateDBError::Fenced)),
+            "expected fenced error, got {:?}",
+            backpressure_result
+        );
+    }
+
     #[tokio::test]
     async fn test_apply_backpressure_to_memtable_flush() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
