@@ -4387,8 +4387,8 @@ mod tests {
             .unwrap();
         assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
 
-        // Start backpressure on a cloned inner handle. With the current bug, this
-        // task waits only on WAL/memtable progress and ignores later fencing.
+        // Start backpressure on a cloned inner handle. This parks the task on
+        // the same wait path used by writers before they enqueue a batch.
         let inner = db.inner.clone();
         let mut backpressure_task =
             tokio::spawn(async move { inner.maybe_apply_backpressure().await });
@@ -4414,8 +4414,8 @@ mod tests {
             .status_manager
             .write_result(Err(SlateDBError::Fenced));
 
-        // A fixed implementation should wake promptly on the fence signal. The
-        // current implementation times out here because no WAL flush will notify it.
+        // The lifecycle signal should wake the waiter promptly even though no
+        // WAL flush or memtable upload will notify it.
         let result = tokio::time::timeout(Duration::from_secs(5), &mut backpressure_task).await;
         if result.is_err() {
             backpressure_task.abort();
