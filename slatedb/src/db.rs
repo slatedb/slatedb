@@ -5148,6 +5148,44 @@ mod tests {
         assert!(manifest.manifest.core.next_wal_sst_id > next_wal_sst_id);
     }
 
+    #[tokio::test]
+    async fn test_close_should_return_error_if_wal_flush_fails() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+
+        let mut settings = test_db_options(0, 128, None);
+        // Disable automatic flush
+        settings.flush_interval = None;
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Turn on the io error failpoint for WAL
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "return").unwrap();
+
+        // Write data without awaiting durable so it goes into the WAL buffer
+        db.put_with_options(
+            b"foo",
+            b"bar",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Close triggers the WAL flush, which should fail due to the io error
+        db.close()
+            .await
+            .expect_err("close should error out due to WAL IO error");
+    }
+
     async fn do_test_should_read_compacted_db(mut options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
