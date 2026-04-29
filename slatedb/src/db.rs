@@ -4948,6 +4948,9 @@ mod tests {
             .unwrap();
         next_wal_id += 1;
 
+        // subscribe to status manager to get notified when db is closed
+        let mut rx = db.inner.status_manager.subscribe();
+
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
@@ -5002,8 +5005,17 @@ mod tests {
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
-        // expect to fail as l0 upload is blocked
-        assert!(db.close().await.is_err());
+
+        // wait for the background task to report the Fenced error
+        rx.wait_for(|status| status.close_reason.is_some())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.inner.status_manager.status().close_reason,
+            Some(crate::error::CloseReason::Fenced)
+        );
+
+        db.close().await.unwrap();
         reader.close().await.unwrap();
     }
 
