@@ -4,7 +4,7 @@ use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
 use crate::rand::DbRand;
 use bytes::{Bytes, BytesMut};
-use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use futures::{stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attributes, GetRange, GetResultPayload, PutMultipartOptions, PutResult};
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
@@ -295,7 +295,9 @@ impl CachedObjectStore {
         // store to get the missing parts.
         let futures = parts
             .into_iter()
-            .map(|(part_id, range_in_part)| self.read_part(location, part_id, range_in_part))
+            .map(|(part_id, range_in_part)| {
+                Self::read_part(self.clone(), location.clone(), part_id, range_in_part)
+            })
             .collect::<Vec<_>>();
         let result_stream = stream::iter(futures).then(|fut| fut).boxed();
 
@@ -490,73 +492,69 @@ impl CachedObjectStore {
     /// get from disk if the parts are cached, otherwise start a new GET request.
     /// the io errors on reading the disk caches will be ignored, just fallback to
     /// the object store.
-    fn read_part(
-        &self,
-        location: &Path,
+    async fn read_part(
+        this: CachedObjectStore,
+        location: Path,
         part_id: PartID,
         range_in_part: Range<usize>,
-    ) -> BoxFuture<'static, object_store::Result<Bytes>> {
-        let this = self.clone();
-        let location = location.clone();
-        Box::pin(async move {
-            this.stats.object_store_cache_part_access.increment(1);
+    ) -> object_store::Result<Bytes> {
+        this.stats.object_store_cache_part_access.increment(1);
 
-            // Try local cache first.
-            if let Some(cache_location) = this.cache_location_for(&location) {
-                let entry = this
-                    .cache_storage
-                    .entry(&cache_location, this.part_size_bytes);
-                // Cache hit, so return immediately.
-                if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
-                    this.stats.object_store_cache_part_hits.increment(1);
-                    return Ok(bytes);
-                }
+        // Try local cache first.
+        if let Some(cache_location) = this.cache_location_for(&location) {
+            let entry = this
+                .cache_storage
+                .entry(&cache_location, this.part_size_bytes);
+            // Cache hit, so return immediately.
+            if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
+                this.stats.object_store_cache_part_hits.increment(1);
+                return Ok(bytes);
             }
+        }
 
-            // Cache miss, so we need to fetch from the object store.
-            let part_range = Range {
-                start: (part_id * this.part_size_bytes) as u64,
-                end: ((part_id + 1) * this.part_size_bytes) as u64,
-            };
-            let get_result = this
-                .object_store
-                .get_opts(
-                    &location,
-                    GetOptions {
-                        range: Some(GetRange::Bounded(part_range)),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+        // Cache miss, so we need to fetch from the object store.
+        let part_range = Range {
+            start: (part_id * this.part_size_bytes) as u64,
+            end: ((part_id + 1) * this.part_size_bytes) as u64,
+        };
+        let get_result = this
+            .object_store
+            .get_opts(
+                &location,
+                GetOptions {
+                    range: Some(GetRange::Bounded(part_range)),
+                    ..Default::default()
+                },
+            )
+            .await?;
 
-            // Get the cache entry again after successful get so we can cache the part.
-            let cache_entry = if this.resolve_root(&location, &get_result.meta.location) {
-                this.cache_location_for(&location).map(|cache_location| {
-                    this.cache_storage
-                        .entry(&cache_location, this.part_size_bytes)
-                })
-            } else {
-                // If the root resolution fails, we won't be able to derive a canonical cache
-                // key. Skip saving to cache to avoid poisoning the cache with unsafe keys.
-                None
-            };
+        // Get the cache entry again after successful get so we can cache the part.
+        let cache_entry = if this.resolve_root(&location, &get_result.meta.location) {
+            this.cache_location_for(&location).map(|cache_location| {
+                this.cache_storage
+                    .entry(&cache_location, this.part_size_bytes)
+            })
+        } else {
+            // If the root resolution fails, we won't be able to derive a canonical cache
+            // key. Skip saving to cache to avoid poisoning the cache with unsafe keys.
+            None
+        };
 
-            // Save the head and the part to cache for future accesses. Just read the bytes
-            // if we still can't derive a canonical cache key.
-            let bytes = if let Some(entry) = cache_entry {
-                // Save the head and the part to cache for future accesses.
-                let meta = get_result.meta.clone();
-                let attrs = get_result.attributes.clone();
-                let bytes = get_result.bytes().await?;
-                entry.save_head((&meta, &attrs)).await.ok();
-                entry.save_part(part_id, bytes.clone()).await.ok();
-                bytes
-            } else {
-                get_result.bytes().await?
-            };
+        // Save the head and the part to cache for future accesses. Just read the bytes
+        // if we still can't derive a canonical cache key.
+        let bytes = if let Some(entry) = cache_entry {
+            // Save the head and the part to cache for future accesses.
+            let meta = get_result.meta.clone();
+            let attrs = get_result.attributes.clone();
+            let bytes = get_result.bytes().await?;
+            entry.save_head((&meta, &attrs)).await.ok();
+            entry.save_part(part_id, bytes.clone()).await.ok();
+            bytes
+        } else {
+            get_result.bytes().await?
+        };
 
-            Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
-        })
+        Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
     }
 
     // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
