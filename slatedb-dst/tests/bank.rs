@@ -119,7 +119,6 @@ fn test_dst_bank_with_toxics(
             DbFencerActor::new(
                 DbFencerActorOptions {
                     restart_interval: fencer_restart_interval,
-                    min_fencings: 1,
                 },
                 |ctx| async move { open_bank_db(ctx.startup_ctx().clone()).await },
             )?,

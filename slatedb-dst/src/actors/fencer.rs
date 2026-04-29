@@ -48,15 +48,12 @@ where
 pub struct DbFencerActorOptions {
     /// How long the actor waits between DB replacement attempts.
     pub restart_interval: Duration,
-    /// The minimum number of completed fencings required before shutdown.
-    pub min_fencings: u64,
 }
 
 /// Reopens the shared database in a loop and verifies each old handle is fenced.
 pub struct DbFencerActor {
     actor_options: DbFencerActorOptions,
     db_factory: DbFactory,
-    completed_fencings: u64,
 }
 
 impl DbFencerActor {
@@ -69,7 +66,6 @@ impl DbFencerActor {
         Ok(Self {
             actor_options,
             db_factory: Box::new(move |ctx| Box::pin(db_factory(ctx))),
-            completed_fencings: 0,
         })
     }
 }
@@ -86,12 +82,7 @@ impl Actor for DbFencerActor {
         self.assert_old_db_fenced(ctx, &old_db).await;
         old_db.close().await?;
 
-        self.completed_fencings += 1;
-        info!(
-            "db fencing complete [name={}, completed_fencings={}]",
-            ctx.name(),
-            self.completed_fencings
-        );
+        info!("db fencing complete [name={}]", ctx.name());
 
         let shutdown_token = ctx.shutdown_token();
         let system_clock = ctx.system_clock();
@@ -103,32 +94,17 @@ impl Actor for DbFencerActor {
 
         Ok(())
     }
-
-    async fn finish(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
-        assert!(
-            self.completed_fencings >= self.actor_options.min_fencings,
-            "db fencer completed {} fencings but expected at least {} [name={}]",
-            self.completed_fencings,
-            self.actor_options.min_fencings,
-            ctx.name(),
-        );
-        Ok(())
-    }
 }
 
 impl DbFencerActor {
     async fn open_replacement_db(&self, ctx: &ActorCtx) -> Result<Option<Arc<Db>>, Error> {
         loop {
-            let result = if self.completed_fencings >= self.actor_options.min_fencings {
-                let shutdown_token = ctx.shutdown_token();
-                let open_db = (self.db_factory)(ctx.clone());
-                tokio::select! {
-                    biased;
-                    _ = shutdown_token.cancelled() => return Ok(None),
-                    result = open_db => result,
-                }
-            } else {
-                (self.db_factory)(ctx.clone()).await
+            let shutdown_token = ctx.shutdown_token();
+            let open_db = (self.db_factory)(ctx.clone());
+            let result = tokio::select! {
+                biased;
+                _ = shutdown_token.cancelled() => return Ok(None),
+                result = open_db => result,
             };
 
             match result {
@@ -144,11 +120,7 @@ impl DbFencerActor {
     }
 
     async fn assert_old_db_fenced(&self, ctx: &ActorCtx, old_db: &Db) {
-        let probe_key = format!(
-            "__slatedb_dst/db_fencer/{}/{}",
-            ctx.name(),
-            self.completed_fencings
-        );
+        let probe_key = format!("__slatedb_dst/db_fencer/{}/probe", ctx.name());
         let result = old_db
             .put_with_options(
                 probe_key.as_bytes(),
