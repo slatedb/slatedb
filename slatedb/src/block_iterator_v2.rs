@@ -470,8 +470,8 @@ impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
 
 #[cfg(feature = "bench-internal")]
 pub mod benches {
-    use bytes::Bytes;
     use super::BlockIteratorV2;
+    use bytes::Bytes;
 
     #[cfg(feature = "bench-internal")]
     pub struct BlockIteratorV2BenchConfig {
