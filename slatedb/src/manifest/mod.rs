@@ -57,11 +57,6 @@ impl LsmTreeState {
         Self::merge_writer_and_compactor(self, compactor)
     }
 
-    /// Canonical merge of a single LSM tree, called by both
-    /// [`Self::merge_from_writer`] and [`Self::merge_from_compactor`]. The
-    /// writer owns L0 and the compactor owns compacted runs / markers, so the
-    /// merge keeps each side's authoritative state and drops L0 entries the
-    /// compactor has already absorbed.
     /// True iff this tree is a "drain marker": no L0, no compacted runs, but
     /// the watermark is set. Drain markers are produced when the compactor
     /// drains a segment (advances `last_compacted_l0_*` to cover all observed
@@ -84,6 +79,11 @@ impl LsmTreeState {
             && self.last_compacted_l0_sst_id.is_none()
     }
 
+    /// Canonical merge of a single LSM tree, called by both
+    /// [`Self::merge_from_writer`] and [`Self::merge_from_compactor`]. The
+    /// writer owns L0 and the compactor owns compacted runs / markers, so the
+    /// merge keeps each side's authoritative state and drops L0 entries the
+    /// compactor has already absorbed.
     pub(crate) fn merge_writer_and_compactor(writer: &Self, compactor: &Self) -> Self {
         let last_compacted_view = compactor.last_compacted_l0_sst_view_id;
         let last_compacted_sst = compactor.last_compacted_l0_sst_id;
