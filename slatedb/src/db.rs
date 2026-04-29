@@ -360,6 +360,7 @@ impl DbInner {
     #[inline]
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
+            self.check_closed()?;
             let (wal_size_bytes, imm_memtable_size_bytes) = {
                 let wal_size_bytes = self.wal_buffer.estimated_bytes()?;
                 let imm_memtable_size_bytes = {
@@ -438,10 +439,18 @@ impl DbInner {
                 };
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
+                let await_closed = async {
+                    let mut watcher = self.status_manager.result_reader();
+                    match watcher.await_value().await {
+                        Ok(()) => Err(SlateDBError::Closed),
+                        Err(e) => Err(e),
+                    }
+                };
 
                 tokio::select! {
                     result = await_memtable_uploaded => result?,
                     result = await_flush_wal => result?,
+                    result = await_closed => result?,
                     _ = timeout_fut => {
                         warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
