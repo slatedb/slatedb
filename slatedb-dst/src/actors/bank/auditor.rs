@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use log::info;
 use rand::RngCore;
 use slatedb::config::DbReaderOptions;
 use slatedb::{DbReadOps, DbReader, Error};
+use tracing::{info, instrument};
 
 use crate::{Actor, ActorCtx};
 
@@ -68,30 +68,16 @@ impl AuditorActor {
 
 #[async_trait]
 impl Actor for AuditorActor {
+    #[instrument(level = "debug", skip_all, fields(name = %ctx.name(), view = %self.view.name(), step = self.step))]
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let view = self.view.clone();
-        let view_name = view.name();
         match view {
             BankAuditView::Regular => {
-                audit_bank_view(
-                    ctx.db().as_ref(),
-                    &self.bank,
-                    ctx.name(),
-                    self.step,
-                    view_name,
-                )
-                .await?;
+                audit_bank_view(ctx.db().as_ref(), &self.bank, self.step).await?;
             }
             BankAuditView::Snapshot => {
                 let snapshot = ctx.db().snapshot().await?;
-                audit_bank_view(
-                    snapshot.as_ref(),
-                    &self.bank,
-                    ctx.name(),
-                    self.step,
-                    view_name,
-                )
-                .await?;
+                audit_bank_view(snapshot.as_ref(), &self.bank, self.step).await?;
             }
             BankAuditView::Reader { options } => {
                 if self.reader.is_none() {
@@ -101,17 +87,12 @@ impl Actor for AuditorActor {
                     .reader
                     .as_ref()
                     .expect("bank reader auditor should have opened a reader");
-                audit_bank_view(reader, &self.bank, ctx.name(), self.step, view_name).await?;
+                audit_bank_view(reader, &self.bank, self.step).await?;
             }
         };
 
         self.step += 1;
-        info!(
-            "bank auditor step complete [name={}, view={}, step={}]",
-            ctx.name(),
-            view_name,
-            self.step
-        );
+        info!("bank auditor step complete");
 
         let shutdown_token = ctx.shutdown_token();
         let system_clock = ctx.system_clock();
@@ -145,13 +126,7 @@ async fn open_bank_reader(ctx: &ActorCtx, options: DbReaderOptions) -> Result<Db
     builder.build().await
 }
 
-async fn audit_bank_view<R>(
-    reader: &R,
-    bank: &BankAccounts,
-    actor_name: &str,
-    step: u64,
-    view_name: &str,
-) -> Result<(), Error>
+async fn audit_bank_view<R>(reader: &R, bank: &BankAccounts, step: u64) -> Result<(), Error>
 where
     R: DbReadOps + Sync,
 {
@@ -163,7 +138,7 @@ where
         let account_id = bank.parse_account_id(kv.key.as_ref())?;
         assert!(
             !seen[account_id],
-            "duplicate bank account key observed during {view_name} audit [name={actor_name}, step={step}, key={}]",
+            "duplicate bank account key observed during audit [step={step}, key={}]",
             String::from_utf8_lossy(kv.key.as_ref()),
         );
 
@@ -175,13 +150,13 @@ where
     assert_eq!(
         observed_count,
         bank.account_count(),
-        "bank {view_name} audit observed {observed_count} accounts but expected {} [name={actor_name}, step={step}]",
+        "bank audit observed {observed_count} accounts but expected {} [step={step}]",
         bank.account_count(),
     );
     assert_eq!(
         total,
         bank.expected_total(),
-        "bank {view_name} audit total mismatch: observed {total} expected {} [name={actor_name}, step={step}]",
+        "bank audit total mismatch: observed {total} expected {} [step={step}]",
         bank.expected_total(),
     );
 
