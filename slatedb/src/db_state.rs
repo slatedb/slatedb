@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
-use crate::manifest::{LsmTreeState, Manifest, ManifestCore};
+use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::wal_id::WalIdStore;
@@ -238,6 +238,106 @@ impl SsTableView {
     pub fn estimate_size(&self) -> u64 {
         self.sst.estimate_size()
     }
+}
+
+/// Maximum number of L0 SST views whose effective ranges cover any single key.
+///
+/// A key `p` is covered by an L0 view when `p` lies within the view's effective
+/// range. This is the per-key read-amplification for L0 lookups and is the
+/// quantity bounded by `Settings::l0_max_ssts_per_key`.
+///
+/// Implementation: a sweep over 2·N boundary events. Each L0 view contributes a
+/// "+1" event at its start bound and a "-1" event at its end bound. Events are
+/// sorted by virtual position on a number line that distinguishes `just-before v`,
+/// `at v`, and `just-after v`, so inclusive/exclusive bounds are ordered
+/// correctly. At equal positions, `+1` events sort before `-1` so the peak
+/// counts ranges that touch edge-to-edge at an inclusive boundary.
+/// Complexity: O(N log N) time, O(N) space.
+pub(crate) fn max_l0_overlap(l0: &VecDeque<SsTableView>) -> usize {
+    if l0.is_empty() {
+        return 0;
+    }
+
+    // Sign discriminates ±∞ sentinels from finite positions so derive-Ord
+    // places -∞ first and +∞ last; for finite positions, we sort by (key,
+    // offset) where offset is -1/0/+1 for "just before / at / just after".
+    #[derive(Eq, PartialEq)]
+    struct Pos {
+        sign: i8,
+        key: Bytes,
+        offset: i8,
+    }
+
+    impl Ord for Pos {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.sign
+                .cmp(&other.sign)
+                .then_with(|| self.key.cmp(&other.key))
+                .then_with(|| self.offset.cmp(&other.offset))
+        }
+    }
+    impl PartialOrd for Pos {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let start_pos = |r: &BytesRange| -> Pos {
+        match r.start_bound() {
+            Included(k) => Pos {
+                sign: 0,
+                key: k.clone(),
+                offset: 0,
+            },
+            Excluded(k) => Pos {
+                sign: 0,
+                key: k.clone(),
+                offset: 1,
+            },
+            Unbounded => Pos {
+                sign: -1,
+                key: Bytes::new(),
+                offset: 0,
+            },
+        }
+    };
+    let end_pos = |r: &BytesRange| -> Pos {
+        match r.end_bound() {
+            Included(k) => Pos {
+                sign: 0,
+                key: k.clone(),
+                offset: 0,
+            },
+            Excluded(k) => Pos {
+                sign: 0,
+                key: k.clone(),
+                offset: -1,
+            },
+            Unbounded => Pos {
+                sign: 1,
+                key: Bytes::new(),
+                offset: 0,
+            },
+        }
+    };
+
+    let mut events: Vec<(Pos, i8)> = Vec::with_capacity(l0.len() * 2);
+    for view in l0 {
+        let range = view.compacted_effective_range();
+        events.push((start_pos(range), 1));
+        events.push((end_pos(range), -1));
+    }
+    events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+
+    let mut active: i32 = 0;
+    let mut peak: i32 = 0;
+    for (_, delta) in events {
+        active += delta as i32;
+        if active > peak {
+            peak = active;
+        }
+    }
+    peak as usize
 }
 
 /// An identifier for an SSTable, which can be either a WAL SST or a compacted SST.
@@ -630,63 +730,17 @@ impl<'a> StateModifier<'a> {
     }
 
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
-        // The compactor removes tables from l0_last_compacted, so we
-        // only want to keep the tables up to there.
-        let l0_last_compacted_view_id = &remote_manifest
-            .value
-            .core
-            .tree
-            .last_compacted_l0_sst_view_id;
-        let l0_last_compacted_sst_id = &remote_manifest.value.core.tree.last_compacted_l0_sst_id;
-        let new_l0 = if l0_last_compacted_view_id.is_some() || l0_last_compacted_sst_id.is_some() {
-            self.state
-                .manifest
-                .value
-                .core
-                .tree
-                .l0
-                .iter()
-                .cloned()
-                .take_while(|view| {
-                    // Match by view ID first (V2 manifests), then fall back to SST ID (V1).
-                    if let Some(view_id) = l0_last_compacted_view_id {
-                        if view.id == *view_id {
-                            return false;
-                        }
-                    }
-                    if let Some(sst_id) = l0_last_compacted_sst_id {
-                        if view.sst.id.unwrap_compacted_id() == *sst_id {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .collect()
-        } else {
-            self.state
-                .manifest
-                .value
-                .core
-                .tree
-                .l0
-                .iter()
-                .cloned()
-                .collect()
-        };
-
         let my_db_state = self.state.core();
+        let remote = &remote_manifest.value.core;
+        let tree = my_db_state.tree.merge_from_compactor(&remote.tree);
+        let segments =
+            crate::manifest::merge_segments_from_compactor(&my_db_state.segments, &remote.segments);
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
-            tree: LsmTreeState {
-                last_compacted_l0_sst_view_id: remote_manifest
-                    .value
-                    .core
-                    .tree
-                    .last_compacted_l0_sst_view_id,
-                last_compacted_l0_sst_id: remote_manifest.value.core.tree.last_compacted_l0_sst_id,
-                l0: new_l0,
-                compacted: remote_manifest.value.core.tree.compacted,
-            },
+            tree,
+            segments,
+            // Segment configuration is stable; the writer is the source of truth.
+            segment_extractor_name: my_db_state.segment_extractor_name.clone(),
             next_wal_sst_id: my_db_state.next_wal_sst_id,
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
@@ -722,10 +776,12 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 
 #[cfg(test)]
 mod tests {
+    use crate::bytes_range::BytesRange;
     use crate::checkpoint::Checkpoint;
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::{LsmTreeState, Segment};
     use crate::proptest_util::arbitrary;
     use crate::seq_tracker::{FindOption, SequenceTracker, TrackedSeq};
     use crate::test_utils;
@@ -736,6 +792,7 @@ mod tests {
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
+    use std::collections::VecDeque;
     use std::ops::RangeBounds;
 
     #[test]
@@ -824,6 +881,109 @@ mod tests {
             .map(|l0| l0.sst.id)
             .collect();
         assert_eq!(expected, merged);
+    }
+
+    #[test]
+    fn test_should_keep_local_segments_on_merge() {
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+
+        // Local writer has a segment extractor configured and a populated segment.
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|modifier| {
+            let core = &mut modifier.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour-bucket".to_string());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v1.clone()]),
+                    compacted: vec![],
+                },
+            }];
+        });
+
+        // Remote (compactor-authored) state echoes the local core but blanks
+        // out segment configuration — simulating a regression where the
+        // compactor failed to carry segments forward.
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![];
+        remote_state.value.core.segment_extractor_name = None;
+
+        db_state.merge_remote_manifest(remote_state);
+
+        // The writer is the source of truth for segment config and for L0,
+        // so the local segment (with its L0) must survive the merge.
+        let merged = db_state.state.core();
+        assert_eq!(
+            merged.segment_extractor_name.as_deref(),
+            Some("hour-bucket")
+        );
+        assert_eq!(merged.segments.len(), 1);
+        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
+        let l0_ids: Vec<_> = merged.segments[0].tree.l0.iter().map(|v| v.id).collect();
+        assert_eq!(l0_ids, vec![v1.id]);
+    }
+
+    #[test]
+    fn test_should_re_create_segment_on_late_backfill_after_drop() {
+        // After the compactor has drained a segment, a writer L0 with an ID
+        // above the watermark must keep the segment alive (re-creation).
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+        let v2 = view(2); // backfill, written after compactor's snapshot.
+
+        // Local writer: v1 (already absorbed by compactor) and v2 (backfill).
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v2.clone(), v1.clone()]),
+                    compacted: vec![],
+                },
+            }];
+        });
+
+        // Remote compactor: watermark at v1, drained.
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        }];
+
+        db_state.merge_remote_manifest(remote_state);
+
+        let merged = db_state.state.core();
+        assert_eq!(merged.segments.len(), 1);
+        let l0_ids: Vec<_> = merged.segments[0].tree.l0.iter().map(|v| v.id).collect();
+        assert_eq!(l0_ids, vec![v2.id]);
     }
 
     #[test]
@@ -997,5 +1157,253 @@ mod tests {
             first_entry,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn max_l0_overlap_empty_is_zero() {
+        let l0: std::collections::VecDeque<SsTableView> = std::collections::VecDeque::new();
+        assert_eq!(super::max_l0_overlap(&l0), 0);
+    }
+
+    #[test]
+    fn max_l0_overlap_disjoint_ranges_is_one() {
+        // Simulates a post-union manifest where each source's L0s cover
+        // disjoint key ranges — the peak per-point count stays at 1.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"a", Some(b"b")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"c", Some(b"d")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"e", Some(b"f")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"g", Some(b"h")));
+        assert_eq!(super::max_l0_overlap(&l0), 1);
+    }
+
+    #[test]
+    fn max_l0_overlap_full_overlap_counts_all() {
+        let mut l0 = std::collections::VecDeque::new();
+        for _ in 0..4 {
+            l0.push_back(create_compacted_sst_view_with_bounds(b"a", Some(b"z")));
+        }
+        assert_eq!(super::max_l0_overlap(&l0), 4);
+    }
+
+    #[test]
+    fn max_l0_overlap_partial_overlap() {
+        // A: [a, c], B: [b, d]. At B.start=b, both A and B contain b.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"a", Some(b"c")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"b", Some(b"d")));
+        assert_eq!(super::max_l0_overlap(&l0), 2);
+    }
+
+    #[test]
+    fn max_l0_overlap_mixed_disjoint_groups() {
+        // Two disjoint groups of 3 overlapping SSTs each. Peak is 3, not 6.
+        let mut l0 = std::collections::VecDeque::new();
+        for _ in 0..3 {
+            l0.push_back(create_compacted_sst_view_with_bounds(b"a", Some(b"c")));
+        }
+        for _ in 0..3 {
+            l0.push_back(create_compacted_sst_view_with_bounds(b"m", Some(b"p")));
+        }
+        assert_eq!(super::max_l0_overlap(&l0), 3);
+    }
+
+    #[test]
+    fn max_l0_overlap_single_point_range_is_one() {
+        // A view whose first_entry == last_entry covers exactly one key.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"k", Some(b"k")));
+        assert_eq!(super::max_l0_overlap(&l0), 1);
+    }
+
+    #[test]
+    fn max_l0_overlap_many_point_ranges_same_key() {
+        // N coincident point ranges [k, k] all cover key k → peak N.
+        let mut l0 = std::collections::VecDeque::new();
+        for _ in 0..5 {
+            l0.push_back(create_compacted_sst_view_with_bounds(b"k", Some(b"k")));
+        }
+        assert_eq!(super::max_l0_overlap(&l0), 5);
+    }
+
+    #[test]
+    fn max_l0_overlap_mixed_point_and_longer_ranges_at_same_key() {
+        // Two point ranges [k, k] and two longer ranges [k, z] all cover k.
+        // Peak at k is 4; past k, only the two longer ranges remain.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"k", Some(b"k")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"k", Some(b"k")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"k", Some(b"z")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"k", Some(b"z")));
+        assert_eq!(super::max_l0_overlap(&l0), 4);
+    }
+
+    #[test]
+    fn max_l0_overlap_edge_touching_inclusive_counts_both() {
+        // [a, b] and [b, c]: both contain b → peak 2.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"a", Some(b"b")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"b", Some(b"c")));
+        assert_eq!(super::max_l0_overlap(&l0), 2);
+    }
+
+    #[test]
+    fn max_l0_overlap_edge_touching_exclusive_end_is_disjoint() {
+        // [a, b) and [b, c]: no point is in both → peak 1.
+        // First view has an Excluded end at b via a visible_range projection.
+        let a = Bytes::copy_from_slice(b"a");
+        let b = Bytes::copy_from_slice(b"b");
+        let v1 = create_compacted_sst_view_with_bounds(b"a", Some(b"b")).with_visible_range(
+            BytesRange::new(
+                std::ops::Bound::Included(a),
+                std::ops::Bound::Excluded(b.clone()),
+            ),
+        );
+        let v2 = create_compacted_sst_view_with_bounds(b"b", Some(b"c"));
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(v1);
+        l0.push_back(v2);
+        assert_eq!(super::max_l0_overlap(&l0), 1);
+    }
+
+    #[test]
+    fn max_l0_overlap_unbounded_end_single_view() {
+        // A view with first_entry but no last_entry has effective_range
+        // [first, Unbounded) — still one view, peak 1.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"a", None));
+        assert_eq!(super::max_l0_overlap(&l0), 1);
+    }
+
+    #[test]
+    fn max_l0_overlap_unbounded_ends_share_tail() {
+        // [a, ∞) and [b, ∞) both extend to +∞, so they overlap at every
+        // point ≥ b. Peak is 2.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"a", None));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"b", None));
+        assert_eq!(super::max_l0_overlap(&l0), 2);
+    }
+
+    #[test]
+    fn max_l0_overlap_mixed_bounded_and_unbounded_end() {
+        // [a, m] ends at m; [b, ∞) starts before m and extends past it.
+        // They coexist on [b, m]. Peak is 2.
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(create_compacted_sst_view_with_bounds(b"a", Some(b"m")));
+        l0.push_back(create_compacted_sst_view_with_bounds(b"b", None));
+        assert_eq!(super::max_l0_overlap(&l0), 2);
+    }
+
+    #[test]
+    fn max_l0_overlap_unbounded_end_via_visible_range() {
+        // visible_range = [m, Unbounded) applied to a physical [a, z] view.
+        // Effective range becomes [m, z] (physical end clamps the Unbounded).
+        // Pair with [n, ∞): overlap on [n, z]. Peak is 2.
+        let m = Bytes::copy_from_slice(b"m");
+        let projected = create_compacted_sst_view_with_bounds(b"a", Some(b"z")).with_visible_range(
+            BytesRange::new(std::ops::Bound::Included(m), std::ops::Bound::Unbounded),
+        );
+        let open = create_compacted_sst_view_with_bounds(b"n", None);
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(projected);
+        l0.push_back(open);
+        assert_eq!(super::max_l0_overlap(&l0), 2);
+    }
+
+    #[test]
+    fn max_l0_overlap_respects_visible_range() {
+        // Two views whose physical ranges overlap but whose visible_range
+        // projections are disjoint should not count as overlapping.
+        let lo = Bytes::copy_from_slice(b"a");
+        let mid = Bytes::copy_from_slice(b"m");
+        let hi = Bytes::copy_from_slice(b"z");
+        let v1 = create_compacted_sst_view_with_bounds(b"a", Some(b"z")).with_visible_range(
+            BytesRange::new(
+                std::ops::Bound::Included(lo.clone()),
+                std::ops::Bound::Excluded(mid.clone()),
+            ),
+        );
+        let v2 = create_compacted_sst_view_with_bounds(b"a", Some(b"z")).with_visible_range(
+            BytesRange::new(
+                std::ops::Bound::Included(mid),
+                std::ops::Bound::Included(hi),
+            ),
+        );
+        let mut l0 = std::collections::VecDeque::new();
+        l0.push_back(v1);
+        l0.push_back(v2);
+        assert_eq!(super::max_l0_overlap(&l0), 1);
+    }
+
+    #[test]
+    fn max_l0_overlap_proptest_matches_naive() {
+        use proptest::prelude::{prop_oneof, Just, ProptestConfig, Strategy};
+
+        // Generate views with Included starts and end bounds drawn from
+        // {Included, Excluded, Unbounded}. The keyspace is intentionally
+        // small (alphabet 0..3, length 1..=3) so generated views frequently
+        // overlap and the brute-force reference exercises real cases.
+        #[derive(Debug, Clone)]
+        enum EndKind {
+            Inclusive(Bytes),
+            Exclusive(Bytes),
+            Unbounded,
+        }
+        #[derive(Debug, Clone)]
+        struct ViewSpec {
+            start: Bytes,
+            end: EndKind,
+        }
+
+        let key = vec(0u8..3u8, 1..=3).prop_map(Bytes::from);
+        let end = prop_oneof![
+            Just(EndKind::Unbounded),
+            key.clone().prop_map(EndKind::Inclusive),
+            key.clone().prop_map(EndKind::Exclusive),
+        ];
+        let spec =
+            (key, end).prop_filter_map("non-empty effective range", |(start, end)| match &end {
+                EndKind::Inclusive(k) if k < &start => None,
+                EndKind::Exclusive(k) if k <= &start => None,
+                _ => Some(ViewSpec { start, end }),
+            });
+
+        proptest!(ProptestConfig::with_cases(256), |(specs in vec(spec, 0..=8))| {
+            let mut l0 = std::collections::VecDeque::new();
+            for s in &specs {
+                let view = match &s.end {
+                    EndKind::Inclusive(end) => {
+                        create_compacted_sst_view_with_bounds(&s.start, Some(end))
+                    }
+                    EndKind::Unbounded => {
+                        create_compacted_sst_view_with_bounds(&s.start, None)
+                    }
+                    EndKind::Exclusive(end) => create_compacted_sst_view_with_bounds(
+                        &s.start, None,
+                    )
+                    .with_visible_range(BytesRange::new(
+                        std::ops::Bound::Included(s.start.clone()),
+                        std::ops::Bound::Excluded(end.clone()),
+                    )),
+                };
+                l0.push_back(view);
+            }
+
+            // Naive reference: every view's start is Included, so the peak of
+            // the sweep is always achieved at some view's start key. Counting
+            // covers at each start key and taking the max is sufficient.
+            let naive = specs
+                .iter()
+                .map(|s| {
+                    l0.iter()
+                        .filter(|v| v.compacted_effective_range().contains(&s.start))
+                        .count()
+                })
+                .max()
+                .unwrap_or(0);
+
+            assert_eq!(super::max_l0_overlap(&l0), naive);
+        });
     }
 }

@@ -74,6 +74,14 @@ impl ActorCtx {
         self.rand.as_ref()
     }
 
+    /// Returns the startup context shared by this harness run.
+    ///
+    /// This exposes the database path, object stores, clock, failpoint
+    /// registry, and startup RNG used by the database factory.
+    pub fn startup_ctx(&self) -> &StartupCtx {
+        &self.shared.startup_ctx
+    }
+
     /// Returns the current database handle from the shared harness slot.
     ///
     /// ## Returns
@@ -111,7 +119,7 @@ impl ActorCtx {
     /// ## Arguments
     /// - `duration`: The amount of simulated time to add.
     pub async fn advance_time(&self, duration: Duration) {
-        self.shared.system_clock.advance(duration).await;
+        self.shared.startup_ctx.system_clock.advance(duration).await;
     }
 
     /// Returns the root path used to open the database under test.
@@ -119,7 +127,7 @@ impl ActorCtx {
     /// ## Returns
     /// - `&Path`: The path configured for the harness run.
     pub fn path(&self) -> &Path {
-        &self.shared.path
+        self.shared.startup_ctx.path()
     }
 
     /// Returns the wrapped main object store used by the harness.
@@ -128,7 +136,7 @@ impl ActorCtx {
     /// - `Arc<dyn ObjectStore>`: The main object store wrapped with
     ///   deterministic clock behavior.
     pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
-        Arc::clone(&self.shared.main_object_store)
+        self.shared.startup_ctx.main_object_store()
     }
 
     /// Returns the wrapped WAL object store, if one was configured.
@@ -137,7 +145,7 @@ impl ActorCtx {
     /// - `Option<Arc<dyn ObjectStore>>`: The WAL store wrapped with
     ///   deterministic clock behavior, or `None`.
     pub fn wal_object_store(&self) -> Option<Arc<dyn ObjectStore>> {
-        self.shared.wal_object_store.clone()
+        self.shared.startup_ctx.wal_object_store()
     }
 
     /// Returns the shared system clock used by the harness.
@@ -145,7 +153,7 @@ impl ActorCtx {
     /// ## Returns
     /// - `Arc<dyn SystemClock>`: The clock backing time-sensitive test behavior.
     pub fn system_clock(&self) -> Arc<dyn SystemClock> {
-        Arc::clone(&self.shared.system_clock)
+        self.shared.startup_ctx.system_clock()
     }
 
     /// Returns the shared failpoint registry for the harness run.
@@ -154,7 +162,7 @@ impl ActorCtx {
     /// - `Arc<FailPointRegistry>`: The registry used to configure failpoints in
     ///   participating components.
     pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
-        Arc::clone(&self.shared.fp_registry)
+        self.shared.startup_ctx.fp_registry()
     }
 
     /// Returns the shared shutdown token for the current harness run.
@@ -237,11 +245,7 @@ impl StartupCtx {
 
 #[derive(Clone)]
 struct HarnessCtx {
-    path: Path,
-    main_object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Option<Arc<dyn ObjectStore>>,
-    system_clock: Arc<dyn SystemClock>,
-    fp_registry: Arc<FailPointRegistry>,
+    startup_ctx: StartupCtx,
     db_slot: Arc<RwLock<Arc<Db>>>,
     compactor_slot: Arc<RwLock<Option<Compactor>>>,
     shutdown_token: CancellationToken,
@@ -533,14 +537,10 @@ impl Harness {
             rand: Arc::new(DbRand::new(startup_seed)),
         };
 
-        let db = startup_factory(startup_ctx).await?;
+        let db = startup_factory(startup_ctx.clone()).await?;
 
         let shared = HarnessCtx {
-            path,
-            main_object_store,
-            wal_object_store,
-            system_clock: system_clock.clone(),
-            fp_registry,
+            startup_ctx,
             db_slot: Arc::new(RwLock::new(db)),
             compactor_slot: Arc::new(RwLock::new(None)),
             shutdown_token: CancellationToken::new(),
@@ -562,6 +562,9 @@ impl Harness {
                 let shutdown_token = ctx.shutdown_token();
                 while !shutdown_token.is_cancelled() {
                     actor.run(&ctx).await?;
+                    // Keep hot actors from monopolizing the current-thread runtime when
+                    // their awaited operations complete without parking.
+                    tokio::task::yield_now().await;
                 }
                 actor.finish(&ctx).await
             });

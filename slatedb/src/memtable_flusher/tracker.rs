@@ -199,11 +199,18 @@ impl FlushTracker {
     }
 
     fn available_l0_slots(&self) -> usize {
-        let l0_len = self.inner.state.read().state().core().tree.l0.len();
-        self.inner
-            .settings
-            .l0_max_ssts
-            .saturating_sub(l0_len + self.frontier.reserved_l0_slots())
+        let (l0_len, peak) = {
+            let state = self.inner.state.read().state();
+            let l0 = &state.core().tree.l0;
+            (l0.len(), crate::db_state::max_l0_overlap(l0))
+        };
+        let reserved = self.frontier.reserved_l0_slots();
+        let settings = &self.inner.settings;
+        let total_slots = settings.l0_max_ssts.saturating_sub(l0_len + reserved);
+        // Each reserved (in-flight) upload is treated as +1 at every point
+        // because its output key range is not yet known.
+        let per_key_slots = settings.l0_max_ssts_per_key.saturating_sub(peak + reserved);
+        total_slots.min(per_key_slots)
     }
 
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
@@ -522,12 +529,16 @@ mod tests {
     }
 
     fn seeded_l0_handle(first_key: &[u8]) -> SsTableHandle {
+        seeded_l0_handle_with_bounds(first_key, None)
+    }
+
+    fn seeded_l0_handle_with_bounds(first_key: &[u8], last_key: Option<&[u8]>) -> SsTableHandle {
         SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::copy_from_slice(first_key)),
-                last_entry: None,
+                last_entry: last_key.map(Bytes::copy_from_slice),
                 index_offset: 0,
                 index_len: 0,
                 filter_offset: 0,
@@ -539,6 +550,47 @@ mod tests {
                 filter_format: FilterFormat::default(),
             },
         )
+    }
+
+    async fn set_remote_l0_disjoint(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+        ranges: &[(&[u8], &[u8])],
+    ) {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.tree.l0.clear();
+        for (first, last) in ranges {
+            dirty.value.core.tree.l0.push_back(SsTableView::new(
+                ulid::Ulid::new(),
+                seeded_l0_handle_with_bounds(first, Some(last)),
+            ));
+        }
+        stored_manifest.update(dirty).await.unwrap();
+    }
+
+    fn set_local_l0_disjoint(harness: &TestHarness, ranges: &[(&[u8], &[u8])]) {
+        let mut guard = harness.inner.state.write();
+        guard.modify(|modifier| {
+            modifier.state.manifest.value.core.tree.l0.clear();
+            for (first, last) in ranges {
+                modifier
+                    .state
+                    .manifest
+                    .value
+                    .core
+                    .tree
+                    .l0
+                    .push_back(SsTableView::new(
+                        ulid::Ulid::new(),
+                        seeded_l0_handle_with_bounds(first, Some(last)),
+                    ));
+            }
+        });
     }
 
     async fn set_remote_l0_len(path: &str, object_store: Arc<dyn ObjectStore>, l0_len: usize) {
@@ -873,6 +925,93 @@ mod tests {
                 .unwrap();
             assert_eq!(result.durable_seq, 1);
         }
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn flush_proceeds_when_l0_total_high_but_disjoint_ranges() {
+        // Mirrors a post-rescaling (union) manifest: L0 total exceeds the
+        // single-source `l0_max_ssts`, but each L0 covers a disjoint key
+        // range so no point is covered by more than one L0. The per-key cap
+        // should allow flushes to proceed.
+        let settings = Settings {
+            l0_max_ssts: 100,
+            l0_max_ssts_per_key: 2,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_per_key_disjoint",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let ranges: &[(&[u8], &[u8])] = &[
+            (b"a0", b"a9"),
+            (b"b0", b"b9"),
+            (b"c0", b"c9"),
+            (b"d0", b"d9"),
+            (b"e0", b"e9"),
+        ];
+        set_local_l0_disjoint(&harness, ranges);
+        set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn flush_blocked_by_per_key_cap_when_ranges_overlap() {
+        // A single wide-range L0 covers the whole key space. With per-key
+        // cap of 1, the peak overlap is already 1 so flushes must block
+        // until L0 drains.
+        let settings = Settings {
+            l0_max_ssts: 100,
+            l0_max_ssts_per_key: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_per_key_blocks",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let ranges: &[(&[u8], &[u8])] = &[(b"aaa", b"zzz")];
+        set_local_l0_disjoint(&harness, ranges);
+        set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 42);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        // Blocked — per-key cap reached.
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+
+        // Drain L0 locally and remotely; flush should now progress.
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+        }
+        set_remote_l0_disjoint(&path, object_store, &[]).await;
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
 
         flusher.shutdown().await;
     }

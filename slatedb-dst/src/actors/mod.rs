@@ -14,14 +14,18 @@
 
 pub mod bank;
 pub mod compactor;
+pub mod fencer;
 pub mod flusher;
 pub mod shutdown;
+pub mod suppress_errors;
 pub mod workload;
 
 pub use self::bank::{initialize_accounts, AuditorActor, BankOptions, TransferActor};
 pub use self::compactor::{CompactorActor, CompactorActorOptions};
+pub use self::fencer::{DbFencerActor, DbFencerActorOptions, SuppressFenced};
 pub use self::flusher::FlusherActor;
 pub use self::shutdown::ShutdownActor;
+pub use self::suppress_errors::SuppressErrorActor;
 pub use self::workload::{WorkloadActor, WorkloadActorOptions};
 
 /// Emit one progress log line every N completed steps for the looping actors.
