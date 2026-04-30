@@ -93,6 +93,8 @@ mod batch_write;
 mod blob;
 mod block_iterator;
 mod block_iterator_v2;
+#[cfg(feature = "bench-internal")]
+pub use block_iterator_v2::benches as block_iterator_v2_benches;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;

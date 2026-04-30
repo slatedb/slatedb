@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run microbenchmark
-        run: cargo bench -- --output-format bencher | tee output.txt
+        run: cargo bench --features bench-internal -- --output-format bencher | tee output.txt
 
       - name: Download nightly microbenchmark data
         uses: actions/cache/restore@v4
