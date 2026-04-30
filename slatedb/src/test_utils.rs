@@ -778,6 +778,111 @@ impl ObjectStore for FlakyObjectStore {
     }
 }
 
+/// An ObjectStore wrapper that injects an artificial delay into `get_opts` and `head`,
+/// ensuring that concurrent callers truly overlap in time so deduplication logic
+/// (e.g. SingleFlight) is deterministically exercised.
+#[derive(Debug)]
+pub(crate) struct SlowObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    delay: Duration,
+}
+
+impl SlowObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>, delay: Duration) -> Self {
+        Self { inner, delay }
+    }
+}
+
+impl fmt::Display for SlowObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SlowObjectStore({})", self.inner)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for SlowObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.head(location).await
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: OS_PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart(
+        &self,
+        location: &Path,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart(location).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&Path>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&Path>,
+    ) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.rename(from, to).await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+
+    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.rename_if_not_exists(from, to).await
+    }
+}
+
+
 pub(crate) struct StringConcatMergeOperator;
 
 impl MergeOperator for StringConcatMergeOperator {
