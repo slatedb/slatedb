@@ -41,6 +41,7 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     let min_filter_keys = rng.random_range(100..1000);
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
     let l0_max_ssts = rng.random_range(4..8);
+    let l0_max_ssts_per_key = l0_max_ssts;
     let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
@@ -56,6 +57,7 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         min_filter_keys,
         l0_sst_size_bytes,
         l0_max_ssts,
+        l0_max_ssts_per_key,
         max_unflushed_bytes,
         compression_codec,
         compactor_options: Some(build_settings_compactor(&mut *rng)),

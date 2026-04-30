@@ -50,6 +50,7 @@
 //! min_filter_keys = 1000
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
+//! l0_max_ssts_per_key = 8
 //! l0_flush_parallelism = 4
 //! max_unflushed_bytes = 536870912
 //!
@@ -97,6 +98,7 @@
 //!  "min_filter_keys": 1000,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
+//!  "l0_max_ssts_per_key": 8,
 //!  "l0_flush_parallelism": 4,
 //!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
@@ -147,6 +149,7 @@
 //! min_filter_keys: 1000
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
+//! l0_max_ssts_per_key: 8
 //! l0_flush_parallelism: 1
 //! max_unflushed_bytes: 536870912
 //! compactor_options:
@@ -660,9 +663,27 @@ pub struct Settings {
     ///   secondary readers to see new data.
     pub l0_sst_size_bytes: usize,
 
-    /// Defines the max number of SSTs in l0. Memtables will not be flushed if there are more
-    /// l0 ssts than this value, until compaction can compact the ssts into compacted.
+    /// Defines the max total number of SSTs in L0 across the entire key space. Memtables
+    /// will not be flushed if the total L0 count (including in-flight uploads) would exceed
+    /// this value, until compaction can compact the ssts into compacted.
+    ///
+    /// This cap primarily bounds manifest size and global bookkeeping. Read amplification
+    /// and write backpressure are governed by [`Self::l0_max_ssts_per_key`], which enforces
+    /// a cap on L0 SSTs overlapping any single key. After a manifest union (rescaling),
+    /// the total L0 count can exceed a single source's `l0_max_ssts` while no individual
+    /// key is covered by more than `l0_max_ssts_per_key` SSTs; `l0_max_ssts` should be
+    /// set generously in that case (e.g. `l0_max_ssts_per_key * expected_max_shards`).
     pub l0_max_ssts: usize,
+
+    /// Defines the max number of L0 SSTs whose effective ranges cover any single key.
+    /// Memtables will not be flushed if dispatching a new L0 upload would cause any point
+    /// in the key space to be covered by more L0 SSTs than this value.
+    ///
+    /// This is the per-key analogue of [`Self::l0_max_ssts`]: it bounds the number of L0
+    /// SSTs a point read may need to consult (read amplification) and drives write
+    /// backpressure. Because in-flight uploads have no known key range yet, each reserved
+    /// slot is treated conservatively as contributing to the peak at every point.
+    pub l0_max_ssts_per_key: usize,
 
     /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
     /// Higher values increase L0 flush throughput at the cost of more concurrent
@@ -720,6 +741,7 @@ impl std::fmt::Debug for Settings {
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
             .field("l0_max_ssts", &self.l0_max_ssts)
+            .field("l0_max_ssts_per_key", &self.l0_max_ssts_per_key)
             .field("l0_flush_parallelism", &self.l0_flush_parallelism)
             .field("compactor_options", &self.compactor_options)
             .field("compression_codec", &self.compression_codec)
@@ -917,6 +939,7 @@ impl Default for Settings {
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
             l0_max_ssts: 8,
+            l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
