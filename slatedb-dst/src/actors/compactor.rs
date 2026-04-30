@@ -124,9 +124,15 @@ impl CompactorActor {
     }
 
     fn compactor_builder(&self, ctx: &ActorCtx) -> CompactorBuilder<object_store::path::Path> {
-        CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
+        let mut builder = CompactorBuilder::new(ctx.path().clone(), ctx.main_object_store())
             .with_options(self.actor_options.compactor_options.clone())
             .with_system_clock(ctx.system_clock())
-            .with_seed(ctx.rand().rng().next_u64())
+            .with_seed(ctx.rand().rng().next_u64());
+
+        if let Some(merge_operator) = ctx.merge_operator() {
+            builder = builder.with_merge_operator(merge_operator);
+        }
+
+        builder
     }
 }

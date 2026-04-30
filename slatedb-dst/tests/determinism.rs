@@ -195,14 +195,16 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
         // Disable since we're using the standalone compactor actor.
         settings.compactor_options = None;
 
-        let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+        let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
             .with_wal_object_store(ctx.wal_object_store().expect("configured"))
             .with_system_clock(ctx.system_clock())
             .with_fp_registry(ctx.fp_registry())
             .with_seed(db_seed)
-            .with_settings(settings)
-            .build()
-            .await?;
+            .with_settings(settings);
+        if let Some(merge_operator) = ctx.merge_operator() {
+            builder = builder.with_merge_operator(merge_operator);
+        }
+        let db = builder.build().await?;
         Ok(Arc::new(db))
     })
     .with_rand(Arc::clone(&rand))
