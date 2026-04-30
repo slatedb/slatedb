@@ -222,6 +222,8 @@ Each registered actor instance receives its own `ActorCtx`.
 
 - `name()` for actor identity
 - `rand()` for actor-local deterministic randomness
+- `startup_ctx()` to reuse the startup path, object stores, clock, failpoint
+  registry, and startup RNG when reopening a database
 - `db()` to read the currently installed shared `Arc<Db>`
 - `swap_db(new_db)` to replace the shared DB handle for all actors
 - `swap_compactor(new_compactor)` to replace the shared standalone compactor handle
