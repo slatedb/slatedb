@@ -18,8 +18,7 @@ use slatedb_dst::{
         TransferActor,
     },
     utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
-    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    StartupCtx,
+    DeterministicLocalFilesystem, Harness, StartupCtx,
 };
 use tempfile::TempDir;
 
