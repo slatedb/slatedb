@@ -64,7 +64,6 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     };
-
     settings
 }
 
@@ -78,7 +77,6 @@ pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
     let checkpoint_lifetime =
         rng.random_range(min_checkpoint_lifetime..Duration::from_secs(4 * 60 * 60));
     let max_memtable_bytes = rng.random_range((MIB_1 as u64)..=(MIB_500 as u64));
-
     DbReaderOptions {
         manifest_poll_interval,
         checkpoint_lifetime,
@@ -91,7 +89,6 @@ pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
 pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
     let min_compaction_sources = rng.random_range(2..=4);
     let max_compaction_sources = rng.random_range(min_compaction_sources..=16);
-
     CompactorOptions {
         poll_interval: rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         manifest_update_timeout: rng
