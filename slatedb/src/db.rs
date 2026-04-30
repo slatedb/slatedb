@@ -536,8 +536,7 @@ impl DbInner {
 
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
-            min_memtable_bytes: self.settings.l0_sst_size_bytes,
-            max_memtable_bytes: usize::MAX,
+            max_memtable_bytes: self.settings.l0_sst_size_bytes,
             sst_iter_options,
             min_seq: None,
         };
@@ -5987,6 +5986,7 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 1,
             min_filter_keys,
             l0_sst_size_bytes,
@@ -7461,6 +7461,7 @@ mod tests {
             }),
         );
         settings.l0_max_ssts = 10_000;
+        settings.l0_max_ssts_per_key = 10_000;
         settings.flush_interval = None;
         settings.wal_enabled = false;
 
@@ -7610,6 +7611,7 @@ mod tests {
             }),
         );
         settings.l0_max_ssts = 10_000;
+        settings.l0_max_ssts_per_key = 10_000;
         settings.flush_interval = None;
         settings.wal_enabled = false;
 
