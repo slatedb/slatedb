@@ -103,7 +103,7 @@ where
         let value = guard
             .cell
             .as_ref()
-            .unwrap()
+            .expect("cell is always Some until Drop")
             .get_or_try_init(func)
             .await
             .cloned();
