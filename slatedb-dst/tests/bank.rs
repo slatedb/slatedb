@@ -9,7 +9,6 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::{Rng, RngCore};
 use rstest::rstest;
-use slatedb::config::DbReaderOptions;
 use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
@@ -18,7 +17,7 @@ use slatedb_dst::{
         CompactorActorOptions, DbFencerActor, DbFencerActorOptions, ShutdownActor, SuppressFenced,
         TransferActor,
     },
-    utils::{build_settings, build_settings_compactor, build_toxic},
+    utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     StartupCtx,
 };
@@ -64,11 +63,7 @@ fn test_dst_bank_with_toxics(
     let bank_options = random_bank_options(&rand);
     info!("dst bank options: {bank_options:?}");
     let audit_interval = Duration::from_millis(1000);
-    let reader_options = DbReaderOptions {
-        manifest_poll_interval: Duration::from_millis(500),
-        checkpoint_lifetime: Duration::from_secs(60 * 60),
-        ..DbReaderOptions::default()
-    };
+    let reader_options = build_reader_options(&rand);
     let fencer_restart_interval = Duration::from_secs(120);
     let compactor_options = build_settings_compactor(&mut *rand.rng());
 

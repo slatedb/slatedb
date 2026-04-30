@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use rand::Rng;
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-    GarbageCollectorScheduleOptions, SizeTieredCompactionSchedulerOptions,
+    CompactorOptions, CompressionCodec, DbReaderOptions, GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions, GarbageCollectorScheduleOptions, SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -66,6 +66,25 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     };
 
     settings
+}
+
+/// Builds randomized deterministic reader options for DST scenarios.
+pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
+    let mut rng = rand.rng();
+    let manifest_poll_interval =
+        rng.random_range(Duration::from_millis(100)..Duration::from_secs(5));
+    // Lifetime must always be greater than twice the poll interval.
+    let min_checkpoint_lifetime = manifest_poll_interval * 2 + Duration::from_micros(1);
+    let checkpoint_lifetime =
+        rng.random_range(min_checkpoint_lifetime..Duration::from_secs(4 * 60 * 60));
+    let max_memtable_bytes = rng.random_range((MIB_1 as u64)..=(MIB_500 as u64));
+
+    DbReaderOptions {
+        manifest_poll_interval,
+        checkpoint_lifetime,
+        max_memtable_bytes,
+        ..DbReaderOptions::default()
+    }
 }
 
 /// Builds randomized deterministic compactor options for DST scenarios.
