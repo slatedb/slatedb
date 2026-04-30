@@ -637,6 +637,10 @@ impl Harness {
             }
         }
 
+        let failure_controller = shared.startup_ctx.failure_controller();
+        failure_controller.clear_toxics();
+        failure_controller.clear_http_failures();
+
         let db_result = shared.db_slot.write().close().await;
         let compactor_result = match shared.compactor_slot.write().take() {
             Some(compactor) => compactor.stop().await,
