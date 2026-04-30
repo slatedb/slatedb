@@ -843,10 +843,7 @@ impl ObjectStore for SlowObjectStore {
         self.inner.delete(location).await
     }
 
-    fn list(
-        &self,
-        prefix: Option<&Path>,
-    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.inner.list(prefix)
     }
 
@@ -858,10 +855,7 @@ impl ObjectStore for SlowObjectStore {
         self.inner.list_with_offset(prefix, offset)
     }
 
-    async fn list_with_delimiter(
-        &self,
-        prefix: Option<&Path>,
-    ) -> object_store::Result<ListResult> {
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
         self.inner.list_with_delimiter(prefix).await
     }
 
@@ -881,7 +875,6 @@ impl ObjectStore for SlowObjectStore {
         self.inner.rename_if_not_exists(from, to).await
     }
 }
-
 
 pub(crate) struct StringConcatMergeOperator;
 
