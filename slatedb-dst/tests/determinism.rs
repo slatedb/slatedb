@@ -34,8 +34,7 @@ use slatedb_dst::{
         WorkloadActorOptions,
     },
     utils::build_settings,
-    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    Operation, StreamDirection, Toxic, ToxicKind,
+    DeterministicLocalFilesystem, Harness, Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 use tracing::instrument;
@@ -148,11 +147,12 @@ fn run_seed_is_deterministic(
 /// state after the harness shuts down.
 ///
 /// Each invocation builds a fresh temporary main and WAL object-store root,
-/// fresh root RNG, fresh mock clock, and fresh fault-injection controller. The
-/// harness then opens a real `Db`, starts workload, flusher, compactor, and
-/// shutdown actors, and runs until the shutdown actor cancels the simulation.
-/// Returning the next root RNG value and current mock-clock time gives callers a
-/// compact fingerprint of the deterministic execution path.
+/// fresh root RNG, and fresh mock clock. The harness then owns the
+/// fault-injection controller, opens a real `Db`, starts workload, flusher,
+/// compactor, and shutdown actors, and runs until the shutdown actor cancels
+/// the simulation. Returning the next root RNG value and current mock-clock
+/// time gives callers a compact fingerprint of the deterministic execution
+/// path.
 #[instrument(level = "debug", skip_all, fields(seed = seed))]
 fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Utc>)> {
     let tempdir = TempDir::new()?;
@@ -163,29 +163,10 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
 
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
-    let failure_seed = rand.rng().next_u64();
-    let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(failure_seed)));
-    failures.add_toxic(Toxic {
-        name: "put-latency".into(),
-        kind: ToxicKind::Latency {
-            latency: Duration::from_millis(1),
-            jitter: Duration::from_millis(3),
-        },
-        direction: StreamDirection::Upstream,
-        toxicity: 1.0,
-        operations: vec![Operation::PutOpts],
-        path_prefix: None,
-    });
-    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
-        failures.clone(),
-        system_clock.clone(),
-    ));
-    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
-        failures,
-        system_clock.clone(),
-    ));
+    let main_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
+    let wal_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
     let workload_options = WorkloadActorOptions::default();
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(10),
@@ -198,6 +179,18 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
         ..CompactorOptions::default()
     };
     let harness = Harness::new("determinism", seed, move |ctx| async move {
+        ctx.failure_controller().add_toxic(Toxic {
+            name: "put-latency".into(),
+            kind: ToxicKind::Latency {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(3),
+            },
+            direction: StreamDirection::Upstream,
+            toxicity: 1.0,
+            operations: vec![Operation::PutOpts],
+            path_prefix: None,
+        });
+
         let db_seed = ctx.rand().rng().next_u64();
         let mut settings = build_settings(ctx.rand()).await;
 

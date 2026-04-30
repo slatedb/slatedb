@@ -17,8 +17,7 @@ use slatedb_dst::{
         DbFencerActor, DbFencerActorOptions, ShutdownActor, SuppressFenced, TransferActor,
     },
     utils::{build_settings, build_settings_compactor, build_toxic},
-    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    StartupCtx,
+    DeterministicLocalFilesystem, Harness, StartupCtx,
 };
 use tempfile::TempDir;
 
@@ -39,25 +38,10 @@ fn test_dst_bank_with_toxics(
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
 
-    // Build a shared toxic controller with randomized toxics.
-    let failure_seed = rand.rng().next_u64();
-    let failure_rand = Arc::new(DbRand::new(failure_seed));
-    let failures = FailingObjectStoreController::new(failure_rand.clone());
-    for index in 0..10 {
-        let toxic = build_toxic(failure_rand.as_ref(), "bank", index);
-        failures.add_toxic(toxic);
-    }
-
-    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
-        failures.clone(),
-        system_clock.clone(),
-    ));
-    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
-        failures,
-        system_clock.clone(),
-    ));
+    let main_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
+    let wal_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
 
     let bank_options = random_bank_options(&rand);
     info!("dst bank options: {bank_options:?}");
@@ -68,6 +52,11 @@ fn test_dst_bank_with_toxics(
     let harness = Harness::new("bank", seed, {
         let bank_options = bank_options.clone();
         move |ctx| async move {
+            let failures = ctx.failure_controller();
+            for index in 0..10 {
+                failures.add_toxic(build_toxic(ctx.rand(), ctx.path().as_ref(), index));
+            }
+
             let db = open_bank_db(ctx).await?;
             initialize_accounts(db.as_ref(), &bank_options).await?;
 
