@@ -332,7 +332,7 @@ The extractor must be configured when the database is first created, or never co
 
 **Union.** Union of N segmented manifests adds two preconditions on top of those in [RFC 0004](./0004-checkpoints.md#union):
 
-- All sources must share the same `segment_extractor_name`. Mismatched extractor identity is rejected — silently routing data through a different extractor than was used at write time would produce inconsistent reads.
+- All sources must share the same `segment_extractor_name` exactly, including the absence/presence of an extractor: either every source has `None` (unsegmented union) or every source has the same `Some(name)` (segmented union). Mixed configurations — some sources with an extractor and some without — are rejected. Although we know that unioned ranges are disjoint, we don't know that unsegmented data in a database without an extractor will remain unsegmented after union: a key persisted in an unsegmented source's `core.tree` may still match an extractor prefix carried over from another source, even when the SST-view ranges are disjoint. After such a union a future read of that key would route through the extractor to a segment that does not contain it, dropping the value. A future extension may relax this once a per-source key check can confirm unsegmented data does not match any extractor prefix; for now we require exact agreement and lean on simplicity.
 - The combined set of segment prefixes across all sources must form an antichain (no prefix is a proper prefix of another). This usually follows from the existing non-overlapping key range precondition, but is checked explicitly to defend against stale extractor-name matches.
 
 For each segment prefix in the inputs:
