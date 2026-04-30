@@ -12,6 +12,8 @@ use slatedb_common::clock::SystemClock;
 use std::{ops::Range, sync::Arc};
 use tokio::sync::OnceCell;
 
+use crate::single_flight::SingleFlight;
+
 use crate::cached_object_store::admission::AdmissionPicker;
 use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
 use crate::error::SlateDBError;
@@ -30,6 +32,13 @@ pub(crate) struct CachedObjectStore {
     // Absolute path of the root folder relative to the bucket. See #1319.
     resolved_root: Arc<OnceCell<Path>>,
     stats: Arc<CachedObjectStoreStats>,
+    // Deduplicates concurrent HEAD requests for the same path after a cache miss.
+    head_flights: SingleFlight<Path, ObjectMeta>,
+    // Deduplicates concurrent prefetch/GET requests for the same path after a cache miss.
+    prefetch_flights: SingleFlight<Path, (ObjectMeta, Attributes)>,
+    // Deduplicates concurrent fetches of the same part after a cache miss.
+    // Keyed on (path, part_id) so multiple readers needing the same part share one fetch.
+    part_flights: SingleFlight<(Path, PartID), Bytes>,
 }
 
 impl CachedObjectStore {
@@ -52,6 +61,9 @@ impl CachedObjectStore {
             admission_picker: AdmissionPicker::default(),
             cache_puts,
             resolved_root: Arc::new(OnceCell::new()),
+            head_flights: SingleFlight::new(),
+            prefetch_flights: SingleFlight::new(),
+            part_flights: SingleFlight::new(),
         }))
     }
 
@@ -254,22 +266,27 @@ impl CachedObjectStore {
             }
         }
 
-        let result = self
-            .object_store
-            .get_opts(
-                location,
-                GetOptions {
-                    range: None,
-                    head: true,
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let meta = result.meta.clone();
-        if self.resolve_root(location, &meta.location) {
-            self.save_get_result(result).await.ok();
-        }
-        Ok(meta)
+        // Cache miss — deduplicate concurrent HEAD requests for the same path.
+        self.head_flights
+            .call(location.clone(), || async {
+                let result = self
+                    .object_store
+                    .get_opts(
+                        location,
+                        GetOptions {
+                            range: None,
+                            head: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                let meta = result.meta.clone();
+                if self.resolve_root(location, &meta.location) {
+                    self.save_get_result(result).await.ok();
+                }
+                Ok(meta)
+            })
+            .await
     }
 
     pub(crate) async fn cached_get_opts(
@@ -375,16 +392,21 @@ impl CachedObjectStore {
             opts.range = Some(self.align_get_range(range));
         }
 
-        let get_result = self.object_store.get_opts(location, opts).await?;
-        let result_meta = get_result.meta.clone();
-        let result_attrs = get_result.attributes.clone();
-        // swallow the error on saving to disk here (the disk might be already full), just fallback
-        // to the object store.
-        // TODO: add a warning log here.
-        if self.resolve_root(location, &result_meta.location) {
-            self.save_get_result(get_result).await.ok();
-        }
-        Ok((result_meta, result_attrs))
+        // Cache miss — deduplicate concurrent prefetch requests for the same path.
+        // Only one caller performs the fetch+save; others share the metadata result.
+        // Parts not covered by the winning caller's range are handled by read_part's
+        // own object-store fallback, so correctness is maintained.
+        self.prefetch_flights
+            .call(location.clone(), || async {
+                let get_result = self.object_store.get_opts(location, opts).await?;
+                let result_meta = get_result.meta.clone();
+                let result_attrs = get_result.attributes.clone();
+                if self.resolve_root(location, &result_meta.location) {
+                    self.save_get_result(get_result).await.ok();
+                }
+                Ok((result_meta, result_attrs))
+            })
+            .await
     }
 
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
@@ -513,47 +535,50 @@ impl CachedObjectStore {
                 }
             }
 
-            // Cache miss, so we need to fetch from the object store.
-            let part_range = Range {
-                start: (part_id * this.part_size_bytes) as u64,
-                end: ((part_id + 1) * this.part_size_bytes) as u64,
-            };
-            let get_result = this
-                .object_store
-                .get_opts(
-                    &location,
-                    GetOptions {
-                        range: Some(GetRange::Bounded(part_range)),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+            // Cache miss — deduplicate concurrent fetches of the same part.
+            // The SingleFlight fetches the full part and saves it to cache; each
+            // caller then slices out their own range_in_part.
+            let bytes = this
+                .part_flights
+                .call((location.clone(), part_id), || async {
+                    let part_range = Range {
+                        start: (part_id * this.part_size_bytes) as u64,
+                        end: ((part_id + 1) * this.part_size_bytes) as u64,
+                    };
+                    let get_result = this
+                        .object_store
+                        .get_opts(
+                            &location,
+                            GetOptions {
+                                range: Some(GetRange::Bounded(part_range)),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
 
-            // Get the cache entry again after successful get so we can cache the part.
-            let cache_entry = if this.resolve_root(&location, &get_result.meta.location) {
-                this.cache_location_for(&location).map(|cache_location| {
-                    this.cache_storage
-                        .entry(&cache_location, this.part_size_bytes)
+                    let cache_entry = if this.resolve_root(&location, &get_result.meta.location) {
+                        this.cache_location_for(&location).map(|cache_location| {
+                            this.cache_storage
+                                .entry(&cache_location, this.part_size_bytes)
+                        })
+                    } else {
+                        None
+                    };
+
+                    let bytes = if let Some(entry) = cache_entry {
+                        let meta = get_result.meta.clone();
+                        let attrs = get_result.attributes.clone();
+                        let bytes = get_result.bytes().await?;
+                        entry.save_head((&meta, &attrs)).await.ok();
+                        entry.save_part(part_id, bytes.clone()).await.ok();
+                        bytes
+                    } else {
+                        get_result.bytes().await?
+                    };
+
+                    Ok::<_, object_store::Error>(bytes)
                 })
-            } else {
-                // If the root resolution fails, we won't be able to derive a canonical cache
-                // key. Skip saving to cache to avoid poisoning the cache with unsafe keys.
-                None
-            };
-
-            // Save the head and the part to cache for future accesses. Just read the bytes
-            // if we still can't derive a canonical cache key.
-            let bytes = if let Some(entry) = cache_entry {
-                // Save the head and the part to cache for future accesses.
-                let meta = get_result.meta.clone();
-                let attrs = get_result.attributes.clone();
-                let bytes = get_result.bytes().await?;
-                entry.save_head((&meta, &attrs)).await.ok();
-                entry.save_part(part_id, bytes.clone()).await.ok();
-                bytes
-            } else {
-                get_result.bytes().await?
-            };
+                .await?;
 
             Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
         })
