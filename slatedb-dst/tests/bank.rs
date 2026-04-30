@@ -13,10 +13,11 @@ use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
     actors::{
-        initialize_accounts, AuditorActor, BankOptions, CompactorActor, CompactorActorOptions,
-        DbFencerActor, DbFencerActorOptions, ShutdownActor, SuppressFenced, TransferActor,
+        initialize_accounts, AuditorActor, BankAuditView, BankOptions, CompactorActor,
+        CompactorActorOptions, DbFencerActor, DbFencerActorOptions, ShutdownActor, SuppressFenced,
+        TransferActor,
     },
-    utils::{build_settings, build_settings_compactor, build_toxic},
+    utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
     DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
     StartupCtx,
 };
@@ -62,6 +63,7 @@ fn test_dst_bank_with_toxics(
     let bank_options = random_bank_options(&rand);
     info!("dst bank options: {bank_options:?}");
     let audit_interval = Duration::from_millis(1000);
+    let reader_options = build_reader_options(&rand);
     let fencer_restart_interval = Duration::from_secs(120);
     let compactor_options = build_settings_compactor(&mut *rand.rng());
 
@@ -107,12 +109,26 @@ fn test_dst_bank_with_toxics(
             SuppressFenced::new(TransferActor::new(bank_options.clone())?),
         )
         .actor(
-            "auditor-1",
+            "regular-auditor",
             SuppressFenced::new(AuditorActor::new(bank_options.clone(), audit_interval)?),
         )
         .actor(
-            "auditor-2",
-            SuppressFenced::new(AuditorActor::new(bank_options, audit_interval)?),
+            "snapshot-auditor",
+            SuppressFenced::new(AuditorActor::new_with_view(
+                bank_options.clone(),
+                audit_interval,
+                BankAuditView::Snapshot,
+            )?),
+        )
+        .actor(
+            "reader-auditor",
+            AuditorActor::new_with_view(
+                bank_options,
+                audit_interval,
+                BankAuditView::Reader {
+                    options: reader_options,
+                },
+            )?,
         )
         .actor(
             "db-fencer",

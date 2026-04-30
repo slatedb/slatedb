@@ -20,7 +20,9 @@ pub mod shutdown;
 pub mod suppress_errors;
 pub mod workload;
 
-pub use self::bank::{initialize_accounts, AuditorActor, BankOptions, TransferActor};
+pub use self::bank::{
+    initialize_accounts, AuditorActor, BankAuditView, BankOptions, TransferActor,
+};
 pub use self::compactor::{CompactorActor, CompactorActorOptions};
 pub use self::fencer::{DbFencerActor, DbFencerActorOptions, SuppressFenced};
 pub use self::flusher::FlusherActor;
