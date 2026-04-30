@@ -6,7 +6,6 @@ use crate::manifest::SsTableView;
 use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
 use crate::utils::panic_string;
 use log::error;
 use std::collections::VecDeque;
@@ -19,11 +18,9 @@ pub(crate) struct WalReplayOptions {
     /// The number of SSTs to preload while replaying
     pub(crate) sst_batch_size: usize,
 
-    /// The minimum number of bytes in each returned table
-    /// (save the final table, which may be arbitrarily small).
-    pub(crate) min_memtable_bytes: usize,
-
-    /// The maximum number of bytes in each returned table
+    /// The target maximum number of bytes in each returned table. WAL replay only
+    /// splits between complete WAL SSTs, so a returned table may exceed this if a
+    /// single WAL SST is larger.
     pub(crate) max_memtable_bytes: usize,
 
     /// Options to pass through to underlying SST iterators
@@ -38,8 +35,7 @@ impl Default for WalReplayOptions {
     fn default() -> Self {
         Self {
             sst_batch_size: 4,
-            min_memtable_bytes: 64 * 1024 * 1024,
-            max_memtable_bytes: 128 * 1024 * 1024,
+            max_memtable_bytes: 64 * 1024 * 1024,
             sst_iter_options: SstIteratorOptions::default(),
             min_seq: None,
         }
@@ -74,11 +70,11 @@ impl<T> IteratorHolder<T> {
         self.initialized = true;
         self.current_iter = iterator;
     }
-}
 
-struct ReplayedRow {
-    row_entry: RowEntry,
-    wal_id: u64,
+    fn reset(&mut self) {
+        self.initialized = false;
+        self.current_iter = None;
+    }
 }
 
 pub(crate) struct WalReplayIterator<'a> {
@@ -87,7 +83,6 @@ pub(crate) struct WalReplayIterator<'a> {
     table_store: Arc<TableStore>,
     current_iter: IteratorHolder<SstIterator<'a>>,
     next_iters: VecDeque<JoinHandle<Result<Option<SstIterator<'a>>, SlateDBError>>>,
-    overflow_row: Option<ReplayedRow>,
     last_tick: i64,
     last_seq: u64,
     min_seq: u64,
@@ -121,7 +116,6 @@ impl WalReplayIterator<'_> {
             table_store: Arc::clone(&table_store),
             current_iter: IteratorHolder::new(),
             next_iters: VecDeque::new(),
-            overflow_row: None,
             last_tick,
             last_seq,
             min_seq,
@@ -207,29 +201,23 @@ impl WalReplayIterator<'_> {
         Ok(())
     }
 
-    /// Get the next table replayed from the WAL. The next table is guaranteed to
-    /// have a size at least as large as [`WalReplayOptions::min_memtable_bytes`]
-    /// unless it is the final table replayed from the WAL. The final table may
-    /// even be empty since writers use an empty WAL to fence zombie writers.
-    /// The empty table must still be returned so that replay logic can account for
-    /// the latest WAL ID.
+    /// Get the next table replayed from the WAL. Replay accumulates complete WAL
+    /// SSTs until the returned table reaches [`WalReplayOptions::max_memtable_bytes`],
+    /// unless it is the final table replayed from the WAL. The final table may even
+    /// be empty since writers use an empty WAL to fence zombie writers. The empty
+    /// table must still be returned so that replay logic can account for the latest
+    /// WAL ID.
+    ///
+    /// The returned table may exceed [`WalReplayOptions::max_memtable_bytes`] when
+    /// a complete WAL SST is larger than the configured target, because replay
+    /// must not split a WAL SST across replayed memtables.
     pub(crate) async fn next(&mut self) -> Result<Option<ReplayedMemtable>, SlateDBError> {
-        if self.current_iter.is_finished() && self.overflow_row.is_none() {
+        if self.current_iter.is_finished() {
             return Ok(None);
         }
 
         let table = WritableKVTable::new();
         let mut last_wal_id = 0;
-
-        if let Some(overflow_row) = self.overflow_row.take() {
-            let row_entry = overflow_row.row_entry;
-            if let Some(ts) = row_entry.create_ts {
-                self.last_tick = self.last_tick.max(ts);
-            }
-            self.last_seq = self.last_seq.max(row_entry.seq);
-            table.put(row_entry);
-            last_wal_id = overflow_row.wal_id;
-        }
 
         while !self.current_iter.is_finished() {
             if let Some(sst_iter) = &mut self.current_iter.current_iter {
@@ -240,17 +228,6 @@ impl WalReplayIterator<'_> {
                         continue;
                     }
 
-                    // if the table is full, we'll overflow the row to the next iterator.
-                    let meta = table.metadata();
-                    if self.table_store.estimate_encoded_size_compacted(
-                        meta.entry_num + 1,
-                        meta.entries_size_in_bytes + row_entry.estimated_size(),
-                    ) > self.options.max_memtable_bytes
-                    {
-                        self.overflow_row.replace(ReplayedRow { row_entry, wal_id });
-                        break;
-                    }
-
                     if let Some(ts) = row_entry.create_ts {
                         self.last_tick = self.last_tick.max(ts);
                     }
@@ -258,18 +235,14 @@ impl WalReplayIterator<'_> {
                     table.put(row_entry);
                 }
 
-                let table_overflowed = self.overflow_row.is_some();
-                if !table.is_empty() || !table_overflowed {
-                    last_wal_id = wal_id;
-                }
+                last_wal_id = wal_id;
 
                 let meta = table.metadata();
-                if table_overflowed
-                    || self
-                        .table_store
-                        .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes)
-                        > self.options.min_memtable_bytes
-                {
+                let estimated_bytes = self
+                    .table_store
+                    .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
+                if !table.is_empty() && estimated_bytes >= self.options.max_memtable_bytes {
+                    self.current_iter.reset();
                     break;
                 }
             }
@@ -373,7 +346,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_enforce_min_memtable_bytes() {
+    async fn should_enforce_max_memtable_bytes() {
         let table_store = test_table_store();
         let mut rng = rng::new_test_rng(None);
         let num_entries = 5000;
@@ -382,11 +355,11 @@ mod tests {
             .await
             .unwrap();
 
-        let min_memtable_bytes = 1024;
+        let max_memtable_bytes = 1024;
         let mut replay_iter = WalReplayIterator::new(
             &ManifestCore::new(),
             WalReplayOptions {
-                min_memtable_bytes,
+                max_memtable_bytes,
                 ..WalReplayOptions::default()
             },
             Arc::clone(&table_store),
@@ -396,15 +369,20 @@ mod tests {
 
         let full_replayed_table = WritableKVTable::new();
         let mut last_wal_id = 0;
-        let mut replayed_entries = 0;
+        let mut replayed_entry_count = 0;
 
         while let Some(replayed_table) = replay_iter.next().await.unwrap() {
             last_wal_id = replayed_table.last_wal_id;
-            replayed_entries += replayed_table.table.metadata().entries_size_in_bytes;
+            let metadata = replayed_table.table.metadata();
+            replayed_entry_count += metadata.entry_num;
 
-            // The last table may be less than `min_memtable_bytes`
-            if replayed_entries < num_entries {
-                assert!(replayed_table.table.metadata().entries_size_in_bytes > min_memtable_bytes);
+            // The last table may be less than `max_memtable_bytes`.
+            if replayed_entry_count < num_entries {
+                let estimated_bytes = table_store.estimate_encoded_size_compacted(
+                    metadata.entry_num,
+                    metadata.entries_size_in_bytes,
+                );
+                assert!(estimated_bytes >= max_memtable_bytes);
             }
 
             let mut iter = replayed_table.table.table().iter();
@@ -425,20 +403,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_enforce_max_memtable_bytes() {
+    async fn should_apply_max_memtable_bytes_at_wal_boundaries() {
         let table_store = test_table_store();
-        let mut rng = rng::new_test_rng(None);
-        let num_entries = 5000;
-        let entries = sample::table(&mut rng, num_entries, 10);
-        let next_wal_id = write_wals(&entries, 1, &mut rng, 200, Arc::clone(&table_store))
-            .await
-            .unwrap();
+        let wal_entries = [
+            vec![RowEntry::new_value(b"key_001", &[b'x'; 128], 1)],
+            vec![RowEntry::new_value(b"key_002", &[b'x'; 128], 2)],
+            vec![RowEntry::new_value(b"key_003", &[b'x'; 128], 3)],
+        ];
+        let single_row_size = wal_entries[0][0].estimated_size();
+        let max_memtable_bytes =
+            table_store.estimate_encoded_size_compacted(1, single_row_size) + 1;
 
-        let max_memtable_bytes = 1024;
+        for (wal_id, entries) in wal_entries.into_iter().enumerate() {
+            let mut builder = table_store.wal_table_builder();
+            for entry in entries {
+                builder.add(entry).await.unwrap();
+            }
+            let encoded_sst = builder.build().await.unwrap();
+            table_store
+                .write_sst(&SsTableId::Wal(wal_id as u64 + 1), encoded_sst, false)
+                .await
+                .unwrap();
+        }
+
         let mut replay_iter = WalReplayIterator::new(
             &ManifestCore::new(),
             WalReplayOptions {
-                min_memtable_bytes: usize::MAX,
                 max_memtable_bytes,
                 ..WalReplayOptions::default()
             },
@@ -447,28 +437,148 @@ mod tests {
         .await
         .unwrap();
 
-        let full_replayed_table = WritableKVTable::new();
-        let mut last_wal_id = 0;
+        let mut replayed_last_wal_ids = Vec::new();
+        let mut replayed_table_sizes = Vec::new();
+        let mut replayed_seqs = Vec::new();
 
         while let Some(replayed_table) = replay_iter.next().await.unwrap() {
-            last_wal_id = replayed_table.last_wal_id;
-            assert!(replayed_table.table.metadata().entries_size_in_bytes <= max_memtable_bytes);
-
+            replayed_last_wal_ids.push(replayed_table.last_wal_id);
+            let metadata = replayed_table.table.metadata();
+            replayed_table_sizes.push(table_store.estimate_encoded_size_compacted(
+                metadata.entry_num,
+                metadata.entries_size_in_bytes,
+            ));
             let mut iter = replayed_table.table.table().iter();
             while let Some(next) = iter.next().await.unwrap() {
-                full_replayed_table.put(next);
+                replayed_seqs.push(next.seq);
             }
         }
-        assert_eq!(last_wal_id + 1, next_wal_id);
 
-        let mut full_replayed_iter = full_replayed_table.table().iter();
-        test_utils::assert_ranged_kv_scan(
-            &entries,
-            &BytesRange::from(..),
-            IterationOrder::Ascending,
-            &mut full_replayed_iter,
+        assert_eq!(replayed_last_wal_ids, vec![2, 3]);
+        assert!(
+            replayed_table_sizes[0] > max_memtable_bytes,
+            "first replayed table should exceed the target rather than split a WAL SST"
+        );
+        assert_eq!(replayed_seqs, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn should_not_split_one_commit_seq_across_replayed_memtables() {
+        let table_store = test_table_store();
+        let commit_seq = 42;
+
+        // Simulate one committed write batch. Every row gets the same commit
+        // sequence, which means replay must not split these rows into separate
+        // memtable layers.
+        let entries = (0..8)
+            .map(|i| {
+                RowEntry::new_value(format!("key_{i:03}").as_bytes(), &[b'x'; 128], commit_seq)
+            })
+            .collect::<Vec<_>>();
+
+        // Size replayed memtables so one real row fits, but the second row
+        // overflows into the next replayed memtable.
+        let max_memtable_bytes =
+            table_store.estimate_encoded_size_compacted(1, entries[0].estimated_size());
+
+        // Use the real WAL SST builder so the fixture matches WAL flushes.
+        let mut builder = table_store.wal_table_builder();
+        for entry in entries {
+            builder.add(entry).await.unwrap();
+        }
+        let encoded_sst = builder.build().await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(1), encoded_sst, false)
+            .await
+            .unwrap();
+
+        // Replay the single WAL SST into in-memory tables. If the replay code
+        // can split a single commit sequence, it will do so here.
+        let mut replay_iter = WalReplayIterator::new(
+            &ManifestCore::new(),
+            WalReplayOptions {
+                max_memtable_bytes,
+                ..WalReplayOptions::default()
+            },
+            Arc::clone(&table_store),
         )
-        .await;
+        .await
+        .unwrap();
+
+        let mut replayed_seq_ranges = Vec::new();
+        while let Some(replayed_table) = replay_iter.next().await.unwrap() {
+            let metadata = replayed_table.table.metadata();
+            replayed_seq_ranges.push((metadata.first_seq, metadata.last_seq));
+        }
+
+        // This guards against producing multiple replayed memtables with the same
+        // sequence range, which can make later replay logic treat part of the write
+        // batch as already committed.
+        assert_eq!(
+            replayed_seq_ranges,
+            vec![(commit_seq, commit_seq)],
+            "WAL replay split one commit seq across replayed memtables: {replayed_seq_ranges:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_replay_memtables_in_sequence_order() {
+        let table_store = test_table_store();
+
+        // Write one WAL with entries whose sequence numbers do not match key
+        // order. Replay must not expose a later memtable whose sequence range
+        // starts before the previous memtable's sequence range ends.
+        let entries = vec![
+            RowEntry::new_value(b"key_000", &[b'x'; 128], 100),
+            RowEntry::new_value(b"key_001", &[b'x'; 128], 10),
+            RowEntry::new_value(b"key_002", &[b'x'; 128], 110),
+        ];
+
+        // Size replayed memtables so one real row fits, but the second row
+        // overflows into the next replayed memtable.
+        let max_memtable_bytes =
+            table_store.estimate_encoded_size_compacted(1, entries[0].estimated_size());
+
+        // Use the real WAL SST builder so replay sees the same entry order as a
+        // flushed WAL.
+        let mut builder = table_store.wal_table_builder();
+        for entry in entries {
+            builder.add(entry).await.unwrap();
+        }
+        let encoded_sst = builder.build().await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(1), encoded_sst, false)
+            .await
+            .unwrap();
+
+        // Replay the single WAL SST into in-memory tables.
+        let mut replay_iter = WalReplayIterator::new(
+            &ManifestCore::new(),
+            WalReplayOptions {
+                max_memtable_bytes,
+                ..WalReplayOptions::default()
+            },
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let mut replayed_seq_ranges = Vec::new();
+        while let Some(replayed_table) = replay_iter.next().await.unwrap() {
+            let metadata = replayed_table.table.metadata();
+            replayed_seq_ranges.push((metadata.first_seq, metadata.last_seq));
+        }
+
+        // This guards against returning the seq=10 row in a later replayed
+        // memtable after already returning seq=100.
+        for adjacent in replayed_seq_ranges.windows(2) {
+            let previous_last_seq = adjacent[0].1;
+            let later_first_seq = adjacent[1].0;
+            assert!(
+                later_first_seq >= previous_last_seq,
+                "WAL replay returned out-of-order memtable sequence ranges: {replayed_seq_ranges:?}"
+            );
+        }
     }
 
     #[tokio::test]

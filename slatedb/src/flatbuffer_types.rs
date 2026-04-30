@@ -37,13 +37,13 @@ use crate::flatbuffer_types::root_generated::{
     CompactedSsTableArgs, CompactedSsTableV2, CompactedSsTableV2Args, CompactedSsTableView,
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
-    CompactionsV1Args, CompressionFormat, ManifestV1Args, SortedRun as FbSortedRunV1,
-    SortedRunArgs as FbSortedRunV1Args, SortedRunV2, SortedRunV2Args, SstType as FbSstType,
-    TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
-    UuidArgs,
+    CompactionsV1Args, CompressionFormat, ManifestV1Args, Segment as FbSegment,
+    SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
+    SortedRunV2, SortedRunV2Args, SstType as FbSstType, TieredCompactionSpec,
+    TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
-use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore};
+use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
@@ -312,6 +312,9 @@ impl FlatBufferManifestCodec {
                 l0,
                 compacted,
             },
+            // Segmentation is V2-only. V1 manifests are always unsegmented.
+            segments: vec![],
+            segment_extractor_name: None,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             replay_after_wal_id: manifest.replay_after_wal_id(),
             last_l0_seq: manifest.last_l0_seq(),
@@ -358,29 +361,26 @@ impl FlatBufferManifestCodec {
                 (ulid, handle)
             })
             .collect();
-        let l0_last_compacted = manifest.last_compacted_l0_sst_view_id().map(|id| id.ulid());
-        let l0: VecDeque<SsTableView> = manifest
-            .l0()
-            .iter()
-            .map(|view| Self::decode_compacted_sst_view(&view, &sst_lookup))
-            .collect::<Result<_, _>>()?;
-        let compacted: Vec<db_state::SortedRun> = manifest
-            .compacted()
-            .iter()
-            .map(
-                |sr| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
-                    let ssts = sr
-                        .ssts()
-                        .iter()
-                        .map(|view| Self::decode_compacted_sst_view(&view, &sst_lookup))
-                        .collect::<Result<_, _>>()?;
-                    Ok(db_state::SortedRun {
-                        id: sr.id(),
-                        sst_views: ssts,
-                    })
-                },
-            )
-            .collect::<Result<_, _>>()?;
+        let tree = Self::decode_lsm_tree_v2(
+            manifest.last_compacted_l0_sst_view_id(),
+            manifest.l0(),
+            manifest.compacted(),
+            &sst_lookup,
+        )?;
+        let mut segments = manifest
+            .segments()
+            .map(|fb_segments| {
+                fb_segments
+                    .iter()
+                    .map(|fb_segment| Self::decode_segment(&fb_segment, &sst_lookup))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        // Uphold the `ManifestCore::segments` invariant (sorted by prefix)
+        // even if the on-disk order happens to differ.
+        segments.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+        let segment_extractor_name = manifest.segment_extractor_name().map(|s| s.to_string());
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
             .iter()
@@ -425,13 +425,9 @@ impl FlatBufferManifestCodec {
             .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            tree: LsmTreeState {
-                last_compacted_l0_sst_view_id: l0_last_compacted,
-                // Not persisted in V2; populated at runtime by finish_compaction.
-                last_compacted_l0_sst_id: None,
-                l0,
-                compacted,
-            },
+            tree,
+            segments,
+            segment_extractor_name,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             replay_after_wal_id: manifest.replay_after_wal_id(),
             last_l0_seq: manifest.last_l0_seq(),
@@ -446,6 +442,66 @@ impl FlatBufferManifestCodec {
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
+        })
+    }
+
+    fn decode_sorted_runs_v2(
+        runs: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2<'_>>>,
+        sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
+    ) -> Result<Vec<db_state::SortedRun>, Box<dyn std::error::Error + Send + Sync>> {
+        runs.iter()
+            .map(
+                |sr| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                    let ssts = sr
+                        .ssts()
+                        .iter()
+                        .map(|view| Self::decode_compacted_sst_view(&view, sst_lookup))
+                        .collect::<Result<_, _>>()?;
+                    Ok(db_state::SortedRun {
+                        id: sr.id(),
+                        sst_views: ssts,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    fn decode_segment(
+        fb_segment: &FbSegment,
+        sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
+    ) -> Result<Segment, Box<dyn std::error::Error + Send + Sync>> {
+        let prefix = Bytes::copy_from_slice(fb_segment.prefix().bytes());
+        let tree = Self::decode_lsm_tree_v2(
+            fb_segment.last_compacted_l0_sst_view_id(),
+            fb_segment.l0(),
+            fb_segment.compacted(),
+            sst_lookup,
+        )?;
+        Ok(Segment { prefix, tree })
+    }
+
+    /// Decode the V2 wire shape shared by the unsegmented tree (`ManifestV2`)
+    /// and each `Segment`: an optional last-compacted view id, an L0 vector,
+    /// and a sorted-runs vector.
+    fn decode_lsm_tree_v2(
+        last_compacted_l0_sst_view_id: Option<FbUlid>,
+        l0: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableView<'_>>>,
+        compacted: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2<'_>>>,
+        sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
+    ) -> Result<LsmTreeState, Box<dyn std::error::Error + Send + Sync>> {
+        let last_compacted_l0_sst_view_id = last_compacted_l0_sst_view_id.map(|id| id.ulid());
+        let l0: VecDeque<SsTableView> = l0
+            .iter()
+            .map(|view| Self::decode_compacted_sst_view(&view, sst_lookup))
+            .collect::<Result<_, _>>()?;
+        let compacted = Self::decode_sorted_runs_v2(compacted, sst_lookup)?;
+        Ok(LsmTreeState {
+            last_compacted_l0_sst_view_id,
+            // `last_compacted_l0_sst_id` is V1-only (see LsmTreeState) and has
+            // no V2 wire representation, so it stays `None` after decode.
+            last_compacted_l0_sst_id: None,
+            l0,
+            compacted,
         })
     }
 
@@ -584,6 +640,14 @@ impl FbUlid<'_> {
 
 struct DbFlatBufferBuilder<'b> {
     builder: FlatBufferBuilder<'b>,
+}
+
+/// Offsets for the V2 wire shape shared by the unsegmented tree (`ManifestV2`)
+/// and each `Segment`. Produced by `add_lsm_tree_v2`.
+struct LsmTreeV2Offsets<'b> {
+    l0: WIPOffset<Vector<'b, ForwardsUOffset<CompactedSsTableView<'b>>>>,
+    last_compacted_l0_sst_view_id: Option<WIPOffset<FbUlid<'b>>>,
+    compacted: WIPOffset<Vector<'b, ForwardsUOffset<SortedRunV2<'b>>>>,
 }
 
 impl<'b> DbFlatBufferBuilder<'b> {
@@ -789,6 +853,47 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(sorted_runs_fbs.as_ref())
     }
 
+    fn add_segment(&mut self, segment: &Segment) -> WIPOffset<FbSegment<'b>> {
+        let prefix = self.builder.create_vector(segment.prefix.as_ref());
+        let tree = self.add_lsm_tree_v2(&segment.tree);
+        FbSegment::create(
+            &mut self.builder,
+            &FbSegmentArgs {
+                prefix: Some(prefix),
+                last_compacted_l0_sst_view_id: tree.last_compacted_l0_sst_view_id,
+                l0: Some(tree.l0),
+                compacted: Some(tree.compacted),
+            },
+        )
+    }
+
+    /// Encode the V2 wire shape shared by the unsegmented tree and each
+    /// `Segment`. Returns the three offsets (l0, last-compacted view id,
+    /// compacted runs) so the caller can attach them to either a `ManifestV2`
+    /// or a `Segment` flatbuffer table.
+    fn add_lsm_tree_v2(&mut self, tree: &LsmTreeState) -> LsmTreeV2Offsets<'b> {
+        let l0 = self.add_compacted_sst_views(tree.l0.iter());
+        let last_compacted_l0_sst_view_id = tree
+            .last_compacted_l0_sst_view_id
+            .as_ref()
+            .map(|ulid| self.add_compacted_sst_id(ulid));
+        let compacted = self.add_sorted_runs_v2(&tree.compacted);
+        LsmTreeV2Offsets {
+            l0,
+            last_compacted_l0_sst_view_id,
+            compacted,
+        }
+    }
+
+    fn add_segments(
+        &mut self,
+        segments: &[Segment],
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbSegment<'b>>>> {
+        let segment_offsets: Vec<WIPOffset<FbSegment>> =
+            segments.iter().map(|s| self.add_segment(s)).collect();
+        self.builder.create_vector(segment_offsets.as_ref())
+    }
+
     fn add_sorted_run_v1(
         &mut self,
         sorted_run: &db_state::SortedRun,
@@ -961,18 +1066,21 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn create_manifest(&mut self, manifest: &Manifest) -> Bytes {
         let core = &manifest.core;
 
-        // Collect all unique SSTs from l0 and compacted runs.
+        // Collect all unique SSTs from l0, compacted runs, and segments.
         let mut unique_ssts: std::collections::HashMap<Ulid, &SsTableHandle> =
             std::collections::HashMap::new();
-        for view in core.tree.l0.iter() {
-            if let SsTableId::Compacted(ulid) = view.sst.id {
-                unique_ssts.entry(ulid).or_insert(&view.sst);
-            }
-        }
-        for sr in core.tree.compacted.iter() {
-            for view in sr.sst_views.iter() {
+        let trees = std::iter::once(&core.tree).chain(core.segments.iter().map(|s| &s.tree));
+        for tree in trees {
+            for view in tree.l0.iter() {
                 if let SsTableId::Compacted(ulid) = view.sst.id {
                     unique_ssts.entry(ulid).or_insert(&view.sst);
+                }
+            }
+            for sr in tree.compacted.iter() {
+                for view in sr.sst_views.iter() {
+                    if let SsTableId::Compacted(ulid) = view.sst.id {
+                        unique_ssts.entry(ulid).or_insert(&view.sst);
+                    }
                 }
             }
         }
@@ -984,12 +1092,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
             self.builder.create_vector(sst_offsets.as_ref())
         };
 
-        let l0 = self.add_compacted_sst_views(core.tree.l0.iter());
-        let mut l0_last_compacted = None;
-        if let Some(ulid) = core.tree.last_compacted_l0_sst_view_id.as_ref() {
-            l0_last_compacted = Some(self.add_compacted_sst_id(ulid))
-        }
-        let compacted = self.add_sorted_runs_v2(&core.tree.compacted);
+        let tree = self.add_lsm_tree_v2(&core.tree);
+        let segments = self.add_segments(&core.segments);
+        let segment_extractor_name = core
+            .segment_extractor_name
+            .as_ref()
+            .map(|name| self.builder.create_string(name));
         let checkpoints = self.add_checkpoints(&core.checkpoints);
         let external_dbs = if manifest.external_dbs.is_empty() {
             None
@@ -1025,15 +1133,17 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 compactor_epoch: manifest.compactor_epoch,
                 replay_after_wal_id: core.replay_after_wal_id,
                 wal_id_last_seen: core.next_wal_sst_id - 1,
-                last_compacted_l0_sst_view_id: l0_last_compacted,
+                last_compacted_l0_sst_view_id: tree.last_compacted_l0_sst_view_id,
                 ssts: Some(ssts),
-                l0: Some(l0),
-                compacted: Some(compacted),
+                l0: Some(tree.l0),
+                compacted: Some(tree.compacted),
                 last_l0_clock_tick: core.last_l0_clock_tick,
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
                 recent_snapshot_min_seq: core.recent_snapshot_min_seq,
                 sequence_tracker: Some(sequence_tracker),
+                segments: Some(segments),
+                segment_extractor_name,
             },
         );
         self.builder.finish(manifest, None);
@@ -1239,7 +1349,7 @@ mod tests {
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
-    use crate::manifest::{ExternalDb, Manifest, ManifestCore};
+    use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
     use crate::{checkpoint, error::SlateDBError};
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
@@ -1497,6 +1607,88 @@ mod tests {
         let mut expected = manifest.clone();
         expected.core.wal_object_store_uri = None;
         assert_eq!(expected, decoded);
+    }
+
+    #[test]
+    fn test_should_round_trip_segments_in_v2() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        fn new_sst_view() -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(COUNTER.fetch_add(1, Ordering::Relaxed), 0);
+            SsTableView::new_projected(
+                ulid,
+                SsTableHandle::new(
+                    SsTableId::Compacted(ulid),
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(b"a")),
+                        ..Default::default()
+                    },
+                ),
+                None,
+            )
+        }
+
+        // given: a manifest with two named segments, each carrying its own L0
+        // and sorted run state.
+        let mut manifest = Manifest::initial(ManifestCore::new());
+        manifest.core.segment_extractor_name = Some("hour-bucket".to_string());
+        // Constructed in sorted-by-prefix order to match the
+        // `ManifestCore::segments` invariant.
+        manifest.core.segments = vec![
+            Segment {
+                prefix: Bytes::from_static(b"hour=11/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![SortedRun {
+                        id: 0,
+                        sst_views: vec![new_sst_view(), new_sst_view()],
+                    }],
+                },
+            },
+            Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![new_sst_view(), new_sst_view()]),
+                    compacted: vec![SortedRun {
+                        id: 1,
+                        sst_views: vec![new_sst_view()],
+                    }],
+                },
+            },
+        ];
+
+        let codec = FlatBufferManifestCodec {};
+
+        // when: encoded via the V2 encoder (the V1 encoder does not carry
+        // segment state).
+        let bytes = FlatBufferManifestCodec::create_from_manifest(&manifest);
+        let decoded = codec.decode(&bytes).expect("failed to decode manifest");
+
+        // then: the manifest round-trips on the V2 wire.
+        assert_eq!(
+            u16::from_be_bytes([bytes[0], bytes[1]]),
+            MANIFEST_FORMAT_VERSION
+        );
+        assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_round_trip_empty_segments_via_v2() {
+        // V2 with no segmented state still round-trips: segments empty,
+        // extractor name absent.
+        let manifest = Manifest::initial(ManifestCore::new());
+        let codec = FlatBufferManifestCodec {};
+
+        let bytes = FlatBufferManifestCodec::create_from_manifest(&manifest);
+        let decoded = codec.decode(&bytes).expect("failed to decode manifest");
+
+        assert!(decoded.core.segments.is_empty());
+        assert!(decoded.core.segment_extractor_name.is_none());
     }
 
     #[test]

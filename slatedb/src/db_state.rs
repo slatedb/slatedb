@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
-use crate::manifest::{LsmTreeState, Manifest, ManifestCore};
+use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::wal_id::WalIdStore;
@@ -630,63 +630,17 @@ impl<'a> StateModifier<'a> {
     }
 
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
-        // The compactor removes tables from l0_last_compacted, so we
-        // only want to keep the tables up to there.
-        let l0_last_compacted_view_id = &remote_manifest
-            .value
-            .core
-            .tree
-            .last_compacted_l0_sst_view_id;
-        let l0_last_compacted_sst_id = &remote_manifest.value.core.tree.last_compacted_l0_sst_id;
-        let new_l0 = if l0_last_compacted_view_id.is_some() || l0_last_compacted_sst_id.is_some() {
-            self.state
-                .manifest
-                .value
-                .core
-                .tree
-                .l0
-                .iter()
-                .cloned()
-                .take_while(|view| {
-                    // Match by view ID first (V2 manifests), then fall back to SST ID (V1).
-                    if let Some(view_id) = l0_last_compacted_view_id {
-                        if view.id == *view_id {
-                            return false;
-                        }
-                    }
-                    if let Some(sst_id) = l0_last_compacted_sst_id {
-                        if view.sst.id.unwrap_compacted_id() == *sst_id {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .collect()
-        } else {
-            self.state
-                .manifest
-                .value
-                .core
-                .tree
-                .l0
-                .iter()
-                .cloned()
-                .collect()
-        };
-
         let my_db_state = self.state.core();
+        let remote = &remote_manifest.value.core;
+        let tree = my_db_state.tree.merge_from_compactor(&remote.tree);
+        let segments =
+            crate::manifest::merge_segments_from_compactor(&my_db_state.segments, &remote.segments);
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
-            tree: LsmTreeState {
-                last_compacted_l0_sst_view_id: remote_manifest
-                    .value
-                    .core
-                    .tree
-                    .last_compacted_l0_sst_view_id,
-                last_compacted_l0_sst_id: remote_manifest.value.core.tree.last_compacted_l0_sst_id,
-                l0: new_l0,
-                compacted: remote_manifest.value.core.tree.compacted,
-            },
+            tree,
+            segments,
+            // Segment configuration is stable; the writer is the source of truth.
+            segment_extractor_name: my_db_state.segment_extractor_name.clone(),
             next_wal_sst_id: my_db_state.next_wal_sst_id,
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
@@ -726,6 +680,7 @@ mod tests {
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::{LsmTreeState, Segment};
     use crate::proptest_util::arbitrary;
     use crate::seq_tracker::{FindOption, SequenceTracker, TrackedSeq};
     use crate::test_utils;
@@ -736,6 +691,7 @@ mod tests {
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
+    use std::collections::VecDeque;
     use std::ops::RangeBounds;
 
     #[test]
@@ -824,6 +780,109 @@ mod tests {
             .map(|l0| l0.sst.id)
             .collect();
         assert_eq!(expected, merged);
+    }
+
+    #[test]
+    fn test_should_keep_local_segments_on_merge() {
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+
+        // Local writer has a segment extractor configured and a populated segment.
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|modifier| {
+            let core = &mut modifier.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour-bucket".to_string());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v1.clone()]),
+                    compacted: vec![],
+                },
+            }];
+        });
+
+        // Remote (compactor-authored) state echoes the local core but blanks
+        // out segment configuration — simulating a regression where the
+        // compactor failed to carry segments forward.
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![];
+        remote_state.value.core.segment_extractor_name = None;
+
+        db_state.merge_remote_manifest(remote_state);
+
+        // The writer is the source of truth for segment config and for L0,
+        // so the local segment (with its L0) must survive the merge.
+        let merged = db_state.state.core();
+        assert_eq!(
+            merged.segment_extractor_name.as_deref(),
+            Some("hour-bucket")
+        );
+        assert_eq!(merged.segments.len(), 1);
+        assert_eq!(merged.segments[0].prefix, Bytes::from_static(b"hour=12/"));
+        let l0_ids: Vec<_> = merged.segments[0].tree.l0.iter().map(|v| v.id).collect();
+        assert_eq!(l0_ids, vec![v1.id]);
+    }
+
+    #[test]
+    fn test_should_re_create_segment_on_late_backfill_after_drop() {
+        // After the compactor has drained a segment, a writer L0 with an ID
+        // above the watermark must keep the segment alive (re-creation).
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        let v1 = view(1);
+        let v2 = view(2); // backfill, written after compactor's snapshot.
+
+        // Local writer: v1 (already absorbed by compactor) and v2 (backfill).
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![v2.clone(), v1.clone()]),
+                    compacted: vec![],
+                },
+            }];
+        });
+
+        // Remote compactor: watermark at v1, drained.
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"hour=12/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(v1.id),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        }];
+
+        db_state.merge_remote_manifest(remote_state);
+
+        let merged = db_state.state.core();
+        assert_eq!(merged.segments.len(), 1);
+        let l0_ids: Vec<_> = merged.segments[0].tree.l0.iter().map(|v| v.id).collect();
+        assert_eq!(l0_ids, vec![v2.id]);
     }
 
     #[test]
