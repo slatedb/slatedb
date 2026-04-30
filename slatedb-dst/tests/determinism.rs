@@ -33,8 +33,8 @@ use slatedb_dst::{
         CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
         WorkloadActorOptions,
     },
-    utils::build_settings,
-    DeterministicLocalFilesystem, Harness, Operation, StreamDirection, Toxic, ToxicKind,
+    utils::{build_settings, build_toxic},
+    DeterministicLocalFilesystem, Harness,
 };
 use tempfile::TempDir;
 use tracing::instrument;
@@ -179,17 +179,10 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
         ..CompactorOptions::default()
     };
     let harness = Harness::new("determinism", seed, move |ctx| async move {
-        ctx.failure_controller().add_toxic(Toxic {
-            name: "put-latency".into(),
-            kind: ToxicKind::Latency {
-                latency: Duration::from_millis(1),
-                jitter: Duration::from_millis(3),
-            },
-            direction: StreamDirection::Upstream,
-            toxicity: 1.0,
-            operations: vec![Operation::PutOpts],
-            path_prefix: None,
-        });
+        let failures = ctx.failure_controller();
+        for index in 0..10 {
+            failures.add_toxic(build_toxic(ctx.rand(), ctx.path().as_ref(), index));
+        }
 
         let db_seed = ctx.rand().rng().next_u64();
         let mut settings = build_settings(ctx.rand()).await;
