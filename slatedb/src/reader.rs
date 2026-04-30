@@ -4,7 +4,7 @@ use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
-use crate::manifest::ManifestCore;
+use crate::manifest::{LsmTreeState, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
@@ -158,26 +158,25 @@ impl Reader {
             4,
         );
 
+        let tree = &db_state.core().tree;
         let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point() {
             let l0 = self.build_point_l0_iters(
                 range,
-                db_state,
+                tree,
                 sst_iter_options,
                 point_lookup_stats.clone(),
             )?;
             let sr = self.build_point_sr_iters(
                 range,
                 point_key.as_ref(),
-                db_state,
+                tree,
                 sst_iter_options,
                 point_lookup_stats,
             )?;
             (l0, sr)
         } else {
-            let l0_future =
-                self.build_range_l0_iters(range, db_state, sst_iter_options, max_parallel);
-            let sr_future =
-                self.build_range_sr_iters(range, db_state, sst_iter_options, max_parallel);
+            let l0_future = self.build_range_l0_iters(range, tree, sst_iter_options, max_parallel);
+            let sr_future = self.build_range_sr_iters(range, tree, sst_iter_options, max_parallel);
             let (l0_res, sr_res) = join(l0_future, sr_future).await;
             (l0_res?, sr_res?)
         };
@@ -193,12 +192,12 @@ impl Reader {
     fn build_point_l0_iters<'a>(
         &self,
         range: &BytesRange,
-        db_state: &(dyn DbStateReader + Sync),
+        tree: &LsmTreeState,
         sst_iter_options: &SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
-        for sst in &db_state.core().tree.l0 {
+        for sst in &tree.l0 {
             let iterator = SstIterator::new_owned_with_stats(
                 range.clone(),
                 sst.clone(),
@@ -217,12 +216,12 @@ impl Reader {
         &self,
         range: &BytesRange,
         key: &[u8],
-        db_state: &(dyn DbStateReader + Sync),
+        tree: &LsmTreeState,
         sst_iter_options: &SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
-        for sr in &db_state.core().tree.compacted {
+        for sr in &tree.compacted {
             for handle in sr.tables_covering_point_key(key) {
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
@@ -242,49 +241,43 @@ impl Reader {
     async fn build_range_l0_iters<'a>(
         &self,
         range: &BytesRange,
-        db_state: &(dyn DbStateReader + Sync),
+        tree: &LsmTreeState,
         sst_iter_options: &SstIteratorOptions,
         max_parallel: usize,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
         let table_store = self.table_store.clone();
         let sst_iter_options = sst_iter_options.clone();
-        build_concurrent(
-            db_state.core().tree.l0.iter().cloned(),
-            max_parallel,
-            move |sst| {
-                let table_store = table_store.clone();
-                let range = range_clone.clone();
-                let sst_iter_options = sst_iter_options.clone();
-                async move {
-                    SstIterator::new_owned_initialized(
-                        range.clone(),
-                        sst,
-                        table_store,
-                        sst_iter_options,
-                    )
-                    .await
-                    .map(|maybe_iter| {
-                        maybe_iter.map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'a>)
-                    })
-                }
-            },
-        )
+        build_concurrent(tree.l0.iter().cloned(), max_parallel, move |sst| {
+            let table_store = table_store.clone();
+            let range = range_clone.clone();
+            let sst_iter_options = sst_iter_options.clone();
+            async move {
+                SstIterator::new_owned_initialized(
+                    range.clone(),
+                    sst,
+                    table_store,
+                    sst_iter_options,
+                )
+                .await
+                .map(|maybe_iter| {
+                    maybe_iter.map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'a>)
+                })
+            }
+        })
         .await
     }
 
     async fn build_range_sr_iters<'a>(
         &self,
         range: &BytesRange,
-        db_state: &(dyn DbStateReader + Sync),
+        tree: &LsmTreeState,
         sst_iter_options: &SstIteratorOptions,
         max_parallel: usize,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
         let table_store = self.table_store.clone();
-        let overlapping: Vec<_> = db_state
-            .core()
-            .tree
+        let overlapping: Vec<_> = tree
             .compacted
             .iter()
             .filter(|sr| sr.overlaps_range(range))
