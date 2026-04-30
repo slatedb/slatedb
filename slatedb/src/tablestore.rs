@@ -377,7 +377,11 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
-        let (info, version) = self.sst_format.read_info_and_version(&obj).await?;
+        let (info, version) = self
+            .sst_format
+            .read_info_and_version(&obj)
+            .await
+            .map_err(|e| e.with_path(&obj.path))?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 
@@ -386,7 +390,11 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
-        let (_, version) = self.sst_format.read_info_and_version(&obj).await?;
+        let (_, version) = self
+            .sst_format
+            .read_info_and_version(&obj)
+            .await
+            .map_err(|e| e.with_path(&obj.path))?;
         Ok(version)
     }
 
@@ -419,7 +427,11 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let named_filters = self.sst_format.read_filters(&handle.info, &obj).await?;
+        let named_filters = self
+            .sst_format
+            .read_filters(&handle.info, &obj)
+            .await
+            .map_err(|e| e.with_path(&obj.path))?;
         if cache_blocks && !named_filters.is_empty() {
             if let Some(ref cache) = self.cache {
                 cache
@@ -452,7 +464,11 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let stats = self.sst_format.read_stats(&handle.info, &obj).await?;
+        let stats = self
+            .sst_format
+            .read_stats(&handle.info, &obj)
+            .await
+            .map_err(|e| e.with_path(&obj.path))?;
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 if let Some(ref stats) = stats {
@@ -491,7 +507,12 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
+        let index = Arc::new(
+            self.sst_format
+                .read_index(&handle.info, &obj)
+                .await
+                .map_err(|e| e.with_path(&obj.path))?,
+        );
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 cache
@@ -514,10 +535,15 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
+        let index = self
+            .sst_format
+            .read_index(&handle.info, &obj)
+            .await
+            .map_err(|e| e.with_path(&obj.path))?;
         self.sst_format
             .read_blocks(&handle.info, &index, blocks, &obj)
             .await
+            .map_err(|e| e.with_path(&obj.path))
     }
 
     /// Reads specified blocks from an SSTable using the provided index.
@@ -590,6 +616,7 @@ impl TableStore {
                 self.sst_format
                     .read_blocks(&handle.info, index_ref, range.clone(), obj_ref)
                     .await
+                    .map_err(|e| e.with_path(&obj_ref.path))
             }
         }))
         .await;
@@ -1031,6 +1058,53 @@ mod tests {
         // write another wal sst with the same id.
         let result = ts.write_sst(&wal_id, table2, false).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_checksum_mismatch_error_includes_path() {
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from(ROOT),
+            None,
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+
+        let mut writer = ts.table_writer(id);
+        writer
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
+
+        let sst_path = ts.path(&id);
+        let original = os.get(&sst_path).await.unwrap().bytes().await.unwrap();
+        let mut corrupted = original.to_vec();
+        corrupted[0] ^= 0x01;
+        os.put(&sst_path, corrupted.into()).await.unwrap();
+
+        let handle = ts.open_sst(&id).await.unwrap();
+        let err = match ts.read_blocks(&handle, 0..1).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected checksum mismatch"),
+        };
+        assert!(
+            matches!(err, error::SlateDBError::ChecksumMismatch { path: Some(ref p) } if p == &sst_path),
+            "expected ChecksumMismatch tagged with sst path, got {err:?}"
+        );
+
+        let public_msg = error::Error::from(err).to_string();
+        let expected = format!("checksum mismatch in {sst_path}");
+        assert!(
+            public_msg.contains(&expected),
+            "public error message {public_msg:?} did not contain {expected:?}"
+        );
     }
 
     #[tokio::test]
