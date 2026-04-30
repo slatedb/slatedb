@@ -35,7 +35,7 @@ pub(crate) struct CachedObjectStore {
     // Deduplicates concurrent HEAD requests for the same path after a cache miss.
     head_flights: SingleFlight<Path, ObjectMeta>,
     // Deduplicates concurrent prefetch/GET requests for the same path after a cache miss.
-    prefetch_flights: SingleFlight<Path, (ObjectMeta, Attributes)>,
+    prefetch_flights: SingleFlight<(Path, Option<GetRangeKey>), (ObjectMeta, Attributes)>,
     // Deduplicates concurrent fetches of the same part after a cache miss.
     // Keyed on (path, part_id) so multiple readers needing the same part share one fetch.
     part_flights: SingleFlight<(Path, PartID), Bytes>,
@@ -397,15 +397,18 @@ impl CachedObjectStore {
         // Parts not covered by the winning caller's range are handled by read_part's
         // own object-store fallback, so correctness is maintained.
         self.prefetch_flights
-            .call(location.clone(), || async {
-                let get_result = self.object_store.get_opts(location, opts).await?;
-                let result_meta = get_result.meta.clone();
-                let result_attrs = get_result.attributes.clone();
-                if self.resolve_root(location, &result_meta.location) {
-                    self.save_get_result(get_result).await.ok();
-                }
-                Ok((result_meta, result_attrs))
-            })
+            .call(
+                (location.clone(), opts.range.clone().map(Into::into)),
+                || async {
+                    let get_result = self.object_store.get_opts(location, opts).await?;
+                    let result_meta = get_result.meta.clone();
+                    let result_attrs = get_result.attributes.clone();
+                    if self.resolve_root(location, &result_meta.location) {
+                        self.save_get_result(get_result).await.ok();
+                    }
+                    Ok((result_meta, result_attrs))
+                },
+            )
             .await
     }
 
@@ -757,6 +760,25 @@ pub(crate) enum InvalidGetRange {
 
     #[error("Range started at {start} and ended at {end}")]
     Inconsistent { start: u64, end: u64 },
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+/// A mirror of [`object_store::GetRange`] that implements [`Hash`] and [`Eq`],
+/// allowing it to be used as a key in hash-based collections (e.g. `SingleFlight`).
+enum GetRangeKey {
+    Bounded(Range<u64>),
+    Offset(u64),
+    Suffix(u64),
+}
+
+impl From<GetRange> for GetRangeKey {
+    fn from(range: GetRange) -> Self {
+        match range {
+            GetRange::Bounded(r) => GetRangeKey::Bounded(r),
+            GetRange::Offset(o) => GetRangeKey::Offset(o),
+            GetRange::Suffix(s) => GetRangeKey::Suffix(s),
+        }
+    }
 }
 
 #[cfg(test)]
