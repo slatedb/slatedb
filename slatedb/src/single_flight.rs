@@ -114,18 +114,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            atomic::{
-                AtomicUsize,
-                Ordering::{AcqRel, Acquire},
-            },
-            Arc,
+    use std::sync::{
+        atomic::{
+            AtomicUsize,
+            Ordering::{AcqRel, Acquire},
         },
-        time::Duration,
+        Arc,
     };
 
-    use futures::{stream::FuturesUnordered, StreamExt};
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -133,52 +130,25 @@ mod tests {
     async fn direct_call() {
         let group = SingleFlight::new();
         let result = group
-            .call("key", || async {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                Ok::<_, ()>("Result".to_string())
-            })
+            .call("key", || async { Ok::<_, ()>("Result".to_string()) })
             .await;
         assert_eq!(result, Ok("Result".to_string()));
     }
 
     #[tokio::test]
     async fn parallel_call() {
-        let call_counter = AtomicUsize::default();
-
-        let group = SingleFlight::new();
-        let futures = FuturesUnordered::new();
-        for _ in 0..10 {
-            futures.push(group.call("key", || async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                call_counter.fetch_add(1, AcqRel);
-                Ok::<_, ()>("Result".to_string())
-            }));
-        }
-
-        assert!(
-            futures
-                .all(|out| async move { out == Ok("Result".to_string()) })
-                .await
-        );
-        assert_eq!(
-            call_counter.load(Acquire),
-            1,
-            "future should only be executed once"
-        );
-    }
-
-    #[tokio::test]
-    async fn parallel_call_spawned() {
         let call_counter = Arc::new(AtomicUsize::default());
+        let gate = Arc::new(Notify::new());
 
-        let group = SingleFlight::<&'static str, String>::new();
+        let group = SingleFlight::<&str, String>::new();
         let mut handles = Vec::new();
         for _ in 0..10 {
             let g = group.clone();
             let counter = call_counter.clone();
+            let gate = gate.clone();
             handles.push(tokio::spawn(async move {
                 g.call("key", || async move {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    gate.notified().await;
                     counter.fetch_add(1, AcqRel);
                     Ok::<_, ()>("Result".to_string())
                 })
@@ -186,8 +156,17 @@ mod tests {
             }));
         }
 
+        // Let all tasks register in the map.
+        tokio::task::yield_now().await;
+
+        // Release the single winner.
+        gate.notify_one();
+
         for handle in handles {
-            assert_eq!(handle.await.unwrap(), Ok("Result".to_string()));
+            assert_eq!(
+                handle.await.expect("task panicked"),
+                Ok("Result".to_string())
+            );
         }
         assert_eq!(
             call_counter.load(Acquire),
@@ -200,14 +179,17 @@ mod tests {
     async fn different_keys_are_independent() {
         let counter_a = Arc::new(AtomicUsize::default());
         let counter_b = Arc::new(AtomicUsize::default());
+        let gate_a = Arc::new(Notify::new());
+        let gate_b = Arc::new(Notify::new());
 
         let group = SingleFlight::<&'static str, String>::new();
 
         let g = group.clone();
         let ca = counter_a.clone();
+        let ga = gate_a.clone();
         let handle_a = tokio::spawn(async move {
             g.call("key_a", || async move {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                ga.notified().await;
                 ca.fetch_add(1, AcqRel);
                 Ok::<_, ()>("A".to_string())
             })
@@ -216,17 +198,25 @@ mod tests {
 
         let g = group.clone();
         let cb = counter_b.clone();
+        let gb = gate_b.clone();
         let handle_b = tokio::spawn(async move {
             g.call("key_b", || async move {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                gb.notified().await;
                 cb.fetch_add(1, AcqRel);
                 Ok::<_, ()>("B".to_string())
             })
             .await
         });
 
-        assert_eq!(handle_a.await.unwrap(), Ok("A".to_string()));
-        assert_eq!(handle_b.await.unwrap(), Ok("B".to_string()));
+        // Let both tasks register.
+        tokio::task::yield_now().await;
+
+        // Release both independently.
+        gate_a.notify_one();
+        gate_b.notify_one();
+
+        assert_eq!(handle_a.await.expect("task panicked"), Ok("A".to_string()));
+        assert_eq!(handle_b.await.expect("task panicked"), Ok("B".to_string()));
         assert_eq!(counter_a.load(Acquire), 1);
         assert_eq!(counter_b.load(Acquire), 1);
     }
@@ -280,17 +270,23 @@ mod tests {
     async fn error_with_concurrent_waiters() {
         // When the initializer fails, a concurrent waiter gets to retry with its own func.
         let group = SingleFlight::<&str, String>::new();
-        let call_counter = AtomicUsize::default();
+        let call_counter = Arc::new(AtomicUsize::default());
+        let gate = Arc::new(Notify::new());
 
-        let fut_1 = group.call("key", || async {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            call_counter.fetch_add(1, AcqRel);
+        let counter = call_counter.clone();
+        let g = gate.clone();
+        let fut_1 = group.call("key", || async move {
+            g.notified().await;
+            counter.fetch_add(1, AcqRel);
             Err::<String, _>("fail")
         });
         let fut_2 = group.call("key", || async {
             call_counter.fetch_add(1, AcqRel);
             Ok::<_, &str>("recovered".to_string())
         });
+
+        // Release the first caller so it fails.
+        gate.notify_one();
 
         let (r1, r2) = tokio::join!(fut_1, fut_2);
         assert_eq!(r1, Err("fail"));
@@ -308,10 +304,7 @@ mod tests {
         struct K(i32);
         let group = SingleFlight::new();
         let result = group
-            .call(K(1), || async {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                Ok::<_, ()>("Result".to_string())
-            })
+            .call(K(1), || async { Ok::<_, ()>("Result".to_string()) })
             .await;
         assert_eq!(result, Ok("Result".to_string()));
     }
@@ -319,38 +312,57 @@ mod tests {
     #[tokio::test]
     async fn late_joiner_shares_result() {
         let group = SingleFlight::<String, String>::new();
+        let gate = Arc::new(Notify::new());
 
-        // Spawn early so it registers in the map while it's running.
+        // Spawn early so it registers in the map while it's blocked on the gate.
         let g = group.clone();
+        let gate_clone = gate.clone();
         let early_handle = tokio::spawn(async move {
-            g.call("key".to_string(), || async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            g.call("key".to_string(), || async move {
+                gate_clone.notified().await;
                 Ok::<_, ()>("Result".to_string())
             })
             .await
         });
 
-        // Give early time to register and start sleeping.
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Yield so the spawned task registers in the map.
+        tokio::task::yield_now().await;
 
-        // Late caller should find the existing entry and share the result.
-        let late_result = group
-            .call("key".to_string(), || async { panic!("unexpected") })
-            .await;
+        // Late caller finds the existing entry — its func should never run.
+        let late_fut = group.call("key".to_string(), || async { panic!("unexpected") });
+
+        // Release the gate so the first caller completes.
+        gate.notify_one();
+
+        let (early_result, late_result) = tokio::join!(early_handle, late_fut);
+        assert_eq!(
+            early_result.expect("task panicked"),
+            Ok("Result".to_string())
+        );
         assert_eq!(late_result, Ok::<_, ()>("Result".to_string()));
-        assert_eq!(early_handle.await.unwrap(), Ok("Result".to_string()));
     }
 
     #[tokio::test]
     async fn cancel_allows_next_caller_to_proceed() {
         let group = SingleFlight::new();
 
-        // Start a slow computation, then cancel it.
-        let fut_cancel = group.call("key".to_string(), || async {
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-            Ok::<_, ()>("cancelled".to_string())
+        // Start a call that will never complete on its own.
+        let handle = tokio::spawn({
+            let g = group.clone();
+            async move {
+                g.call("key".to_string(), || {
+                    std::future::pending::<Result<String, ()>>()
+                })
+                .await
+            }
         });
-        let _ = tokio::time::timeout(Duration::from_millis(10), fut_cancel).await;
+
+        // Let it register.
+        tokio::task::yield_now().await;
+
+        // Cancel it.
+        handle.abort();
+        let _ = handle.await;
 
         // The next caller should run fresh since the previous was cancelled.
         let result = group
@@ -369,15 +381,14 @@ mod tests {
 
         let g = group.clone();
         let initializer = tokio::spawn(async move {
-            g.call("key".to_string(), || async {
-                tokio::time::sleep(Duration::from_millis(2000)).await;
-                Ok::<_, ()>("slow".to_string())
+            g.call("key".to_string(), || {
+                std::future::pending::<Result<String, ()>>()
             })
             .await
         });
 
         // Let the initializer register.
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
 
         // Start a concurrent waiter on the same key.
         let g = group.clone();
@@ -389,33 +400,47 @@ mod tests {
             .await
         });
 
-        // Give the waiter time to register and start waiting.
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Let the waiter register and start waiting.
+        tokio::task::yield_now().await;
 
         // Cancel the initializer.
         initializer.abort();
         let _ = initializer.await;
 
         // The waiter should retry and succeed.
-        let result = waiter.await.unwrap();
+        let result = waiter.await.expect("task panicked");
         assert_eq!(result, Ok("retried".to_string()));
     }
 
     #[tokio::test]
-    async fn concurrent_callers_share_slow_result() {
-        // Two concurrent callers via join! — second should not run its func.
-        let group = SingleFlight::new();
+    async fn concurrent_callers_share_result() {
+        // Two concurrent callers — second should not run its func.
+        let group = SingleFlight::<String, String>::new();
+        let gate = Arc::new(Notify::new());
 
-        let begin = tokio::time::Instant::now();
-        let fut_1 = group.call("key".to_string(), || async {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            Ok::<_, ()>("Result1".to_string())
+        // Spawn the first caller so it registers and blocks on the gate.
+        let g = group.clone();
+        let gate_clone = gate.clone();
+        let handle = tokio::spawn(async move {
+            g.call("key".to_string(), || async move {
+                gate_clone.notified().await;
+                Ok::<_, ()>("Result1".to_string())
+            })
+            .await
         });
+
+        // Let the spawned task register in the map.
+        tokio::task::yield_now().await;
+
+        // Second caller finds the existing entry — its func should never run.
         let fut_2 = group.call("key".to_string(), || async { panic!("should not execute") });
-        let (v1, v2) = tokio::join!(fut_1, fut_2);
-        assert_eq!(v1, Ok("Result1".to_string()));
+
+        // Release the gate so the first caller completes.
+        gate.notify_one();
+
+        let (v1, v2) = tokio::join!(handle, fut_2);
+        assert_eq!(v1.expect("task panicked"), Ok("Result1".to_string()));
         assert_eq!(v2, Ok::<_, ()>("Result1".to_string()));
-        assert!(begin.elapsed() >= Duration::from_millis(200));
     }
 
     #[tokio::test]
@@ -439,11 +464,23 @@ mod tests {
     async fn map_is_cleaned_up_after_cancel() {
         let group = SingleFlight::new();
 
-        let fut = group.call("key".to_string(), || async {
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-            Ok::<_, ()>("never".to_string())
+        // Start a call that will never complete on its own.
+        let handle = tokio::spawn({
+            let g = group.clone();
+            async move {
+                g.call("key".to_string(), || {
+                    std::future::pending::<Result<String, ()>>()
+                })
+                .await
+            }
         });
-        let _ = tokio::time::timeout(Duration::from_millis(10), fut).await;
+
+        // Let it register.
+        tokio::task::yield_now().await;
+
+        // Cancel it.
+        handle.abort();
+        let _ = handle.await;
 
         // The internal map should be empty after cancellation.
         let in_flight = group.in_flight.lock();
