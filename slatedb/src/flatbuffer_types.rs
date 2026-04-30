@@ -1069,8 +1069,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         // Collect all unique SSTs from l0, compacted runs, and segments.
         let mut unique_ssts: std::collections::HashMap<Ulid, &SsTableHandle> =
             std::collections::HashMap::new();
-        let trees = std::iter::once(&core.tree).chain(core.segments.iter().map(|s| &s.tree));
-        for tree in trees {
+        for tree in core.trees() {
             for view in tree.l0.iter() {
                 if let SsTableId::Compacted(ulid) = view.sst.id {
                     unique_ssts.entry(ulid).or_insert(&view.sst);
