@@ -18,8 +18,8 @@ pub(crate) enum SlateDBError {
     #[error("io error")]
     IoError(#[from] Arc<std::io::Error>),
 
-    #[error("checksum mismatch")]
-    ChecksumMismatch,
+    #[error("checksum mismatch{}", .path.as_ref().map(|p| format!(" in {p}")).unwrap_or_default())]
+    ChecksumMismatch { path: Option<Path> },
 
     #[error("empty SSTable")]
     EmptySSTable,
@@ -250,6 +250,17 @@ pub(crate) enum SlateDBError {
         "invalid sequence number, must be greater than the current max. provided=`{provided}`, current=`{current}`"
     )]
     InvalidSequenceNumber { provided: u64, current: u64 },
+}
+
+impl SlateDBError {
+    pub(crate) fn with_path(self, path: &Path) -> Self {
+        match self {
+            SlateDBError::ChecksumMismatch { path: None } => SlateDBError::ChecksumMismatch {
+                path: Some(path.clone()),
+            },
+            other => other,
+        }
+    }
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -566,7 +577,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::EmptyBlockMeta => Error::data(msg),
             SlateDBError::InvalidFilterBlock => Error::data(msg),
             SlateDBError::EmptySSTable => Error::data(msg),
-            SlateDBError::ChecksumMismatch => Error::data(msg),
+            SlateDBError::ChecksumMismatch { .. } => Error::data(msg),
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
