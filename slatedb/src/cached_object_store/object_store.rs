@@ -1661,6 +1661,7 @@ mod tests {
 
         // Wrap with a gate-controlled store so we can block callers deterministically.
         let gated = Arc::new(GatedObjectStore::new(mem));
+        gated.get_opts_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch many concurrent head requests for the same path.
@@ -1673,11 +1674,15 @@ mod tests {
 
         // Wait until exactly 1 caller arrives at the gate (SingleFlight dedup
         // ensures only one caller reaches get_opts).
-        gated.wait_for_arrivals(1).await;
-        assert_eq!(gated.arrivals(), 1, "SingleFlight should let only 1 through");
+        gated.get_opts_gate.wait_for_arrivals(1).await;
+        assert_eq!(
+            gated.get_opts_gate.arrivals(),
+            1,
+            "SingleFlight should let only 1 through"
+        );
 
         // Release the gate — success path.
-        gated.release();
+        gated.get_opts_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1701,6 +1706,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
+        gated.get_opts_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch many concurrent get_opts requests for the same path and range.
@@ -1719,11 +1725,15 @@ mod tests {
         }
 
         // Wait for the single winning caller to arrive at the gate.
-        gated.wait_for_arrivals(1).await;
-        assert_eq!(gated.arrivals(), 1, "SingleFlight should let only 1 through");
+        gated.get_opts_gate.wait_for_arrivals(1).await;
+        assert_eq!(
+            gated.get_opts_gate.arrivals(),
+            1,
+            "SingleFlight should let only 1 through"
+        );
 
         // Release — success.
-        gated.release();
+        gated.get_opts_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1752,6 +1762,7 @@ mod tests {
         }
 
         let gated = Arc::new(GatedObjectStore::new(mem));
+        gated.get_opts_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         let mut handles = Vec::new();
@@ -1762,15 +1773,15 @@ mod tests {
         }
 
         // Each distinct path has its own SingleFlight key, so all 5 should arrive.
-        gated.wait_for_arrivals(5).await;
+        gated.get_opts_gate.wait_for_arrivals(5).await;
         assert_eq!(
-            gated.arrivals(),
+            gated.get_opts_gate.arrivals(),
             5,
             "different keys should each pass through SingleFlight independently"
         );
 
         // Release all.
-        gated.release();
+        gated.get_opts_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1795,6 +1806,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
+        gated.get_opts_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         let ranges = vec![
@@ -1817,15 +1829,15 @@ mod tests {
         }
 
         // Each distinct range maps to a different key, so all 3 should arrive.
-        gated.wait_for_arrivals(3).await;
+        gated.get_opts_gate.wait_for_arrivals(3).await;
         assert_eq!(
-            gated.arrivals(),
+            gated.get_opts_gate.arrivals(),
             3,
             "different ranges should each pass through SingleFlight independently"
         );
 
         // Release all.
-        gated.release();
+        gated.get_opts_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1850,6 +1862,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
+        gated.get_opts_gate.close();
         let (_, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch concurrent head requests.
@@ -1861,11 +1874,19 @@ mod tests {
         }
 
         // Wait for the single winning caller to arrive at the gate.
-        gated.wait_for_arrivals(1).await;
+        gated.get_opts_gate.wait_for_arrivals(1).await;
 
         // Inject failure, then release.
-        gated.set_should_fail(true);
-        gated.release();
+        gated
+            .get_opts_gate
+            .set_error(|| object_store::Error::Generic {
+                store: "test",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected test failure",
+                )),
+            });
+        gated.get_opts_gate.release();
 
         // All callers should see an error.
         for handle in handles {
@@ -1885,6 +1906,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
+        gated.get_opts_gate.close();
         let (_, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // First call — configure failure.
@@ -1892,21 +1914,29 @@ mod tests {
         let p = path.clone();
         let handle = tokio::spawn(async move { store.cached_head(&p).await });
 
-        gated.wait_for_arrivals(1).await;
-        gated.set_should_fail(true);
-        gated.release();
+        gated.get_opts_gate.wait_for_arrivals(1).await;
+        gated
+            .get_opts_gate
+            .set_error(|| object_store::Error::Generic {
+                store: "test",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected test failure",
+                )),
+            });
+        gated.get_opts_gate.release();
 
         let result = handle.await.unwrap();
         assert!(result.is_err(), "first call should fail");
 
         // Second call — configure success.
-        gated.set_should_fail(false);
+        gated.get_opts_gate.clear_error();
         let store = cached_store.clone();
         let p = path.clone();
         let handle = tokio::spawn(async move { store.cached_head(&p).await });
 
-        gated.wait_for_arrivals(2).await;
-        gated.release();
+        gated.get_opts_gate.wait_for_arrivals(2).await;
+        gated.get_opts_gate.release();
 
         let result = handle.await.unwrap();
         assert!(result.is_ok(), "second call should succeed after retry");

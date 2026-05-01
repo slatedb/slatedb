@@ -778,59 +778,70 @@ impl ObjectStore for FlakyObjectStore {
     }
 }
 
-/// A gate-controlled ObjectStore wrapper for deterministic concurrency testing.
+/// A per-operation gate for deterministic concurrency testing.
 ///
-/// Instead of using time-based delays, this store blocks `get_opts` and `head`
-/// callers at an explicit gate. Tests control exactly when callers proceed and
-/// whether they see a success or an injected error.
-///
-/// # Usage pattern (mirrors `single_flight.rs` tests)
-/// ```ignore
-/// let inner = Arc::new(InMemory::new());
-/// let gated = Arc::new(GatedObjectStore::new(inner));
-///
-/// // Spawn concurrent callers (they block at the gate inside get_opts)
-/// // ...
-///
-/// // Wait until the expected number of callers have arrived at the gate
-/// gated.wait_for_arrivals(1).await;
-///
-/// // Release them — success path
-/// gated.release();
-///
-/// // Or: inject failure before releasing
-/// gated.set_should_fail(true);
-/// gated.release();
-/// ```
-#[derive(Debug)]
-pub(crate) struct GatedObjectStore {
-    inner: Arc<dyn ObjectStore>,
-    /// When true, callers blocked at the gate are allowed to proceed.
-    gate_open: std::sync::atomic::AtomicBool,
-    /// Tracks how many callers have arrived at the gate.
+/// Each gate starts **open** (pass-through). Call [`close()`](Self::close) to block
+/// callers, then [`release()`](Self::release) to let them proceed. Use
+/// [`set_error`](Self::set_error) before releasing to inject a specific error.
+pub(crate) struct Gate {
+    open: std::sync::atomic::AtomicBool,
     arrival_count: AtomicUsize,
-    /// If true, `get_opts`/`head` return an error after the gate opens.
-    should_fail: std::sync::atomic::AtomicBool,
+    /// If `Some`, callers receive the produced error after the gate opens.
+    error_fn: std::sync::Mutex<Option<Box<dyn Fn() -> object_store::Error + Send + Sync>>>,
 }
 
-impl GatedObjectStore {
-    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+impl fmt::Debug for Gate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Gate")
+            .field("open", &self.open)
+            .field("arrival_count", &self.arrival_count)
+            .field("has_error", &self.error_fn.lock().unwrap().is_some())
+            .finish()
+    }
+}
+
+impl Default for Gate {
+    fn default() -> Self {
         Self {
-            inner,
-            gate_open: std::sync::atomic::AtomicBool::new(false),
+            open: std::sync::atomic::AtomicBool::new(true),
             arrival_count: AtomicUsize::new(0),
-            should_fail: std::sync::atomic::AtomicBool::new(false),
+            error_fn: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Gate {
+    /// Create a gate that starts closed (callers will block).
+    #[allow(dead_code)]
+    pub(crate) fn closed() -> Self {
+        Self {
+            open: std::sync::atomic::AtomicBool::new(false),
+            ..Default::default()
         }
     }
 
-    /// Configure whether callers should see an error after the gate opens.
-    pub(crate) fn set_should_fail(&self, fail: bool) {
-        self.should_fail.store(fail, Ordering::Release);
+    /// Close the gate so subsequent callers block.
+    pub(crate) fn close(&self) {
+        self.open.store(false, Ordering::Release);
     }
 
-    /// Release all callers currently blocked at the gate.
+    /// Open the gate, allowing all blocked (and future) callers to proceed.
     pub(crate) fn release(&self) {
-        self.gate_open.store(true, Ordering::Release);
+        self.open.store(true, Ordering::Release);
+    }
+
+    /// Set an error factory. After the gate opens, callers will receive the
+    /// error produced by `f` instead of proceeding to the inner store.
+    pub(crate) fn set_error<F>(&self, f: F)
+    where
+        F: Fn() -> object_store::Error + Send + Sync + 'static,
+    {
+        *self.error_fn.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// Clear any previously set error, restoring success behavior.
+    pub(crate) fn clear_error(&self) {
+        *self.error_fn.lock().unwrap() = None;
     }
 
     /// Wait until at least `n` callers have arrived at the gate.
@@ -840,33 +851,82 @@ impl GatedObjectStore {
         }
     }
 
-    /// How many callers are currently blocked at the gate.
+    /// How many callers have arrived at the gate (cumulative).
     pub(crate) fn arrivals(&self) -> usize {
         self.arrival_count.load(Ordering::Acquire)
     }
 
-    /// Block at the gate until released by the test.
-    async fn wait_at_gate(&self) -> object_store::Result<()> {
-        // Signal arrival so the test knows we are blocked.
+    /// Block at this gate until released. Returns the configured error (if any)
+    /// or `Ok(())` to let the caller proceed to the inner store.
+    async fn wait(&self) -> object_store::Result<()> {
+        // Signal arrival.
         self.arrival_count.fetch_add(1, Ordering::AcqRel);
 
-        // Spin-yield until the gate is opened. This is race-free: no
-        // notification can be "missed" since we just check an atomic flag.
-        while !self.gate_open.load(Ordering::Acquire) {
+        // Spin-yield until the gate is opened.
+        while !self.open.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
 
-        // Check outcome.
-        if self.should_fail.load(Ordering::Acquire) {
-            Err(object_store::Error::Generic {
-                store: "GatedObjectStore",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "injected gate failure",
-                )),
-            })
+        // Check if an error is configured.
+        if let Some(error_fn) = self.error_fn.lock().unwrap().as_ref() {
+            Err(error_fn())
         } else {
             Ok(())
+        }
+    }
+}
+
+/// A gate-controlled ObjectStore wrapper for deterministic concurrency testing.
+///
+/// Each ObjectStore method has its own [`Gate`] that can be independently closed,
+/// released, and configured to inject errors. Gates default to **open** (pass-through).
+///
+/// # Usage pattern (mirrors `single_flight.rs` tests)
+/// ```ignore
+/// let inner = Arc::new(InMemory::new());
+/// let gated = Arc::new(GatedObjectStore::new(inner));
+///
+/// // Close the gate for the method under test.
+/// gated.get_opts_gate.close();
+///
+/// // Spawn concurrent callers (they block at the gate inside get_opts)
+/// // ...
+///
+/// // Wait until the expected number of callers have arrived.
+/// gated.get_opts_gate.wait_for_arrivals(1).await;
+///
+/// // Release them — success path.
+/// gated.get_opts_gate.release();
+///
+/// // Or: inject failure before releasing.
+/// gated.get_opts_gate.set_should_fail(true);
+/// gated.get_opts_gate.release();
+/// ```
+#[derive(Debug)]
+pub(crate) struct GatedObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    pub(crate) get_opts_gate: Gate,
+    pub(crate) head_gate: Gate,
+    pub(crate) put_opts_gate: Gate,
+    pub(crate) put_multipart_gate: Gate,
+    pub(crate) put_multipart_opts_gate: Gate,
+    pub(crate) delete_gate: Gate,
+    pub(crate) copy_gate: Gate,
+    pub(crate) rename_gate: Gate,
+}
+
+impl GatedObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            inner,
+            get_opts_gate: Gate::default(),
+            head_gate: Gate::default(),
+            put_opts_gate: Gate::default(),
+            put_multipart_gate: Gate::default(),
+            put_multipart_opts_gate: Gate::default(),
+            delete_gate: Gate::default(),
+            copy_gate: Gate::default(),
+            rename_gate: Gate::default(),
         }
     }
 }
@@ -884,12 +944,12 @@ impl ObjectStore for GatedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
-        self.wait_at_gate().await?;
+        self.get_opts_gate.wait().await?;
         self.inner.get_opts(location, options).await
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.wait_at_gate().await?;
+        self.head_gate.wait().await?;
         self.inner.head(location).await
     }
 
@@ -899,6 +959,7 @@ impl ObjectStore for GatedObjectStore {
         payload: PutPayload,
         opts: OS_PutOptions,
     ) -> object_store::Result<PutResult> {
+        self.put_opts_gate.wait().await?;
         self.inner.put_opts(location, payload, opts).await
     }
 
@@ -906,6 +967,7 @@ impl ObjectStore for GatedObjectStore {
         &self,
         location: &Path,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.put_multipart_gate.wait().await?;
         self.inner.put_multipart(location).await
     }
 
@@ -914,10 +976,12 @@ impl ObjectStore for GatedObjectStore {
         location: &Path,
         opts: object_store::PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.put_multipart_opts_gate.wait().await?;
         self.inner.put_multipart_opts(location, opts).await
     }
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        self.delete_gate.wait().await?;
         self.inner.delete(location).await
     }
 
@@ -938,18 +1002,22 @@ impl ObjectStore for GatedObjectStore {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.copy_gate.wait().await?;
         self.inner.copy(from, to).await
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.rename_gate.wait().await?;
         self.inner.rename(from, to).await
     }
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.copy_gate.wait().await?;
         self.inner.copy_if_not_exists(from, to).await
     }
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.rename_gate.wait().await?;
         self.inner.rename_if_not_exists(from, to).await
     }
 }
