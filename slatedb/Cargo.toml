@@ -107,6 +107,7 @@ zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer"]
+bench-internal = []
 test-util = [
     "tokio/test-util",
     "slatedb-common/test-util",
@@ -149,6 +150,11 @@ harness = false
 [[bench]]
 name = "scan_prefix_bench"
 harness = false
+
+[[bench]]
+name = "block_iterator_v2"
+harness = false
+required-features = ["bench-internal"]
 
 [lints]
 workspace = true

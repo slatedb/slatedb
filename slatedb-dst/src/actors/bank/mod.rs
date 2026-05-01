@@ -4,7 +4,7 @@ mod transfer;
 use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::{Db, DbTransaction, Error};
 
-pub use self::auditor::AuditorActor;
+pub use self::auditor::{AuditorActor, BankAuditView};
 pub use self::transfer::TransferActor;
 
 const BALANCE_BYTES: usize = std::mem::size_of::<u64>();

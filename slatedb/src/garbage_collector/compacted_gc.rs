@@ -69,59 +69,7 @@ impl CompactedGcTask {
             .manifest_store
             .read_referenced_manifests(manifest_id, manifest)
             .await?;
-        let mut active_ssts = HashSet::new();
-        for manifest in active_manifests.values() {
-            for sr in manifest.core.tree.compacted.iter() {
-                for view in sr.sst_views.iter() {
-                    active_ssts.insert(view.sst.id);
-                }
-            }
-            for view in manifest.core.tree.l0.iter() {
-                active_ssts.insert(view.sst.id);
-            }
-        }
-        Ok(active_ssts)
-    }
-
-    /// Computes the newest L0 timestamp from the latest manifest.
-    ///
-    /// This is used as a conservative upper bound for compacted SST deletion. The following
-    /// branches are handled in order:
-    ///
-    /// 1. If there are active L0 SSTs, take the newest (max) L0 timestamp.
-    /// 2. Else, if `l0_last_compacted` is set, use that timestamp as a fallback
-    ///    barrier for recently compacted L0s.
-    /// 3. Else, if the DB has never had L0s, return the Unix epoch to disable
-    ///    deletion based on this signal.
-    ///
-    /// ## Arguments
-    /// - `manifest`: The latest manifest contents.
-    ///
-    /// ## Returns
-    /// - The newest L0 timestamp if any L0s exist, otherwise a conservative fallback
-    ///   (last compacted L0 or Unix epoch).
-    async fn newest_l0_dt(&self, manifest: &Manifest) -> Result<DateTime<Utc>, SlateDBError> {
-        let l0_timestamps = if !manifest.core.tree.l0.is_empty() {
-            // Use active L0's if some exist
-            manifest
-                .core
-                .tree
-                .l0
-                .iter()
-                .map(|view| DateTime::<Utc>::from(view.sst.id.unwrap_compacted_id().datetime()))
-                .collect::<Vec<_>>()
-        } else if let Some(l0_last_compacted) = manifest.core.tree.last_compacted_l0_sst_view_id {
-            // Else fall back to the last compacted L0, which can serve as a conservative barrier
-            vec![DateTime::<Utc>::from(l0_last_compacted.datetime())]
-        } else {
-            // If there has never been an L0, don't allow garbage collection to delete anything
-            vec![DateTime::<Utc>::UNIX_EPOCH]
-        };
-        let max_l0_ts = l0_timestamps
-            .into_iter()
-            .max()
-            .expect("expected at least unix epoch");
-        Ok(max_l0_ts)
+        Ok(collect_active_ssts(active_manifests.values()))
     }
 
     /// Returns the minimum starting timestamp of:
@@ -159,6 +107,61 @@ impl CompactedGcTask {
     }
 }
 
+/// Collect every SST id referenced by `manifests`, across the unsegmented
+/// tree and each named segment (RFC-0024).
+fn collect_active_ssts<'a>(manifests: impl Iterator<Item = &'a Manifest>) -> HashSet<SsTableId> {
+    let mut active = HashSet::new();
+    for manifest in manifests {
+        for tree in manifest.core.trees() {
+            for view in tree.l0.iter() {
+                active.insert(view.sst.id);
+            }
+            for sr in tree.compacted.iter() {
+                for view in sr.sst_views.iter() {
+                    active.insert(view.sst.id);
+                }
+            }
+        }
+    }
+    active
+}
+
+/// Computes the newest L0 timestamp from the latest manifest.
+///
+/// This is used as a conservative upper bound for compacted SST deletion. The following
+/// branches are handled in order:
+///
+/// 1. If there are active L0 SSTs, take the newest (max) L0 timestamp.
+/// 2. Else, if `l0_last_compacted` is set, use that timestamp as a fallback
+///    barrier for recently compacted L0s.
+/// 3. Else, if the DB has never had L0s, return the Unix epoch to disable
+///    deletion based on this signal.
+///
+/// ## Arguments
+/// - `manifest`: The latest manifest contents.
+///
+/// ## Returns
+/// - The newest L0 timestamp if any L0s exist, otherwise a conservative fallback
+///   (last compacted L0 or Unix epoch).
+fn newest_l0_dt(manifest: &Manifest) -> DateTime<Utc> {
+    manifest
+        .core
+        .trees()
+        .filter_map(|tree| {
+            if !tree.l0.is_empty() {
+                tree.l0
+                    .iter()
+                    .map(|view| DateTime::<Utc>::from(view.sst.id.unwrap_compacted_id().datetime()))
+                    .max()
+            } else {
+                tree.last_compacted_l0_sst_view_id
+                    .map(|id| DateTime::<Utc>::from(id.datetime()))
+            }
+        })
+        .max()
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+}
+
 impl GcTask for CompactedGcTask {
     /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
     /// older than the minimum age specified in the options and are not active in the manifest.
@@ -189,7 +192,7 @@ impl GcTask for CompactedGcTask {
         // Don't delete SSTs that are newer than this SST since they're probably an L0 that hasn't yet
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
-        let newest_l0_dt = self.newest_l0_dt(&manifest).await?;
+        let newest_l0_dt = newest_l0_dt(&manifest);
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
         let cutoff_dt = configured_min_age_dt
@@ -234,19 +237,20 @@ impl GcTask for CompactedGcTask {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::db_state::{SsTableId, SsTableView};
-    use crate::format::sst::SsTableFormat;
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
+    use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::StoredManifest;
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment};
     use crate::object_stores::ObjectStores;
     use crate::test_utils::build_test_sst;
+    use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path};
     use slatedb_common::clock::DefaultSystemClock;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_compacted_gc_respects_min_age_cutoff() {
@@ -659,5 +663,146 @@ mod tests {
             remaining.contains(&compaction_output_id),
             "expected GC to retain compacted SST output from a running compaction when the watermark is missing"
         );
+    }
+
+    fn ulid_at(seq: u64) -> ulid::Ulid {
+        ulid::Ulid::from_parts(seq, 0)
+    }
+
+    fn view_at(seq: u64) -> SsTableView {
+        let id = ulid_at(seq);
+        SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(id),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        ))
+    }
+
+    fn manifest_with(unsegmented: LsmTreeState, segments: Vec<Segment>) -> Manifest {
+        let mut core = ManifestCore::new();
+        core.tree = unsegmented;
+        core.segments = segments;
+        if !core.segments.is_empty() {
+            core.segment_extractor_name = Some("test".into());
+        }
+        Manifest::initial(core)
+    }
+
+    #[test]
+    fn test_collect_active_ssts_walks_segment_trees() {
+        // SSTs split across unsegmented L0, segment L0, and segment SR.
+        let unsegmented_l0 = view_at(1);
+        let segment_l0 = view_at(2);
+        let segment_sr = view_at(3);
+        let manifest = manifest_with(
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![unsegmented_l0.clone()]),
+                compacted: vec![],
+            },
+            vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![segment_l0.clone()]),
+                    compacted: vec![SortedRun {
+                        id: 0,
+                        sst_views: vec![segment_sr.clone()],
+                    }],
+                },
+            }],
+        );
+
+        let mut by_id = BTreeMap::new();
+        by_id.insert(1, manifest);
+        let active = collect_active_ssts(by_id.values());
+
+        assert!(active.contains(&unsegmented_l0.sst.id));
+        assert!(active.contains(&segment_l0.sst.id));
+        assert!(active.contains(&segment_sr.sst.id));
+    }
+
+    #[test]
+    fn test_newest_l0_dt_considers_segment_l0() {
+        // Segment L0 newer than unsegmented L0; barrier should reflect it.
+        let manifest = manifest_with(
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![view_at(1_000)]),
+                compacted: vec![],
+            },
+            vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![view_at(5_000)]),
+                    compacted: vec![],
+                },
+            }],
+        );
+
+        assert_eq!(
+            newest_l0_dt(&manifest),
+            DateTime::<Utc>::from(ulid_at(5_000).datetime())
+        );
+    }
+
+    #[test]
+    fn test_newest_l0_dt_falls_back_to_segment_watermark() {
+        // Drained segment with watermark only; barrier should use it.
+        let manifest = manifest_with(
+            LsmTreeState::default(),
+            vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: Some(ulid_at(7_000)),
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![],
+                },
+            }],
+        );
+
+        assert_eq!(
+            newest_l0_dt(&manifest),
+            DateTime::<Utc>::from(ulid_at(7_000).datetime())
+        );
+    }
+
+    #[test]
+    fn test_newest_l0_dt_max_across_unsegmented_and_segments() {
+        // Mix of an unsegmented watermark and a newer segment L0.
+        let manifest = manifest_with(
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(ulid_at(2_000)),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+            vec![Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![view_at(9_000)]),
+                    compacted: vec![],
+                },
+            }],
+        );
+
+        assert_eq!(
+            newest_l0_dt(&manifest),
+            DateTime::<Utc>::from(ulid_at(9_000).datetime())
+        );
+    }
+
+    #[test]
+    fn test_newest_l0_dt_unix_epoch_when_no_trees_contribute() {
+        let manifest = manifest_with(LsmTreeState::default(), vec![]);
+        assert_eq!(newest_l0_dt(&manifest), DateTime::<Utc>::UNIX_EPOCH);
     }
 }

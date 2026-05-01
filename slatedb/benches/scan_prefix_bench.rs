@@ -108,6 +108,10 @@ fn base_settings() -> Settings {
         min_filter_keys: 0,
         l0_sst_size_bytes: 256 * 1024 * 1024,
         l0_max_ssts: NUM_FLUSHES + 10,
+        // Sentinel keys make every SST's effective range cover every key, so
+        // per-key L0 overlap equals the number of flushes. Bump the per-key
+        // cap above NUM_FLUSHES; otherwise populate() blocks on backpressure.
+        l0_max_ssts_per_key: NUM_FLUSHES + 10,
         compactor_options: None,
         ..Settings::default()
     }

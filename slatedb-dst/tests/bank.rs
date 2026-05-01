@@ -13,12 +13,12 @@ use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
     actors::{
-        initialize_accounts, AuditorActor, BankOptions, CompactorActor, CompactorActorOptions,
-        DbFencerActor, DbFencerActorOptions, ShutdownActor, SuppressFenced, TransferActor,
+        initialize_accounts, AuditorActor, BankAuditView, BankOptions, CompactorActor,
+        CompactorActorOptions, DbFencerActor, DbFencerActorOptions, ShutdownActor, SuppressFenced,
+        TransferActor,
     },
-    utils::{build_settings, build_settings_compactor, build_toxic},
-    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    StartupCtx,
+    utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
+    DeterministicLocalFilesystem, Harness, StartupCtx,
 };
 use tempfile::TempDir;
 
@@ -39,35 +39,26 @@ fn test_dst_bank_with_toxics(
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
 
-    // Build a shared toxic controller with randomized toxics.
-    let failure_seed = rand.rng().next_u64();
-    let failure_rand = Arc::new(DbRand::new(failure_seed));
-    let failures = FailingObjectStoreController::new(failure_rand.clone());
-    for index in 0..10 {
-        let toxic = build_toxic(failure_rand.as_ref(), "bank", index);
-        failures.add_toxic(toxic);
-    }
-
-    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
-        failures.clone(),
-        system_clock.clone(),
-    ));
-    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
-        failures,
-        system_clock.clone(),
-    ));
+    let main_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
+    let wal_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
 
     let bank_options = random_bank_options(&rand);
     info!("dst bank options: {bank_options:?}");
     let audit_interval = Duration::from_millis(1000);
+    let reader_options = build_reader_options(&rand);
     let fencer_restart_interval = Duration::from_secs(120);
     let compactor_options = build_settings_compactor(&mut *rand.rng());
 
     let harness = Harness::new("bank", seed, {
         let bank_options = bank_options.clone();
         move |ctx| async move {
+            let failures = ctx.failure_controller();
+            for index in 0..10 {
+                failures.add_toxic(build_toxic(ctx.rand(), ctx.path().as_ref(), index));
+            }
+
             let db = open_bank_db(ctx).await?;
             initialize_accounts(db.as_ref(), &bank_options).await?;
 
@@ -107,12 +98,26 @@ fn test_dst_bank_with_toxics(
             SuppressFenced::new(TransferActor::new(bank_options.clone())?),
         )
         .actor(
-            "auditor-1",
+            "regular-auditor",
             SuppressFenced::new(AuditorActor::new(bank_options.clone(), audit_interval)?),
         )
         .actor(
-            "auditor-2",
-            SuppressFenced::new(AuditorActor::new(bank_options, audit_interval)?),
+            "snapshot-auditor",
+            SuppressFenced::new(AuditorActor::new_with_view(
+                bank_options.clone(),
+                audit_interval,
+                BankAuditView::Snapshot,
+            )?),
+        )
+        .actor(
+            "reader-auditor",
+            AuditorActor::new_with_view(
+                bank_options,
+                audit_interval,
+                BankAuditView::Reader {
+                    options: reader_options,
+                },
+            )?,
         )
         .actor(
             "db-fencer",
