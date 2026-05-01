@@ -31,7 +31,7 @@ use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
     actors::{
         CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
-        WorkloadActorOptions,
+        WorkloadActorOptions, WorkloadMergeOperator,
     },
     utils::{build_settings, build_toxic},
     DeterministicLocalFilesystem, Harness,
@@ -214,7 +214,8 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
     .with_system_clock(Arc::clone(&system_clock))
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
-    .with_wal_object_store(wal_store);
+    .with_wal_object_store(wal_store)
+    .with_merge_operator(Arc::new(WorkloadMergeOperator));
 
     let harness = harness
         .actor("workload-1", WorkloadActor::new(workload_options.clone())?)
