@@ -357,7 +357,7 @@ union.tree.compacted = [SR{0}, SR{1}, SR{2}, SR{3}]
 
 Per-segment runs follow the same rule and draw from the same shared counter.
 
-The owned-SST list recorded in each new `external_dbs` entry includes SSTs from every per-segment tree, not only the unsegmented tree. Other union mechanics — `last_l0_seq` set to the max across sources, sequence tracker reinitialization, the WAL-flushed prerequisite, and the post-union L0 spike — apply unchanged. Per-tree backpressure (see [Backpressure](#backpressure)) means that spike is contained within the affected segments rather than coupled across the entire database.
+The owned-SST list recorded in each new `external_dbs` entry includes SSTs from every per-segment tree, not only the unsegmented tree. Clone and compaction cleanup follow the same rule: when `finish_compaction` prunes dereferenced `external_dbs` SST IDs, it must account for references from all segments as well as the unsegmented tree. Other union mechanics — `last_l0_seq` set to the max across sources, sequence tracker reinitialization, the WAL-flushed prerequisite, and the post-union L0 spike — apply unchanged. Per-tree backpressure (see [Backpressure](#backpressure)) means that spike is contained within the affected segments rather than coupled across the entire database.
 
 ### Write Path
 
