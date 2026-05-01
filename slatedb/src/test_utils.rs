@@ -253,7 +253,10 @@ pub(crate) async fn seed_database(
     await_durable: bool,
 ) -> Result<(), crate::Error> {
     let put_options = PutOptions::default();
-    let write_options = WriteOptions { await_durable };
+    let write_options = WriteOptions {
+        await_durable,
+        ..Default::default()
+    };
 
     for (key, value) in table.iter() {
         db.put_with_options(key, value, &put_options, &write_options)

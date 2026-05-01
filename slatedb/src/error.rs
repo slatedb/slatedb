@@ -245,6 +245,11 @@ pub(crate) enum SlateDBError {
 
     #[error("unexpected tombstone encountered where a value was expected")]
     UnexpectedTombstone,
+
+    #[error(
+        "invalid sequence number, must be greater than the current max. provided=`{provided}`, current=`{current}`"
+    )]
+    InvalidSequenceNumber { provided: u64, current: u64 },
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -532,6 +537,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
+            SlateDBError::InvalidSequenceNumber { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
 
             // Data errors
