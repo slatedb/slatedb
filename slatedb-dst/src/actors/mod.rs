@@ -10,7 +10,7 @@
 //!
 //! Registering `workload` and `flusher` actors together preserves the old
 //! scenario shape of steady write churn plus explicit flush pressure, while the
-//! workload actor now embeds read verification against an actor-local oracle.
+//! workload actor now embeds monotonic read verification.
 
 pub mod bank;
 pub mod compactor;

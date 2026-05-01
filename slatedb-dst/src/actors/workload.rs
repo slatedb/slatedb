@@ -1,16 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use log::info;
 use rand::RngCore;
-use slatedb::config::{PutOptions, WriteOptions};
+use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use slatedb::{Error, WriteBatch};
 use tracing::instrument;
 
 use crate::{Actor, ActorCtx};
 
 use super::PROGRESS_LOG_INTERVAL;
+
+const WORKLOAD_VALUE_VERSION_SIZE: usize = std::mem::size_of::<u64>();
 
 /// Configuration for the mixed DST workload actor.
 #[derive(Clone, Debug)]
@@ -22,6 +25,8 @@ pub struct WorkloadActorOptions {
     pub min_value_size: usize,
     /// Maximum random value size generated for `put` and `write_batch`.
     pub max_value_size: usize,
+    /// Durability level used by workload read verification.
+    pub read_durability: DurabilityLevel,
 }
 
 impl Default for WorkloadActorOptions {
@@ -30,6 +35,7 @@ impl Default for WorkloadActorOptions {
             key_count: 1024,
             min_value_size: 32,
             max_value_size: 256,
+            read_durability: DurabilityLevel::Memory,
         }
     }
 }
@@ -37,9 +43,16 @@ impl Default for WorkloadActorOptions {
 #[derive(Debug)]
 pub struct WorkloadActor {
     options: WorkloadActorOptions,
-    oracle: BTreeMap<Bytes, Bytes>,
+    observed: BTreeMap<Bytes, Observation>,
+    next_value_version: AtomicU64,
     step: u64,
     key_prefix: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Observation {
+    max_seen_version: u64,
+    observed_absent: bool,
 }
 
 impl WorkloadActor {
@@ -52,10 +65,15 @@ impl WorkloadActor {
             options.min_value_size <= options.max_value_size,
             "workload actor min_value_size must be less than or equal to max_value_size"
         );
+        assert!(
+            options.max_value_size >= WORKLOAD_VALUE_VERSION_SIZE,
+            "workload actor max_value_size must be at least {WORKLOAD_VALUE_VERSION_SIZE} bytes"
+        );
 
         Ok(Self {
             options,
-            oracle: BTreeMap::new(),
+            observed: BTreeMap::new(),
+            next_value_version: AtomicU64::new(1),
             step: 0,
             key_prefix: None,
         })
@@ -86,7 +104,7 @@ impl WorkloadOperation {
 #[async_trait]
 impl Actor for WorkloadActor {
     /// Executes one mixed deterministic workload step against the shared
-    /// database while verifying reads against an actor-local oracle.
+    /// database while verifying reads against actor-local monotonic observations.
     #[instrument(level = "debug", skip_all, fields(name = %ctx.name()))]
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let put_options = PutOptions::default();
@@ -107,10 +125,24 @@ impl Actor for WorkloadActor {
                     ctx.rand().rng().next_u64(),
                     self.options.key_count,
                 );
-                verify_get(ctx, self.step, &key, &self.oracle).await?;
+                verify_get(
+                    ctx,
+                    self.step,
+                    &key,
+                    self.options.read_durability,
+                    &mut self.observed,
+                )
+                .await?;
             }
             WorkloadOperation::Scan => {
-                verify_scan(ctx, self.step, &key_prefix, &self.oracle).await?;
+                verify_scan(
+                    ctx,
+                    self.step,
+                    &key_prefix,
+                    self.options.read_durability,
+                    &mut self.observed,
+                )
+                .await?;
             }
             WorkloadOperation::Delete => {
                 let key = workload_key(
@@ -121,7 +153,6 @@ impl Actor for WorkloadActor {
                 ctx.db()
                     .delete_with_options(key.clone(), &write_options)
                     .await?;
-                self.oracle.remove(&key);
             }
             WorkloadOperation::Put => {
                 let key = workload_key(
@@ -129,19 +160,19 @@ impl Actor for WorkloadActor {
                     ctx.rand().rng().next_u64(),
                     self.options.key_count,
                 );
+                let version = self.next_value_version.fetch_add(1, Ordering::Relaxed);
                 let value = workload_value(
+                    version,
                     &mut *ctx.rand().rng(),
                     self.options.min_value_size,
                     self.options.max_value_size,
                 );
                 ctx.db()
-                    .put_with_options(key.clone(), value.clone(), &put_options, &write_options)
+                    .put_with_options(key.clone(), value, &put_options, &write_options)
                     .await?;
-                self.oracle.insert(key, value);
             }
             WorkloadOperation::WriteBatch => {
                 let mut batch = WriteBatch::new();
-                let mut next_oracle = self.oracle.clone();
                 let batch_len = 2 + (ctx.rand().rng().next_u64() % 3) as usize;
 
                 for _ in 0..batch_len {
@@ -151,31 +182,30 @@ impl Actor for WorkloadActor {
                         self.options.key_count,
                     );
                     if ctx.rand().rng().next_u64() & 1 == 0 {
+                        let version = self.next_value_version.fetch_add(1, Ordering::Relaxed);
                         let value = workload_value(
+                            version,
                             &mut *ctx.rand().rng(),
                             self.options.min_value_size,
                             self.options.max_value_size,
                         );
-                        batch.put_bytes(key.clone(), value.clone());
-                        next_oracle.insert(key, value);
+                        batch.put_bytes(key.clone(), value);
                     } else {
                         batch.delete(key.clone());
-                        next_oracle.remove(&key);
                     }
                 }
 
                 ctx.db().write_with_options(batch, &write_options).await?;
-                self.oracle = next_oracle;
             }
         }
 
         self.step += 1;
         if self.step % PROGRESS_LOG_INTERVAL == 0 {
             info!(
-                "workload step complete [name={}, step={}, oracle_keys={}]",
+                "workload step complete [name={}, step={}, observed_keys={}]",
                 ctx.name(),
                 self.step,
-                self.oracle.len()
+                self.observed.len()
             );
         }
 
@@ -188,11 +218,18 @@ fn workload_key(prefix: &str, rand_value: u64, key_count: usize) -> Bytes {
     Bytes::from(format!("{prefix}{key_index}"))
 }
 
-fn workload_value(rng: &mut impl RngCore, min_value_size: usize, max_value_size: usize) -> Bytes {
+fn workload_value(
+    version: u64,
+    rng: &mut impl RngCore,
+    min_value_size: usize,
+    max_value_size: usize,
+) -> Bytes {
+    let min_value_size = min_value_size.max(WORKLOAD_VALUE_VERSION_SIZE);
     let value_len =
         min_value_size + (rng.next_u64() as usize % (max_value_size - min_value_size + 1));
     let mut value = vec![0; value_len];
-    rng.fill_bytes(&mut value);
+    value[..WORKLOAD_VALUE_VERSION_SIZE].copy_from_slice(&version.to_be_bytes());
+    rng.fill_bytes(&mut value[WORKLOAD_VALUE_VERSION_SIZE..]);
     Bytes::from(value)
 }
 
@@ -200,18 +237,18 @@ async fn verify_get(
     ctx: &ActorCtx,
     step: u64,
     key: &Bytes,
-    oracle: &BTreeMap<Bytes, Bytes>,
+    read_durability: DurabilityLevel,
+    observed: &mut BTreeMap<Bytes, Observation>,
 ) -> Result<(), Error> {
-    let actual = ctx.db().get(key.clone()).await?;
-    let expected = oracle.get(key).cloned();
-    assert_eq!(
-        actual,
-        expected,
-        "workload get mismatch [name={}, step={}, key={}]",
-        ctx.name(),
-        step,
-        String::from_utf8_lossy(key.as_ref()).into_owned(),
-    );
+    let read_options = ReadOptions::new().with_durability_filter(read_durability);
+    match ctx
+        .db()
+        .get_with_options(key.clone(), &read_options)
+        .await?
+    {
+        Some(value) => observe_present(ctx, step, key, &value, observed),
+        None => observe_absent(key, observed),
+    }
     Ok(())
 }
 
@@ -219,31 +256,101 @@ async fn verify_scan(
     ctx: &ActorCtx,
     step: u64,
     key_prefix: &str,
-    oracle: &BTreeMap<Bytes, Bytes>,
+    read_durability: DurabilityLevel,
+    observed: &mut BTreeMap<Bytes, Observation>,
 ) -> Result<(), Error> {
-    let mut iter = ctx.db().scan_prefix(key_prefix.as_bytes()).await?;
-    let mut actual = BTreeMap::new();
+    let scan_options = ScanOptions::new().with_durability_filter(read_durability);
+    let mut iter = ctx
+        .db()
+        .scan_prefix_with_options(key_prefix.as_bytes(), &scan_options)
+        .await?;
+    let mut seen = BTreeSet::new();
 
     while let Some(key_value) = iter.next().await? {
         assert!(
-            actual
-                .insert(key_value.key.clone(), key_value.value.clone())
-                .is_none(),
+            key_value.key.starts_with(key_prefix.as_bytes()),
+            "workload scan returned key outside prefix [name={}, step={}, key_prefix={}, key={}]",
+            ctx.name(),
+            step,
+            key_prefix,
+            String::from_utf8_lossy(key_value.key.as_ref()).into_owned(),
+        );
+        assert!(
+            seen.insert(key_value.key.clone()),
             "workload scan returned duplicate key [name={}, step={}, key_prefix={}, key={}]",
             ctx.name(),
             step,
             key_prefix,
             String::from_utf8_lossy(key_value.key.as_ref()).into_owned(),
         );
+        observe_present(ctx, step, &key_value.key, &key_value.value, observed);
     }
 
-    assert_eq!(
-        actual,
-        *oracle,
-        "workload scan mismatch [name={}, step={}, key_prefix={}]",
-        ctx.name(),
-        step,
-        key_prefix,
-    );
+    let missing_keys = observed
+        .keys()
+        .filter(|key| key.starts_with(key_prefix.as_bytes()) && !seen.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in missing_keys {
+        observe_absent(&key, observed);
+    }
+
     Ok(())
+}
+
+fn observe_present(
+    ctx: &ActorCtx,
+    step: u64,
+    key: &Bytes,
+    value: &Bytes,
+    observed: &mut BTreeMap<Bytes, Observation>,
+) {
+    let version = decode_workload_value(ctx, step, key, value);
+    let key_display = String::from_utf8_lossy(key.as_ref()).into_owned();
+    match observed.get_mut(key) {
+        Some(observation) => {
+            assert!(
+                !(observation.observed_absent && version <= observation.max_seen_version),
+                "workload read stale value after observed deletion [name={}, step={}, key={}, version={}, max_seen_version={}]",
+                ctx.name(),
+                step,
+                key_display,
+                version,
+                observation.max_seen_version,
+            );
+            assert!(
+                version >= observation.max_seen_version,
+                "workload read version moved backward [name={}, step={}, key={}, version={}, max_seen_version={}]",
+                ctx.name(),
+                step,
+                key_display,
+                version,
+                observation.max_seen_version,
+            );
+            observation.max_seen_version = version;
+            observation.observed_absent = false;
+        }
+        None => {
+            observed.insert(
+                key.clone(),
+                Observation {
+                    max_seen_version: version,
+                    observed_absent: false,
+                },
+            );
+        }
+    }
+}
+
+fn observe_absent(key: &Bytes, observed: &mut BTreeMap<Bytes, Observation>) {
+    if let Some(observation) = observed.get_mut(key) {
+        observation.observed_absent = true;
+    }
+}
+
+fn decode_workload_value(ctx: &ActorCtx, step: u64, key: &Bytes, value: &Bytes) -> u64 {
+    let version_bytes: [u8; WORKLOAD_VALUE_VERSION_SIZE] = value[..WORKLOAD_VALUE_VERSION_SIZE]
+        .try_into()
+        .expect("workload value version slice has fixed size");
+    u64::from_be_bytes(version_bytes)
 }
