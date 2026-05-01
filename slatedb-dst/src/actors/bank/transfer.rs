@@ -8,17 +8,29 @@ use crate::{Actor, ActorCtx};
 
 use super::{BankAccounts, BankOptions};
 
+/// Write style used by a bank transfer actor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransferMode {
+    /// Commit absolute account balances with put operations.
+    Put,
+    /// Commit signed debit and credit deltas with merge operations.
+    Merge,
+}
+
 /// Repeatedly transfers funds between deterministic account pairs.
 #[derive(Debug)]
 pub struct TransferActor {
     bank: BankAccounts,
+    mode: TransferMode,
     step: u64,
 }
 
 impl TransferActor {
-    pub fn new(options: BankOptions) -> Result<Self, Error> {
+    /// Creates a transfer actor that uses the requested write mode for its lifetime.
+    pub fn new(options: BankOptions, mode: TransferMode) -> Result<Self, Error> {
         Ok(Self {
             bank: BankAccounts::new(options)?,
+            mode,
             step: 0,
         })
     }
@@ -56,11 +68,21 @@ impl Actor for TransferActor {
                     .checked_add(transfer_amount)
                     .expect("bank transfer overflowed destination account balance");
 
-                let updated_from_value = self.bank.encode_balance(from_balance - transfer_amount);
-                let updated_to_value = self.bank.encode_balance(updated_to_balance);
-
-                txn.put(from_key.as_bytes(), updated_from_value)?;
-                txn.put(to_key.as_bytes(), updated_to_value)?;
+                match self.mode {
+                    TransferMode::Put => {
+                        let updated_from_value =
+                            self.bank.encode_balance(from_balance - transfer_amount);
+                        let updated_to_value = self.bank.encode_balance(updated_to_balance);
+                        txn.put(from_key.as_bytes(), updated_from_value)?;
+                        txn.put(to_key.as_bytes(), updated_to_value)?;
+                    }
+                    TransferMode::Merge => {
+                        let transfer_delta = i64::try_from(transfer_amount)
+                            .expect("bank transfer amount must fit within i64");
+                        txn.merge(from_key.as_bytes(), self.bank.encode_delta(-transfer_delta))?;
+                        txn.merge(to_key.as_bytes(), self.bank.encode_delta(transfer_delta))?;
+                    }
+                }
 
                 match txn.commit_with_options(&write_options).await {
                     Ok(_) => break,

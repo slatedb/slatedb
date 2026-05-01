@@ -123,6 +123,10 @@ async fn open_bank_reader(ctx: &ActorCtx, options: DbReaderOptions) -> Result<Db
         builder = builder.with_wal_object_store(wal_object_store);
     }
 
+    if let Some(merge_operator) = ctx.merge_operator() {
+        builder = builder.with_merge_operator(merge_operator);
+    }
+
     builder.build().await
 }
 

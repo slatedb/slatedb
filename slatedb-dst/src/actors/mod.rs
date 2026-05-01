@@ -21,7 +21,8 @@ pub mod suppress_errors;
 pub mod workload;
 
 pub use self::bank::{
-    initialize_accounts, AuditorActor, BankAuditView, BankOptions, TransferActor,
+    initialize_accounts, AuditorActor, BankAuditView, BankMergeOperator, BankOptions,
+    TransferActor, TransferMode,
 };
 pub use self::compactor::{CompactorActor, CompactorActorOptions};
 pub use self::fencer::{DbFencerActor, DbFencerActorOptions, SuppressFenced};

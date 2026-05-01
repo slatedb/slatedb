@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use fail_parallel::FailPointRegistry;
 use slatedb::compactor::Compactor;
-use slatedb::{Db, DbRand, Error};
+use slatedb::{Db, DbRand, Error, MergeOperator};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::MockSystemClock;
 
@@ -79,8 +79,8 @@ impl ActorCtx {
     /// Returns the startup context shared by this harness run.
     ///
     /// This exposes the database path, object stores, clock, failpoint
-    /// registry, failure controller, and startup RNG used by the database
-    /// factory.
+    /// registry, failure controller, optional merge operator, and startup RNG
+    /// used by the database factory.
     pub fn startup_ctx(&self) -> &StartupCtx {
         &self.shared.startup_ctx
     }
@@ -168,6 +168,19 @@ impl ActorCtx {
         self.shared.startup_ctx.fp_registry()
     }
 
+    /// Returns the merge operator configured for this harness run, if any.
+    ///
+    /// Components that open a `Db`, `DbReader`, or standalone `Compactor`
+    /// against a database that may contain merge operands should pass this
+    /// handle through to the corresponding SlateDB builder.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn MergeOperator + Send + Sync>>`: The shared
+    ///   merge-operator handle, or `None`.
+    pub fn merge_operator(&self) -> Option<Arc<dyn MergeOperator + Send + Sync>> {
+        self.shared.startup_ctx.merge_operator()
+    }
+
     /// Returns the shared shutdown token for the current harness run.
     ///
     /// Actors may call `cancel()` to request harness shutdown, or observe the
@@ -190,6 +203,7 @@ pub struct StartupCtx {
     system_clock: Arc<dyn SystemClock>,
     fp_registry: Arc<FailPointRegistry>,
     failure_controller: FailingObjectStoreController,
+    merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
     rand: Arc<DbRand>,
 }
 
@@ -236,6 +250,18 @@ impl StartupCtx {
     ///   the database under test.
     pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
         Arc::clone(&self.fp_registry)
+    }
+
+    /// Returns the merge operator configured for this harness run, if any.
+    ///
+    /// Startup factories should pass this handle to `DbBuilder` when opening a
+    /// database that may write or read merge operands.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn MergeOperator + Send + Sync>>`: The shared
+    ///   merge-operator handle, or `None`.
+    pub fn merge_operator(&self) -> Option<Arc<dyn MergeOperator + Send + Sync>> {
+        self.merge_operator.clone()
     }
 
     /// Returns the shared failure controller for the harness object stores.
@@ -334,6 +360,7 @@ pub struct Harness {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     clock_advance_ms: RangeInclusive<u64>,
+    merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
     startup_factory: StartupFactory,
     actors: Vec<ActorRegistration>,
 }
@@ -364,6 +391,7 @@ impl Harness {
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
             clock_advance_ms: 1..=5,
+            merge_operator: None,
             startup_factory: Box::new(move |ctx| Box::pin(factory(ctx))),
             actors: Vec::new(),
         }
@@ -459,6 +487,26 @@ impl Harness {
         self
     }
 
+    /// Configures the merge operator shared by DST components.
+    ///
+    /// The handle is exposed through [`StartupCtx::merge_operator`] and
+    /// [`ActorCtx::merge_operator`]. Built-in DST components that open
+    /// read-only readers or standalone compactors pass it through automatically.
+    /// Startup factories remain responsible for passing it to `DbBuilder`.
+    ///
+    /// ## Arguments
+    /// - `merge_operator`: The merge operator handle to use for this harness run.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    pub fn with_merge_operator(
+        mut self,
+        merge_operator: Arc<dyn MergeOperator + Send + Sync>,
+    ) -> Self {
+        self.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Registers one actor task under a unique logical name.
     ///
     /// ## Arguments
@@ -527,6 +575,7 @@ impl Harness {
             main_object_store,
             wal_object_store,
             clock_advance_ms: _,
+            merge_operator,
             startup_factory,
             actors,
         } = self;
@@ -570,6 +619,7 @@ impl Harness {
             system_clock: Arc::clone(&system_clock),
             fp_registry: Arc::clone(&fp_registry),
             failure_controller,
+            merge_operator,
             rand: Arc::new(DbRand::new(startup_seed)),
         };
 
