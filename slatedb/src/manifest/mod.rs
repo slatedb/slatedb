@@ -727,14 +727,26 @@ impl Manifest {
     /// unsegmented tree and every segment, so ids must be regenerated
     /// to avoid cross-source collisions. RFC-0024 requires SR ids to be
     /// globally unique across all trees.
+    ///
+    /// Ids are assigned in descending order of walk position so that
+    /// within each tree, the first list entry gets the highest id and
+    /// the last gets the lowest. This preserves the existing convention
+    /// that `compacted` is sorted by descending id, mirroring the
+    /// per-source state pre-union.
     fn renumber_union_sorted_runs(core: &mut ManifestCore) {
+        let count: usize = core.tree.compacted.len()
+            + core
+                .segments
+                .iter()
+                .map(|s| s.tree.compacted.len())
+                .sum::<usize>();
         let all_compacted = core.tree.compacted.iter_mut().chain(
             core.segments
                 .iter_mut()
                 .flat_map(|s| s.tree.compacted.iter_mut()),
         );
         for (idx, sr) in all_compacted.enumerate() {
-            sr.id = idx as u32;
+            sr.id = (count - 1 - idx) as u32;
         }
     }
 
@@ -765,11 +777,12 @@ impl Manifest {
         let mut external_dbs = vec![];
         let mut core = ManifestCore::new();
         core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources);
-        // Sources have non-overlapping key ranges, so each segment prefix
-        // appears in at most one source under typical conditions; the
-        // `compacted` and `l0` lists across sources are concatenated when
-        // the same prefix shows up more than once. Collect by prefix to
-        // keep the result sorted as required by `ManifestCore::segments`.
+        // The same segment prefix can appear in multiple sources — e.g.
+        // hourly segmentation with sources sliced by label — since
+        // non-overlap is enforced at the SST-view level, not the segment
+        // level. Collect by prefix and concatenate the per-source `l0`
+        // and `compacted` lists as we go; the BTreeMap keeps the result
+        // sorted as required by `ManifestCore::segments`.
         let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
 
         for (source, _) in ranges {
@@ -791,14 +804,9 @@ impl Manifest {
             core.tree
                 .compacted
                 .extend(manifest.core.tree.compacted.iter().cloned());
-            // Per-segment LSM state. Two sources can share a segment
-            // prefix when their key ranges within that prefix are
-            // disjoint — non-overlap is enforced at the SST-view level,
-            // not the segment level. Concatenate L0 and `compacted`
-            // across sources; SR IDs get regenerated globally below.
-            // Watermarks are reset to None to match the unsegmented
-            // tree's union behavior (the unioned manifest is a fresh
-            // DB and starts compaction tracking from scratch).
+            // SR IDs are regenerated globally after the loop; watermarks
+            // start as `None` because the unioned manifest is a fresh DB
+            // that begins compaction tracking from scratch.
             for segment in &manifest.core.segments {
                 let entry = segments_by_prefix
                     .entry(segment.prefix.clone())
@@ -927,14 +935,8 @@ impl Manifest {
     /// `sst_ids` becomes empty — detaching a clone from its parent is done by the GC,
     /// not here, because it also requires that no live checkpoint references those IDs.
     pub(crate) fn prune_external_sst_ids(&mut self) {
-        let used_sst_ids: HashSet<SsTableId> = self
-            .core
-            .tree
-            .compacted
-            .iter()
-            .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
-            .chain(self.core.tree.l0.iter().map(|v| v.sst.id))
-            .collect();
+        let used_sst_ids: HashSet<SsTableId> =
+            self.core.all_sst_views().map(|v| v.sst.id).collect();
         for external_db in self.external_dbs.iter_mut() {
             external_db.sst_ids.retain(|id| used_sst_ids.contains(id));
         }
@@ -961,7 +963,7 @@ mod tests {
     use object_store::ObjectStore;
     use proptest::proptest;
     use rstest::rstest;
-    use std::collections::{BTreeSet, HashMap, VecDeque};
+    use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
@@ -1909,11 +1911,17 @@ mod tests {
             rand,
         );
 
-        // After union, we should have 5 SRs with IDs 0, 1, 2, 3, 4
+        // After union, we should have 5 SRs with IDs 4, 3, 2, 1, 0
+        // (renumber assigns descending ids in walk order so that within
+        // each tree the first list entry has the highest id).
         assert_eq!(union.core.tree.compacted.len(), 5);
 
         let sr_ids: Vec<u32> = union.core.tree.compacted.iter().map(|sr| sr.id).collect();
-        assert_eq!(sr_ids, vec![0, 1, 2, 3, 4], "SR IDs should be sequential");
+        assert_eq!(
+            sr_ids,
+            vec![4, 3, 2, 1, 0],
+            "SR IDs should descend in list order"
+        );
 
         // Verify no duplicates
         let mut seen = std::collections::HashSet::new();
@@ -2332,7 +2340,55 @@ mod tests {
         assert!(manifest.external_dbs[1].final_checkpoint_id.is_some());
     }
 
-    fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8; 1]) -> SsTableView {
+    #[test]
+    fn test_prune_external_sst_ids_retains_segment_referenced_ssts() {
+        // Regression: prune_external_sst_ids must walk segment trees in
+        // addition to the unsegmented tree. Otherwise SSTs referenced
+        // only by a segment get treated as stale and dropped from
+        // external_dbs.sst_ids, which would let parent detach/GC remove
+        // files the clone still needs.
+        let unsegmented_l0 = SsTableId::Compacted(Ulid::new());
+        let segment_l0 = SsTableId::Compacted(Ulid::new());
+        let segment_compacted = SsTableId::Compacted(Ulid::new());
+        let stale = SsTableId::Compacted(Ulid::new());
+
+        let mut core = ManifestCore::new();
+        core.tree
+            .l0
+            .push_back(create_sst_view(unsegmented_l0, b"a"));
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"seg/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![create_sst_view(segment_l0, b"seg/a")]),
+                compacted: vec![SortedRun {
+                    id: 0,
+                    sst_views: vec![create_sst_view(segment_compacted, b"seg/b")],
+                }],
+            },
+        }];
+
+        let mut manifest = Manifest::initial(core);
+        manifest.external_dbs = vec![ExternalDb {
+            path: "/path/to/parent".to_string(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![unsegmented_l0, segment_l0, segment_compacted, stale],
+        }];
+
+        manifest.prune_external_sst_ids();
+
+        assert_eq!(manifest.external_dbs.len(), 1);
+        let retained: HashSet<SsTableId> =
+            manifest.external_dbs[0].sst_ids.iter().copied().collect();
+        let expected: HashSet<SsTableId> = [unsegmented_l0, segment_l0, segment_compacted]
+            .into_iter()
+            .collect();
+        assert_eq!(retained, expected);
+    }
+
+    fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8]) -> SsTableView {
         SsTableView::new_projected(
             sst_id.unwrap_compacted_id(),
             SsTableHandle::new(
@@ -2532,6 +2588,9 @@ mod tests {
         // across the unsegmented tree and every segment has an id in
         // 0..N (one per run) with no duplicates. Walk order is
         // unsegmented first, then segments in `core.segments` order.
+        // Ids descend in walk order, so within each tree the first list
+        // entry has the highest id (matching the descending-id-by-list-
+        // position convention).
         fn make_sr(id: u32) -> SortedRun {
             SortedRun {
                 id, // intentionally collides across trees pre-renumber
@@ -2569,9 +2628,8 @@ mod tests {
             .trees()
             .flat_map(|t| t.compacted.iter().map(|sr| sr.id))
             .collect();
-        // 5 runs total → ids must be 0..5 in walk order with no
-        // duplicates.
-        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+        // 5 runs total → ids descend from N-1 down to 0 in walk order.
+        assert_eq!(ids, vec![4, 3, 2, 1, 0]);
     }
 
     #[test]
