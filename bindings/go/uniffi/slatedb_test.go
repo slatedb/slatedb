@@ -448,7 +448,7 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 		}
 		metaCache, err := slatedb.DbCacheNewFoyerCache(slatedb.FoyerCacheOptions{
 			MaxCapacity: 256 * 1024 * 1024,
-			Shards:      runtime.NumCPU(),
+			Shards:      uint64(runtime.NumCPU()),
 		})
 		if err != nil {
 			t.Fatalf("NewFoyerCache: %v", err)
