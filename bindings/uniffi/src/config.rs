@@ -277,6 +277,7 @@ impl From<WriteOptions> for slatedb::config::WriteOptions {
     fn from(value: WriteOptions) -> Self {
         slatedb::config::WriteOptions {
             await_durable: value.await_durable,
+            ..Default::default()
         }
     }
 }

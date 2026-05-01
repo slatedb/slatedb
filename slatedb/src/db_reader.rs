@@ -2497,6 +2497,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2507,6 +2508,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2549,6 +2551,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2559,6 +2562,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
