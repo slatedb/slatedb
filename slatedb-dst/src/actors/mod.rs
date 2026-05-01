@@ -29,7 +29,7 @@ pub use self::fencer::{DbFencerActor, DbFencerActorOptions, SuppressFenced};
 pub use self::flusher::FlusherActor;
 pub use self::shutdown::ShutdownActor;
 pub use self::suppress_errors::SuppressErrorActor;
-pub use self::workload::{WorkloadActor, WorkloadActorOptions};
+pub use self::workload::{WorkloadActor, WorkloadActorOptions, WorkloadMergeOperator};
 
 /// Emit one progress log line every N completed steps for the looping actors.
 const PROGRESS_LOG_INTERVAL: u64 = 10;
