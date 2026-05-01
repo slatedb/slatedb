@@ -53,7 +53,7 @@ type TestResult<T> = Result<T, TestError>;
 /// fails or panics.
 #[rstest]
 #[cfg_attr(not(slow), case::regular(4, 200))]
-#[cfg_attr(slow, case::slow(2, 1_000))]
+#[cfg_attr(slow, case::slow(2, 10_000))]
 fn test_dst_is_deterministic(
     #[case] simulations: u32,
     #[case] shutdown_at_ms: i64,
