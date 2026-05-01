@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"runtime"
 
 	slatedb "slatedb.io/slatedb-go/uniffi"
 )
@@ -444,14 +444,14 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 		t.Helper()
 		blockCache, err := slatedb.DbCacheNewMokaCache(slatedb.MokaCacheOptions{
 			MaxCapacity: 128 * 1024 * 1024,
-			Shards: runtime.NumCPU(),
+			Shards:      runtime.NumCPU(),
 		})
 		if err != nil {
 			t.Fatalf("NewMokaCache: %v", err)
 		}
 		metaCache, err := slatedb.DbCacheNewFoyerCache(slatedb.FoyerCacheOptions{
 			MaxCapacity: 256 * 1024 * 1024,
-			Shards: runtime.NumCPU(),
+			Shards:      runtime.NumCPU(),
 		})
 		if err != nil {
 			t.Fatalf("NewFoyerCache: %v", err)
