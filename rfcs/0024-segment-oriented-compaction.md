@@ -340,6 +340,23 @@ For each segment prefix in the inputs:
 - Segments appearing in only one source are copied as-is, with sorted run IDs regenerated against the unioned manifest's shared SR counter.
 - Segments appearing in multiple sources have their `l0` lists concatenated using the same logical-creation-time ordering RFC 0004 specifies for unsegmented L0, and their `compacted` lists concatenated with regenerated SR IDs. The "similarly-sized SR merging" optimization applies within a segment: cross-source SRs in the same segment are non-overlapping by union's preconditions.
 
+**SR id renumbering.** Renumbering relabels every sorted run across the unioned manifest with a fresh `u32` id drawn from a single counter, so all ids are globally unique across the unsegmented tree and every segment. Within each tree, `compacted` list order is preserved exactly — renumbering never reorders runs. List position remains the authoritative encoding of read precedence; the convention that ID order agrees with list order (newer runs have higher IDs) is a per-source property and is not preserved across union, since the unioned list interleaves runs from sources whose ID counters were independent.
+
+For example, two sources `A` and `B`, each with two unsegmented sorted runs (IDs local to each source):
+
+```
+A.tree.compacted = [SR{5}, SR{3}]
+B.tree.compacted = [SR{8}, SR{2}]
+
+union.tree.compacted = [SR{0}, SR{1}, SR{2}, SR{3}]
+                        ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+                        A's runs        B's runs
+                        (in original    (in original
+                         list order)     list order)
+```
+
+Per-segment runs follow the same rule and draw from the same shared counter.
+
 The owned-SST list recorded in each new `external_dbs` entry includes SSTs from every per-segment tree, not only the unsegmented tree. Other union mechanics — `last_l0_seq` set to the max across sources, sequence tracker reinitialization, the WAL-flushed prerequisite, and the post-union L0 spike — apply unchanged. Per-tree backpressure (see [Backpressure](#backpressure)) means that spike is contained within the affected segments rather than coupled across the entire database.
 
 ### Write Path
