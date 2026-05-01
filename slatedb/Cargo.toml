@@ -146,5 +146,9 @@ bench = false
 name = "db_operations"
 harness = false
 
+[[bench]]
+name = "scan_prefix_bench"
+harness = false
+
 [lints]
 workspace = true
