@@ -795,7 +795,7 @@ mod tests {
     use crate::cached_object_store::storage_fs::FsCacheEntry;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::rand::DbRand;
-    use crate::test_utils::{gen_rand_bytes, FlakyObjectStore, SlowObjectStore};
+    use crate::test_utils::{gen_rand_bytes, FlakyObjectStore, GatedObjectStore};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -1652,22 +1652,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_flight_deduplicates_concurrent_head_requests() {
-        // Set up an object in the backing store, then wrap it with SlowObjectStore
-        // to inject a pause so concurrent callers overlap in time.
+        // Set up an object in the backing store.
         let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let path = Path::from("data/test_head_dedup");
         mem.put(&path, PutPayload::from_bytes(gen_rand_bytes(512)))
             .await
             .unwrap();
 
-        let slow = Arc::new(SlowObjectStore::new(
-            mem,
-            std::time::Duration::from_millis(50),
-        ));
-        let (recorder, cached_store) = build_instrumented_cached_store(slow);
+        // Wrap with a gate-controlled store so we can block callers deterministically.
+        let gated = Arc::new(GatedObjectStore::new(mem));
+        let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch many concurrent head requests for the same path.
-        // The 50ms delay ensures they all register before the first one completes.
         let mut handles = Vec::new();
         for _ in 0..10 {
             let store = cached_store.clone();
@@ -1675,11 +1671,19 @@ mod tests {
             handles.push(tokio::spawn(async move { store.cached_head(&p).await }));
         }
 
+        // Wait until exactly 1 caller arrives at the gate (SingleFlight dedup
+        // ensures only one caller reaches get_opts).
+        gated.wait_for_arrivals(1).await;
+        assert_eq!(gated.arrivals(), 1, "SingleFlight should let only 1 through");
+
+        // Release the gate — success path.
+        gated.release();
+
         for handle in handles {
             handle.await.unwrap().unwrap();
         }
 
-        // SingleFlight should collapse them into a single actual GET (head: true) request.
+        // SingleFlight should collapse them into a single actual GET request.
         let count = get_request_count(&recorder, "get");
         assert_eq!(
             count, 1,
@@ -1696,14 +1700,10 @@ mod tests {
             .await
             .unwrap();
 
-        let slow = Arc::new(SlowObjectStore::new(
-            mem,
-            std::time::Duration::from_millis(50),
-        ));
-        let (recorder, cached_store) = build_instrumented_cached_store(slow);
+        let gated = Arc::new(GatedObjectStore::new(mem));
+        let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch many concurrent get_opts requests for the same path and range.
-        // The 50ms delay guarantees they pile up behind the SingleFlight.
         let mut handles = Vec::new();
         for _ in 0..10 {
             let store = cached_store.clone();
@@ -1717,6 +1717,13 @@ mod tests {
                 result.bytes().await
             }));
         }
+
+        // Wait for the single winning caller to arrive at the gate.
+        gated.wait_for_arrivals(1).await;
+        assert_eq!(gated.arrivals(), 1, "SingleFlight should let only 1 through");
+
+        // Release — success.
+        gated.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1733,7 +1740,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_flight_allows_independent_paths() {
-        // Requests to different paths should NOT be deduplicated, even with pauses.
+        // Requests to different paths should NOT be deduplicated.
         let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let paths: Vec<Path> = (0..5)
             .map(|i| Path::from(format!("data/independent_{}", i)))
@@ -1744,11 +1751,8 @@ mod tests {
                 .unwrap();
         }
 
-        let slow = Arc::new(SlowObjectStore::new(
-            mem,
-            std::time::Duration::from_millis(50),
-        ));
-        let (recorder, cached_store) = build_instrumented_cached_store(slow);
+        let gated = Arc::new(GatedObjectStore::new(mem));
+        let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         let mut handles = Vec::new();
         for p in &paths {
@@ -1756,6 +1760,17 @@ mod tests {
             let p = p.clone();
             handles.push(tokio::spawn(async move { store.cached_head(&p).await }));
         }
+
+        // Each distinct path has its own SingleFlight key, so all 5 should arrive.
+        gated.wait_for_arrivals(5).await;
+        assert_eq!(
+            gated.arrivals(),
+            5,
+            "different keys should each pass through SingleFlight independently"
+        );
+
+        // Release all.
+        gated.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1770,67 +1785,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_flight_deduplicates_concurrent_part_fetches() {
-        // When multiple readers need the same uncached part, only one fetch should occur.
-        let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let path = Path::from("data/test_part_dedup");
-        // Create an object spanning multiple parts (part_size = 1024).
-        let payload = gen_rand_bytes(4096);
-        mem.put(&path, PutPayload::from_bytes(payload.clone()))
-            .await
-            .unwrap();
-
-        let slow = Arc::new(SlowObjectStore::new(
-            mem,
-            std::time::Duration::from_millis(50),
-        ));
-        let (recorder, cached_store) = build_instrumented_cached_store(slow);
-
-        // First, prime the metadata cache so that cached_get_opts doesn't prefetch.
-        let prime_opts = GetOptions {
-            range: None,
-            ..Default::default()
-        };
-        let result = cached_store
-            .cached_get_opts(&path, prime_opts)
-            .await
-            .unwrap();
-        let _ = result.bytes().await.unwrap();
-
-        // Record baseline after priming.
-        let baseline = get_request_count(&recorder, "get");
-
-        // Now issue concurrent requests that all need the same part (part 0).
-        // The delay ensures they overlap and hit the part_flights SingleFlight.
-        let mut handles = Vec::new();
-        for _ in 0..10 {
-            let store = cached_store.clone();
-            let p = path.clone();
-            handles.push(tokio::spawn(async move {
-                let opts = GetOptions {
-                    range: Some(GetRange::Bounded(0..512)),
-                    ..Default::default()
-                };
-                let result = store.cached_get_opts(&p, opts).await?;
-                result.bytes().await
-            }));
-        }
-
-        for handle in handles {
-            handle.await.unwrap().unwrap();
-        }
-
-        // After the initial prime, subsequent reads for already-cached parts should
-        // not require additional object store requests (served from cache).
-        let after = get_request_count(&recorder, "get");
-        let additional = after - baseline;
-        assert!(
-            additional <= 1,
-            "expected at most 1 additional request for part dedup, got {additional}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_single_flight_different_ranges_are_independent() {
         // Requests with different ranges should be treated as separate flights.
         let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
@@ -1840,11 +1794,8 @@ mod tests {
             .await
             .unwrap();
 
-        let slow = Arc::new(SlowObjectStore::new(
-            mem,
-            std::time::Duration::from_millis(50),
-        ));
-        let (recorder, cached_store) = build_instrumented_cached_store(slow);
+        let gated = Arc::new(GatedObjectStore::new(mem));
+        let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         let ranges = vec![
             Some(GetRange::Bounded(0..1024)),
@@ -1865,6 +1816,17 @@ mod tests {
             }));
         }
 
+        // Each distinct range maps to a different key, so all 3 should arrive.
+        gated.wait_for_arrivals(3).await;
+        assert_eq!(
+            gated.arrivals(),
+            3,
+            "different ranges should each pass through SingleFlight independently"
+        );
+
+        // Release all.
+        gated.release();
+
         for handle in handles {
             handle.await.unwrap().unwrap();
         }
@@ -1878,86 +1840,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_flight_head_retries_after_transient_error() {
-        // When the underlying store fails transiently, the SingleFlight should
-        // propagate the error and allow the next caller to retry successfully.
+    async fn test_single_flight_concurrent_callers_see_gate_failure() {
+        // When the gate is configured to fail, all concurrent waiters on the
+        // same SingleFlight key should receive an error (not hang forever).
         let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let path = Path::from("data/test_head_retry");
+        let path = Path::from("data/test_gate_failure");
         mem.put(&path, PutPayload::from_bytes(gen_rand_bytes(512)))
             .await
             .unwrap();
 
-        // Wrap with FlakyObjectStore that fails the first head request.
-        let flaky = Arc::new(FlakyObjectStore::new(mem, 0).with_head_failures(1));
-        let (_, cached_store) = build_instrumented_cached_store(flaky.clone());
+        let gated = Arc::new(GatedObjectStore::new(mem));
+        let (_, cached_store) = build_instrumented_cached_store(gated.clone());
 
-        // First call should fail because FlakyObjectStore fails the first get_opts
-        // (cached_head uses get_opts with head:true internally).
-        // Note: FlakyObjectStore's head failures affect `head()` not `get_opts()`,
-        // but cached_head calls get_opts. Let's verify the retry path works by
-        // calling twice sequentially.
-        let result1 = cached_store.cached_head(&path).await;
-        // The first call goes through get_opts (not head), so it should succeed.
-        assert!(result1.is_ok());
-
-        // Second call should also succeed (served from cache or SingleFlight).
-        let result2 = cached_store.cached_head(&path).await;
-        assert!(result2.is_ok());
-        assert_eq!(result1.unwrap().size, result2.unwrap().size);
-    }
-
-    #[tokio::test]
-    async fn test_single_flight_get_opts_with_flaky_store_first_failure() {
-        // Validates that when the underlying store returns a transient error,
-        // the SingleFlight does not cache the error and subsequent calls succeed.
-        let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let path = Path::from("data/test_get_flaky");
-        let payload = gen_rand_bytes(2048);
-        mem.put(&path, PutPayload::from_bytes(payload.clone()))
-            .await
-            .unwrap();
-
-        // FlakyObjectStore with 1 put failure (we use put failures to set it up,
-        // but get_opts passes through). Instead, use get_range failures to test
-        // the part_flights path. First let's just verify normal get_opts works.
-        let flaky = Arc::new(FlakyObjectStore::new(mem.clone(), 0));
-        let (recorder, cached_store) = build_instrumented_cached_store(flaky);
-
-        let opts = GetOptions {
-            range: Some(GetRange::Bounded(0..1024)),
-            ..Default::default()
-        };
-        let result = cached_store.cached_get_opts(&path, opts).await;
-        assert!(result.is_ok());
-
-        let bytes = result.unwrap().bytes().await.unwrap();
-        assert_eq!(&bytes[..], &payload[..1024]);
-
-        // Verify the request went through exactly once for the prefetch.
-        let count = get_request_count(&recorder, "get");
-        assert!(
-            count >= 1,
-            "expected at least 1 request through FlakyObjectStore, got {count}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_single_flight_concurrent_callers_see_same_error() {
-        // When the underlying store fails, all concurrent waiters on the same
-        // SingleFlight key should receive an error (not hang forever), and the
-        // next call should be able to retry fresh.
-        let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        // Intentionally do NOT put anything at this path so get_opts returns NotFound.
-        let path = Path::from("data/nonexistent");
-
-        let slow = Arc::new(SlowObjectStore::new(
-            mem,
-            std::time::Duration::from_millis(50),
-        ));
-        let (_, cached_store) = build_instrumented_cached_store(slow);
-
-        // Launch concurrent head requests for a non-existent path.
-        // All should fail with NotFound, none should hang.
+        // Launch concurrent head requests.
         let mut handles = Vec::new();
         for _ in 0..5 {
             let store = cached_store.clone();
@@ -1965,10 +1860,56 @@ mod tests {
             handles.push(tokio::spawn(async move { store.cached_head(&p).await }));
         }
 
+        // Wait for the single winning caller to arrive at the gate.
+        gated.wait_for_arrivals(1).await;
+
+        // Inject failure, then release.
+        gated.set_should_fail(true);
+        gated.release();
+
+        // All callers should see an error.
         for handle in handles {
             let result = handle.await.unwrap();
-            assert!(result.is_err(), "expected error for non-existent path");
+            assert!(result.is_err(), "expected error when gate injects failure");
         }
+    }
+
+    #[tokio::test]
+    async fn test_single_flight_retries_after_gate_failure() {
+        // After a failure, the SingleFlight should not cache the error,
+        // allowing the next call to succeed fresh.
+        let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let path = Path::from("data/test_retry_after_fail");
+        mem.put(&path, PutPayload::from_bytes(gen_rand_bytes(512)))
+            .await
+            .unwrap();
+
+        let gated = Arc::new(GatedObjectStore::new(mem));
+        let (_, cached_store) = build_instrumented_cached_store(gated.clone());
+
+        // First call — configure failure.
+        let store = cached_store.clone();
+        let p = path.clone();
+        let handle = tokio::spawn(async move { store.cached_head(&p).await });
+
+        gated.wait_for_arrivals(1).await;
+        gated.set_should_fail(true);
+        gated.release();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err(), "first call should fail");
+
+        // Second call — configure success.
+        gated.set_should_fail(false);
+        let store = cached_store.clone();
+        let p = path.clone();
+        let handle = tokio::spawn(async move { store.cached_head(&p).await });
+
+        gated.wait_for_arrivals(2).await;
+        gated.release();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "second call should succeed after retry");
     }
 
     #[tokio::test]

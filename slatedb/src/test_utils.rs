@@ -778,40 +778,118 @@ impl ObjectStore for FlakyObjectStore {
     }
 }
 
-/// An ObjectStore wrapper that injects an artificial delay into `get_opts` and `head`,
-/// ensuring that concurrent callers truly overlap in time so deduplication logic
-/// (e.g. SingleFlight) is deterministically exercised.
+/// A gate-controlled ObjectStore wrapper for deterministic concurrency testing.
+///
+/// Instead of using time-based delays, this store blocks `get_opts` and `head`
+/// callers at an explicit gate. Tests control exactly when callers proceed and
+/// whether they see a success or an injected error.
+///
+/// # Usage pattern (mirrors `single_flight.rs` tests)
+/// ```ignore
+/// let inner = Arc::new(InMemory::new());
+/// let gated = Arc::new(GatedObjectStore::new(inner));
+///
+/// // Spawn concurrent callers (they block at the gate inside get_opts)
+/// // ...
+///
+/// // Wait until the expected number of callers have arrived at the gate
+/// gated.wait_for_arrivals(1).await;
+///
+/// // Release them — success path
+/// gated.release();
+///
+/// // Or: inject failure before releasing
+/// gated.set_should_fail(true);
+/// gated.release();
+/// ```
 #[derive(Debug)]
-pub(crate) struct SlowObjectStore {
+pub(crate) struct GatedObjectStore {
     inner: Arc<dyn ObjectStore>,
-    delay: Duration,
+    /// When true, callers blocked at the gate are allowed to proceed.
+    gate_open: std::sync::atomic::AtomicBool,
+    /// Tracks how many callers have arrived at the gate.
+    arrival_count: AtomicUsize,
+    /// If true, `get_opts`/`head` return an error after the gate opens.
+    should_fail: std::sync::atomic::AtomicBool,
 }
 
-impl SlowObjectStore {
-    pub(crate) fn new(inner: Arc<dyn ObjectStore>, delay: Duration) -> Self {
-        Self { inner, delay }
+impl GatedObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            inner,
+            gate_open: std::sync::atomic::AtomicBool::new(false),
+            arrival_count: AtomicUsize::new(0),
+            should_fail: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Configure whether callers should see an error after the gate opens.
+    pub(crate) fn set_should_fail(&self, fail: bool) {
+        self.should_fail.store(fail, Ordering::Release);
+    }
+
+    /// Release all callers currently blocked at the gate.
+    pub(crate) fn release(&self) {
+        self.gate_open.store(true, Ordering::Release);
+    }
+
+    /// Wait until at least `n` callers have arrived at the gate.
+    pub(crate) async fn wait_for_arrivals(&self, n: usize) {
+        while self.arrival_count.load(Ordering::Acquire) < n {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// How many callers are currently blocked at the gate.
+    pub(crate) fn arrivals(&self) -> usize {
+        self.arrival_count.load(Ordering::Acquire)
+    }
+
+    /// Block at the gate until released by the test.
+    async fn wait_at_gate(&self) -> object_store::Result<()> {
+        // Signal arrival so the test knows we are blocked.
+        self.arrival_count.fetch_add(1, Ordering::AcqRel);
+
+        // Spin-yield until the gate is opened. This is race-free: no
+        // notification can be "missed" since we just check an atomic flag.
+        while !self.gate_open.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        // Check outcome.
+        if self.should_fail.load(Ordering::Acquire) {
+            Err(object_store::Error::Generic {
+                store: "GatedObjectStore",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected gate failure",
+                )),
+            })
+        } else {
+            Ok(())
+        }
     }
 }
 
-impl fmt::Display for SlowObjectStore {
+impl fmt::Display for GatedObjectStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SlowObjectStore({})", self.inner)
+        write!(f, "GatedObjectStore({})", self.inner)
     }
 }
 
 #[async_trait]
-impl ObjectStore for SlowObjectStore {
+impl ObjectStore for GatedObjectStore {
     async fn get_opts(
         &self,
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
-        tokio::time::sleep(self.delay).await;
+        self.wait_at_gate().await?;
         self.inner.get_opts(location, options).await
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        tokio::time::sleep(self.delay).await;
+        self.wait_at_gate().await?;
         self.inner.head(location).await
     }
 
