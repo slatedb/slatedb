@@ -403,6 +403,9 @@ impl CachedObjectStore {
                     let get_result = self.object_store.get_opts(location, opts).await?;
                     let result_meta = get_result.meta.clone();
                     let result_attrs = get_result.attributes.clone();
+                    // swallow the error on saving to disk here (the disk might be already full), just fallback
+                    // to the object store.
+                    // TODO: add a warning log here
                     if self.resolve_root(location, &result_meta.location) {
                         self.save_get_result(get_result).await.ok();
                     }
@@ -538,7 +541,8 @@ impl CachedObjectStore {
                 }
             }
 
-            // Cache miss — deduplicate concurrent fetches of the same part.
+            // Cache miss, so we need to fetch from the object store.
+            // Read Part — deduplicate concurrent fetches of the same part.
             // The SingleFlight fetches the full part and saves it to cache; each
             // caller then slices out their own range_in_part.
             let bytes = this
@@ -559,16 +563,22 @@ impl CachedObjectStore {
                         )
                         .await?;
 
+                    // Get the cache entry again after successful get so we can cache the part.
                     let cache_entry = if this.resolve_root(&location, &get_result.meta.location) {
                         this.cache_location_for(&location).map(|cache_location| {
                             this.cache_storage
                                 .entry(&cache_location, this.part_size_bytes)
                         })
                     } else {
+                        // If the root resolution fails, we won't be able to derive a canonical cache
+                        // key. Skip saving to cache to avoid poisoning the cache with unsafe keys.
                         None
                     };
 
+                    // Save the head and the part to cache for future accesses. Just read the bytes
+                    // if we still can't derive a canonical cache key.
                     let bytes = if let Some(entry) = cache_entry {
+                        // Save the head and the part to cache for future accesses.
                         let meta = get_result.meta.clone();
                         let attrs = get_result.attributes.clone();
                         let bytes = get_result.bytes().await?;
