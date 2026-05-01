@@ -25,13 +25,13 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use rstest::rstest;
-use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
+use slatedb::config::{CompactorOptions, DurabilityLevel, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
     actors::{
         CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
-        WorkloadActorOptions,
+        WorkloadActorOptions, WorkloadMergeOperator,
     },
     utils::{build_settings, build_toxic},
     DeterministicLocalFilesystem, Harness,
@@ -53,7 +53,7 @@ type TestResult<T> = Result<T, TestError>;
 /// fails or panics.
 #[rstest]
 #[cfg_attr(not(slow), case::regular(4, 200))]
-#[cfg_attr(slow, case::slow(2, 1_000))]
+#[cfg_attr(slow, case::slow(2, 10_000))]
 fn test_dst_is_deterministic(
     #[case] simulations: u32,
     #[case] shutdown_at_ms: i64,
@@ -167,7 +167,10 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
     let wal_store: Arc<dyn ObjectStore> =
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
-    let workload_options = WorkloadActorOptions::default();
+    let workload_options = WorkloadActorOptions {
+        read_durability: DurabilityLevel::Remote,
+        ..WorkloadActorOptions::default()
+    };
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(10),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
@@ -211,7 +214,8 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
     .with_system_clock(Arc::clone(&system_clock))
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
-    .with_wal_object_store(wal_store);
+    .with_wal_object_store(wal_store)
+    .with_merge_operator(Arc::new(WorkloadMergeOperator));
 
     let harness = harness
         .actor("workload-1", WorkloadActor::new(workload_options.clone())?)
