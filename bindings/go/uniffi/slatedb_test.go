@@ -442,10 +442,7 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
 		t.Helper()
-		blockCache, err := slatedb.DbCacheNewMokaCache(slatedb.MokaCacheOptions{
-			MaxCapacity: 128 * 1024 * 1024,
-			Shards:      runtime.NumCPU(),
-		})
+		blockCache, err := slatedb.DbCacheNewMokaCache(slatedb.MokaCacheOptions{MaxCapacity: 128 * 1024 * 1024})
 		if err != nil {
 			t.Fatalf("NewMokaCache: %v", err)
 		}
