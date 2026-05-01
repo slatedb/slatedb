@@ -69,12 +69,16 @@ impl MergeOperator for WorkloadMergeOperator {
         let (base_value, version_increment) = match existing_value {
             Some(value) => (
                 value,
+                // If a base value exists, treat merge operations as "increment by one".
                 u64::try_from(operands.len()).expect("operand count must fit in u64"),
             ),
             None => {
                 let Some(first_operand) = operands.first() else {
                     return Err(MergeOperatorError::EmptyBatch);
                 };
+                // Otherwise use the first operand's value as the base value and treat
+                // subsequent operands as increments. This is to accommodate deletions
+                // followed by merges, which will have no existing value.
                 (
                     first_operand.clone(),
                     u64::try_from(operands.len() - 1).expect("operand count must fit in u64"),
@@ -222,7 +226,13 @@ impl Actor for WorkloadActor {
                     ctx.rand().rng().next_u64(),
                     self.options.key_count,
                 );
-                let value = self.next_workload_value(ctx);
+                let version = self.next_value_version.fetch_add(1, Ordering::Relaxed);
+                let value = workload_value(
+                    version,
+                    &mut *ctx.rand().rng(),
+                    self.options.min_value_size,
+                    self.options.max_value_size,
+                );
                 ctx.db()
                     .put_with_options(key.clone(), value, &put_options, &write_options)
                     .await?;
@@ -233,7 +243,13 @@ impl Actor for WorkloadActor {
                     ctx.rand().rng().next_u64(),
                     self.options.key_count,
                 );
-                let value = self.next_workload_value(ctx);
+                let version = self.next_value_version.fetch_add(1, Ordering::Relaxed);
+                let value = workload_value(
+                    version,
+                    &mut *ctx.rand().rng(),
+                    self.options.min_value_size,
+                    self.options.max_value_size,
+                );
                 ctx.db()
                     .merge_with_options(
                         key.clone(),
@@ -260,12 +276,24 @@ impl Actor for WorkloadActor {
                     };
                     match sampled_operation {
                         0 => {
-                            let value = self.next_workload_value(ctx);
+                            let version = self.next_value_version.fetch_add(1, Ordering::Relaxed);
+                            let value = workload_value(
+                                version,
+                                &mut *ctx.rand().rng(),
+                                self.options.min_value_size,
+                                self.options.max_value_size,
+                            );
                             batch.put_bytes(key.clone(), value);
                         }
                         1 => batch.delete(key.clone()),
                         _ => {
-                            let value = self.next_workload_value(ctx);
+                            let version = self.next_value_version.fetch_add(1, Ordering::Relaxed);
+                            let value = workload_value(
+                                version,
+                                &mut *ctx.rand().rng(),
+                                self.options.min_value_size,
+                                self.options.max_value_size,
+                            );
                             batch.merge(key.clone(), value);
                         }
                     }
@@ -286,18 +314,6 @@ impl Actor for WorkloadActor {
         }
 
         Ok(())
-    }
-}
-
-impl WorkloadActor {
-    fn next_workload_value(&self, ctx: &ActorCtx) -> Bytes {
-        let version = self.next_value_version.fetch_add(1, Ordering::Relaxed);
-        workload_value(
-            version,
-            &mut *ctx.rand().rng(),
-            self.options.min_value_size,
-            self.options.max_value_size,
-        )
     }
 }
 
