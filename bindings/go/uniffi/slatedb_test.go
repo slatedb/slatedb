@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -445,7 +446,10 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMokaCache: %v", err)
 		}
-		metaCache, err := slatedb.DbCacheNewFoyerCache(slatedb.FoyerCacheOptions{MaxCapacity: 256 * 1024 * 1024})
+		metaCache, err := slatedb.DbCacheNewFoyerCache(slatedb.FoyerCacheOptions{
+			MaxCapacity: 256 * 1024 * 1024,
+			Shards:      uint64(runtime.NumCPU()),
+		})
 		if err != nil {
 			t.Fatalf("NewFoyerCache: %v", err)
 		}
