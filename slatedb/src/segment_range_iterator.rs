@@ -7,7 +7,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::iter::RowEntryIterator;
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::{LsmTreeState, Segment};
 use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -48,6 +48,9 @@ impl TreeIterators {
     /// Build the L0 + SR iterators for one segment's tree. Branches on
     /// whether the query is a point lookup; range scans fan out via
     /// `build_concurrent` for both tiers.
+    ///
+    /// Descending scans over sorted runs are broken until
+    /// [`SortedRunIterator`] supports descending iteration.
     pub(crate) async fn build(
         tree: LsmTreeState,
         ctx: &SegmentScanContext,
@@ -81,11 +84,11 @@ enum SegmentIterState {
     Built(Box<dyn RowEntryIterator>),
 }
 
-/// Iterator that walks a sequence of per-segment children in segment-
-/// prefix order. Segments partition the key space (RFC-0024 antichain
-/// invariant), so a key-by-key merge across them is a no-op — chaining
-/// is sufficient and avoids the heap inflation a global merge would
-/// incur.
+/// Iterator that walks a sequence of per-segment children in
+/// iteration order. Segments partition the key space (RFC-0024
+/// antichain invariant), so a key-by-key merge across them is a no-op
+/// — chaining is sufficient and avoids the heap inflation a global
+/// merge would incur.
 ///
 /// Each child is paired with the prefix of the segment it covers.
 /// Prefixes drive two things:
@@ -95,9 +98,16 @@ enum SegmentIterState {
 ///    the current exhausts, so SST opens for unreached segments never
 ///    happen.
 /// 2. **Binary-search seek.** A `seek(key)` discards every child
-///    whose interval ends strictly before `key` in `O(log M)` and then
-///    seeks inside the matching child — far cheaper than walking
-///    children one at a time when a scan jumps far ahead.
+///    whose interval is entirely on the already-emitted side of `key`
+///    in `O(log M)` and then seeks inside the matching child — far
+///    cheaper than walking children one at a time when a scan jumps
+///    far ahead.
+///
+/// Children are stored in iteration order: prefix-ascending for
+/// `Ascending`, prefix-descending for `Descending`. `next` always pops
+/// from the front, so the chain logic itself is order-agnostic — only
+/// the construction order and the [`Self::count_before`] predicate
+/// differ.
 ///
 /// The unsegmented mode is treated as a singleton segment with empty
 /// prefix. Empty is a prefix of every byte string, so the binary-
@@ -113,6 +123,9 @@ pub(crate) struct SegmentRangeIterator {
     /// permitted only when every child is already `Built` (test
     /// configurations and degenerate empty chains).
     context: Option<SegmentScanContext>,
+    /// Iteration order. Children are stored in this order, and
+    /// `count_before` flips its predicate accordingly.
+    order: IterationOrder,
     /// Most recent seek target, applied to each child on promotion so
     /// a seek into a future segment is honored when iteration reaches
     /// it.
@@ -125,30 +138,53 @@ impl SegmentRangeIterator {
     /// child wrapping its `LsmTreeState`; promotion is lazy so segments
     /// the query never reaches incur no SST opens. `segments` must be
     /// in prefix-ascending order (the antichain invariant from the
-    /// manifest is preserved by `select_trees`).
+    /// manifest is preserved by `select_trees`); the constructor
+    /// reverses them when `order` is `Descending` so the front of the
+    /// deque is always the next segment to emit.
     pub(crate) fn new(segments: Vec<Segment>, context: SegmentScanContext) -> Self {
-        let children = segments
+        let order = context.sst_iter_options.order;
+        let mut children: VecDeque<(Bytes, SegmentIterState)> = segments
             .into_iter()
             .map(|s| (s.prefix, SegmentIterState::Pending(s.tree)))
             .collect();
+        if matches!(order, IterationOrder::Descending) {
+            children = children.into_iter().rev().collect();
+        }
         Self {
             children,
             context: Some(context),
+            order,
             pending_seek: None,
             initialized: false,
         }
     }
 
-    /// Number of leading children whose intervals end strictly before
-    /// `key`. The single binary search relies on the antichain
-    /// invariant: at most one prefix can be a prefix of `key`, and it
-    /// is the largest prefix `<= key`.
+    /// Number of leading children whose intervals are entirely on the
+    /// already-emitted side of `key` and can be discarded.
+    ///
+    /// **Ascending.** Children are prefix-ascending; we drop those
+    /// whose interval `[prefix, prefix++)` ends `<= key`. Equivalent
+    /// to "prefix < key and key does not extend prefix" — the
+    /// extension special-case keeps the unique segment containing
+    /// `key` (antichain invariant: at most one prefix is itself a
+    /// prefix of `key`, and it is the largest prefix `<= key`).
+    ///
+    /// **Descending.** Children are prefix-descending; we drop those
+    /// whose interval `[prefix, prefix++)` starts `> key`. No
+    /// extension special-case is needed: if `prefix` is a prefix of
+    /// `key` then `prefix <= key` lexicographically, so the predicate
+    /// already keeps that child.
     fn count_before(&self, key: &[u8]) -> usize {
-        let after = self.children.partition_point(|(p, _)| p.as_ref() <= key);
-        if after > 0 && key.starts_with(self.children[after - 1].0.as_ref()) {
-            after - 1
-        } else {
-            after
+        match self.order {
+            IterationOrder::Ascending => {
+                let after = self.children.partition_point(|(p, _)| p.as_ref() <= key);
+                if after > 0 && key.starts_with(self.children[after - 1].0.as_ref()) {
+                    after - 1
+                } else {
+                    after
+                }
+            }
+            IterationOrder::Descending => self.children.partition_point(|(p, _)| p.as_ref() > key),
         }
     }
 
@@ -250,7 +286,8 @@ async fn build_segment_iter(
 ) -> Result<Box<dyn RowEntryIterator>, SlateDBError> {
     let TreeIterators { l0, sr } = TreeIterators::build(tree, ctx).await?;
     let iters: VecDeque<Box<dyn RowEntryIterator>> = l0.into_iter().chain(sr).collect();
-    Ok(Box::new(MergeIterator::new(iters)?.with_dedup(false)))
+    let merge = MergeIterator::new_with_order(iters, ctx.sst_iter_options.order)?;
+    Ok(Box::new(merge.with_dedup(false)))
 }
 
 fn build_l0_point_iters(
@@ -355,16 +392,19 @@ mod tests {
     use bytes::Bytes;
 
     /// Vec-backed iterator over fixed RowEntries. `seek` discards
-    /// entries with key < target (assumes ascending input).
+    /// entries on the already-emitted side of `next_key` according to
+    /// the configured order.
     struct VecIter {
         entries: VecDeque<RowEntry>,
+        order: IterationOrder,
         initialized: bool,
     }
 
     impl VecIter {
-        fn new(entries: Vec<RowEntry>) -> Self {
+        fn with_order(entries: Vec<RowEntry>, order: IterationOrder) -> Self {
             Self {
                 entries: entries.into(),
+                order,
                 initialized: false,
             }
         }
@@ -389,7 +429,11 @@ mod tests {
                 return Err(SlateDBError::IteratorNotInitialized);
             }
             while let Some(front) = self.entries.front() {
-                if front.key.as_ref() >= next_key {
+                let satisfied = match self.order {
+                    IterationOrder::Ascending => front.key.as_ref() >= next_key,
+                    IterationOrder::Descending => front.key.as_ref() <= next_key,
+                };
+                if satisfied {
                     break;
                 }
                 self.entries.pop_front();
@@ -421,8 +465,12 @@ mod tests {
     /// Tests inject pre-built, already-initialized iterators. Production
     /// wires up `Pending(LsmTreeState)` plus a `SegmentScanContext`; the chain
     /// logic is identical for already-`Built` children either way.
-    async fn built_child(prefix: &[u8], entries: Vec<RowEntry>) -> (Bytes, SegmentIterState) {
-        let mut iter = VecIter::new(entries);
+    async fn built_child(
+        prefix: &[u8],
+        entries: Vec<RowEntry>,
+        order: IterationOrder,
+    ) -> (Bytes, SegmentIterState) {
+        let mut iter = VecIter::with_order(entries, order);
         iter.init().await.unwrap();
         (
             Bytes::copy_from_slice(prefix),
@@ -431,17 +479,28 @@ mod tests {
     }
 
     async fn make_iter(specs: Vec<(&[u8], Vec<RowEntry>)>) -> SegmentRangeIterator {
+        make_iter_with_order(specs, IterationOrder::Ascending).await
+    }
+
+    async fn make_iter_with_order(
+        specs: Vec<(&[u8], Vec<RowEntry>)>,
+        order: IterationOrder,
+    ) -> SegmentRangeIterator {
         let mut children = VecDeque::new();
         for (prefix, entries) in specs {
-            children.push_back(built_child(prefix, entries).await);
+            children.push_back(built_child(prefix, entries, order).await);
         }
         // Tests bypass the production `new` (which takes Vec<Segment>
         // and lazily promotes) by constructing the struct directly with
         // already-`Built` children. Same-module access lets us skip the
-        // `SegmentScanContext` entirely.
+        // `SegmentScanContext` entirely. For descending tests the
+        // caller is expected to pass `specs` in iteration order
+        // (largest prefix first), matching what production does
+        // internally via the `new` reverse step.
         SegmentRangeIterator {
             children,
             context: None,
+            order,
             pending_seek: None,
             initialized: false,
         }
@@ -634,5 +693,144 @@ mod tests {
         assert!(matches!(second.value, ValueDeletable::Tombstone));
         let third = iter.next().await.unwrap().unwrap();
         assert!(matches!(third.value, ValueDeletable::Value(_)));
+    }
+
+    #[tokio::test]
+    async fn descending_two_children_chain_largest_prefix_first() {
+        // Descending: caller supplies specs in iteration order
+        // (largest prefix first), and within each child entries are
+        // already in descending order. The chain emits them in that
+        // order, never crossing back to a smaller prefix once
+        // exhausted.
+        let mut iter = make_iter_with_order(
+            vec![
+                (b"b/", vec![entry(b"b/2", b"z", 3), entry(b"b/1", b"y", 2)]),
+                (b"a/", vec![entry(b"a/2", b"w", 4), entry(b"a/1", b"x", 1)]),
+            ],
+            IterationOrder::Descending,
+        )
+        .await;
+        iter.init().await.unwrap();
+        assert_eq!(
+            drain(&mut iter).await,
+            vec![
+                Bytes::from_static(b"b/2"),
+                Bytes::from_static(b"b/1"),
+                Bytes::from_static(b"a/2"),
+                Bytes::from_static(b"a/1"),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn descending_seek_into_earlier_child_skips_intervening() {
+        // Descending: seek to `a/2` lands in the *last* segment
+        // (smallest prefix). The two larger-prefix segments must be
+        // dropped from the front. Verifies count_before's descending
+        // predicate.
+        let mut iter = make_iter_with_order(
+            vec![
+                (b"c/", vec![entry(b"c/2", b"z", 5), entry(b"c/1", b"y", 4)]),
+                (b"b/", vec![entry(b"b/1", b"x", 3)]),
+                (b"a/", vec![entry(b"a/2", b"w", 2), entry(b"a/1", b"v", 1)]),
+            ],
+            IterationOrder::Descending,
+        )
+        .await;
+        iter.init().await.unwrap();
+        iter.seek(b"a/2").await.unwrap();
+        assert_eq!(
+            drain(&mut iter).await,
+            vec![Bytes::from_static(b"a/2"), Bytes::from_static(b"a/1")],
+        );
+    }
+
+    #[tokio::test]
+    async fn descending_seek_into_gap_advances_to_smaller_segment() {
+        // Descending: seek key falls between segments (no segment
+        // contains it). The first child whose prefix is `<= seek_key`
+        // becomes the new front — here `a/`, since `b/key` is between
+        // `c/` and `a/` in lex order and the only candidates whose
+        // prefix is `<= b/key` are `a/` and `b/`-prefixed (none here).
+        let mut iter = make_iter_with_order(
+            vec![
+                (b"c/", vec![entry(b"c/1", b"z", 3)]),
+                (b"a/", vec![entry(b"a/1", b"y", 1)]),
+            ],
+            IterationOrder::Descending,
+        )
+        .await;
+        iter.init().await.unwrap();
+        iter.seek(b"b/key").await.unwrap();
+        assert_eq!(drain(&mut iter).await, vec![Bytes::from_static(b"a/1")]);
+    }
+
+    #[tokio::test]
+    async fn descending_seek_within_segment_via_prefix_extension() {
+        // Descending: seek key extends a segment's prefix. That child
+        // contains the key, so we keep it and seek inside. The
+        // descending predicate `prefix > key` is false when prefix is
+        // a prefix of key (since prefix <= key lexicographically), so
+        // no extension special-case is needed.
+        let mut iter = make_iter_with_order(
+            vec![
+                (b"c/", vec![entry(b"c/1", b"z", 3)]),
+                (
+                    b"b/",
+                    vec![
+                        entry(b"b/3", b"w", 6),
+                        entry(b"b/2", b"v", 5),
+                        entry(b"b/1", b"u", 4),
+                    ],
+                ),
+                (b"a/", vec![entry(b"a/1", b"t", 1)]),
+            ],
+            IterationOrder::Descending,
+        )
+        .await;
+        iter.init().await.unwrap();
+        iter.seek(b"b/2").await.unwrap();
+        assert_eq!(
+            drain(&mut iter).await,
+            vec![
+                Bytes::from_static(b"b/2"),
+                Bytes::from_static(b"b/1"),
+                Bytes::from_static(b"a/1"),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn descending_seek_drops_all_children() {
+        // Seek key is smaller than every segment's prefix in
+        // descending iteration → drop everything. next() returns
+        // None.
+        let mut iter = make_iter_with_order(
+            vec![
+                (b"c/", vec![entry(b"c/1", b"z", 2)]),
+                (b"b/", vec![entry(b"b/1", b"y", 1)]),
+            ],
+            IterationOrder::Descending,
+        )
+        .await;
+        iter.init().await.unwrap();
+        // All prefixes (b/, c/) are > "a/anything" lex-wise, so
+        // count_before drops them all in descending mode.
+        iter.seek(b"a/zzz").await.unwrap();
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn ascending_seek_drops_all_children() {
+        // Symmetric to the descending variant: seek key is larger
+        // than every segment's interval → drop everything.
+        let mut iter = make_iter(vec![
+            (b"a/", vec![entry(b"a/1", b"x", 1)]),
+            (b"b/", vec![entry(b"b/1", b"y", 2)]),
+        ])
+        .await;
+        iter.init().await.unwrap();
+        iter.seek(b"z/").await.unwrap();
+        assert!(iter.next().await.unwrap().is_none());
     }
 }
