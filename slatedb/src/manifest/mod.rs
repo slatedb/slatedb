@@ -430,17 +430,17 @@ impl ManifestCore {
         self.checkpoints.iter().find(|c| c.id == checkpoint_id)
     }
 
-    /// Returns the LSM trees that may contain entries in `range`, paired
-    /// with the prefix of the segment each tree covers. Used by the read
-    /// path to route a query to the relevant tree(s) and by
-    /// `SegmentRangeIterator` to binary-search seek across the chain.
+    /// Returns owned `Segment`s whose intervals may contain entries in
+    /// `range`. Used by the read path to route a query to the relevant
+    /// tree(s) and by `SegmentRangeIterator` to binary-search seek
+    /// across the chain.
     ///
     /// In an unconfigured database (no segments) the routing collapses to
-    /// the unsegmented `tree`, returned with an empty prefix — the empty
-    /// prefix's interval `[b"", +∞)` trivially covers every key, which is
-    /// what unsegmented mode requires. In an extractor-configured
-    /// database (mandatory full segmentation: `tree` empty, `segments`
-    /// non-empty), returns the trees of all segments whose
+    /// the unsegmented `tree`, returned as a single segment with empty
+    /// prefix — the empty prefix's interval `[b"", +∞)` trivially covers
+    /// every key, which is what unsegmented mode requires. In an
+    /// extractor-configured database (mandatory full segmentation:
+    /// `tree` empty, `segments` non-empty), returns every segment whose
     /// `[prefix, prefix++)` interval overlaps `range`, in prefix-
     /// ascending order. Because segments are pairwise disjoint and
     /// sorted, the matching set is a contiguous slice of `segments`
@@ -449,15 +449,15 @@ impl ManifestCore {
     /// A point query that lands outside every segment's interval — and
     /// any query against a configured-but-empty database — returns an
     /// empty vector: no tree can hold a matching key.
-    pub(crate) fn select_trees(&self, range: &BytesRange) -> Vec<(Bytes, &LsmTreeState)> {
+    pub(crate) fn select_segments(&self, range: &BytesRange) -> Vec<Segment> {
         if self.segments.is_empty() {
-            return vec![(Bytes::new(), &self.tree)];
+            return vec![Segment {
+                prefix: Bytes::new(),
+                tree: self.tree.clone(),
+            }];
         }
         let indices = self.overlapping_segment_indices(range);
-        self.segments[indices]
-            .iter()
-            .map(|s| (s.prefix.clone(), &s.tree))
-            .collect()
+        self.segments[indices].to_vec()
     }
 
     /// Half-open `[start, end)` index range of segments whose intervals
@@ -2433,21 +2433,21 @@ mod tests {
         }
     }
 
-    fn collect_prefixes(pairs: &[(Bytes, &LsmTreeState)]) -> Vec<Bytes> {
-        pairs.iter().map(|(p, _)| p.clone()).collect()
+    fn collect_prefixes(segments: &[super::Segment]) -> Vec<Bytes> {
+        segments.iter().map(|s| s.prefix.clone()).collect()
     }
 
     #[test]
-    fn test_select_trees_unconfigured_returns_unsegmented_tree() {
+    fn test_select_segments_unconfigured_returns_unsegmented_tree() {
         // No segments configured -> route always lands on `core.tree`,
         // identical to today's single-tree read path.
         let core = ManifestCore::new();
-        let trees = core.select_trees(&BytesRange::unbounded());
-        assert_eq!(collect_prefixes(&trees), vec![Bytes::new()]);
+        let segments = core.select_segments(&BytesRange::unbounded());
+        assert_eq!(collect_prefixes(&segments), vec![Bytes::new()]);
     }
 
     #[test]
-    fn test_select_trees_point_inside_segment() {
+    fn test_select_segments_point_inside_segment() {
         // Point query whose key starts with a segment prefix routes to
         // exactly that segment's tree.
         let mut core = ManifestCore::new();
@@ -2457,23 +2457,23 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"b/k".as_ref()..=b"b/k".as_ref());
-        let trees = core.select_trees(&range);
-        assert_eq!(collect_prefixes(&trees), vec![Bytes::from_static(b"b/")]);
+        let segments = core.select_segments(&range);
+        assert_eq!(collect_prefixes(&segments), vec![Bytes::from_static(b"b/")]);
     }
 
     #[test]
-    fn test_select_trees_point_outside_any_segment() {
+    fn test_select_segments_point_outside_any_segment() {
         // Point query that falls in a gap between segment prefixes routes
         // to nothing — the key cannot exist in this database.
         let mut core = ManifestCore::new();
         core.segments = vec![segment_with_prefix(b"a/", 1), segment_with_prefix(b"c/", 3)];
         let range = BytesRange::from_slice(b"b/k".as_ref()..=b"b/k".as_ref());
-        let trees = core.select_trees(&range);
-        assert!(trees.is_empty());
+        let segments = core.select_segments(&range);
+        assert!(segments.is_empty());
     }
 
     #[test]
-    fn test_select_trees_range_overlapping_contiguous_segments() {
+    fn test_select_segments_range_overlapping_contiguous_segments() {
         // Range query collects every overlapping segment in prefix order.
         let mut core = ManifestCore::new();
         core.segments = vec![
@@ -2483,26 +2483,26 @@ mod tests {
             segment_with_prefix(b"d/", 4),
         ];
         let range = BytesRange::from_slice(b"b/".as_ref()..b"d/".as_ref());
-        let trees = core.select_trees(&range);
+        let segments = core.select_segments(&range);
         assert_eq!(
-            collect_prefixes(&trees),
+            collect_prefixes(&segments),
             vec![Bytes::from_static(b"b/"), Bytes::from_static(b"c/")]
         );
     }
 
     #[test]
-    fn test_select_trees_range_outside_all_segments() {
+    fn test_select_segments_range_outside_all_segments() {
         // Range that falls entirely outside every segment interval routes
         // to no trees.
         let mut core = ManifestCore::new();
         core.segments = vec![segment_with_prefix(b"a/", 1), segment_with_prefix(b"c/", 3)];
         let range = BytesRange::from_slice(b"x/".as_ref()..b"y/".as_ref());
-        let trees = core.select_trees(&range);
-        assert!(trees.is_empty());
+        let segments = core.select_segments(&range);
+        assert!(segments.is_empty());
     }
 
     #[test]
-    fn test_select_trees_unbounded_range_returns_all_segments() {
+    fn test_select_segments_unbounded_range_returns_all_segments() {
         // Unbounded range covers every segment interval.
         let mut core = ManifestCore::new();
         core.segments = vec![
@@ -2510,9 +2510,9 @@ mod tests {
             segment_with_prefix(b"b/", 2),
             segment_with_prefix(b"c/", 3),
         ];
-        let trees = core.select_trees(&BytesRange::unbounded());
+        let segments = core.select_segments(&BytesRange::unbounded());
         assert_eq!(
-            collect_prefixes(&trees),
+            collect_prefixes(&segments),
             vec![
                 Bytes::from_static(b"a/"),
                 Bytes::from_static(b"b/"),
@@ -2522,7 +2522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_trees_excluded_hi_at_segment_boundary() {
+    fn test_select_segments_excluded_hi_at_segment_boundary() {
         // For Excluded(hi), a segment whose prefix == hi is skipped — its
         // interval starts exactly at hi, which is outside the half-open
         // query.
@@ -2533,12 +2533,12 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"a/".as_ref()..b"b/".as_ref());
-        let trees = core.select_trees(&range);
-        assert_eq!(collect_prefixes(&trees), vec![Bytes::from_static(b"a/")]);
+        let segments = core.select_segments(&range);
+        assert_eq!(collect_prefixes(&segments), vec![Bytes::from_static(b"a/")]);
     }
 
     #[test]
-    fn test_select_trees_included_hi_at_segment_boundary() {
+    fn test_select_segments_included_hi_at_segment_boundary() {
         // For Included(hi), a segment whose prefix == hi is included — its
         // interval starts at hi, which is inside the closed query.
         let mut core = ManifestCore::new();
@@ -2548,15 +2548,15 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"a/".as_ref()..=b"b/".as_ref());
-        let trees = core.select_trees(&range);
+        let segments = core.select_segments(&range);
         assert_eq!(
-            collect_prefixes(&trees),
+            collect_prefixes(&segments),
             vec![Bytes::from_static(b"a/"), Bytes::from_static(b"b/")]
         );
     }
 
     #[test]
-    fn test_select_trees_lo_inside_segment_interval() {
+    fn test_select_segments_lo_inside_segment_interval() {
         // `lo` lands deep inside a segment's interval; that segment must
         // be included even though its prefix is strictly less than `lo`.
         let mut core = ManifestCore::new();
@@ -2566,15 +2566,15 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"b/middle".as_ref()..b"d/".as_ref());
-        let trees = core.select_trees(&range);
+        let segments = core.select_segments(&range);
         assert_eq!(
-            collect_prefixes(&trees),
+            collect_prefixes(&segments),
             vec![Bytes::from_static(b"b/"), Bytes::from_static(b"c/")]
         );
     }
 
     #[test]
-    fn test_select_trees_matches_brute_force_filter() {
+    fn test_select_segments_matches_brute_force_filter() {
         // Property: binary-search routing agrees with a naive
         // intersect-based filter on every (segments, range) shape we
         // could generate. Catches off-by-ones around the lower-bound
@@ -2632,7 +2632,7 @@ mod tests {
                 return Ok(());
             };
 
-            let actual = collect_prefixes(&core.select_trees(&range));
+            let actual = collect_prefixes(&core.select_segments(&range));
             let expected = brute_force(&core, &range);
             prop_assert_eq!(actual, expected);
         });

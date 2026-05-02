@@ -5,7 +5,6 @@ use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
 use crate::manifest::ManifestCore;
-use crate::manifest::Segment;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
@@ -154,15 +153,7 @@ impl Reader {
             })
             .collect::<Vec<_>>();
 
-        let segments: Vec<Segment> = db_state
-            .core()
-            .select_trees(range)
-            .into_iter()
-            .map(|(prefix, tree)| Segment {
-                prefix,
-                tree: tree.clone(),
-            })
-            .collect();
+        let segments = db_state.core().select_segments(range);
         let total_ssts: usize = segments.iter().map(|s| s.tree.total_ssts()).sum();
         let max_parallel = total_ssts.clamp(1, 4);
 
