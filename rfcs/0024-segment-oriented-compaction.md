@@ -39,7 +39,7 @@ Table of Contents:
    - [Segment tag in WriteOptions instead of an extractor](#segment-tag-in-writeoptions-instead-of-an-extractor)
    - [One memtable per segment](#one-memtable-per-segment)
    - [Dynamic migration from unsegmented to segmented](#dynamic-migration-from-unsegmented-to-segmented)
-   - [Mixed-mode coexistence when an extractor is configured](#mixed-mode-coexistence-when-an-extractor-is-configured)
+   - [Mixed segmented and unsegmented trees](#mixed-segmented-and-unsegmented-trees)
    - [Global-sum L0 backpressure](#global-sum-l0-backpressure)
 - [Appendix A: OpenData Timeseries Usage](#appendix-a-opendata-timeseries-usage)
    - [A.1 Ingestion Shape](#a1-ingestion-shape)
@@ -87,7 +87,7 @@ The design targets the common single-active-segment case. Concurrent writes to m
 ## Goals
 
 - Introduce a deterministic prefix-based segment extractor that derives segment membership from keys, propagated through L0 and sorted runs.
-- Model each segment as an independent logical LSM tree in the manifest, sharing a single manifest schema with the existing unsegmented layout.
+- Model each segment as an independent logical LSM tree in the manifest, with today's root-tree layout treated as a compatibility encoding of the empty-prefix segment.
 - Enable segment-aware compaction scheduling based on manifest-visible per-segment state.
 - Support explicit segment-level deletion as part of compaction lifecycle and retention.
 - Support automatic read-path pruning of segments based on query ranges.
@@ -215,7 +215,7 @@ hour=11    L0{seq=500..600}, L0{seq=400..500}, L0{seq=300..400}
 
 This RFC introduces a deterministic prefix-based segment extractor that derives segment membership from keys. The extractor is configured at database open time and returns a key prefix that identifies the segment for each key. Because segments are prefix-based, each segment owns a contiguous key interval, and segments partition the key space into disjoint ranges. All segments share a common WAL and a single manifest, but each segment carries its own independent LSM state (L0 SSTs and sorted runs) within that manifest.
 
-The extractor mode is set at database creation time and is binary: either no extractor is configured (all data lives in a single unsegmented LSM tree, identical to today's behavior), or an extractor is configured (every write must produce a segment prefix; writes the extractor cannot route are rejected). The two modes do not coexist within a single database — an extractor-configured database is fully segmented, and an unconfigured database has no segments. See [Alternatives](#alternatives) for the rejected mixed-mode design.
+Conceptually, a database is a set of segment trees whose key intervals cover the entire keyspace. The default layout is treated as the degenerate case: a single segment with prefix `""`. Segmenting the LSM tree this way gives each segment its own compaction and retention lifecycle, lets hot and cold segments evolve independently, and lets the read path prune work to only the segments whose key intervals overlap the query.
 
 ### Segment Extractor
 
@@ -235,9 +235,9 @@ Two properties follow directly from the trait contract:
 - **Determinism.** `prefix_len` is a pure function of the target. For `Point(k)`, the invariant that `prefix_len(Point(k)) = Some(n)` implies `prefix_len(Point(k')) = Some(n)` for every `k'` sharing the first `n` bytes with `k` means a given key always maps to the same segment across flushes, compactions, and restarts.
 - **Disjoint, non-nesting segment intervals.** Because the extracted prefix is always a prefix of the key, each segment prefix `p` owns exactly the key interval `[p, p++)` (where `p++` is the lexicographic successor of `p`). The Point-variant invariant further prevents nested prefixes: a single extractor cannot simultaneously assign some `users:*` keys to a segment `users` and others to `users:foo`. If any key in `[p, p++)` maps to segment `p`, every key in that interval must. The extractor therefore picks one consistent prefix structure, and segment intervals sit side-by-side in the key space.
 
-Together these give the active segments a natural total order by prefix, with pairwise disjoint key intervals. The [Scans](#scans) design leverages this to iterate segment-by-segment in prefix order without any key-wise merging across segments. Because mandatory full segmentation rules out unsegmented data in an extractor-configured database, no key falls outside the union of segment intervals — every stored key belongs to exactly one segment.
+Together these give the active segments a natural total order by prefix, with pairwise disjoint key intervals. The [Scans](#scans) design leverages this to iterate segment-by-segment in prefix order without any key-wise merging across segments. In the singleton empty-prefix case, the one segment owns the entire key space. In every case, every stored key belongs to exactly one segment.
 
-The extractor's `name()` is persisted in the manifest. On a writer open, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. The extractor must be configured at database creation time or never configured — introducing an extractor on an existing non-empty database, or removing a previously-configured extractor, causes the writer open to fail. See [Migration](#migration) for the correctness rationale. A read-only client (`DbReader`) does not need an extractor for correctness — read-side routing is structural (see [Read Path](#read-path)) — and may set `segment_extractor: None` to skip the name match entirely.
+The extractor's `name()` is persisted in the manifest. On a writer open, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. The extractor must be configured at database creation time or never configured — introducing an extractor on an existing non-empty database, or removing a previously-configured extractor, causes the writer open to fail. See [Migration](#migration) for the correctness rationale. A read-only client (`DbReader`) does not need an extractor for correctness — read-side routing is structural (see [Read Path](#read-path)) — and may set `segment_extractor: None` to skip the name match entirely. When no extractor is configured, the database remains the singleton empty-prefix segment case.
 
 #### Validation
 
@@ -263,7 +263,7 @@ The extractor must be configured consistently across restarts. The persisted ext
 
 ### Manifest
 
-The manifest is responsible for tracking the logical structure of the LSM tree: the set of L0 SSTs and compacted sorted runs that together represent the current state of the database. With segments, the manifest tracks multiple logical LSM trees — one per segment — within a single shared structure. A database without a configured extractor continues to have a single unsegmented LSM tree at the manifest root, and the segments list is empty; the two modes share the schema but never both populate state at the same time.
+The manifest is responsible for tracking the logical structure of the LSM tree: the set of L0 SSTs and compacted sorted runs that together represent the current state of the database. Logically, the manifest tracks a set of segment trees — one per segment prefix. The current wire format keeps the pre-existing top-level tree fields and uses them as a compatibility encoding of the segment whose prefix is `""`; non-empty-prefix segments appear in the `segments` list.
 
 #### Current Model
 
@@ -273,14 +273,15 @@ Today, the manifest holds a single LSM state consisting of:
 - `l0: [CompactedSsTable]` — the set of L0 SSTs visible above `last_compacted_l0_sst_view_id`.
 - `compacted: [SortedRun]` — the set of sorted runs, ordered by descending `u32` ID (list position encodes read precedence).
 
-This structure works for a single logical LSM tree. Segment-oriented compaction needs multiple independent trees that can evolve (flush, compact, retire) on their own schedule without coordinating ID assignment or ordering with each other.
+This structure works for a single logical LSM tree. Segment-oriented compaction generalizes it to multiple independent trees that can evolve (flush, compact, retire) on their own schedule without coordinating ID assignment or ordering with each other. The single-tree case remains as the degenerate one-segment `prefix=""` case.
 
 #### Proposed Change: Per-Segment LSM State
 
-This RFC preserves the existing manifest fields as the unsegmented LSM state and adds a new `segments` list. Each entry in `segments` carries its own independent LSM state, structurally identical to the existing top-level fields:
+This RFC keeps the existing manifest fields as a compatibility encoding of the empty-prefix segment and adds a new `segments` list for non-empty-prefix segments. Each entry in `segments` carries its own independent LSM state, structurally identical to the existing top-level fields:
 
 ```flatbuffer
-// Existing fields, now interpreted as the unsegmented LSM state ("None" segment):
+// Existing fields, now interpreted as the empty-prefix segment (`prefix=""`)
+// for compatibility with pre-segmentation manifests:
 last_compacted_l0_sst_view_id: Ulid;
 l0: [CompactedSsTable] (required);
 compacted: [SortedRun] (required);
@@ -301,7 +302,7 @@ table Segment {
 segment_extractor_name: string;
 ```
 
-Within each segment, `l0` and `compacted` follow today's semantics exactly: `l0` is the set of L0 SSTs above `last_compacted_l0_sst_view_id`, and `compacted` is an ordered list of sorted runs where list position determines read precedence. Sorted run `u32` IDs remain globally unique across the database — a single shared counter allocates IDs monotonically regardless of which segment (or the unsegmented tree) a run belongs to. Within a segment, list position and ID order agree (newer runs have higher IDs), so list-position reads and ID-based debugging align.
+Within each segment, `l0` and `compacted` follow today's semantics exactly: `l0` is the set of L0 SSTs above `last_compacted_l0_sst_view_id`, and `compacted` is an ordered list of sorted runs where list position determines read precedence. Sorted run `u32` IDs remain globally unique across the database — a single shared counter allocates IDs monotonically regardless of which segment (including the compatibility-encoded empty-prefix segment) a run belongs to. Within a segment, list position and ID order agree (newer runs have higher IDs), so list-position reads and ID-based debugging align.
 
 This scoping has two consequences:
 
@@ -310,21 +311,21 @@ This scoping has two consequences:
 
 #### Migration
 
-Because the change is purely additive, migration is a one-step schema bump to `ManifestV3`, which is `ManifestV2` plus the `segments` list and `segment_extractor_name` field.
+This RFC keeps the current `ManifestV2` wire shape and extends it compatibly with `segments` and `segment_extractor_name`. No version bump is required for this RFC's initial rollout because the top-level tree already remains available as the compatibility encoding of the empty-prefix segment.
 
-The version is bumped lazily — only when segments are actually used. A database that never configures a segment extractor continues to write V2 manifests indefinitely; the `segments` list and `segment_extractor_name` field are absent. The first manifest write that persists segmented state (either a configured extractor or a non-empty `segments` list) emits V3. This keeps the version number meaningful: V3 marks the presence of segmented state, not merely a compile-time capability.
+- A manifest with an empty `segments` list is the singleton empty-prefix case.
+- No SST metadata rereads are required. Existing sorted runs and L0 SSTs keep their current IDs and their representation in the top-level fields; named segments are added alongside them.
+- The manifest decoder continues to support both encodings of logical segment state: the root tree for the singleton empty-prefix case, and `segments` for named segments.
 
-- A V3 manifest with an empty `segments` list is semantically identical to a V2 manifest — the existing `l0`/`compacted` fields carry the unsegmented state.
-- No SST metadata rereads are required. Existing sorted runs and L0 SSTs keep their current IDs and representation in the top-level fields; V3 adds alongside rather than restructuring.
-- The manifest decoder is updated to handle both V2 and V3. The standalone compactor reads whichever version the writer has published and does not independently upgrade.
+This compatibility shape is not the end state. A future `ManifestV3` cleanup should remove the top-level compatibility tree entirely and encode *all* segment trees uniformly in `segments`, including the `prefix=""` segment. That future bump is where the wire format will catch up to the conceptual model described in this RFC.
 
-Broader concerns about safe manifest evolution across mismatched process versions — writers, standalone compactors, readers, CLI tools — are tracked by [issue #779](https://github.com/slatedb/slatedb/issues/779). This RFC does not propose an inner solution to that problem; it assumes whatever mechanism lands from that work will apply to V3 manifests as it does to V2.
+Broader concerns about safe manifest evolution across mismatched process versions — writers, standalone compactors, readers, CLI tools — are tracked by [issue #779](https://github.com/slatedb/slatedb/issues/779). This RFC does not propose an inner solution to that problem; it assumes whatever mechanism lands from that work will apply to the future V3 cleanup as it does to V2.
 
 The extractor must be configured when the database is first created, or never configured. If a database has existing data and the open-time configuration disagrees with the manifest's persisted extractor state — configuring an extractor where none was before, or removing an extractor that was previously set — the database refuses to open. See [Alternatives](#alternatives) for additional discussion and potential room for future work.
 
 ### Write Path
 
-The write path consults the extractor for each incoming write to validate that it routes to a segment and respects the antichain invariant (see [Validation](#validation)) before appending to the WAL. If the check passes, the write proceeds through the WAL and memtable as today. At memtable flush, the extractor's output (either recomputed or carried alongside each entry) is used to group entries by target segment, producing one L0 SST per segment that received entries from this flush. In a database without a configured extractor, every entry lands in the unsegmented tree and a flush produces a single L0 SST as today.
+The write path consults the extractor for each incoming write to validate that it routes to a segment and respects the antichain invariant (see [Validation](#validation)) before appending to the WAL. If the check passes, the write proceeds through the WAL and memtable as today. At memtable flush, the extractor's output (either recomputed or carried alongside each entry) is used to group entries by target segment, producing one L0 SST per segment that received entries from this flush. Without a configured extractor, every entry belongs to the singleton `prefix=""` segment and a flush produces a single L0 SST as today.
 
 All L0 SSTs from a single flush are uploaded (in parallel) and then added to the manifest in a single atomic update. This update appends the new L0 SST to each affected tree's `l0` list and advances the corresponding `last_compacted_l0_sst_view_id` cursors as appropriate. Partial visibility of a multi-segment flush is not supported — the manifest either reflects the entire flush or none of it.
 
@@ -342,22 +343,22 @@ SlateDB has two backpressure mechanisms today: a memory-based one driven by `max
 
 **Memory-based backpressure is unchanged.** Unflushed bytes are tracked at the WAL and memtable level, above the extractor. The threshold applies to the total in-memory footprint regardless of how it will later split into per-segment L0 SSTs. Writers pause when the total exceeds the configured limit, exactly as today.
 
-**L0-count-based backpressure is applied per tree.** `l0_max_ssts` is compared against each individual tree's `l0` length — the single unsegmented tree in unconfigured mode, or every named segment in extractor-configured mode — rather than against their sum. Backpressure fires when *any* tree exceeds the threshold. Each segment's backpressure therefore reflects only its own compaction lag; cold segments with small L0 counts do not delay flushes elsewhere.
+**L0-count-based backpressure is applied per tree.** `l0_max_ssts` is compared against each individual tree's `l0` length — including the compatibility-encoded `prefix=""` tree when no extractor is configured — rather than against their sum. Backpressure fires when *any* tree exceeds the threshold. Each segment's backpressure therefore reflects only its own compaction lag; cold segments with small L0 counts do not delay flushes elsewhere.
 
 Applying the threshold per tree does allow the *total* L0 count to grow with the number of segments. This is an accepted tradeoff: point reads route to a single segment, so read amplification is governed by per-segment L0 count regardless; long range scans that touch multiple segments see cost proportional to total L0 count, which is inherent to segmentation. See [Alternatives](#alternatives) for the rejected global-sum approach.
 
 ### Read Path
 
-Because each named segment is its own LSM tree with its own ordered `compacted` list, read-path logic within a segment is identical to today's single-tree read path. The only new behavior is routing.
+Because each segment is its own LSM tree with its own ordered `compacted` list, read-path logic within a segment is identical to today's single-tree read path. The only new behavior is routing.
 
-A database falls into one of two modes:
+Conceptually, the reader always walks the segment tree or trees whose intervals overlap the query. In today's manifest encoding, that means either:
 
-- **Unconfigured.** No extractor, no segments. The reader walks `core.tree` (the unsegmented LSM state) exactly as today.
-- **Extractor-configured.** Every persisted key belongs to exactly one segment, and `core.tree` is empty. The reader routes each query to the matching segment(s) and ignores `core.tree`.
+- the top-level `core.tree` represents the singleton `prefix=""` segment for compatibility, or
+- `core.segments` represents the named non-empty-prefix segments.
 
 Routing is **structural** — derived from the segment prefixes already in the manifest, not from the configured extractor — so reads are correct as long as the manifest's segment list reflects what's persisted, regardless of how the reader's extractor is configured (or whether one is configured at all). Routing is automatic and requires no changes to `ReadOptions` or the query APIs.
 
-**Point lookups.** A `get(key)` is the degenerate case where the query range is `key..=key`. By the antichain invariant on segment prefixes (see [Segment Extractor](#segment-extractor)), at most one segment's interval contains a given key — the segment whose prefix is itself a prefix of the key, found via binary search on `core.segments`. The lookup consults that one tree (or none, if no segment matches, in which case the key cannot exist) and is otherwise identical to today's single-tree read path.
+**Point lookups.** A `get(key)` is the degenerate case where the query range is `key..=key`. In the singleton empty-prefix case, the lookup consults `core.tree` exactly as today. Otherwise, by the antichain invariant on segment prefixes (see [Segment Extractor](#segment-extractor)), at most one non-empty segment's interval contains a given key — the segment whose prefix is itself a prefix of the key, found via binary search on `core.segments`. The lookup then consults exactly one tree and is otherwise identical to today's single-tree read path.
 
 **Range scans.** See [Scans](#scans) below.
 
@@ -367,12 +368,9 @@ Because routing is structural, a reader does not need a configured extractor for
 
 ### Scans
 
-A range scan `scan(lo..hi)` resolves to a single iteration story chosen by manifest mode:
+A range scan `scan(lo..hi)` resolves to a chained walk over the segment intervals `[prefix, prefix++)` that overlap `[lo, hi)`, stepping from one segment to the next in prefix order. Within each consulted segment the existing merge iterator runs against that segment's `l0` and `compacted` lists using list-position precedence. Because segment intervals are pairwise disjoint (see [Segment Extractor](#segment-extractor)), this chain produces a single key-ordered stream with no per-key merging across segments.
 
-- **Unconfigured database.** The scan iterates the unsegmented tree's `l0` and `compacted` lists exactly as today.
-- **Extractor-configured database.** The scan is a chained iterator over the segments whose intervals `[prefix, prefix++)` overlap `[lo, hi)`, stepping from one segment to the next in prefix order. Within each segment the existing merge iterator runs against that segment's `l0` and `compacted` lists using list-position precedence. Because segment intervals are pairwise disjoint (see [Segment Extractor](#segment-extractor)), this chain produces a single key-ordered stream with no per-key merging across segments.
-
-There is no cross-mode merge: an extractor-configured database has an empty `core.tree`, and an unconfigured database has an empty `core.segments`. Routing is structural — the reader picks overlapping segments by binary search on `core.segments` without consulting the extractor — so a `DbReader` configured with `segment_extractor: None` produces identical results to one that mirrors the writer's extractor.
+In today's manifest encoding, that means the scan either walks only the compatibility-encoded `prefix=""` tree, or walks the overlapping named segments found by binary search on `core.segments`. Routing is structural, so a `DbReader` configured with `segment_extractor: None` produces identical results to one that mirrors the writer's extractor.
 
 **Implications for existing APIs.** `scan`, `scan_prefix`, `scan_with_options`, and `scan_prefix_with_options` on `Db`, `DbReader`, `DbSnapshot`, and `DbTransaction` pick up segment-aware routing automatically — they all resolve to a range scan internally, and the routing lives beneath that. No API additions are required.
 
@@ -380,7 +378,7 @@ There is no cross-mode merge: an extractor-configured database has an empty `cor
 
 Segmentation extends the existing compaction model in two small ways:
 
-1. The existing `TieredCompactionSpec` gains an optional `segment` field identifying the target tree. A spec whose `segment` is absent or empty targets the unsegmented tree (same as today); a spec whose `segment` is a named prefix targets that segment.
+1. The existing `TieredCompactionSpec` gains a required `segment` field identifying the target tree. An empty prefix targets the compatibility-encoded `prefix=""` segment (same data as today); a non-empty prefix targets that named segment. Every spec names a segment — there is no implicit "unsegmented" target — which mirrors the conceptual model that every key belongs to exactly one segment.
 2. A new `DrainSegmentSpec` variant is added to the top-level `CompactionSpec` union, expressing wholesale segment retention as a distinct operation from merge.
 
 The schema changes are:
@@ -392,10 +390,10 @@ union CompactionSpec {
 }
 
 table TieredCompactionSpec {
-    ssts: [Ulid];              // unchanged (deprecated)
-    sorted_runs: [uint32];     // unchanged
-    l0_view_ids: [Ulid];       // unchanged
-    segment: [ubyte];          // new — absent/empty = unsegmented tree
+    ssts: [Ulid];                       // unchanged (deprecated)
+    sorted_runs: [uint32];              // unchanged
+    l0_view_ids: [Ulid];                // unchanged
+    segment: [ubyte] (required);        // new — empty bytes = `prefix=""` segment
 }
 
 table DrainSegmentSpec {
@@ -405,13 +403,13 @@ table DrainSegmentSpec {
 }
 ```
 
-On the Rust side, `CompactionSpec` gains an optional `segment` field alongside its existing `sources` and `destination`. A new `DrainSegmentSpec` type is introduced:
+On the Rust side, `CompactionSpec` gains a required `segment` field alongside its existing `sources` and `destination`. A new `DrainSegmentSpec` type is introduced:
 
 ```rust
 pub struct CompactionSpec {
-    /// `None` targets the unsegmented tree; `Some(prefix)` targets the
-    /// segment with that prefix.
-    segment: Option<Bytes>,
+    /// Target segment prefix. An empty `Bytes` targets the
+    /// compatibility-encoded `prefix=""` segment.
+    segment: Bytes,
     sources: Vec<SourceId>,
     destination: u32,
 }
@@ -432,15 +430,15 @@ pub struct DrainSegmentSpec {
 ```rust
 impl ManifestCore {
     /// Generate the next sorted run ID. IDs are globally unique across
-    /// all segments and the unsegmented tree, allocated monotonically
-    /// for the lifetime of the database.
+    /// all segments, including the compatibility-encoded `prefix=""`
+    /// segment, allocated monotonically for the lifetime of the database.
     pub fn next_sorted_run_id(&self) -> u32 { ... }
 }
 ```
 
   The helper is a convenience — the scheduler could equivalently track the counter itself — but centralizing allocation in `ManifestCore` keeps the counter authoritative and avoids drift between planning and commit.
 
-- `DrainSegmentSpec` targets a named segment for retention. The executor lists the specific L0 SSTs and sorted runs the compactor has observed in `sources`. On commit, it advances the segment's `last_compacted_l0_sst_view_id` to the newest L0 named in `sources` and removes those sorted runs from `compacted`. The segment **entry remains in the manifest as a "drain marker"** — `l0=[], compacted=[], watermark=set` — until the writer prunes it (see below). Only the latest manifest's references are removed when the prune lands; the garbage collector is responsible for cleaning up the underlying SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them. The unsegmented tree cannot be drained by this operation.
+- `DrainSegmentSpec` targets a named segment for retention. The executor lists the specific L0 SSTs and sorted runs the compactor has observed in `sources`. On commit, it advances the segment's `last_compacted_l0_sst_view_id` to the newest L0 named in `sources` and removes those sorted runs from `compacted`. The segment **entry remains in the manifest as a "drain marker"** — `l0=[], compacted=[], watermark=set` — until the writer prunes it (see below). Only the latest manifest's references are removed when the prune lands; the garbage collector is responsible for cleaning up the underlying SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them. The compatibility-encoded `prefix=""` segment is not drained by this operation.
 
   **Concurrent writes during drain.** The compactor never advances the watermark past an L0 it has not observed. If the writer flushes new L0s into the segment after the compactor planned the drain — or after the spec was queued but before it commits — those L0s have IDs above the watermark named in `sources`, so they survive the merge and the segment is not removed. The compactor's next pass observes them and decides whether to drain them. There is no implicit drop of unobserved data: every L0 the drain removes must appear by ID in the spec's `sources`. This is the same contract that L0→SR compaction follows today.
 
@@ -457,13 +455,13 @@ impl ManifestCore {
 ```rust
 impl ManifestCore {
     /// Returns the set of named segments and their LSM state.
-    /// Unsegmented state is accessible through the existing `l0()`
-    /// and `compacted()` accessors.
+    /// The compatibility-encoded `prefix=""` segment remains
+    /// accessible through the existing root-tree accessors.
     pub fn segments(&self) -> &[Segment];
 }
 ```
 
-The scheduler uses this to plan work: selecting segments with many L0s, merging sorted runs within a segment, or identifying expired segments for retention. The scheduler logic is mode-exclusive: an extractor-configured database has only `segments()` to plan against (the top-level state is empty), and an unconfigured database has only the top-level state (no segments).
+The scheduler uses this to plan work: selecting segments with many L0s, merging sorted runs within a segment, or identifying expired segments for retention. Conceptually it plans over one logical set of segments; in today's manifest encoding that means either `segments()` for named segments or the root-tree accessors for the singleton `prefix=""` case.
 
 #### Default Scheduler
 
@@ -562,39 +560,24 @@ An alternative to the single shared memtable is to maintain one memtable per seg
 
 ### Dynamic migration from unsegmented to segmented
 
-An earlier version of this design allowed an extractor to be introduced on an existing non-empty database. New writes would route through the extractor, while pre-existing keys remained in the unsegmented tree. This is rejected in favor of requiring the extractor to be fixed at database creation time (see [Migration](#migration)).
+An earlier version of this design allowed an extractor to be introduced on an existing non-empty database. New writes would route through the extractor, while pre-existing keys remained in the compatibility-encoded `prefix=""` segment. This is rejected in favor of requiring the extractor to be fixed at database creation time (see [Migration](#migration)).
 
 The core problem with dynamic migration is that pre-existing data is no longer addressable through the new routing:
 
-- **Reads miss shadowed data.** A key written before the extractor existed lives in the unsegmented tree. After the extractor is configured, `get`/`scan` route the query to a segment — which does not contain the key — producing false-negative reads.
-- **Tombstones never reach their targets.** A delete or tombstone written after the change lands in a segment while the key it targets remains in the unsegmented tree. Compaction operates per-tree, so the tombstone and the original key never meet. The delete effectively does nothing, and retention cannot expire the key.
+- **Reads miss shadowed data.** A key written before the extractor existed lives in the compatibility-encoded `prefix=""` segment. After the extractor is configured, `get`/`scan` route the query to a more specific segment — which does not contain the key — producing false-negative reads.
+- **Tombstones never reach their targets.** A delete or tombstone written after the change lands in a specific segment while the key it targets remains in the compatibility-encoded `prefix=""` segment. Compaction operates per-tree, so the tombstone and the original key never meet. The delete effectively does nothing, and retention cannot expire the key.
 
-These could in principle be addressed by routing queries and deletes to *both* the unsegmented tree and the matching segment tree, and merging results — effectively treating the unsegmented tree as an always-consulted fallback for any segmented query. That restores correctness at the cost of consulting two trees on every routed operation and retaining precedence logic across them. We have chosen to defer this until there is a clear need which justifies the additional complexity. 
+These could in principle be addressed by routing queries and deletes to *both* the compatibility-encoded `prefix=""` segment and the matching non-empty-prefix segment, and merging results. That restores correctness at the cost of consulting two trees on every routed operation and retaining precedence logic across them. We have chosen to defer this until there is a clear need which justifies the additional complexity.
 
-### Mixed-mode coexistence when an extractor is configured
+### Mixed segmented and unsegmented trees
 
-An earlier draft of this RFC allowed mixed-mode data in an extractor-configured database: keys for which `prefix_len(Point(key))` returns `Some(n)` would land in segment `key[..n]`, and keys for which it returns `None` would land in the shared unsegmented tree alongside the segments. The reader would consult both the matching segment and the unsegmented tree on every query and merge the results. This RFC rejects mixed mode in favor of mandatory full segmentation: an extractor-configured database segments every write, and `None` from the extractor is a write error.
+An earlier draft of this RFC allowed segmented data in an extractor-configured database to coexist with unsegmented data. Keys for which `prefix_len(Point(key))` returns `Some(n)` would land in segment `key[..n]`, and keys for which it returns `None` would land in a separate fallback bucket encoded at the manifest root alongside the segments. The reader would consult both the matching segment and that fallback bucket on every query and merge the results. This RFC rejects this mixed mode in favor of mandatory full segmentation: an extractor-configured database segments every write, and `None` from the extractor is a write error.
 
-Mixed mode is rejected for two reasons.
-
-**It introduces an invariant that cannot be enforced after the fact.** Once `abc1` exists in the unsegmented tree, the writer can later configure or evolve the extractor to introduce a segment with prefix `abc`. The trait contract (see [Segment Extractor](#segment-extractor)) requires that if any key in `[abc, abc++)` maps to segment `abc`, every key in that interval must — but enforcing this would require iterating the unsegmented tree for the prefix range at the moment the segment first appears. That is impractical at write time and inelegant at compaction time. Mandatory mode rules out the precondition: there is no scenario in which `abc1` is unsegmented at the time `abc` becomes a segment, because `abc1` was never allowed in the unsegmented tree in the first place.
-
-**The use case for mixed mode is already served by segments.** The motivating scenario was an application keeping segmented user data alongside unsegmented system metadata in one database — for example, persistent state not subject to retention. That same shape is expressible as a dedicated segment with its own retention policy (a `system/` prefix that never expires, distinct from the time-bucket prefixes that do). Segments already support per-segment retention semantics; nothing about the mixed-mode design grants the unsegmented tree a capability the segmented form lacks.
-
-The simplification cascades through several layers:
-
-- **Reader is single-branch.** A point lookup consults at most one tree (the segment whose prefix is a prefix of the key, found by binary search on `core.segments`); a range scan consults only the overlapping segments. There is no two-branch merge with an unsegmented branch.
-- **No prefix-pruning logic on reads.** The whole `prefix_len(Prefix(...))`-based machinery for "skip the unsegmented branch when proven safe" never has to be implemented — there is no unsegmented branch to skip in an extractor-configured database.
-- **Stronger schema invariant.** A reader holding a manifest with `segment_extractor_name = Some(_)` knows `core.tree` is empty; useful for testing and debugging.
-- **Smaller code surface.** The cross-mode merge and the prefix-based pruning logic are absent by construction.
-
-The cost is mixed-mode flexibility. An application that wants both segmented user data and unsegmented system metadata in one database has to redesign its key encoding so system keys land in an explicit segment (e.g., `system/`) rather than in an unsegmented bucket. Patterns relying on `None` from the extractor as a "this key is unsegmented" signal must instead route those keys into a dedicated segment.
-
-The implementation cost of mixed mode is also higher than the user-facing description suggests: the manifest carries both `tree` and `segments`, but the rules governing how data may be split between them — and how reads, compactions, and retention policies interact across the boundary — are specific to the mixed-mode mental model. Mandatory full segmentation lets the manifest schema stay shared between the two configured modes (extractor-configured ⟹ `tree` empty, unconfigured ⟹ `segments` empty) without each mode requiring its own invariants and policies.
+Full segmentation simplifies the read path — every key belongs to exactly one segment, and reads only merge within one LSM tree at a time — at no loss of generality. The motivating scenario for mixed mode was an application keeping segmented user data alongside logically unsegmented system metadata in one database (for example, persistent state not subject to retention). That same shape is expressible as a dedicated segment with its own retention policy — a `system/` prefix that never expires, distinct from the time-bucket prefixes that do. Nothing about the mixed-mode design grants a separate fallback bucket a capability the segmented form lacks.
 
 ### Global-sum L0 backpressure
 
-An alternative to the per-tree backpressure policy (see [Backpressure](#backpressure)) is to compare `l0_max_ssts` against the sum of L0 entries across every tree — the unsegmented tree plus every named segment. This preserves a single global contract for operators and bounds the total L0 count in the database.
+An alternative to the per-tree backpressure policy (see [Backpressure](#backpressure)) is to compare `l0_max_ssts` against the sum of L0 entries across every tree — the compatibility-encoded `prefix=""` tree when present, plus every named segment. This preserves a single global contract for operators and bounds the total L0 count in the database.
 
 The per-tree approach was chosen instead because a global sum couples unrelated segments together. Each retired segment typically retains a small tail of L0s until compaction drains it, and with many retired segments those tails add up. Writers to the current active segment would stall on backpressure triggered by stale L0s in cold segments that aren't falling behind in any meaningful sense. The resulting behavior isn't a true deadlock — compaction can still drain cold segments to bring the total below the threshold — but it produces persistent spurious stalls that couple the active segment's write latency to unrelated compaction state. The per-tree check removes that coupling.
 
