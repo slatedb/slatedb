@@ -153,6 +153,7 @@ SlateDB follows Semantic Versioning. We release new versions approximately every
 
 See who's using SlateDB.
 
+- [Dropbox](https://www.dropbox.com)
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
 - [Goldsky](https://goldsky.com)
