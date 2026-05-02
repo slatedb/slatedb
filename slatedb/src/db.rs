@@ -2327,6 +2327,7 @@ mod tests {
                                 &PutOptions::default(),
                                 &WriteOptions {
                                     await_durable: false,
+                                    ..Default::default()
                                 },
                             )
                             .await
@@ -2376,6 +2377,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2412,6 +2414,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2470,6 +2473,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2521,6 +2525,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2565,6 +2570,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2599,6 +2605,7 @@ mod tests {
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let get_memory_options = ReadOptions::new().with_durability_filter(Memory);
         let get_remote_options = ReadOptions::new().with_durability_filter(Remote);
@@ -2658,6 +2665,7 @@ mod tests {
                 },
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3405,6 +3413,7 @@ mod tests {
             &[b'b'; 4],
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -3454,6 +3463,7 @@ mod tests {
                 .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         db.put_with_options(
@@ -3473,6 +3483,7 @@ mod tests {
         // at this put_with_options call.
         let write_options = WriteOptions {
             await_durable: true,
+            ..Default::default()
         };
         clock.set(10);
         db.put_with_options(
@@ -3611,6 +3622,7 @@ mod tests {
 
         let write_options: WriteOptions = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
 
@@ -3732,6 +3744,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3746,6 +3759,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3842,6 +3856,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3910,6 +3925,7 @@ mod tests {
                 .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
 
@@ -4022,6 +4038,7 @@ mod tests {
 
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         async fn put_with_timestamp(
@@ -4155,6 +4172,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4169,6 +4187,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4232,6 +4251,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4293,6 +4313,7 @@ mod tests {
         let metrics_recorder_clone = metrics_recorder.clone();
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
@@ -4376,6 +4397,7 @@ mod tests {
         .unwrap();
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         // Write enough data to leave bytes buffered in the WAL while avoiding
@@ -4527,6 +4549,7 @@ mod tests {
         // do all flushes manually
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         // do a few writes that will result in l0 flushes
@@ -4634,6 +4657,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -4644,6 +4668,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -4654,6 +4679,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -4786,6 +4812,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4839,6 +4866,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4887,6 +4915,7 @@ mod tests {
                 "foo".as_bytes(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4950,6 +4979,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4961,6 +4991,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -5276,6 +5307,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5458,6 +5490,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: true,
+                    ..Default::default()
                 },
             )
             .await
@@ -5509,6 +5542,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5523,7 +5557,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
+                    await_durable: false, ..Default::default()
                 },
             )
             .await
@@ -5556,6 +5590,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5575,7 +5610,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
+                    await_durable: false, ..Default::default()
                 },
             )
             .await
@@ -5657,6 +5692,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5668,6 +5704,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5928,6 +5965,7 @@ mod tests {
             let put_option = PutOptions::default();
             let write_option = WriteOptions {
                 await_durable: false,
+                ..Default::default()
             };
             db.put_with_options(key.as_bytes(), value.clone(), &put_option, &write_option)
                 .await
@@ -6334,6 +6372,7 @@ mod tests {
         // do a write and flush memtable only (not wal)
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         db.put_with_options(&b"foo", &b"bar", &PutOptions::default(), &write_opts)
             .await
@@ -6564,6 +6603,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -6723,6 +6763,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6742,6 +6783,7 @@ mod tests {
                 &put_opts,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6756,6 +6798,7 @@ mod tests {
                 b"key1",
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6773,6 +6816,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6803,6 +6847,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6820,6 +6865,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6836,6 +6882,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6859,6 +6906,7 @@ mod tests {
                 WriteBatch::new(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6989,6 +7037,7 @@ mod tests {
         .unwrap();
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         // Establish and flush seq=1 so the L0 manifest writer has a known
@@ -7390,6 +7439,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7400,6 +7450,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7486,6 +7537,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7501,6 +7553,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -7637,6 +7690,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7654,6 +7708,7 @@ mod tests {
                 &MergeOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -7753,6 +7808,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7785,6 +7841,7 @@ mod tests {
         };
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         clock.set(100);
@@ -7860,6 +7917,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7874,6 +7932,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7998,6 +8057,7 @@ mod tests {
             batch,
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -8041,6 +8101,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -8052,6 +8113,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -8091,6 +8153,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await

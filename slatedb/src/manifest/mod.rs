@@ -404,6 +404,12 @@ impl ManifestCore {
         this
     }
 
+    /// Iterate all per-tree LSM states: the unsegmented `tree` followed by
+    /// each named segment's `tree` (RFC-0024).
+    pub(crate) fn trees(&self) -> impl Iterator<Item = &LsmTreeState> {
+        std::iter::once(&self.tree).chain(self.segments.iter().map(|s| &s.tree))
+    }
+
     pub(crate) fn init_clone_db(&self) -> ManifestCore {
         let mut clone = self.clone();
         clone.initialized = false;

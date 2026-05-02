@@ -421,7 +421,7 @@ mod tests {
         .await
         .unwrap();
 
-        iter.invalidated_error = Some(SlateDBError::ChecksumMismatch);
+        iter.invalidated_error = Some(SlateDBError::ChecksumMismatch { path: None });
 
         let result = iter.next().await;
         let err = result.expect_err("Failed to return invalidated iterator");

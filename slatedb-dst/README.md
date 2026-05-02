@@ -11,6 +11,8 @@ real `slatedb::Db`:
 - deterministic main and optional WAL object-store stacks
 - a shared installed `Arc<slatedb::Db>` slot that actors can read or replace
 - actor-local `slatedb::DbRand` instances derived from the root seed
+- an optional shared `MergeOperator` handle for scenarios that exercise merge
+  operands
 
 This is primarily a test crate for SlateDB itself and is currently
 `publish = false`. It is intended to be used from a workspace checkout or as an
@@ -141,14 +143,16 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         let db_seed = ctx.rand().rng().next_u64();
         let settings = build_settings(ctx.rand()).await;
 
-        let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+        let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
             .with_wal_object_store(ctx.wal_object_store().expect("configured"))
             .with_system_clock(ctx.system_clock())
             .with_fp_registry(ctx.fp_registry())
             .with_seed(db_seed)
-            .with_settings(settings)
-            .build()
-            .await?;
+            .with_settings(settings);
+        if let Some(merge_operator) = ctx.merge_operator() {
+            builder = builder.with_merge_operator(merge_operator);
+        }
+        let db = builder.build().await?;
 
         Ok(Arc::new(db))
     })
@@ -181,6 +185,8 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
   store, which the harness wraps before use
 - `with_wal_object_store(store)`: configures a separate WAL base store, which
   the harness wraps before use
+- `with_merge_operator(merge_operator)`: configures an optional shared
+  `MergeOperator` handle for SlateDB writers, readers, and standalone compactors
 - `actor(name, actor)`: registers one actor instance under a unique name
 - `run()`: builds the seeded runtime, starts the harness-owned background
   clock task, opens the DB, spawns one Tokio task per registered actor, and
@@ -200,6 +206,7 @@ to the database builder.
 - `wal_object_store()`
 - `system_clock()`
 - `fp_registry()`
+- `merge_operator()`
 - `failure_controller()`
 - `rand()`
 
@@ -209,6 +216,8 @@ Typical startup responsibilities:
 - build randomized deterministic settings with `utils::build_settings(...)`
 - open `Db::builder(...)` using the harness-provided object stores and clock
 - pass through the shared failpoint registry
+- pass `ctx.merge_operator()` to `DbBuilder::with_merge_operator(...)` when it
+  is present
 - install initial object-store toxics with `ctx.failure_controller()`
 
 ### `ActorCtx`
@@ -228,6 +237,8 @@ Each registered actor instance receives its own `ActorCtx`.
 - `advance_time(duration)` to move the shared mock clock forward
 - `path()`, `main_object_store()`, `wal_object_store()`
 - `system_clock()` and `fp_registry()`
+- `merge_operator()` to reuse the shared merge operator when opening readers,
+  compactors, or replacement DB handles
 
 `swap_db(...)` is useful for reopen scenarios and tests that intentionally
 replace the database instance mid-run.
