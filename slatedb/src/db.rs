@@ -8204,4 +8204,159 @@ mod tests {
         );
         db.close().await.unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_replay_l0_boundary_does_not_skip_unflushed_replay_batches() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_l0_boundary_does_not_skip_unflushed_replay_batches";
+
+        // Start with a large L0/WAL size so the source writer only creates WAL
+        // files. The data stays out of L0 until recovery replays it.
+        let mut source_settings = test_db_options(0, 16 * 1024, None);
+        source_settings.flush_interval = None;
+
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(source_settings)
+            .build()
+            .await
+            .unwrap();
+
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // Write a large first record and flush it into its own WAL. With the
+        // smaller replay settings below, this becomes the first replayed
+        // memtable and is the only memtable that reaches L0 before the second
+        // simulated crash.
+        let first_key = b"first-replay-batch";
+        let first_value = vec![b'a'; 1024];
+        let first = source
+            .put_with_options(first_key, &first_value, &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+
+        // Write several smaller records, flushing each into a separate WAL. On
+        // replay, these WALs are grouped into a later replayed memtable. The
+        // buggy path publishes the first L0 as if it also covered some of these
+        // later WALs.
+        let lost_key = b"lost-replay-batch";
+        let lost_value = vec![b'b'; 128];
+        source
+            .put_with_options(lost_key, &lost_value, &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+
+        let also_lost_key = b"also-lost-replay-batch";
+        let also_lost_value = vec![b'c'; 128];
+        source
+            .put_with_options(
+                also_lost_key,
+                &also_lost_value,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+
+        let survivor_key = b"survivor-replay-batch";
+        let survivor_value = vec![b'd'; 128];
+        source
+            .put_with_options(
+                survivor_key,
+                &survivor_value,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+
+        // Recover with a much smaller replay target so WAL replay splits into
+        // multiple replayed memtables. Limit L0 to one table so only the first
+        // replayed memtable can be flushed before the next reopen.
+        let mut replay_settings = test_db_options(0, 512, None);
+        replay_settings.flush_interval = None;
+        replay_settings.l0_max_ssts = 1;
+        replay_settings.l0_max_ssts_per_key = 1;
+
+        // First recovery: replay the WAL and allow the first replayed memtable
+        // to publish to L0.
+        let _first_recovery = Db::builder(path, object_store.clone())
+            .with_settings(replay_settings.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Wait until the manifest has durably published that first replayed
+        // memtable. The manifest now has one L0 with last_l0_seq equal to the
+        // first write's sequence number.
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let first_l0_manifest = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |state| !state.tree.l0.is_empty() && state.last_l0_seq >= first.seqnum(),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(first_l0_manifest.last_l0_seq, first.seqnum());
+        assert_eq!(first_l0_manifest.tree.l0.len(), 1);
+
+        // Second recovery: simulate crashing after only the first replayed
+        // memtable reached L0. Correct recovery must replay the WALs after that
+        // first memtable's actual boundary, not after the later replay batch's
+        // last_wal_id - 1.
+        let recovered = Db::builder(path, object_store.clone())
+            .with_settings(replay_settings)
+            .build()
+            .await
+            .unwrap();
+
+        // The first key is present from L0. The later keys must come from WAL
+        // replay; today, lost_key fails here because the first L0 was published
+        // with a replay_after_wal_id that skipped its WAL.
+        assert_eq!(
+            recovered.get(first_key).await.unwrap(),
+            Some(Bytes::copy_from_slice(&first_value))
+        );
+        assert_eq!(
+            recovered.get(lost_key).await.unwrap(),
+            Some(Bytes::copy_from_slice(&lost_value))
+        );
+        assert_eq!(
+            recovered.get(also_lost_key).await.unwrap(),
+            Some(Bytes::copy_from_slice(&also_lost_value))
+        );
+        assert_eq!(
+            recovered.get(survivor_key).await.unwrap(),
+            Some(Bytes::copy_from_slice(&survivor_value))
+        );
+    }
 }
