@@ -548,7 +548,6 @@ impl Harness {
         let system_clock: Arc<dyn SystemClock> = self.system_clock.clone();
         let clock_advance_ms = self.clock_advance_ms.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
             .rng_seed(RngSeed::from_bytes(&runtime_seed.to_le_bytes()))
             .build_local(Default::default())
             .expect("failed to build dst harness runtime");
@@ -579,8 +578,8 @@ impl Harness {
             "dst harness requires at least one actor"
         );
 
-        let seed = rand.seed();
-        let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/seed-{seed:016x}")));
+        let path_seed = rand.seed();
+        let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/{path_seed:016x}")));
         let system_clock: Arc<dyn SystemClock> = system_clock;
         let fp_registry = Arc::new(FailPointRegistry::new());
         let failure_controller = FailingObjectStoreController::new(Arc::clone(&rand));
@@ -688,6 +687,7 @@ impl Harness {
             Some(compactor) => compactor.stop().await,
             None => Ok(()),
         };
+        info!("dst harness final rand [value={}]", rand.rng().next_u64());
         db_result?;
         compactor_result
     }

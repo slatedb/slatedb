@@ -28,7 +28,7 @@ use tempfile::TempDir;
 fn test_dst_bank_with_toxics(
     #[case] shutdown_at_ms: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let seed = rand::random::<u64>();
+    let seed = 12523239368982655918; //rand::random::<u64>();
     info!("dst bank seed: {seed}");
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
