@@ -8245,8 +8245,8 @@ mod tests {
 
         // Write several smaller records, flushing each into a separate WAL. On
         // replay, these WALs are grouped into a later replayed memtable. The
-        // buggy path publishes the first L0 as if it also covered some of these
-        // later WALs.
+        // first L0 must publish only the first replayed memtable's WAL boundary,
+        // leaving these later WALs eligible for replay after the next reopen.
         let lost_key = b"lost-replay-batch";
         let lost_value = vec![b'b'; 128];
         source
@@ -8330,18 +8330,17 @@ mod tests {
         assert_eq!(first_l0_manifest.tree.l0.len(), 1);
 
         // Second recovery: simulate crashing after only the first replayed
-        // memtable reached L0. Correct recovery must replay the WALs after that
-        // first memtable's actual boundary, not after the later replay batch's
-        // last_wal_id - 1.
+        // memtable reached L0. Recovery must resume after that first
+        // memtable's actual WAL boundary, not after the later replay batch's
+        // boundary.
         let recovered = Db::builder(path, object_store.clone())
             .with_settings(replay_settings)
             .build()
             .await
             .unwrap();
 
-        // The first key is present from L0. The later keys must come from WAL
-        // replay; today, lost_key fails here because the first L0 was published
-        // with a replay_after_wal_id that skipped its WAL.
+        // The first key is present from L0. The later keys must still come from
+        // WAL replay because they were not covered by the published L0.
         assert_eq!(
             recovered.get(first_key).await.unwrap(),
             Some(Bytes::copy_from_slice(&first_value))
