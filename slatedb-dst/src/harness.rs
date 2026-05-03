@@ -315,7 +315,7 @@ impl ClockDriver {
                         .advance(Duration::from_millis(advance_ms))
                         .await;
                     steps += 1;
-                    if steps % 100_000 == 0 {
+                    if steps % 10_000 == 0 {
                         info!(
                             "clock driver advanced [steps={steps}, time={:?}]",
                             system_clock.now()
@@ -687,7 +687,7 @@ impl Harness {
             Some(compactor) => compactor.stop().await,
             None => Ok(()),
         };
-        info!("dst harness final rand [value={}]", rand.rng().next_u64());
+        info!("final random [value={}]", rand.rng().next_u64());
         db_result?;
         compactor_result
     }
