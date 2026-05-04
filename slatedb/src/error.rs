@@ -192,6 +192,9 @@ pub(crate) enum SlateDBError {
     #[error("clone sources have overlapping key ranges. ranges=`{ranges:?}`")]
     InvalidUnionOverlappingRanges { ranges: Vec<BytesRange> },
 
+    #[error("clone source has segments but no extractor is configured. prefixes=`{prefixes:?}`")]
+    InvalidUnionSegmentsWithoutExtractor { prefixes: Vec<bytes::Bytes> },
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -598,6 +601,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidUnionExtractorMismatch { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSegmentPrefixOverlap { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionOverlappingRanges { .. } => Error::invalid(msg),
+            SlateDBError::InvalidUnionSegmentsWithoutExtractor { .. } => Error::invalid(msg),
         }
     }
 }

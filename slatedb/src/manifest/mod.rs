@@ -846,8 +846,19 @@ impl Manifest {
         // that lives in `core.tree`. With an extractor configured, every
         // entry — including `""` — belongs in `core.segments`.
         if core.segment_extractor_name.is_none() {
+            // The `""` entry is absent only when every source had no SSTs
+            // (we're cloning from empty sources). Leave `core.tree` empty
+            // in that case.
             if let Some(unsegmented) = segments_by_prefix.remove(&Bytes::new()) {
                 core.tree = unsegmented;
+            }
+            // After removing `""`, any remaining keys came from a source
+            // whose manifest had segments despite no extractor being
+            // configured — a structurally invalid input.
+            if !segments_by_prefix.is_empty() {
+                return Err(SlateDBError::InvalidUnionSegmentsWithoutExtractor {
+                    prefixes: segments_by_prefix.keys().cloned().collect(),
+                });
             }
         }
         core.segments = segments_by_prefix
@@ -3100,6 +3111,40 @@ mod tests {
         assert!(matches!(
             result,
             Err(SlateDBError::InvalidUnionOverlappingRanges { .. })
+        ));
+    }
+
+    #[test]
+    fn test_union_returns_error_on_segments_without_extractor() {
+        // Degenerate source manifests: no extractor configured but
+        // `core.segments` is non-empty. The union must reject this
+        // rather than silently dropping the segment data. Use two
+        // non-overlapping prefixes so the antichain check passes and
+        // we reach the `is_none()` branch.
+        let (m1, _, _) = manifest_with_segment(b"foo/", None, b"a", BytesRange::from_ref("a".."m"));
+        let (m2, _, _) = manifest_with_segment(b"bar/", None, b"m", BytesRange::from_ref("m"..));
+
+        let result = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidUnionSegmentsWithoutExtractor { ref prefixes })
+                if prefixes.len() == 2
+                    && prefixes.iter().any(|p| p.as_ref() == b"foo/")
+                    && prefixes.iter().any(|p| p.as_ref() == b"bar/")
         ));
     }
 
