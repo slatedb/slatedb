@@ -24,6 +24,7 @@ Table of Contents:
       - [Current Model](#current-model)
       - [Proposed Change: Per-Segment LSM State](#proposed-change-per-segment-lsm-state)
       - [Migration](#migration)
+      - [Interaction with Projection and Union](#interaction-with-projection-and-union)
    - [Write Path](#write-path)
    - [Backpressure](#backpressure)
    - [Read Path](#read-path)
@@ -33,6 +34,8 @@ Table of Contents:
    - [Recovery and Progress Tracking](#recovery-and-progress-tracking)
 - [Future Work](#future-work)
 - [Alternatives](#alternatives)
+   - [Multiple databases instead of segments](#multiple-databases-instead-of-segments)
+   - [File-based segment metadata instead of manifest segments](#file-based-segment-metadata-instead-of-manifest-segments)
    - [Time-Window Compaction Strategy (TWCS)](#time-window-compaction-strategy-twcs)
    - [Arbitrary-function segment mapper](#arbitrary-function-segment-mapper)
    - [Sequence-range bookkeeping and unordered sorted run bag](#sequence-range-bookkeeping-and-unordered-sorted-run-bag)
@@ -323,6 +326,41 @@ Broader concerns about safe manifest evolution across mismatched process version
 
 The extractor must be configured when the database is first created, or never configured. If a database has existing data and the open-time configuration disagrees with the manifest's persisted extractor state — configuring an extractor where none was before, or removing an extractor that was previously set — the database refuses to open. See [Alternatives](#alternatives) for additional discussion and potential room for future work.
 
+#### Interaction with Projection and Union
+
+[Projection and union](./0004-checkpoints.md#manifest-projection-and-union) operate on the manifest to support database rescaling. Both extend naturally to per-segment LSM state.
+
+**Projection.** For each segment in `segments`, apply the same view-intersection rules as for the unsegmented `l0` and `compacted` lists: drop SST views whose effective range lies fully outside the projection range, and tag boundary views with a `visible_range`. Segments whose views are all excluded are removed from `segments`. The `segment_extractor_name` field is preserved unchanged. After projection a segment's effective range may be narrower than `[prefix, prefix++)`; this is benign, as `visible_range` enforcement on each view governs read and write access.
+
+**Union.** Union of N segmented manifests adds two preconditions on top of those in [RFC 0004](./0004-checkpoints.md#union):
+
+- All sources must share the same `segment_extractor_name` exactly — every source `None`, or every source the same `Some(name)`. Mixed configurations are rejected. Although unioned ranges are disjoint, we don't know that unsegmented data from a no-extractor source will remain unsegmented after union: a key persisted in `core.tree` may match an extractor prefix carried over from another source, and a future read of that key would route through the extractor to a segment that does not contain it, dropping the value. A future extension can relax this once a per-key check confirms unsegmented data does not match any extractor prefix; for now we require exact agreement.
+- The combined set of segment prefixes across all sources must form an antichain (no prefix is a proper prefix of another). This usually follows from the existing non-overlapping key range precondition, but is checked explicitly to defend against stale extractor-name matches.
+
+For each segment prefix in the inputs:
+
+- Segments appearing in only one source are copied as-is, with sorted run IDs regenerated against the unioned manifest's shared SR counter.
+- Segments appearing in multiple sources have their `l0` lists concatenated using the same logical-creation-time ordering RFC 0004 specifies for unsegmented L0, and their `compacted` lists concatenated with regenerated SR IDs. The "similarly-sized SR merging" optimization applies within a segment: cross-source SRs in the same segment are non-overlapping by union's preconditions.
+
+**SR id renumbering.** Renumbering relabels every sorted run across the unioned manifest with a fresh `u32` id drawn from a single counter, so all ids are globally unique across the unsegmented tree and every segment. Within each tree, `compacted` list order is preserved exactly — renumbering never reorders runs. List position remains the authoritative encoding of read precedence; the convention that ID order agrees with list order (newer runs have higher IDs) is a per-source property and is not preserved across union, since the unioned list interleaves runs from sources whose ID counters were independent.
+
+For example, two sources `A` and `B`, each with two unsegmented sorted runs (IDs local to each source):
+
+```
+A.tree.compacted = [SR{5}, SR{3}]
+B.tree.compacted = [SR{8}, SR{2}]
+
+union.tree.compacted = [SR{0}, SR{1}, SR{2}, SR{3}]
+                        ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+                        A's runs        B's runs
+                        (in original    (in original
+                         list order)     list order)
+```
+
+Per-segment runs follow the same rule and draw from the same shared counter.
+
+The owned-SST list recorded in each new `external_dbs` entry includes SSTs from every per-segment tree, not only the unsegmented tree. Clone and compaction cleanup follow the same rule: when `finish_compaction` prunes dereferenced `external_dbs` SST IDs, it must account for references from all segments as well as the unsegmented tree. Other union mechanics — `last_l0_seq` set to the max across sources, sequence tracker reinitialization, the WAL-flushed prerequisite, and the post-union L0 spike — apply unchanged. Per-tree backpressure (see [Backpressure](#backpressure)) means that spike is contained within the affected segments rather than coupled across the entire database.
+
 ### Write Path
 
 The write path consults the extractor for each incoming write to validate that it routes to a segment and respects the antichain invariant (see [Validation](#validation)) before appending to the WAL. If the check passes, the write proceeds through the WAL and memtable as today. At memtable flush, the extractor's output (either recomputed or carried alongside each entry) is used to group entries by target segment, producing one L0 SST per segment that received entries from this flush. Without a configured extractor, every entry belongs to the singleton `prefix=""` segment and a flush produces a single L0 SST as today.
@@ -510,6 +548,33 @@ A concrete edge case for the rewriting design: once `hour=00..23` have been roll
 The choice hinges on how much rollup state we are willing to push into the write path versus the read path.
 
 ## Alternatives
+
+### Multiple databases instead of segments
+
+An application can run one SlateDB instance per segment and route operations externally by key prefix — the [`DbWriteOps`](https://github.com/slatedb/slatedb/pull/1600) trait makes such a wrapper straightforward. From a user API standpoint this delivers similar functionality: dropping a per-segment database is segment retention, and cold instances can be left untouched.
+
+This RFC keeps segments inside one database for the following reasons:
+
+- **Per-database overhead × segment count.** Manifest polling, WAL, memtable, compactor, GC, and object-store rate limits all multiply per instance. A timeseries workload with hourly segments retained for a month is ~730 instances; the aggregate background cost dominates the ingest savings even with cold-instance poll tuning.
+- **Cache coordination stays local.** A single block cache (and the [cache manager](./0023-cache-manager.md)) can reason about SST lifecycle across every segment directly. With N databases the application must decide whether caches are isolated per instance or shared externally, and then coordinate segment-level warming and eviction across instances itself.
+- **Cross-segment consistency.** Snapshots, checkpoints, range scans, and transactions across segments are local on one database. Across N databases each requires external orchestration with its own correctness story.
+- **Composition with projection/union.** [Projection and union](./0004-checkpoints.md#manifest-projection-and-union) operate on a single manifest. Spanning N databases either duplicates the orchestration N times or pushes aggregation outside SlateDB.
+
+A `DbWriteOps` wrapper over multiple SlateDBs remains the right pattern when independent databases are the natural unit — for example, hard tenant isolation where heavy tenants must be physically separable.
+
+### File-based segment metadata instead of manifest segments
+
+An alternative is to keep a single LSM tree and represent segment identity only through file-level metadata or conventions — for example SST key ranges, segment tags attached to SSTs, or compaction rules that preserve segment-aligned file boundaries — rather than introducing per-segment trees in the manifest. Under this design, the system reconstructs segment state by inspecting files instead of reading a first-class `segments` list.
+
+This could plausibly be paired with multiple compaction strategies, including a future leveled compaction implementation ([issue #1598](https://github.com/slatedb/slatedb/issues/1598)). For example, if compaction preserves segment-aligned file boundaries, then cold segment data need not be repeatedly rewritten with hot segment data, which addresses [Motivation](#motivation) #1 without changing the manifest layout.
+
+The tradeoff is that logically scoped lifecycle operations still require segment identity to exist somewhere durable and authoritative. To drop an hour in a timeseries system atomically, some part of the system must know which files and manifest state currently belong to that hour. Likewise, lifecycle-aligned scheduling must reconstruct per-segment state, and the write path must still know the existing segment set to enforce the antichain invariant (see [Validation](#validation)). File-based metadata can support those capabilities, but it pushes the reconstruction logic into compaction, retention, validation, and read-path bookkeeping rather than making segment state explicit in one schema location.
+
+The choice this RFC frames is therefore not segments versus no segments, but **segments as data versus segments as convention**. Put differently, it is a choice between **manifest-based segment metadata versus file-based segment metadata**. In the manifest-based design proposed here, segment identity is explicit and lifecycle features consume it directly. In the file-based design, segment identity is implicit and higher-level features recover it from SST metadata and compaction conventions.
+
+This layering — logical-group identity separate from compaction policy — has precedent in RocksDB. Leveled compaction in RocksDB does not itself provide atomic drop: [`DeleteRange`](https://github.com/facebook/rocksdb/wiki/DeleteRange) writes row-level tombstones that propagate through levels, and [`DeleteFilesInRange`](https://github.com/facebook/rocksdb/blob/main/include/rocksdb/db.h) is a use-with-care primitive that only deletes files entirely within the target range and carries documented partial-overlap and concurrency caveats. Atomic drop is provided by [column families](https://github.com/facebook/rocksdb/wiki/Column-Families), a manifest-level abstraction that composes with leveled, universal, or FIFO compaction interchangeably. RocksDB has kept these concerns separate despite shipping both for over a decade.
+
+The proposal in this RFC chooses manifest-based metadata because it concentrates segment knowledge in one place and composes directly with the lifecycle primitives in [Future Work](#future-work) — per-segment retention TTL, multi-stage rollups, column-family-style namespaces — each of which becomes a field or policy over a segment entry rather than additional reconstruction logic threaded through every subsystem.
 
 ### Time-Window Compaction Strategy (TWCS)
 

@@ -92,7 +92,11 @@ impl Actor for AuditorActor {
         };
 
         self.step += 1;
-        info!("bank auditor step complete");
+        info!(
+            "bank auditor step complete [name={}, step={}]",
+            ctx.name(),
+            self.step
+        );
 
         let shutdown_token = ctx.shutdown_token();
         let system_clock = ctx.system_clock();
