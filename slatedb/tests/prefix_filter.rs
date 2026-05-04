@@ -114,6 +114,7 @@ mod composite_filters {
         let put = PutOptions::default();
         let write = WriteOptions {
             await_durable: false,
+            seqnum: 0,
         };
         // Write each batch in its own SST so multiple SSTs participate in the
         // read path and the filter has something to actually skip.
@@ -282,6 +283,7 @@ mod prop_test {
         let put_opts = PutOptions::default();
         let write_opts = WriteOptions {
             await_durable: false,
+            seqnum: 0,
         };
         for (i, key) in keys.iter().enumerate() {
             let value = format!("v{}", i).into_bytes();
