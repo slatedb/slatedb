@@ -8226,85 +8226,58 @@ mod tests {
             ..Default::default()
         };
 
-        // Write a large record and flush it into its own WAL. With the smaller
-        // replay settings below, this becomes the first replayed memtable and
-        // is the only memtable that reaches L0 before the second simulated
-        // crash.
-        let l0_flushed_key = b"l0-flushed-replay-batch";
-        let l0_flushed_value = vec![b'a'; 1024];
-        let l0_flushed_write = source
-            .put_with_options(
-                l0_flushed_key,
-                &l0_flushed_value,
-                &PutOptions::default(),
-                &write_opts,
-            )
-            .await
-            .unwrap();
-        source
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-            .unwrap();
+        // Write two records, each flushed into its own WAL. With the smaller
+        // replay settings below, these WALs are replayed into the first
+        // memtable, and that memtable is the only one that reaches L0 before
+        // the second simulated crash.
+        let l0_flushed_records = [
+            (b"l0-flushed-replay-batch-1".as_slice(), vec![b'a'; 128]),
+            (b"l0-flushed-replay-batch-2".as_slice(), vec![b'b'; 1024]),
+        ];
+        let mut l0_flushed_seq = 0;
+        let mut first_l0_flushed_wal_id = 0;
+        for (i, (key, value)) in l0_flushed_records.iter().enumerate() {
+            let write = source
+                .put_with_options(*key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+            source
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::Wal,
+                })
+                .await
+                .unwrap();
+            if i == 0 {
+                first_l0_flushed_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+            }
+            l0_flushed_seq = write.seqnum();
+        }
+        let l0_flushed_boundary_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(l0_flushed_boundary_wal_id > first_l0_flushed_wal_id);
 
-        // Write several smaller records, flushing each into a separate WAL. On
-        // replay, these WALs are grouped into a later replayed memtable. The
-        // first L0 must publish only the first replayed memtable's WAL boundary,
-        // leaving these records eligible for replay after the next reopen.
-        let unflushed_replay_key_1 = b"unflushed-replay-batch-1";
-        let unflushed_replay_value_1 = vec![b'b'; 128];
-        source
-            .put_with_options(
-                unflushed_replay_key_1,
-                &unflushed_replay_value_1,
-                &PutOptions::default(),
-                &write_opts,
-            )
-            .await
-            .unwrap();
-        source
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-            .unwrap();
-
-        let unflushed_replay_key_2 = b"unflushed-replay-batch-2";
-        let unflushed_replay_value_2 = vec![b'c'; 128];
-        source
-            .put_with_options(
-                unflushed_replay_key_2,
-                &unflushed_replay_value_2,
-                &PutOptions::default(),
-                &write_opts,
-            )
-            .await
-            .unwrap();
-        source
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-            .unwrap();
-
-        let unflushed_replay_key_3 = b"unflushed-replay-batch-3";
-        let unflushed_replay_value_3 = vec![b'd'; 128];
-        source
-            .put_with_options(
-                unflushed_replay_key_3,
-                &unflushed_replay_value_3,
-                &PutOptions::default(),
-                &write_opts,
-            )
-            .await
-            .unwrap();
-        source
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-            .unwrap();
+        // Write several smaller records, each flushed into a separate WAL. On
+        // replay, these WALs remain after the first replayed memtable's WAL
+        // boundary, so they must still be eligible for replay after the next
+        // reopen.
+        let unflushed_replay_records = [
+            (b"unflushed-replay-batch-1".as_slice(), vec![b'c'; 128]),
+            (b"unflushed-replay-batch-2".as_slice(), vec![b'd'; 128]),
+            (b"unflushed-replay-batch-3".as_slice(), vec![b'e'; 128]),
+        ];
+        for (key, value) in &unflushed_replay_records {
+            source
+                .put_with_options(*key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+            source
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::Wal,
+                })
+                .await
+                .unwrap();
+        }
+        let final_source_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(final_source_wal_id >= l0_flushed_boundary_wal_id + 2);
 
         // Recover with a much smaller replay target so WAL replay splits into
         // multiple replayed memtables. Limit L0 to one table so only the first
@@ -8323,8 +8296,9 @@ mod tests {
             .unwrap();
 
         // Wait until the manifest has durably published that first replayed
-        // memtable. The manifest now has one L0 with last_l0_seq equal to the
-        // first write's sequence number.
+        // memtable. The manifest now has one L0 with last_l0_seq and
+        // replay_after_wal_id matching the first replayed memtable's actual
+        // sequence and WAL boundaries.
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let mut stored_manifest =
             StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
@@ -8332,11 +8306,16 @@ mod tests {
                 .unwrap();
         let first_l0_manifest = wait_for_manifest_condition(
             &mut stored_manifest,
-            |state| !state.tree.l0.is_empty() && state.last_l0_seq >= l0_flushed_write.seqnum(),
-            Duration::from_secs(10),
+            |state| !state.tree.l0.is_empty() && state.last_l0_seq >= l0_flushed_seq,
+            Duration::from_secs(60),
         )
         .await;
-        assert_eq!(first_l0_manifest.last_l0_seq, l0_flushed_write.seqnum());
+        assert_eq!(first_l0_manifest.last_l0_seq, l0_flushed_seq);
+        assert_eq!(
+            first_l0_manifest.replay_after_wal_id,
+            l0_flushed_boundary_wal_id
+        );
+        assert!(final_source_wal_id >= first_l0_manifest.replay_after_wal_id + 2);
         assert_eq!(first_l0_manifest.tree.l0.len(), 1);
 
         // Second recovery: simulate crashing after only the first replayed
@@ -8349,24 +8328,20 @@ mod tests {
             .await
             .unwrap();
 
-        // The L0-flushed key is present from L0. The later keys must still come
-        // from WAL replay because they were not covered by the published L0
-        // boundary.
-        assert_eq!(
-            recovered.get(l0_flushed_key).await.unwrap(),
-            Some(Bytes::copy_from_slice(&l0_flushed_value))
-        );
-        assert_eq!(
-            recovered.get(unflushed_replay_key_1).await.unwrap(),
-            Some(Bytes::copy_from_slice(&unflushed_replay_value_1))
-        );
-        assert_eq!(
-            recovered.get(unflushed_replay_key_2).await.unwrap(),
-            Some(Bytes::copy_from_slice(&unflushed_replay_value_2))
-        );
-        assert_eq!(
-            recovered.get(unflushed_replay_key_3).await.unwrap(),
-            Some(Bytes::copy_from_slice(&unflushed_replay_value_3))
-        );
+        // The L0-flushed keys are present from L0. The later keys must still
+        // come from WAL replay because they were not covered by the published
+        // L0 boundary.
+        for (key, value) in &l0_flushed_records {
+            assert_eq!(
+                recovered.get(*key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+        for (key, value) in &unflushed_replay_records {
+            assert_eq!(
+                recovered.get(*key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
     }
 }
