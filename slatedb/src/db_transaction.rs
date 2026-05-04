@@ -970,6 +970,7 @@ mod tests {
         // Commit without waiting for durability
         txn.commit_with_options(&WriteOptions {
             await_durable: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1851,6 +1852,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1868,6 +1870,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1882,6 +1885,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1901,6 +1905,7 @@ mod tests {
         let result = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap();

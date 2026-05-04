@@ -73,15 +73,17 @@ mod tests {
 
     fn test_harness<A: Actor>(name: &'static str, actor: A) -> Harness {
         Harness::new(name, 7, move |ctx| async move {
-            let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+            let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
                 .with_system_clock(ctx.system_clock())
                 .with_settings(Settings {
                     compactor_options: None,
                     garbage_collector_options: None,
                     ..Settings::default()
-                })
-                .build()
-                .await?;
+                });
+            if let Some(merge_operator) = ctx.merge_operator() {
+                builder = builder.with_merge_operator(merge_operator);
+            }
+            let db = builder.build().await?;
 
             Ok(Arc::new(db))
         })

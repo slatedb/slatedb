@@ -92,7 +92,11 @@ impl Actor for AuditorActor {
         };
 
         self.step += 1;
-        info!("bank auditor step complete");
+        info!(
+            "bank auditor step complete [name={}, step={}]",
+            ctx.name(),
+            self.step
+        );
 
         let shutdown_token = ctx.shutdown_token();
         let system_clock = ctx.system_clock();
@@ -121,6 +125,10 @@ async fn open_bank_reader(ctx: &ActorCtx, options: DbReaderOptions) -> Result<Db
 
     if let Some(wal_object_store) = ctx.wal_object_store() {
         builder = builder.with_wal_object_store(wal_object_store);
+    }
+
+    if let Some(merge_operator) = ctx.merge_operator() {
+        builder = builder.with_merge_operator(merge_operator);
     }
 
     builder.build().await

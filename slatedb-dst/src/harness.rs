@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use fail_parallel::FailPointRegistry;
 use slatedb::compactor::Compactor;
-use slatedb::{Db, DbRand, Error};
+use slatedb::{Db, DbRand, Error, MergeOperator};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::MockSystemClock;
 
@@ -48,8 +48,8 @@ struct ActorRegistration {
 
 /// Per-actor context passed to each registered harness task.
 ///
-/// The context exposes deterministic randomness, the shared database slot,
-/// clock-wrapped object stores, the shared shutdown token, and test
+/// The context exposes shared deterministic randomness, the shared database
+/// slot, clock-wrapped object stores, the shared shutdown token, and test
 /// infrastructure such as the failpoint registry, mock clock, and shared
 /// failure controller.
 #[derive(Clone)]
@@ -68,10 +68,10 @@ impl ActorCtx {
         &self.name
     }
 
-    /// Returns the actor-local deterministic random number generator.
+    /// Returns the shared deterministic random number generator.
     ///
     /// ## Returns
-    /// - `&DbRand`: The seeded RNG derived from the harness seed for this actor.
+    /// - `&DbRand`: The seeded RNG shared by this harness run.
     pub fn rand(&self) -> &DbRand {
         self.rand.as_ref()
     }
@@ -79,8 +79,8 @@ impl ActorCtx {
     /// Returns the startup context shared by this harness run.
     ///
     /// This exposes the database path, object stores, clock, failpoint
-    /// registry, failure controller, and startup RNG used by the database
-    /// factory.
+    /// registry, failure controller, optional merge operator, and startup RNG
+    /// used by the database factory.
     pub fn startup_ctx(&self) -> &StartupCtx {
         &self.shared.startup_ctx
     }
@@ -168,6 +168,19 @@ impl ActorCtx {
         self.shared.startup_ctx.fp_registry()
     }
 
+    /// Returns the merge operator configured for this harness run, if any.
+    ///
+    /// Components that open a `Db`, `DbReader`, or standalone `Compactor`
+    /// against a database that may contain merge operands should pass this
+    /// handle through to the corresponding SlateDB builder.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn MergeOperator + Send + Sync>>`: The shared
+    ///   merge-operator handle, or `None`.
+    pub fn merge_operator(&self) -> Option<Arc<dyn MergeOperator + Send + Sync>> {
+        self.shared.startup_ctx.merge_operator()
+    }
+
     /// Returns the shared shutdown token for the current harness run.
     ///
     /// Actors may call `cancel()` to request harness shutdown, or observe the
@@ -190,6 +203,7 @@ pub struct StartupCtx {
     system_clock: Arc<dyn SystemClock>,
     fp_registry: Arc<FailPointRegistry>,
     failure_controller: FailingObjectStoreController,
+    merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
     rand: Arc<DbRand>,
 }
 
@@ -238,6 +252,18 @@ impl StartupCtx {
         Arc::clone(&self.fp_registry)
     }
 
+    /// Returns the merge operator configured for this harness run, if any.
+    ///
+    /// Startup factories should pass this handle to `DbBuilder` when opening a
+    /// database that may write or read merge operands.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn MergeOperator + Send + Sync>>`: The shared
+    ///   merge-operator handle, or `None`.
+    pub fn merge_operator(&self) -> Option<Arc<dyn MergeOperator + Send + Sync>> {
+        self.merge_operator.clone()
+    }
+
     /// Returns the shared failure controller for the harness object stores.
     ///
     /// Tests may use the controller to install, clear, or replace object-store
@@ -250,10 +276,10 @@ impl StartupCtx {
         self.failure_controller.clone()
     }
 
-    /// Returns the startup-local deterministic random number generator.
+    /// Returns the shared deterministic random number generator.
     ///
     /// ## Returns
-    /// - `&DbRand`: The seeded RNG reserved for database initialization.
+    /// - `&DbRand`: The seeded RNG shared by this harness run.
     pub fn rand(&self) -> &DbRand {
         self.rand.as_ref()
     }
@@ -289,7 +315,7 @@ impl ClockDriver {
                         .advance(Duration::from_millis(advance_ms))
                         .await;
                     steps += 1;
-                    if steps % 100_000 == 0 {
+                    if steps % 10_000 == 0 {
                         info!(
                             "clock driver advanced [steps={steps}, time={:?}]",
                             system_clock.now()
@@ -334,6 +360,7 @@ pub struct Harness {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     clock_advance_ms: RangeInclusive<u64>,
+    merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
     startup_factory: StartupFactory,
     actors: Vec<ActorRegistration>,
 }
@@ -343,8 +370,8 @@ impl Harness {
     ///
     /// ## Arguments
     /// - `name`: Scenario name used when deriving the default database path.
-    /// - `seed`: Root seed used to derive deterministic randomness for startup,
-    ///   fault injection, and actor-local RNGs.
+    /// - `seed`: Root seed used for deterministic randomness throughout the
+    ///   harness run.
     /// - `factory`: A function that receives a [`StartupCtx`] and returns the
     ///   database handle that actors should share.
     ///
@@ -364,6 +391,7 @@ impl Harness {
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
             clock_advance_ms: 1..=5,
+            merge_operator: None,
             startup_factory: Box::new(move |ctx| Box::pin(factory(ctx))),
             actors: Vec::new(),
         }
@@ -384,8 +412,8 @@ impl Harness {
     /// Overrides the root deterministic random number generator.
     ///
     /// ## Arguments
-    /// - `rand`: The RNG to use for deriving runtime, startup, fault-injection,
-    ///   and actor-local seeds.
+    /// - `rand`: The RNG to share across startup, fault injection, the clock
+    ///   driver, and actors.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
@@ -459,6 +487,26 @@ impl Harness {
         self
     }
 
+    /// Configures the merge operator shared by DST components.
+    ///
+    /// The handle is exposed through [`StartupCtx::merge_operator`] and
+    /// [`ActorCtx::merge_operator`]. Built-in DST components that open
+    /// read-only readers or standalone compactors pass it through automatically.
+    /// Startup factories remain responsible for passing it to `DbBuilder`.
+    ///
+    /// ## Arguments
+    /// - `merge_operator`: The merge operator handle to use for this harness run.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    pub fn with_merge_operator(
+        mut self,
+        merge_operator: Arc<dyn MergeOperator + Send + Sync>,
+    ) -> Self {
+        self.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Registers one actor task under a unique logical name.
     ///
     /// ## Arguments
@@ -496,29 +544,22 @@ impl Harness {
     ///   an actor returned or joined with an error.
     pub fn run(self) -> Result<(), Error> {
         let runtime_seed = self.rand.rng().next_u64();
-        let startup_seed = self.rand.rng().next_u64();
-        let clock_seed = self.rand.rng().next_u64();
-        let failure_seed = self.rand.rng().next_u64();
+        let clock_rand = Arc::clone(&self.rand);
         let system_clock: Arc<dyn SystemClock> = self.system_clock.clone();
         let clock_advance_ms = self.clock_advance_ms.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
             .rng_seed(RngSeed::from_bytes(&runtime_seed.to_le_bytes()))
             .build_local(Default::default())
             .expect("failed to build dst harness runtime");
         runtime.block_on(async move {
-            let clock_driver = ClockDriver::spawn(
-                system_clock,
-                Arc::new(DbRand::new(clock_seed)),
-                clock_advance_ms,
-            );
-            let result = self.run_inner(startup_seed, failure_seed).await;
+            let clock_driver = ClockDriver::spawn(system_clock, clock_rand, clock_advance_ms);
+            let result = self.run_inner().await;
             clock_driver.shutdown().await;
             result
         })
     }
 
-    async fn run_inner(self, startup_seed: u64, failure_seed: u64) -> Result<(), Error> {
+    async fn run_inner(self) -> Result<(), Error> {
         let Harness {
             name,
             rand,
@@ -527,6 +568,7 @@ impl Harness {
             main_object_store,
             wal_object_store,
             clock_advance_ms: _,
+            merge_operator,
             startup_factory,
             actors,
         } = self;
@@ -536,12 +578,11 @@ impl Harness {
             "dst harness requires at least one actor"
         );
 
-        let seed = rand.seed();
-        let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/seed-{seed:016x}")));
+        let path_seed = rand.seed();
+        let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/{path_seed:016x}")));
         let system_clock: Arc<dyn SystemClock> = system_clock;
         let fp_registry = Arc::new(FailPointRegistry::new());
-        let failure_controller =
-            FailingObjectStoreController::new(Arc::new(DbRand::new(failure_seed)));
+        let failure_controller = FailingObjectStoreController::new(Arc::clone(&rand));
         let failing_main_object_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
             main_object_store.clone(),
             failure_controller.clone(),
@@ -570,7 +611,8 @@ impl Harness {
             system_clock: Arc::clone(&system_clock),
             fp_registry: Arc::clone(&fp_registry),
             failure_controller,
-            rand: Arc::new(DbRand::new(startup_seed)),
+            merge_operator,
+            rand: Arc::clone(&rand),
         };
 
         let db = startup_factory(startup_ctx.clone()).await?;
@@ -586,12 +628,11 @@ impl Harness {
         let mut join_set = JoinSet::new();
         let mut actor_names = HashMap::new();
         for registration in actors {
-            let actor_seed = rand.rng().next_u64();
             let name = registration.name;
             let mut actor = registration.actor;
             let ctx = ActorCtx {
                 name: name.clone(),
-                rand: Arc::new(DbRand::new(actor_seed)),
+                rand: Arc::clone(&rand),
                 shared: shared.clone(),
             };
             let handle = join_set.spawn(async move {
@@ -646,6 +687,7 @@ impl Harness {
             Some(compactor) => compactor.stop().await,
             None => Ok(()),
         };
+        info!("final random [value={}]", rand.rng().next_u64());
         db_result?;
         compactor_result
     }

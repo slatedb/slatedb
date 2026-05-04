@@ -13,9 +13,9 @@ use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
     actors::{
-        initialize_accounts, AuditorActor, BankAuditView, BankOptions, CompactorActor,
-        CompactorActorOptions, DbFencerActor, DbFencerActorOptions, ShutdownActor, SuppressFenced,
-        TransferActor,
+        initialize_accounts, AuditorActor, BankAuditView, BankMergeOperator, BankOptions,
+        CompactorActor, CompactorActorOptions, DbFencerActor, DbFencerActorOptions, ShutdownActor,
+        SuppressFenced, TransferActor, TransferMode,
     },
     utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
     DeterministicLocalFilesystem, Harness, StartupCtx,
@@ -50,6 +50,7 @@ fn test_dst_bank_with_toxics(
     let reader_options = build_reader_options(&rand);
     let fencer_restart_interval = Duration::from_secs(120);
     let compactor_options = build_settings_compactor(&mut *rand.rng());
+    let merge_operator = Arc::new(BankMergeOperator::new(&bank_options)?);
 
     let harness = Harness::new("bank", seed, {
         let bank_options = bank_options.clone();
@@ -70,32 +71,42 @@ fn test_dst_bank_with_toxics(
     .with_path(Path::from("bank"))
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
+    .with_merge_operator(merge_operator)
     .with_clock_advance(1..=5);
 
     let harness = harness
         .actor(
             "transfer-1",
-            SuppressFenced::new(TransferActor::new(bank_options.clone())?),
+            SuppressFenced::new(TransferActor::new(bank_options.clone(), TransferMode::Put)?),
         )
         .actor(
             "transfer-2",
-            SuppressFenced::new(TransferActor::new(bank_options.clone())?),
+            SuppressFenced::new(TransferActor::new(bank_options.clone(), TransferMode::Put)?),
         )
         .actor(
             "transfer-3",
-            SuppressFenced::new(TransferActor::new(bank_options.clone())?),
+            SuppressFenced::new(TransferActor::new(bank_options.clone(), TransferMode::Put)?),
         )
         .actor(
             "transfer-4",
-            SuppressFenced::new(TransferActor::new(bank_options.clone())?),
+            SuppressFenced::new(TransferActor::new(
+                bank_options.clone(),
+                TransferMode::Merge,
+            )?),
         )
         .actor(
             "transfer-5",
-            SuppressFenced::new(TransferActor::new(bank_options.clone())?),
+            SuppressFenced::new(TransferActor::new(
+                bank_options.clone(),
+                TransferMode::Merge,
+            )?),
         )
         .actor(
             "transfer-6",
-            SuppressFenced::new(TransferActor::new(bank_options.clone())?),
+            SuppressFenced::new(TransferActor::new(
+                bank_options.clone(),
+                TransferMode::Merge,
+            )?),
         )
         .actor(
             "regular-auditor",
@@ -167,14 +178,18 @@ async fn open_bank_db(ctx: StartupCtx) -> Result<Arc<Db>, Error> {
         settings.wal_enabled = true;
     }
 
-    let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+    let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
         .with_wal_object_store(ctx.wal_object_store().expect("configured"))
         .with_system_clock(ctx.system_clock())
         .with_fp_registry(ctx.fp_registry())
         .with_seed(db_seed)
-        .with_settings(settings)
-        .build()
-        .await?;
+        .with_settings(settings);
+
+    if let Some(merge_operator) = ctx.merge_operator() {
+        builder = builder.with_merge_operator(merge_operator);
+    }
+
+    let db = builder.build().await?;
 
     Ok(Arc::new(db))
 }

@@ -970,7 +970,7 @@ mod tests {
 
         assert!(matches!(
             format.validate_checksum(corrupted_bytes.into()),
-            Err(SlateDBError::ChecksumMismatch)
+            Err(SlateDBError::ChecksumMismatch { .. })
         ));
     }
 
