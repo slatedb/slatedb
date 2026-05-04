@@ -8226,46 +8226,16 @@ mod tests {
             ..Default::default()
         };
 
-        // Write a large first record and flush it into its own WAL. With the
-        // smaller replay settings below, this becomes the first replayed
-        // memtable and is the only memtable that reaches L0 before the second
-        // simulated crash.
-        let first_key = b"first-replay-batch";
-        let first_value = vec![b'a'; 1024];
-        let first = source
-            .put_with_options(first_key, &first_value, &PutOptions::default(), &write_opts)
-            .await
-            .unwrap();
-        source
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-            .unwrap();
-
-        // Write several smaller records, flushing each into a separate WAL. On
-        // replay, these WALs are grouped into a later replayed memtable. The
-        // first L0 must publish only the first replayed memtable's WAL boundary,
-        // leaving these later WALs eligible for replay after the next reopen.
-        let lost_key = b"lost-replay-batch";
-        let lost_value = vec![b'b'; 128];
-        source
-            .put_with_options(lost_key, &lost_value, &PutOptions::default(), &write_opts)
-            .await
-            .unwrap();
-        source
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-            .unwrap();
-
-        let also_lost_key = b"also-lost-replay-batch";
-        let also_lost_value = vec![b'c'; 128];
-        source
+        // Write a large record and flush it into its own WAL. With the smaller
+        // replay settings below, this becomes the first replayed memtable and
+        // is the only memtable that reaches L0 before the second simulated
+        // crash.
+        let l0_flushed_key = b"l0-flushed-replay-batch";
+        let l0_flushed_value = vec![b'a'; 1024];
+        let l0_flushed_write = source
             .put_with_options(
-                also_lost_key,
-                &also_lost_value,
+                l0_flushed_key,
+                &l0_flushed_value,
                 &PutOptions::default(),
                 &write_opts,
             )
@@ -8278,12 +8248,52 @@ mod tests {
             .await
             .unwrap();
 
-        let survivor_key = b"survivor-replay-batch";
-        let survivor_value = vec![b'd'; 128];
+        // Write several smaller records, flushing each into a separate WAL. On
+        // replay, these WALs are grouped into a later replayed memtable. The
+        // first L0 must publish only the first replayed memtable's WAL boundary,
+        // leaving these records eligible for replay after the next reopen.
+        let unflushed_replay_key_1 = b"unflushed-replay-batch-1";
+        let unflushed_replay_value_1 = vec![b'b'; 128];
         source
             .put_with_options(
-                survivor_key,
-                &survivor_value,
+                unflushed_replay_key_1,
+                &unflushed_replay_value_1,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+
+        let unflushed_replay_key_2 = b"unflushed-replay-batch-2";
+        let unflushed_replay_value_2 = vec![b'c'; 128];
+        source
+            .put_with_options(
+                unflushed_replay_key_2,
+                &unflushed_replay_value_2,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+
+        let unflushed_replay_key_3 = b"unflushed-replay-batch-3";
+        let unflushed_replay_value_3 = vec![b'd'; 128];
+        source
+            .put_with_options(
+                unflushed_replay_key_3,
+                &unflushed_replay_value_3,
                 &PutOptions::default(),
                 &write_opts,
             )
@@ -8322,11 +8332,11 @@ mod tests {
                 .unwrap();
         let first_l0_manifest = wait_for_manifest_condition(
             &mut stored_manifest,
-            |state| !state.tree.l0.is_empty() && state.last_l0_seq >= first.seqnum(),
+            |state| !state.tree.l0.is_empty() && state.last_l0_seq >= l0_flushed_write.seqnum(),
             Duration::from_secs(10),
         )
         .await;
-        assert_eq!(first_l0_manifest.last_l0_seq, first.seqnum());
+        assert_eq!(first_l0_manifest.last_l0_seq, l0_flushed_write.seqnum());
         assert_eq!(first_l0_manifest.tree.l0.len(), 1);
 
         // Second recovery: simulate crashing after only the first replayed
@@ -8339,23 +8349,24 @@ mod tests {
             .await
             .unwrap();
 
-        // The first key is present from L0. The later keys must still come from
-        // WAL replay because they were not covered by the published L0.
+        // The L0-flushed key is present from L0. The later keys must still come
+        // from WAL replay because they were not covered by the published L0
+        // boundary.
         assert_eq!(
-            recovered.get(first_key).await.unwrap(),
-            Some(Bytes::copy_from_slice(&first_value))
+            recovered.get(l0_flushed_key).await.unwrap(),
+            Some(Bytes::copy_from_slice(&l0_flushed_value))
         );
         assert_eq!(
-            recovered.get(lost_key).await.unwrap(),
-            Some(Bytes::copy_from_slice(&lost_value))
+            recovered.get(unflushed_replay_key_1).await.unwrap(),
+            Some(Bytes::copy_from_slice(&unflushed_replay_value_1))
         );
         assert_eq!(
-            recovered.get(also_lost_key).await.unwrap(),
-            Some(Bytes::copy_from_slice(&also_lost_value))
+            recovered.get(unflushed_replay_key_2).await.unwrap(),
+            Some(Bytes::copy_from_slice(&unflushed_replay_value_2))
         );
         assert_eq!(
-            recovered.get(survivor_key).await.unwrap(),
-            Some(Bytes::copy_from_slice(&survivor_value))
+            recovered.get(unflushed_replay_key_3).await.unwrap(),
+            Some(Bytes::copy_from_slice(&unflushed_replay_value_3))
         );
     }
 }
