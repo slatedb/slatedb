@@ -116,7 +116,7 @@ Definitions used below:
 | `filter_cache_hits`            | Number of filter blocks read from cache                                                       |
 | `filter_cache_misses`          | Number of filter blocks not found in cache                                                    |
 | `block_fetched_from_store`     | Number of data blocks fetched from object store                                               |
-| `filter_fetched_from_store`    | Numebr of filter blocks fetched from object store                                             |
+| `filter_fetched_from_store`    | Number of filter blocks fetched from object store                                             |
 | `index_fetched_from_store`     | Number of index blocks fetched from object store                                              |
 | `bytes_fetched_from_store`     | Number of bytes fetched from object store                                                     |
 | `merge_operands`               | Number of operands passed to `merge_batch`                                                    |
