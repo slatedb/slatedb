@@ -710,18 +710,17 @@ impl Manifest {
     /// ranges usually implies this, but the check is explicit per
     /// RFC-0024.
     ///
-    /// `prefixes` must be sorted ascending (e.g., the keys of a
-    /// `BTreeMap<Bytes, _>`); the windowed scan relies on that ordering.
     /// Returns `Err` on violation.
-    fn validate_union_prefix_antichain<'a>(
+    fn ensure_union_prefix_antichain<'a>(
         prefixes: impl IntoIterator<Item = &'a Bytes>,
     ) -> Result<(), SlateDBError> {
-        let prefixes: Vec<&Bytes> = prefixes.into_iter().collect();
+        let mut prefixes: Vec<&Bytes> = prefixes.into_iter().collect();
+        prefixes.sort();
         for window in prefixes.windows(2) {
             let (a, b) = (window[0], window[1]);
-            // a < b in sort order; if b also starts with a, then a is a
-            // proper prefix of b. Cannot be equal because BTreeMap keys
-            // are unique.
+            // After sort, a <= b. Prefixes are unique by construction
+            // (collected via BTreeMap/HashMap dedup), so a < b strictly.
+            // If b also starts with a, then a is a proper prefix of b.
             if b.starts_with(a) {
                 return Err(SlateDBError::InvalidUnionSegmentPrefixOverlap {
                     shorter: a.clone(),
@@ -844,7 +843,7 @@ impl Manifest {
             }
         }
 
-        Self::validate_union_prefix_antichain(segments_by_prefix.keys())?;
+        Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
         core.segments = segments_by_prefix
             .into_iter()
             .map(|(prefix, tree)| Segment { prefix, tree })
