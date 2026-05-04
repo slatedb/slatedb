@@ -259,7 +259,7 @@ impl ObjectStore for InstrumentedObjectStore {
     }
 }
 
-pub(crate) mod stats {
+pub mod stats {
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -276,10 +276,9 @@ pub(crate) mod stats {
         };
     }
 
-    pub(crate) const REQUEST_COUNT: &str = object_store_stat_name!("request_count");
-    pub(crate) const ERROR_COUNT: &str = object_store_stat_name!("error_count");
-    pub(crate) const REQUEST_DURATION_SECONDS: &str =
-        object_store_stat_name!("request_duration_seconds");
+    pub const REQUEST_COUNT: &str = object_store_stat_name!("request_count");
+    pub const ERROR_COUNT: &str = object_store_stat_name!("error_count");
+    pub const REQUEST_DURATION_SECONDS: &str = object_store_stat_name!("request_duration_seconds");
 
     /// Pre-registered [`RequestMetrics`] for every object store API that
     /// SlateDB calls.
