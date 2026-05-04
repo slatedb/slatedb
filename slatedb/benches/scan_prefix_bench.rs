@@ -130,6 +130,7 @@ fn scan_options() -> ScanOptions {
 async fn populate(db: &Db) {
     let write_opts = WriteOptions {
         await_durable: false,
+        seqnum: 0,
     };
     let put_opts = PutOptions::default();
     let mut next_version = [0u64; NUM_PREFIXES];
