@@ -474,17 +474,29 @@ impl ManifestWriterHandler {
                     .pop_back()
                     .expect("expected imm memtable");
                 assert!(Arc::ptr_eq(&popped, &uploaded.imm_memtable));
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
-                    .l0
-                    .push_front(SsTableView::new(
+                assert!(!uploaded.segments.is_empty());
+                let segmented = self.db.segment_extractor.is_some();
+                for segment in &uploaded.segments {
+                    let view = SsTableView::new(
                         self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
-                        uploaded.sst_handle.clone(),
-                    ));
+                        segment.sst_handle.clone(),
+                    );
+                    let core = &mut modifier.state.manifest.value.core;
+                    let tree: &mut crate::manifest::LsmTreeState = if segmented {
+                        // Extractor configured — every flush handle, including
+                        // any with empty prefix, is routed into `segments`.
+                        core.maybe_insert_tree(&segment.prefix)?
+                    } else {
+                        // No extractor — singleton compatibility-encoded
+                        // `prefix=""` segment lives in the top-level tree.
+                        debug_assert!(
+                            segment.prefix.is_empty(),
+                            "non-empty prefix produced without an extractor"
+                        );
+                        &mut core.tree
+                    };
+                    tree.l0.push_front(view);
+                }
                 modifier.state.manifest.value.core.replay_after_wal_id =
                     uploaded.imm_memtable.recent_flushed_wal_id();
 
@@ -805,13 +817,14 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
-    use crate::memtable_flusher::uploader::UploadedMemtable;
+    use crate::memtable_flusher::uploader::{SegmentHandle, UploadedMemtable};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::{IdGenerator, WatchableOnceCell};
+    use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -921,6 +934,14 @@ mod tests {
     }
 
     async fn setup_harness(path: &str, fp_registry: Arc<FailPointRegistry>) -> TestHarness {
+        setup_harness_with_extractor(path, fp_registry, None).await
+    }
+
+    async fn setup_harness_with_extractor(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    ) -> TestHarness {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = path.to_string();
         let settings = Settings::default();
@@ -964,6 +985,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
+                segment_extractor,
             )
             .await
             .unwrap(),
@@ -1433,6 +1455,134 @@ mod tests {
 
         let through_seq = expect_flushed(&started.tracker_rx).await;
         assert_eq!(through_seq, last_seq2);
+
+        started.shutdown().await;
+    }
+
+    /// Construct an UploadedMemtable whose flush output spans multiple named
+    /// segments. The same underlying SST is reused for each handle — the
+    /// apply path routes by prefix and does not validate SST contents
+    /// against the prefix.
+    async fn next_uploaded_memtable_with_segments(
+        inner: &Arc<DbInner>,
+        key: &[u8],
+        value: &[u8],
+        prefixes: &[&[u8]],
+    ) -> UploadedMemtable {
+        let imm_memtable = freeze_imm(inner, key, value);
+        let first_seq = imm_memtable.table().first_seq().unwrap();
+        let last_seq = imm_memtable.table().last_seq().unwrap();
+        let mut segments = Vec::with_capacity(prefixes.len());
+        for prefix in prefixes {
+            let sst_id =
+                SsTableId::Compacted(inner.rand.rng().gen_ulid(inner.system_clock.as_ref()));
+            let sst_handle = inner
+                .flush_imm_table(&sst_id, imm_memtable.table(), true)
+                .await
+                .unwrap();
+            segments.push(SegmentHandle {
+                prefix: Bytes::copy_from_slice(prefix),
+                sst_handle,
+            });
+        }
+        inner.oracle.advance_durable_seq(last_seq);
+        UploadedMemtable {
+            imm_memtable,
+            segments,
+            first_seq,
+            last_seq,
+        }
+    }
+
+    /// Test-only extractor used solely as a marker that
+    /// `DbInner::segment_extractor.is_some()` so the apply path routes into
+    /// `core.segments`. The flush bookkeeping under test does not actually
+    /// invoke this extractor's logic.
+    struct StubExtractor;
+    impl crate::prefix_extractor::PrefixExtractor for StubExtractor {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn prefix_len(&self, _target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+            Some(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn should_route_segment_handles_into_named_segments() {
+        let harness = setup_harness_with_extractor(
+            "/tmp/test_manifest_writer_segment_routing",
+            Arc::new(FailPointRegistry::new()),
+            Some(Arc::new(StubExtractor)),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // Two segments — "aaa" and "bbb" — published from a single flush.
+        let uploaded =
+            next_uploaded_memtable_with_segments(&inner, b"aaa-key", b"v1", &[b"aaa", b"bbb"])
+                .await;
+        let last_seq = uploaded.last_seq;
+        let aaa_id = uploaded.segments[0].sst_handle.id;
+        let bbb_id = uploaded.segments[1].sst_handle.id;
+        started.notify_uploaded(uploaded).await.unwrap();
+
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, last_seq);
+
+        // Verify the manifest now has both segments, sorted by prefix, each
+        // with one L0. The top-level tree stays empty.
+        let core = inner.state.read().state().core().clone();
+        assert!(core.tree.l0.is_empty(), "root tree should be empty");
+        assert_eq!(core.segments.len(), 2);
+        assert_eq!(core.segments[0].prefix.as_ref(), b"aaa");
+        assert_eq!(core.segments[1].prefix.as_ref(), b"bbb");
+        assert_eq!(core.segments[0].tree.l0.len(), 1);
+        assert_eq!(core.segments[1].tree.l0.len(), 1);
+        assert_eq!(core.segments[0].tree.l0[0].sst.id, aaa_id);
+        assert_eq!(core.segments[1].tree.l0[0].sst.id, bbb_id);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_append_to_existing_segment_l0() {
+        let harness = setup_harness_with_extractor(
+            "/tmp/test_manifest_writer_segment_append",
+            Arc::new(FailPointRegistry::new()),
+            Some(Arc::new(StubExtractor)),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // First flush creates segment "aaa".
+        let uploaded1 =
+            next_uploaded_memtable_with_segments(&inner, b"aaa-1", b"v1", &[b"aaa"]).await;
+        started.notify_uploaded(uploaded1).await.unwrap();
+        let _ = expect_flushed(&started.tracker_rx).await;
+
+        // Second flush adds another L0 to "aaa" alongside a new "bbb".
+        let uploaded2 =
+            next_uploaded_memtable_with_segments(&inner, b"aaa-2", b"v2", &[b"aaa", b"bbb"]).await;
+        started.notify_uploaded(uploaded2).await.unwrap();
+        let _ = expect_flushed(&started.tracker_rx).await;
+
+        let core = inner.state.read().state().core().clone();
+        assert_eq!(core.segments.len(), 2);
+        assert_eq!(core.segments[0].prefix.as_ref(), b"aaa");
+        assert_eq!(core.segments[1].prefix.as_ref(), b"bbb");
+        assert_eq!(core.segments[0].tree.l0.len(), 2);
+        assert_eq!(core.segments[1].tree.l0.len(), 1);
 
         started.shutdown().await;
     }

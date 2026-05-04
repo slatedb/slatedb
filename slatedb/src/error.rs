@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use object_store::path::Path;
 use std::ops::Bound;
 use std::time::Duration;
@@ -77,6 +78,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid compaction")]
     InvalidCompaction,
+
+    #[error("segment prefix {prefix:?} would nest with existing segment {conflict:?}")]
+    InvalidSegmentPrefix { prefix: Bytes, conflict: Bytes },
 
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
@@ -541,6 +545,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
+            SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),

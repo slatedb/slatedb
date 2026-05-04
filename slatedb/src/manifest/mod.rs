@@ -398,6 +398,53 @@ impl ManifestCore {
         std::iter::once(&self.tree).chain(self.segments.iter().map(|s| &s.tree))
     }
 
+    /// Return a mutable reference to the LSM tree of the segment with the
+    /// given `prefix`, inserting an empty entry at the sorted position if
+    /// the segment does not yet exist. Preserves the `segments` ascending-
+    /// prefix invariant and rejects any insertion that would violate the
+    /// antichain invariant against an existing neighbor.
+    pub(crate) fn maybe_insert_tree(
+        &mut self,
+        prefix: &Bytes,
+    ) -> Result<&mut LsmTreeState, crate::error::SlateDBError> {
+        match self.segments.binary_search_by(|s| s.prefix.cmp(prefix)) {
+            Ok(idx) => Ok(&mut self.segments[idx].tree),
+            Err(idx) => {
+                // Sort-order neighbors are the only candidates for nesting:
+                // by induction the existing list is already an antichain, so
+                // any nest with `prefix` must involve an element
+                // immediately less than or greater than it.
+                if let Some(succ) = self.segments.get(idx) {
+                    // succ.prefix > prefix; nested iff succ extends prefix.
+                    if succ.prefix.starts_with(prefix.as_ref()) {
+                        return Err(crate::error::SlateDBError::InvalidSegmentPrefix {
+                            prefix: prefix.clone(),
+                            conflict: succ.prefix.clone(),
+                        });
+                    }
+                }
+                if idx > 0 {
+                    let pred = &self.segments[idx - 1];
+                    // pred.prefix < prefix; nested iff prefix extends pred.
+                    if prefix.starts_with(pred.prefix.as_ref()) {
+                        return Err(crate::error::SlateDBError::InvalidSegmentPrefix {
+                            prefix: prefix.clone(),
+                            conflict: pred.prefix.clone(),
+                        });
+                    }
+                }
+                self.segments.insert(
+                    idx,
+                    Segment {
+                        prefix: prefix.clone(),
+                        tree: LsmTreeState::default(),
+                    },
+                );
+                Ok(&mut self.segments[idx].tree)
+            }
+        }
+    }
+
     pub(crate) fn init_clone_db(&self) -> ManifestCore {
         let mut clone = self.clone();
         clone.initialized = false;
@@ -1386,6 +1433,96 @@ mod tests {
             assert!(is_sorted_by_prefix(&merged_compactor_side),
                 "compactor-side merge must produce sorted output");
         });
+    }
+
+    fn make_view(seed: u64) -> SsTableView {
+        let view_id = Ulid::from_parts(seed, 0);
+        let handle = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::from_parts(seed, 1)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        );
+        SsTableView::new(view_id, handle)
+    }
+
+    #[test]
+    fn maybe_insert_tree_inserts_at_sorted_position() {
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"b")).unwrap();
+        // Predecessor.
+        core.maybe_insert_tree(&Bytes::from_static(b"a")).unwrap();
+        // Successor.
+        core.maybe_insert_tree(&Bytes::from_static(b"c")).unwrap();
+        let prefixes: Vec<&[u8]> = core.segments.iter().map(|s| s.prefix.as_ref()).collect();
+        assert_eq!(prefixes, vec![&b"a"[..], &b"b"[..], &b"c"[..]]);
+    }
+
+    #[test]
+    fn maybe_insert_tree_returns_existing_on_hit() {
+        let mut core = ManifestCore::new();
+        let prefix = Bytes::from_static(b"a");
+        core.maybe_insert_tree(&prefix)
+            .unwrap()
+            .l0
+            .push_front(make_view(1));
+        // Second call must return the same tree, with the previous mutation
+        // still in place.
+        let tree = core.maybe_insert_tree(&prefix).unwrap();
+        assert_eq!(tree.l0.len(), 1);
+        assert_eq!(core.segments.len(), 1, "no duplicate segment created");
+    }
+
+    #[test]
+    fn maybe_insert_tree_handles_empty_prefix_when_alone() {
+        let mut core = ManifestCore::new();
+        let tree = core.maybe_insert_tree(&Bytes::new()).unwrap();
+        tree.l0.push_front(make_view(1));
+        assert_eq!(core.segments.len(), 1);
+        assert!(core.segments[0].prefix.is_empty());
+        assert_eq!(core.segments[0].tree.l0.len(), 1);
+    }
+
+    #[test]
+    fn maybe_insert_tree_rejects_descendant_prefix() {
+        use crate::error::SlateDBError;
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"abc")).unwrap();
+        // "abcd" extends "abc" — nested.
+        let err = core
+            .maybe_insert_tree(&Bytes::from_static(b"abcd"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::InvalidSegmentPrefix { ref prefix, ref conflict }
+                if prefix.as_ref() == b"abcd" && conflict.as_ref() == b"abc"
+        ));
+    }
+
+    #[test]
+    fn maybe_insert_tree_rejects_ancestor_prefix() {
+        use crate::error::SlateDBError;
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"abcd"))
+            .unwrap();
+        // "abc" is a strict prefix of "abcd" — nested.
+        let err = core
+            .maybe_insert_tree(&Bytes::from_static(b"abc"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::InvalidSegmentPrefix { ref prefix, ref conflict }
+                if prefix.as_ref() == b"abc" && conflict.as_ref() == b"abcd"
+        ));
+    }
+
+    #[test]
+    fn maybe_insert_tree_rejects_empty_alongside_named() {
+        use crate::error::SlateDBError;
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"a")).unwrap();
+        // Empty prefix is a strict prefix of every non-empty prefix.
+        let err = core.maybe_insert_tree(&Bytes::new()).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidSegmentPrefix { .. }));
     }
 
     /// Simulator-based protocol check: drive a random interleaving of writer

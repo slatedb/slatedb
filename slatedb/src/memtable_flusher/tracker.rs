@@ -171,8 +171,14 @@ impl FlushTracker {
 
     async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
         debug!(
-            "l0 upload completed [first_seq={}, last_seq={}, sst_id={:?}]",
-            uploaded.first_seq, uploaded.last_seq, uploaded.sst_handle.id
+            "l0 upload completed [first_seq={}, last_seq={}, sst_ids={:?}]",
+            uploaded.first_seq,
+            uploaded.last_seq,
+            uploaded
+                .segments
+                .iter()
+                .map(|s| &s.sst_handle.id)
+                .collect::<Vec<_>>()
         );
         self.frontier
             .set_state(uploaded.last_seq, TrackedImmState::WritingManifest);
@@ -473,6 +479,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
+                None,
             )
             .await
             .unwrap(),

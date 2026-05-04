@@ -21,6 +21,7 @@ use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::{info, warn};
@@ -56,13 +57,25 @@ impl UploadJob {
     }
 }
 
+/// One uploaded SST from a memtable flush, tagged with the segment it
+/// belongs to (RFC-0024). An empty `prefix` denotes the compatibility-encoded
+/// `prefix=""` segment whose state lives in the manifest's top-level tree.
 #[derive(Clone)]
-/// Result of a successfully uploaded immutable memtable.
+pub(crate) struct SegmentHandle {
+    pub(crate) prefix: Bytes,
+    pub(crate) sst_handle: SsTableHandle,
+}
+
+#[derive(Clone)]
+/// Result of a successfully uploaded immutable memtable. A flush produces
+/// one [`SegmentHandle`] per segment touched. Without an extractor configured
+/// every flush yields a single handle with empty prefix.
 pub(crate) struct UploadedMemtable {
     /// Same immutable memtable that was uploaded.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
-    /// Handle for the uploaded SST in object storage.
-    pub(crate) sst_handle: SsTableHandle,
+    /// Per-segment uploaded SSTs, sorted ascending by `prefix`. Always
+    /// non-empty.
+    pub(crate) segments: Vec<SegmentHandle>,
     /// Lowest sequence number present in the immutable memtable.
     pub(crate) first_seq: u64,
     /// Highest sequence number present in the immutable memtable.
@@ -80,7 +93,10 @@ impl UploadedMemtable {
         assert!(first_seq <= last_seq);
         Self {
             imm_memtable,
-            sst_handle,
+            segments: vec![SegmentHandle {
+                prefix: Bytes::new(),
+                sst_handle,
+            }],
             first_seq,
             last_seq,
         }
@@ -211,7 +227,10 @@ impl UploadHandler {
         self.db.db_stats.l0_flush_bytes.increment(written_bytes);
         Ok(UploadedMemtable {
             imm_memtable: Arc::clone(&job.imm_memtable),
-            sst_handle,
+            segments: vec![SegmentHandle {
+                prefix: Bytes::new(),
+                sst_handle,
+            }],
             first_seq,
             last_seq,
         })
@@ -317,6 +336,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
+                None,
             )
             .await
             .unwrap(),
@@ -415,8 +435,15 @@ mod tests {
         assert_eq!(event.last_seq, 1);
 
         // Verify the uploaded SST contains the expected key-value entry.
-        let sst_view =
-            SsTableView::identity(db.table_store.open_sst(&event.sst_handle.id).await.unwrap());
+        assert_eq!(event.segments.len(), 1);
+        let segment = &event.segments[0];
+        assert!(segment.prefix.is_empty());
+        let sst_view = SsTableView::identity(
+            db.table_store
+                .open_sst(&segment.sst_handle.id)
+                .await
+                .unwrap(),
+        );
         let mut iter = SstIterator::new_owned_initialized(
             ..,
             sst_view,
