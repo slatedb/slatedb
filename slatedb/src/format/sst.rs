@@ -225,7 +225,7 @@ pub(crate) struct EncodedSsTableBlock {
     /// offset of the block within the SST
     pub(crate) offset: u64,
     /// uncompressed and untransformed block
-    pub(crate) block: Block,
+    pub(crate) block: Arc<Block>,
     /// compressed and transformed block
     pub(crate) encoded_bytes: Bytes,
 }
@@ -283,7 +283,7 @@ impl EncodedSsTableBlockBuilder {
         .await?;
         Ok(EncodedSsTableBlock {
             offset: self.offset,
-            block,
+            block: Arc::new(block),
             encoded_bytes: Bytes::from(compressed_and_transformed_block),
         })
     }

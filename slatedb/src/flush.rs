@@ -29,7 +29,7 @@ impl DbInner {
         &self,
         id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
-        encoded_sst: EncodedSsTable,
+        encoded_sst: &EncodedSsTable,
         write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         let handle = self
@@ -50,7 +50,7 @@ impl DbInner {
         write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         let encoded_sst = self.build_imm_sst(imm_table.clone()).await?;
-        self.upload_compacted_sst(id, imm_table, encoded_sst, write_cache)
+        self.upload_compacted_sst(id, imm_table, &encoded_sst, write_cache)
             .await
     }
 
