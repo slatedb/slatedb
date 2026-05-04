@@ -792,18 +792,17 @@ impl Manifest {
         let mut external_dbs = vec![];
         let mut core = ManifestCore::new();
         core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources)?;
-        // The same segment prefix can appear in multiple sources — e.g.
-        // hourly segmentation with sources sliced by label — since
-        // non-overlap is enforced at the SST-view level, not the segment
-        // level. Collect by prefix and concatenate the per-source `l0`
-        // and `compacted` lists as we go; the BTreeMap keeps the result
-        // sorted as required by `ManifestCore::segments`.
+        // Per RFC-0024, unsegmented data is a singleton segment with the
+        // empty prefix. Collect every source's trees into one prefix-keyed
+        // map, injecting `core.tree` under `""` when non-empty. The
+        // antichain check then naturally rejects mixing unsegmented (`""`)
+        // and segmented data, since `""` is a proper prefix of every
+        // non-empty bytestring.
         let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
 
         for (source, _) in ranges {
             let manifest = &source.manifest;
 
-            // Then, we need to add all the external dbs
             for parent_external_db in &manifest.external_dbs {
                 external_dbs.push(ExternalDb {
                     path: parent_external_db.path.clone(),
@@ -812,16 +811,14 @@ impl Manifest {
                     sst_ids: parent_external_db.sst_ids.clone(),
                 });
             }
-            // Concatenate the unsegmented tree's L0 and sorted runs
-            // across sources. Mirrors the per-segment concatenation
-            // below; SR IDs are regenerated globally afterward.
-            core.tree.l0.extend(manifest.core.tree.l0.iter().cloned());
-            core.tree
-                .compacted
-                .extend(manifest.core.tree.compacted.iter().cloned());
-            // SR IDs are regenerated globally after the loop; watermarks
-            // start as `None` because the unioned manifest is a fresh DB
-            // that begins compaction tracking from scratch.
+
+            if !manifest.core.tree.is_empty() {
+                let entry = segments_by_prefix.entry(Bytes::new()).or_default();
+                entry.l0.extend(manifest.core.tree.l0.iter().cloned());
+                entry
+                    .compacted
+                    .extend(manifest.core.tree.compacted.iter().cloned());
+            }
             for segment in &manifest.core.segments {
                 let entry = segments_by_prefix
                     .entry(segment.prefix.clone())
@@ -844,6 +841,15 @@ impl Manifest {
         }
 
         Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
+        // Route the `""` entry by extractor presence: with no extractor,
+        // the whole DB is unsegmented and `""` is the singleton segment
+        // that lives in `core.tree`. With an extractor configured, every
+        // entry — including `""` — belongs in `core.segments`.
+        if core.segment_extractor_name.is_none() {
+            if let Some(unsegmented) = segments_by_prefix.remove(&Bytes::new()) {
+                core.tree = unsegmented;
+            }
+        }
         core.segments = segments_by_prefix
             .into_iter()
             .map(|(prefix, tree)| Segment { prefix, tree })
@@ -2654,36 +2660,18 @@ mod tests {
 
     #[test]
     fn test_union_renumbers_sr_ids_globally_across_trees() {
-        // Each source has both unsegmented sorted runs and a segment with
-        // its own sorted run. After union, every SR id (across the
-        // unsegmented tree and all segments) must be unique and sequential.
-        let mut m1 = build_manifest(
-            &SimpleManifest {
-                l0: vec![],
-                sorted_runs: vec![vec![SstEntry::projected("u1", "a", "a".."m")]],
-            },
-            |_| SsTableId::Compacted(Ulid::new()),
-        );
-        let (seg1, _, _) = manifest_with_segment(
+        // Two sources, each with a single segment under the same
+        // extractor. After union, the SR ids drawn from both segments
+        // must be unique and sequential — exercises that renumber walks
+        // multiple segment trees, not just one.
+        let (m1, _, _) = manifest_with_segment(
             b"hour=11/",
             Some("hour"),
             b"a",
             BytesRange::from_ref("a".."m"),
         );
-        m1.core.segment_extractor_name = seg1.core.segment_extractor_name.clone();
-        m1.core.segments = seg1.core.segments;
-
-        let mut m2 = build_manifest(
-            &SimpleManifest {
-                l0: vec![],
-                sorted_runs: vec![vec![SstEntry::projected("u2", "m", "m"..)]],
-            },
-            |_| SsTableId::Compacted(Ulid::new()),
-        );
-        let (seg2, _, _) =
+        let (m2, _, _) =
             manifest_with_segment(b"hour=12/", Some("hour"), b"m", BytesRange::from_ref("m"..));
-        m2.core.segment_extractor_name = seg2.core.segment_extractor_name.clone();
-        m2.core.segments = seg2.core.segments;
 
         let union = Manifest::cloned_from_union(
             vec![
@@ -2708,8 +2696,8 @@ mod tests {
             .flat_map(|t| t.compacted.iter().map(|sr| sr.id))
             .collect();
         all_sr_ids.sort();
-        // 2 unsegmented + 2 segment runs = 4 total, ids 0..3.
-        assert_eq!(all_sr_ids, vec![0, 1, 2, 3]);
+        // 2 segments × 1 run each = 2 total, ids 0..1.
+        assert_eq!(all_sr_ids, vec![0, 1]);
     }
 
     #[test]
@@ -2846,6 +2834,86 @@ mod tests {
         let sr_ids: Vec<u32> = seg.tree.compacted.iter().map(|sr| sr.id).collect();
         assert_eq!(sr_ids.len(), 2);
         assert_ne!(sr_ids[0], sr_ids[1]);
+    }
+
+    #[test]
+    fn test_union_unsegmented_sources_land_in_core_tree() {
+        // Two sources with no extractor configured. The unioned manifest
+        // must keep `segment_extractor_name = None`, place the merged
+        // data in `core.tree`, and leave `core.segments` empty — not
+        // route the data into `core.segments[""]`.
+        let m1 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let m2 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"m",
+            BytesRange::from_ref("m"..),
+        );
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        assert!(union.core.segment_extractor_name.is_none());
+        assert!(union.core.segments.is_empty());
+        assert_eq!(union.core.tree.compacted.len(), 2);
+    }
+
+    #[test]
+    fn test_union_routes_explicit_empty_prefix_segment_to_segments() {
+        // A configured extractor that maps some keys to `""` produces a
+        // segment with prefix `""` in `core.segments`. Under union, that
+        // data must stay in `core.segments[""]`, NOT get extracted back
+        // into `core.tree` — `core.tree` is only used when no extractor
+        // is configured.
+        let (m1, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"a", BytesRange::from_ref("a".."m"));
+        let (m2, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"m", BytesRange::from_ref("m"..));
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        assert_eq!(union.core.segment_extractor_name.as_deref(), Some("legacy"));
+        // Data stays in segments under the empty prefix; core.tree is
+        // untouched because the unioned manifest has an extractor.
+        assert!(union.core.tree.l0.is_empty());
+        assert!(union.core.tree.compacted.is_empty());
+        assert_eq!(union.core.segments.len(), 1);
+        let seg = &union.core.segments[0];
+        assert_eq!(seg.prefix, Bytes::new());
+        assert_eq!(seg.tree.l0.len(), 2);
+        assert_eq!(seg.tree.compacted.len(), 2);
     }
 
     #[test]
@@ -3169,6 +3237,48 @@ mod tests {
         );
         assert_eq!(projected.core.segments[0].tree.l0.len(), 1);
         assert_eq!(projected.core.segments[0].tree.compacted.len(), 1);
+    }
+
+    #[test]
+    fn test_projected_preserves_empty_prefix_segment_under_extractor() {
+        // A source with `Some(extractor)` and a `""` segment must keep
+        // that segment in `core.segments` after projection — projection
+        // only filters; it never moves data into `core.tree` (which is
+        // only populated when no extractor is configured).
+        let (manifest, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"a", BytesRange::from_ref("a".."z"));
+
+        let projected = Manifest::projected(&manifest, BytesRange::from_ref("a".."m"));
+        assert_eq!(
+            projected.core.segment_extractor_name.as_deref(),
+            Some("legacy")
+        );
+        assert!(projected.core.tree.l0.is_empty());
+        assert!(projected.core.tree.compacted.is_empty());
+        assert_eq!(projected.core.segments.len(), 1);
+        assert_eq!(projected.core.segments[0].prefix, Bytes::new());
+    }
+
+    #[test]
+    fn test_cloned_preserves_empty_prefix_segment_under_extractor() {
+        // Single-source clone of a parent with `Some(extractor)` + `""`
+        // segment: the clone's core inherits the same shape. `core.tree`
+        // stays empty; `core.segments` carries the `""` entry.
+        let (parent, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"a", BytesRange::from_ref("a"..));
+
+        let clone = Manifest::cloned(
+            &parent,
+            "tmp/parent".into(),
+            Uuid::new_v4(),
+            Arc::new(DbRand::default()),
+        );
+
+        assert_eq!(clone.core.segment_extractor_name.as_deref(), Some("legacy"));
+        assert!(clone.core.tree.l0.is_empty());
+        assert!(clone.core.tree.compacted.is_empty());
+        assert_eq!(clone.core.segments.len(), 1);
+        assert_eq!(clone.core.segments[0].prefix, Bytes::new());
     }
 
     #[test]
