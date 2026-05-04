@@ -22,11 +22,12 @@ use tokio_util::sync::CancellationToken;
 
 use fail_parallel::FailPointRegistry;
 use slatedb::compactor::Compactor;
-use slatedb::{Db, DbRand, Error};
+use slatedb::{Db, DbRand, Error, MergeOperator};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::MockSystemClock;
 
 use crate::clocked_object_store::ClockedObjectStore;
+use crate::failing_object_store::{FailingObjectStore, FailingObjectStoreController};
 
 type DbFactoryFuture = Pin<Box<dyn Future<Output = Result<Arc<Db>, Error>> + Send + 'static>>;
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
@@ -49,7 +50,8 @@ struct ActorRegistration {
 ///
 /// The context exposes deterministic randomness, the shared database slot,
 /// clock-wrapped object stores, the shared shutdown token, and test
-/// infrastructure such as the failpoint registry and mock clock.
+/// infrastructure such as the failpoint registry, mock clock, and shared
+/// failure controller.
 #[derive(Clone)]
 pub struct ActorCtx {
     name: String,
@@ -77,7 +79,8 @@ impl ActorCtx {
     /// Returns the startup context shared by this harness run.
     ///
     /// This exposes the database path, object stores, clock, failpoint
-    /// registry, and startup RNG used by the database factory.
+    /// registry, failure controller, optional merge operator, and startup RNG
+    /// used by the database factory.
     pub fn startup_ctx(&self) -> &StartupCtx {
         &self.shared.startup_ctx
     }
@@ -134,7 +137,7 @@ impl ActorCtx {
     ///
     /// ## Returns
     /// - `Arc<dyn ObjectStore>`: The main object store wrapped with
-    ///   deterministic clock behavior.
+    ///   deterministic fault-injection and clock behavior.
     pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
         self.shared.startup_ctx.main_object_store()
     }
@@ -143,7 +146,7 @@ impl ActorCtx {
     ///
     /// ## Returns
     /// - `Option<Arc<dyn ObjectStore>>`: The WAL store wrapped with
-    ///   deterministic clock behavior, or `None`.
+    ///   deterministic fault-injection and clock behavior, or `None`.
     pub fn wal_object_store(&self) -> Option<Arc<dyn ObjectStore>> {
         self.shared.startup_ctx.wal_object_store()
     }
@@ -165,6 +168,19 @@ impl ActorCtx {
         self.shared.startup_ctx.fp_registry()
     }
 
+    /// Returns the merge operator configured for this harness run, if any.
+    ///
+    /// Components that open a `Db`, `DbReader`, or standalone `Compactor`
+    /// against a database that may contain merge operands should pass this
+    /// handle through to the corresponding SlateDB builder.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn MergeOperator + Send + Sync>>`: The shared
+    ///   merge-operator handle, or `None`.
+    pub fn merge_operator(&self) -> Option<Arc<dyn MergeOperator + Send + Sync>> {
+        self.shared.startup_ctx.merge_operator()
+    }
+
     /// Returns the shared shutdown token for the current harness run.
     ///
     /// Actors may call `cancel()` to request harness shutdown, or observe the
@@ -178,14 +194,16 @@ impl ActorCtx {
 /// Startup context passed to the database factory configured with
 /// [`Harness::new`].
 ///
-/// The startup context exposes clock-wrapped object stores and shared
-/// infrastructure before actors begin running.
+/// The startup context exposes fault-injecting, clock-wrapped object stores and
+/// shared infrastructure before actors begin running.
 pub struct StartupCtx {
     path: Path,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
     fp_registry: Arc<FailPointRegistry>,
+    failure_controller: FailingObjectStoreController,
+    merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
     rand: Arc<DbRand>,
 }
 
@@ -202,7 +220,7 @@ impl StartupCtx {
     ///
     /// ## Returns
     /// - `Arc<dyn ObjectStore>`: The main object store wrapped for
-    ///   deterministic clock behavior.
+    ///   deterministic fault-injection and clock behavior.
     pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.main_object_store)
     }
@@ -232,6 +250,30 @@ impl StartupCtx {
     ///   the database under test.
     pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
         Arc::clone(&self.fp_registry)
+    }
+
+    /// Returns the merge operator configured for this harness run, if any.
+    ///
+    /// Startup factories should pass this handle to `DbBuilder` when opening a
+    /// database that may write or read merge operands.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn MergeOperator + Send + Sync>>`: The shared
+    ///   merge-operator handle, or `None`.
+    pub fn merge_operator(&self) -> Option<Arc<dyn MergeOperator + Send + Sync>> {
+        self.merge_operator.clone()
+    }
+
+    /// Returns the shared failure controller for the harness object stores.
+    ///
+    /// Tests may use the controller to install, clear, or replace object-store
+    /// toxics before opening the database or while actors are running.
+    ///
+    /// ## Returns
+    /// - `FailingObjectStoreController`: A cloneable handle to the controller
+    ///   used by the harness-wrapped main and WAL object stores.
+    pub fn failure_controller(&self) -> FailingObjectStoreController {
+        self.failure_controller.clone()
     }
 
     /// Returns the startup-local deterministic random number generator.
@@ -308,8 +350,8 @@ impl Drop for ClockDriver {
 /// Builder and executor for deterministic SlateDB scenario tests.
 ///
 /// A harness owns the seeded runtime configuration, shared mock clock,
-/// failpoint registry, clock-wrapped object stores, and the shared database
-/// slot visible to all registered actors.
+/// failpoint registry, fault-injecting clock-wrapped object stores, and the
+/// shared database slot visible to all registered actors.
 pub struct Harness {
     name: String,
     rand: Arc<DbRand>,
@@ -318,6 +360,7 @@ pub struct Harness {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     clock_advance_ms: RangeInclusive<u64>,
+    merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
     startup_factory: StartupFactory,
     actors: Vec<ActorRegistration>,
 }
@@ -327,8 +370,8 @@ impl Harness {
     ///
     /// ## Arguments
     /// - `name`: Scenario name used when deriving the default database path.
-    /// - `seed`: Root seed used to derive deterministic randomness for startup
-    ///   and actor-local RNGs.
+    /// - `seed`: Root seed used to derive deterministic randomness for startup,
+    ///   fault injection, and actor-local RNGs.
     /// - `factory`: A function that receives a [`StartupCtx`] and returns the
     ///   database handle that actors should share.
     ///
@@ -348,6 +391,7 @@ impl Harness {
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
             clock_advance_ms: 1..=5,
+            merge_operator: None,
             startup_factory: Box::new(move |ctx| Box::pin(factory(ctx))),
             actors: Vec::new(),
         }
@@ -368,8 +412,8 @@ impl Harness {
     /// Overrides the root deterministic random number generator.
     ///
     /// ## Arguments
-    /// - `rand`: The RNG to use for deriving runtime, startup, and actor-local
-    ///   seeds.
+    /// - `rand`: The RNG to use for deriving runtime, startup, fault-injection,
+    ///   and actor-local seeds.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
@@ -418,7 +462,9 @@ impl Harness {
     /// Replaces the default in-memory main object store.
     ///
     /// ## Arguments
-    /// - `store`: The object store to wrap and expose as the harness main store.
+    /// - `store`: The base object store that the harness will wrap with
+    ///   deterministic fault injection and clock behavior before exposing it as
+    ///   the main store.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
@@ -430,12 +476,34 @@ impl Harness {
     /// Configures an optional WAL object store for the harness.
     ///
     /// ## Arguments
-    /// - `store`: The object store to wrap and expose as the harness WAL store.
+    /// - `store`: The base object store that the harness will wrap with
+    ///   deterministic fault injection and clock behavior before exposing it as
+    ///   the WAL store.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
     pub fn with_wal_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(store);
+        self
+    }
+
+    /// Configures the merge operator shared by DST components.
+    ///
+    /// The handle is exposed through [`StartupCtx::merge_operator`] and
+    /// [`ActorCtx::merge_operator`]. Built-in DST components that open
+    /// read-only readers or standalone compactors pass it through automatically.
+    /// Startup factories remain responsible for passing it to `DbBuilder`.
+    ///
+    /// ## Arguments
+    /// - `merge_operator`: The merge operator handle to use for this harness run.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    pub fn with_merge_operator(
+        mut self,
+        merge_operator: Arc<dyn MergeOperator + Send + Sync>,
+    ) -> Self {
+        self.merge_operator = Some(merge_operator);
         self
     }
 
@@ -478,6 +546,7 @@ impl Harness {
         let runtime_seed = self.rand.rng().next_u64();
         let startup_seed = self.rand.rng().next_u64();
         let clock_seed = self.rand.rng().next_u64();
+        let failure_seed = self.rand.rng().next_u64();
         let system_clock: Arc<dyn SystemClock> = self.system_clock.clone();
         let clock_advance_ms = self.clock_advance_ms.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -491,13 +560,13 @@ impl Harness {
                 Arc::new(DbRand::new(clock_seed)),
                 clock_advance_ms,
             );
-            let result = self.run_inner(startup_seed).await;
+            let result = self.run_inner(startup_seed, failure_seed).await;
             clock_driver.shutdown().await;
             result
         })
     }
 
-    async fn run_inner(self, startup_seed: u64) -> Result<(), Error> {
+    async fn run_inner(self, startup_seed: u64, failure_seed: u64) -> Result<(), Error> {
         let Harness {
             name,
             rand,
@@ -506,6 +575,7 @@ impl Harness {
             main_object_store,
             wal_object_store,
             clock_advance_ms: _,
+            merge_operator,
             startup_factory,
             actors,
         } = self;
@@ -519,13 +589,27 @@ impl Harness {
         let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/seed-{seed:016x}")));
         let system_clock: Arc<dyn SystemClock> = system_clock;
         let fp_registry = Arc::new(FailPointRegistry::new());
-        let main_object_store: Arc<dyn ObjectStore> = Arc::new(ClockedObjectStore::new(
+        let failure_controller =
+            FailingObjectStoreController::new(Arc::new(DbRand::new(failure_seed)));
+        let failing_main_object_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
             main_object_store.clone(),
+            failure_controller.clone(),
+            system_clock.clone(),
+        ));
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(ClockedObjectStore::new(
+            failing_main_object_store,
             system_clock.clone(),
         ));
         let wal_object_store = wal_object_store.map(|store| {
-            Arc::new(ClockedObjectStore::new(store.clone(), system_clock.clone()))
-                as Arc<dyn ObjectStore>
+            let failing_wal_object_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
+                store.clone(),
+                failure_controller.clone(),
+                system_clock.clone(),
+            ));
+            Arc::new(ClockedObjectStore::new(
+                failing_wal_object_store,
+                system_clock.clone(),
+            )) as Arc<dyn ObjectStore>
         });
 
         let startup_ctx = StartupCtx {
@@ -534,6 +618,8 @@ impl Harness {
             wal_object_store: wal_object_store.clone(),
             system_clock: Arc::clone(&system_clock),
             fp_registry: Arc::clone(&fp_registry),
+            failure_controller,
+            merge_operator,
             rand: Arc::new(DbRand::new(startup_seed)),
         };
 
@@ -600,6 +686,10 @@ impl Harness {
                 }
             }
         }
+
+        let failure_controller = shared.startup_ctx.failure_controller();
+        failure_controller.clear_toxics();
+        failure_controller.clear_http_failures();
 
         let db_result = shared.db_slot.write().close().await;
         let compactor_result = match shared.compactor_slot.write().take() {

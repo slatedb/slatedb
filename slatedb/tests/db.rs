@@ -58,6 +58,7 @@ async fn test_replay_wal_then_write() {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -90,6 +91,7 @@ async fn test_replay_wal_then_write() {
         &PutOptions::default(),
         &WriteOptions {
             await_durable: false,
+            ..Default::default()
         },
     )
     .await
@@ -243,6 +245,7 @@ async fn test_concurrent_writers_and_readers() {
                         &PutOptions::default(),
                         &WriteOptions {
                             await_durable: false,
+                            ..Default::default()
                         },
                     )
                     .await

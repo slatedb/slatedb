@@ -1290,6 +1290,7 @@ mod tests {
         };
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         // Two grandparents, each with a single-key SST. Disjoint ranges are required
