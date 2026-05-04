@@ -19,7 +19,7 @@ use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
-use crate::utils::SafeSender;
+use crate::utils::{IdGenerator, SafeSender};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -31,29 +31,25 @@ use tokio::runtime::Handle;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
 
-/// One immutable-memtable upload request submitted to the uploader.
+/// One immutable-memtable upload request submitted to the uploader. The
+/// worker allocates SST ids for each segment internally — there's no upstream
+/// pre-allocation, since the number of output SSTs is only known after the
+/// memtable is iterated through the segment extractor.
 pub(crate) struct UploadJob {
-    /// Immutable memtable to build into an SST.
+    /// Immutable memtable to build into one or more SSTs.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
-    /// Preallocated SST id to use for the uploaded table.
-    pub(crate) sst_id: SsTableId,
 }
 
 impl std::fmt::Debug for UploadJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UploadJob")
-            .field("sst_id", &self.sst_id)
-            .finish()
+        f.debug_struct("UploadJob").finish()
     }
 }
 
 impl UploadJob {
     /// Creates a new upload job.
-    pub(crate) fn new(imm_memtable: Arc<ImmutableMemtable>, sst_id: SsTableId) -> Self {
-        Self {
-            imm_memtable,
-            sst_id,
-        }
+    pub(crate) fn new(imm_memtable: Arc<ImmutableMemtable>) -> Self {
+        Self { imm_memtable }
     }
 }
 
@@ -180,35 +176,10 @@ impl UploadHandler {
     }
 
     async fn upload_with_retry(&self, job: &UploadJob) -> Result<UploadedMemtable, SlateDBError> {
-        loop {
-            let encoded_sst = self.db.build_imm_sst(job.imm_memtable.table()).await?;
-            match self.try_upload_once(job, encoded_sst).await {
-                Ok(success) => return Ok(success),
-                Err(e) => {
-                    // When the WAL is enabled and the database is shutting
-                    // down, give up immediately. The data is already durable
-                    // in the WAL and will be recovered on the next startup.
-                    if self.db.wal_enabled && self.db.check_closed().is_err() {
-                        info!(
-                            "skipping l0 upload retry during shutdown [sst_id={:?}, error={:?}]",
-                            job.sst_id, e
-                        );
-                        return Err(e);
-                    }
-                    self.db.system_clock.sleep(self.retry_backoff).await;
-                }
-            }
-        }
-    }
-
-    async fn try_upload_once(
-        &self,
-        job: &UploadJob,
-        encoded_sst: EncodedSsTable,
-    ) -> Result<UploadedMemtable, SlateDBError> {
-        // TODO: consider changing the low-level upload path so failed uploads
-        // return ownership of the built SST. That would let the worker build
-        // once and retry uploads without rebuilding.
+        // Build once, retry only the upload. `write_sst` takes
+        // `&EncodedSsTable`, so the encoded SSTs stay alive for retries —
+        // no need to rebuild from the memtable on transient upload errors.
+        let segments_built = self.db.build_imm_ssts(job.imm_memtable.table()).await?;
         let first_seq = job
             .imm_memtable
             .table()
@@ -219,21 +190,68 @@ impl UploadHandler {
             .table()
             .last_seq()
             .expect("flush of l0 with no entries");
-        let written_bytes = encoded_sst.remaining_len() as u64;
-        let sst_handle = self
-            .db
-            .upload_compacted_sst(&job.sst_id, job.imm_memtable.table(), encoded_sst, true)
+
+        // Upload all segment SSTs concurrently. `try_join_all` short-circuits
+        // on the first fatal error and drops the remaining futures, giving
+        // us the abort-on-failure semantics from RFC-0024 Q2. SSTs from
+        // sibling uploads that completed before (or raced to land after)
+        // the abort are left for the garbage collector to reclaim — the
+        // worker does not allocate ids upstream, so those orphans cannot
+        // be enumerated here for explicit cleanup.
+        let segments =
+            futures::future::try_join_all(segments_built.iter().map(|(prefix, encoded)| {
+                self.upload_one_segment(&job.imm_memtable, prefix, encoded)
+            }))
             .await?;
-        self.db.db_stats.l0_flush_bytes.increment(written_bytes);
+
         Ok(UploadedMemtable {
             imm_memtable: Arc::clone(&job.imm_memtable),
-            segments: vec![SegmentHandle {
-                prefix: Bytes::new(),
-                sst_handle,
-            }],
+            segments,
             first_seq,
             last_seq,
         })
+    }
+
+    /// Upload a single segment SST with retry. Each retry reuses the
+    /// already-built `encoded` so the upload loop never rebuilds from the
+    /// memtable.
+    async fn upload_one_segment(
+        &self,
+        imm_memtable: &Arc<ImmutableMemtable>,
+        prefix: &Bytes,
+        encoded: &EncodedSsTable,
+    ) -> Result<SegmentHandle, SlateDBError> {
+        let sst_id =
+            SsTableId::Compacted(self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()));
+        let written_bytes = encoded.remaining_len() as u64;
+        loop {
+            match self
+                .db
+                .upload_compacted_sst(&sst_id, imm_memtable.table(), encoded, true)
+                .await
+            {
+                Ok(sst_handle) => {
+                    self.db.db_stats.l0_flush_bytes.increment(written_bytes);
+                    return Ok(SegmentHandle {
+                        prefix: prefix.clone(),
+                        sst_handle,
+                    });
+                }
+                Err(e) => {
+                    // When the WAL is enabled and the database is shutting
+                    // down, give up immediately. The data is already durable
+                    // in the WAL and will be recovered on the next startup.
+                    if self.db.wal_enabled && self.db.check_closed().is_err() {
+                        info!(
+                            "skipping l0 upload retry during shutdown [sst_id={:?}, error={:?}]",
+                            sst_id, e
+                        );
+                        return Err(e);
+                    }
+                    self.db.system_clock.sleep(self.retry_backoff).await;
+                }
+            }
+        }
     }
 }
 
@@ -268,7 +286,7 @@ mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
-    use crate::db_state::{SsTableId, SsTableView};
+    use crate::db_state::SsTableView;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
@@ -280,7 +298,6 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::utils::IdGenerator;
     use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -295,6 +312,14 @@ mod tests {
     use tokio::time::timeout;
 
     async fn setup_db(path: &str, fp_registry: Arc<FailPointRegistry>) -> Arc<DbInner> {
+        setup_db_with_extractor(path, fp_registry, None).await
+    }
+
+    async fn setup_db_with_extractor(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    ) -> Arc<DbInner> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
@@ -336,7 +361,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
-                None,
+                segment_extractor,
             )
             .await
             .unwrap(),
@@ -357,8 +382,7 @@ mod tests {
 
     fn next_upload_job(db: &DbInner, key: &[u8], value: &[u8], seq: u64) -> UploadJob {
         let imm_memtable = freeze_imm(db, key, value, seq);
-        let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
-        UploadJob::new(imm_memtable, sst_id)
+        UploadJob::new(imm_memtable)
     }
 
     struct TestUploader {
@@ -521,8 +545,7 @@ mod tests {
             .front()
             .cloned()
             .unwrap();
-        let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
-        let job = UploadJob::new(imm_memtable, sst_id);
+        let job = UploadJob::new(imm_memtable);
 
         let test = start_test_uploader(&db);
         test.submit(job).unwrap();
@@ -595,8 +618,7 @@ mod tests {
             .front()
             .cloned()
             .unwrap();
-        let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
-        let bad_job = UploadJob::new(imm_memtable, sst_id);
+        let bad_job = UploadJob::new(imm_memtable);
 
         let test = start_test_uploader(&db);
         test.submit(bad_job).unwrap();
@@ -645,5 +667,91 @@ mod tests {
             .await
             .expect("uploader should stop retrying on shutdown");
         assert!(result.is_err());
+    }
+
+    /// Test extractor that always extracts a fixed 3-byte prefix.
+    #[derive(Debug)]
+    struct FixedThreeBytePrefixExtractor;
+    impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor {
+        fn name(&self) -> &str {
+            "fixed-3"
+        }
+        fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+            let len = match target {
+                crate::prefix_extractor::PrefixTarget::Point(b)
+                | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.len(),
+            };
+            if len >= 3 {
+                Some(3)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn should_emit_one_segment_handle_per_prefix() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let db = setup_db_with_extractor(
+            "/tmp/test_parallel_l0_flush_uploader_multi_segment",
+            fp_registry,
+            Some(Arc::new(FixedThreeBytePrefixExtractor)),
+        )
+        .await;
+        // Stage three segments worth of entries in a single memtable, then
+        // freeze it. The uploader should emit a single UploadComplete with
+        // three SegmentHandles, sorted by prefix.
+        {
+            let mut guard = db.state.write();
+            for (key, value, seq) in [
+                (&b"aaa-1"[..], b"v1", 1),
+                (&b"aaa-2"[..], b"v2", 2),
+                (&b"bbb-1"[..], b"v3", 3),
+                (&b"ccc-1"[..], b"v4", 4),
+            ] {
+                guard.memtable().put(RowEntry::new_value(key, value, seq));
+            }
+            guard.freeze_memtable(0);
+        }
+        let imm_memtable = db
+            .state
+            .read()
+            .state()
+            .imm_memtable
+            .front()
+            .cloned()
+            .unwrap();
+        let job = UploadJob::new(imm_memtable);
+
+        let test = start_test_uploader(&db);
+        test.submit(job).unwrap();
+
+        let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let TrackerMessage::UploadComplete(uploaded) = msg else {
+            panic!("expected UploadComplete");
+        };
+        assert_eq!(uploaded.first_seq, 1);
+        assert_eq!(uploaded.last_seq, 4);
+        let prefixes: Vec<&[u8]> = uploaded
+            .segments
+            .iter()
+            .map(|s| s.prefix.as_ref())
+            .collect();
+        assert_eq!(prefixes, vec![&b"aaa"[..], &b"bbb"[..], &b"ccc"[..]]);
+
+        // Each SST exists in object storage with a unique id.
+        let mut ids = std::collections::HashSet::new();
+        for segment in &uploaded.segments {
+            db.table_store
+                .open_sst(&segment.sst_handle.id)
+                .await
+                .expect("uploaded SST should be readable");
+            assert!(ids.insert(segment.sst_handle.id));
+        }
+
+        test.shutdown().await;
     }
 }

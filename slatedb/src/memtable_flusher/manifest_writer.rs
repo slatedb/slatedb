@@ -474,7 +474,11 @@ impl ManifestWriterHandler {
                     .pop_back()
                     .expect("expected imm memtable");
                 assert!(Arc::ptr_eq(&popped, &uploaded.imm_memtable));
-                assert!(!uploaded.segments.is_empty());
+                // `segments` may legitimately be empty when an extractor
+                // is configured and retention pruned every entry: no
+                // builders open → no SSTs uploaded. We still apply the
+                // memtable's seq/tick bookkeeping below so progress
+                // advances.
                 let segmented = self.db.segment_extractor.is_some();
                 for segment in &uploaded.segments {
                     let view = SsTableView::new(

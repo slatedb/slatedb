@@ -386,7 +386,7 @@ impl WalBufferManager {
 
         let encoded_sst = sst_builder.build().await?;
         self.table_store
-            .write_sst(&SsTableId::Wal(wal_id), encoded_sst, false)
+            .write_sst(&SsTableId::Wal(wal_id), &encoded_sst, false)
             .await?;
 
         self.mono_clock.fetch_max_last_durable_tick(last_tick);
