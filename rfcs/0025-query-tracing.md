@@ -162,7 +162,7 @@ shows per-SST timing in a waterfall. Users who want aggregate timing
 without a subscriber can use the duration counters above
 (`trace.block_read_duration()`, etc.).
 
-Defintion of the fields:
+Definition of the fields:
 - `key`: Key of the query
 - `value`: Found value of the `key`
 - `sst_id`: ID of the SST
