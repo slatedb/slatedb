@@ -731,6 +731,111 @@ impl Manifest {
         Ok(())
     }
 
+    /// Build the per-prefix LSM-state accumulator for a union. Each
+    /// source contributes its `core.segments` keyed by segment prefix,
+    /// plus its `core.tree` keyed under `""` when non-empty (RFC-0024:
+    /// unsegmented data is the singleton segment with empty prefix).
+    /// Watermarks are intentionally not carried over — the unioned
+    /// manifest is a fresh DB that begins compaction tracking from
+    /// scratch.
+    fn build_segments_by_prefix(sources: &[&CloneSource]) -> BTreeMap<Bytes, LsmTreeState> {
+        let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
+        for source in sources {
+            let manifest = &source.manifest;
+            if !manifest.core.tree.is_empty() {
+                let entry = segments_by_prefix.entry(Bytes::new()).or_default();
+                entry.l0.extend(manifest.core.tree.l0.iter().cloned());
+                entry
+                    .compacted
+                    .extend(manifest.core.tree.compacted.iter().cloned());
+            }
+            for segment in &manifest.core.segments {
+                let entry = segments_by_prefix
+                    .entry(segment.prefix.clone())
+                    .or_default();
+                entry.l0.extend(segment.tree.l0.iter().cloned());
+                entry
+                    .compacted
+                    .extend(segment.tree.compacted.iter().cloned());
+            }
+        }
+        segments_by_prefix
+    }
+
+    /// Build the union's `external_dbs` list. Forwards every source's
+    /// inherited `external_dbs` and adds one entry per source that owns
+    /// SSTs directly. `final_checkpoint_id` is left as `None`; it is
+    /// regenerated after the post-loop deduplication.
+    fn build_external_dbs(sources: &[&CloneSource]) -> Vec<ExternalDb> {
+        let mut external_dbs = vec![];
+        for source in sources {
+            let manifest = &source.manifest;
+            for parent_external_db in &manifest.external_dbs {
+                external_dbs.push(ExternalDb {
+                    path: parent_external_db.path.clone(),
+                    source_checkpoint_id: parent_external_db.source_checkpoint_id,
+                    final_checkpoint_id: None,
+                    sst_ids: parent_external_db.sst_ids.clone(),
+                });
+            }
+            let owned_ssts = manifest.owned_ssts();
+            if !owned_ssts.is_empty() {
+                external_dbs.push(ExternalDb {
+                    path: source.path.clone().into(),
+                    source_checkpoint_id: source.checkpoint.id,
+                    final_checkpoint_id: None,
+                    sst_ids: owned_ssts,
+                });
+            }
+        }
+        external_dbs
+    }
+
+    /// Validate the per-prefix LSM state collected from union sources and
+    /// write it into `core`. Performs antichain validation, routes the
+    /// `""` entry by extractor presence (unsegmented → `core.tree`,
+    /// segmented → `core.segments`), rejects sources with segments but
+    /// no configured extractor, and drops drain-marker (empty) entries
+    /// before writing `core.segments`.
+    fn finalize_union_lsm_state(
+        core: &mut ManifestCore,
+        mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState>,
+    ) -> Result<(), SlateDBError> {
+        Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
+        // Route the `""` entry by extractor presence: with no extractor,
+        // the whole DB is unsegmented and `""` is the singleton segment
+        // that lives in `core.tree`. With an extractor configured, every
+        // entry — including `""` — belongs in `core.segments`.
+        if core.segment_extractor_name.is_none() {
+            // The `""` entry is absent only when every source had no SSTs
+            // (we're cloning from empty sources). Leave `core.tree` empty
+            // in that case.
+            if let Some(unsegmented) = segments_by_prefix.remove(&Bytes::new()) {
+                core.tree = unsegmented;
+            }
+            // After removing `""`, any remaining keys came from a source
+            // whose manifest had segments despite no extractor being
+            // configured — a structurally invalid input.
+            if !segments_by_prefix.is_empty() {
+                return Err(SlateDBError::InvalidUnionSegmentsWithoutExtractor {
+                    prefixes: segments_by_prefix.keys().cloned().collect(),
+                });
+            }
+        } else {
+            // Drop empty entries: a source-side drain-marker segment (no
+            // L0, no compacted, watermark set) contributes nothing during
+            // the source loop, leaving a truly-empty `LsmTreeState`. Such
+            // trees must not appear in the manifest (see
+            // `LsmTreeState::is_empty`).
+            core.segments = segments_by_prefix
+                .into_iter()
+                .filter(|(_, tree)| !tree.is_empty())
+                .map(|(prefix, tree)| Segment { prefix, tree })
+                .collect();
+        }
+        Ok(())
+    }
+
     /// Reassign every sorted run in `core` a fresh sequential id. The
     /// union concatenates per-source `compacted` lists across the
     /// unsegmented tree and every segment, so ids must be regenerated
@@ -788,90 +893,19 @@ impl Manifest {
             previous_range = Some(range);
         }
 
-        // Now we can zip the manifests together
-        let mut external_dbs = vec![];
+        let ordered_sources: Vec<&CloneSource> = ranges.iter().map(|(s, _)| *s).collect();
         let mut core = ManifestCore::new();
         core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources)?;
-        // Per RFC-0024, unsegmented data is a singleton segment with the
-        // empty prefix. Collect every source's trees into one prefix-keyed
-        // map, injecting `core.tree` under `""` when non-empty. The
-        // antichain check then naturally rejects mixing unsegmented (`""`)
-        // and segmented data, since `""` is a proper prefix of every
-        // non-empty bytestring.
-        let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
 
-        for (source, _) in ranges {
-            let manifest = &source.manifest;
-
-            for parent_external_db in &manifest.external_dbs {
-                external_dbs.push(ExternalDb {
-                    path: parent_external_db.path.clone(),
-                    source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                    final_checkpoint_id: None, // regenerated after deduplication
-                    sst_ids: parent_external_db.sst_ids.clone(),
-                });
-            }
-
-            if !manifest.core.tree.is_empty() {
-                let entry = segments_by_prefix.entry(Bytes::new()).or_default();
-                entry.l0.extend(manifest.core.tree.l0.iter().cloned());
-                entry
-                    .compacted
-                    .extend(manifest.core.tree.compacted.iter().cloned());
-            }
-            for segment in &manifest.core.segments {
-                let entry = segments_by_prefix
-                    .entry(segment.prefix.clone())
-                    .or_default();
-                entry.l0.extend(segment.tree.l0.iter().cloned());
-                entry
-                    .compacted
-                    .extend(segment.tree.compacted.iter().cloned());
-            }
-
-            let owned_ssts = manifest.owned_ssts();
-            if !owned_ssts.is_empty() {
-                external_dbs.push(ExternalDb {
-                    path: source.path.clone().into(),
-                    source_checkpoint_id: source.checkpoint.id,
-                    final_checkpoint_id: None, // regenerated after deduplication
-                    sst_ids: owned_ssts,
-                });
-            }
-        }
-
-        Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
-        // Route the `""` entry by extractor presence: with no extractor,
-        // the whole DB is unsegmented and `""` is the singleton segment
-        // that lives in `core.tree`. With an extractor configured, every
-        // entry — including `""` — belongs in `core.segments`.
-        if core.segment_extractor_name.is_none() {
-            // The `""` entry is absent only when every source had no SSTs
-            // (we're cloning from empty sources). Leave `core.tree` empty
-            // in that case.
-            if let Some(unsegmented) = segments_by_prefix.remove(&Bytes::new()) {
-                core.tree = unsegmented;
-            }
-            // After removing `""`, any remaining keys came from a source
-            // whose manifest had segments despite no extractor being
-            // configured — a structurally invalid input.
-            if !segments_by_prefix.is_empty() {
-                return Err(SlateDBError::InvalidUnionSegmentsWithoutExtractor {
-                    prefixes: segments_by_prefix.keys().cloned().collect(),
-                });
-            }
-        }
-        core.segments = segments_by_prefix
-            .into_iter()
-            .map(|(prefix, tree)| Segment { prefix, tree })
-            .collect();
-
+        let segments_by_prefix = Self::build_segments_by_prefix(&ordered_sources);
+        Self::finalize_union_lsm_state(&mut core, segments_by_prefix)?;
         Self::renumber_union_sorted_runs(&mut core);
 
         for source in &sources {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
         }
-        let external_dbs_merged = external_dbs
+
+        let external_dbs_merged = Self::build_external_dbs(&ordered_sources)
             .into_iter()
             .fold(
                 HashMap::new(),
@@ -2738,6 +2772,68 @@ mod tests {
             .collect();
         assert!(owned_external.contains(&l0_sst));
         assert!(owned_external.contains(&sr_sst));
+    }
+
+    #[test]
+    fn test_union_drops_drain_marker_segments() {
+        // A source whose `core.segments` mixes a data-bearing segment
+        // with a drain-marker segment (no L0, no compacted, watermark
+        // set). The drain marker carries no meaning in the resulting
+        // clone and must not produce an empty entry in `core.segments`
+        // (which would violate `LsmTreeState::is_empty`'s invariant).
+        let (mut m1, _, _) = manifest_with_segment(
+            b"hour=11/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        // Add a drain-marker segment alongside the data-bearing one.
+        m1.core.segments.push(Segment {
+            prefix: Bytes::from_static(b"hour=99/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(Ulid::new()),
+                last_compacted_l0_sst_id: Some(Ulid::new()),
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        });
+        // `manifest.core.segments` invariant: sorted by prefix.
+        m1.core.segments.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+        debug_assert!(m1.core.segments[1].tree.is_drained());
+
+        let (m2, _, _) =
+            manifest_with_segment(b"hour=12/", Some("hour"), b"m", BytesRange::from_ref("m"..));
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        // Only the two data-bearing segments survive; the drain marker
+        // is dropped.
+        assert_eq!(union.core.segments.len(), 2);
+        let prefixes: Vec<&Bytes> = union.core.segments.iter().map(|s| &s.prefix).collect();
+        assert_eq!(
+            prefixes,
+            vec![
+                &Bytes::from_static(b"hour=11/"),
+                &Bytes::from_static(b"hour=12/"),
+            ]
+        );
+        // No surviving segment is empty.
+        assert!(union.core.segments.iter().all(|s| !s.tree.is_empty()));
     }
 
     #[test]
