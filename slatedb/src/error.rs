@@ -178,6 +178,20 @@ pub(crate) enum SlateDBError {
     #[error("Source manifest set must not be empty")]
     InvalidUnionSetEmpty(),
 
+    #[error("clone sources disagree on segment extractor. extractors=`{extractors:?}`")]
+    InvalidUnionExtractorMismatch { extractors: Vec<Option<String>> },
+
+    #[error(
+        "segment prefixes are not an antichain. `{shorter:?}` is a proper prefix of `{longer:?}`"
+    )]
+    InvalidUnionSegmentPrefixOverlap {
+        shorter: bytes::Bytes,
+        longer: bytes::Bytes,
+    },
+
+    #[error("clone sources have overlapping key ranges. ranges=`{ranges:?}`")]
+    InvalidUnionOverlappingRanges { ranges: Vec<BytesRange> },
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -581,6 +595,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
             SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
+            SlateDBError::InvalidUnionExtractorMismatch { .. } => Error::invalid(msg),
+            SlateDBError::InvalidUnionSegmentPrefixOverlap { .. } => Error::invalid(msg),
+            SlateDBError::InvalidUnionOverlappingRanges { .. } => Error::invalid(msg),
         }
     }
 }

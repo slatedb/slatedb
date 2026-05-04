@@ -135,7 +135,7 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                     ),
                     [..] => {
                         validate_no_wal(&sources)?;
-                        Manifest::cloned_from_union(sources, rand)
+                        Manifest::cloned_from_union(sources, rand)?
                     }
                 };
 

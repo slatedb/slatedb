@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::clone::CloneSource;
+use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
@@ -680,20 +681,25 @@ impl Manifest {
     /// extractor prefix from another source, and after the union a read
     /// for that key would route through the extractor to a segment that
     /// does not contain it.
-    fn ensure_consistent_segment_extractor(sources: &[CloneSource]) -> Option<String> {
+    fn ensure_consistent_segment_extractor(
+        sources: &[CloneSource],
+    ) -> Result<Option<String>, SlateDBError> {
         let mut iter = sources.iter();
-        let first = iter.next()?;
+        let Some(first) = iter.next() else {
+            return Ok(None);
+        };
         let agreed = first.manifest.core.segment_extractor_name.as_ref();
         for source in iter {
             let cur = source.manifest.core.segment_extractor_name.as_ref();
             if agreed != cur {
-                unreachable!(
-                    "clone sources disagree on segment extractor: {:?} vs {:?}",
-                    agreed, cur,
-                );
+                let extractors = sources
+                    .iter()
+                    .map(|s| s.manifest.core.segment_extractor_name.clone())
+                    .collect();
+                return Err(SlateDBError::InvalidUnionExtractorMismatch { extractors });
             }
         }
-        agreed.cloned()
+        Ok(agreed.cloned())
     }
 
     /// Verify the antichain invariant on segment prefixes for a union: no
@@ -706,20 +712,24 @@ impl Manifest {
     ///
     /// `prefixes` must be sorted ascending (e.g., the keys of a
     /// `BTreeMap<Bytes, _>`); the windowed scan relies on that ordering.
-    /// Panics on violation.
-    fn assert_union_prefix_antichain<'a>(prefixes: impl IntoIterator<Item = &'a Bytes>) {
+    /// Returns `Err` on violation.
+    fn validate_union_prefix_antichain<'a>(
+        prefixes: impl IntoIterator<Item = &'a Bytes>,
+    ) -> Result<(), SlateDBError> {
         let prefixes: Vec<&Bytes> = prefixes.into_iter().collect();
         for window in prefixes.windows(2) {
-            let (a, b) = (window[0].as_ref(), window[1].as_ref());
+            let (a, b) = (window[0], window[1]);
             // a < b in sort order; if b also starts with a, then a is a
-            // proper prefix of b.
+            // proper prefix of b. Cannot be equal because BTreeMap keys
+            // are unique.
             if b.starts_with(a) {
-                unreachable!(
-                    "segment prefixes are not an antichain: {:?} is a proper prefix of {:?}",
-                    a, b
-                );
+                return Err(SlateDBError::InvalidUnionSegmentPrefixOverlap {
+                    shorter: a.clone(),
+                    longer: b.clone(),
+                });
             }
         }
+        Ok(())
     }
 
     /// Reassign every sorted run in `core` a fresh sequential id. The
@@ -750,7 +760,10 @@ impl Manifest {
         }
     }
 
-    pub(crate) fn cloned_from_union(sources: Vec<CloneSource>, rand: Arc<DbRand>) -> Manifest {
+    pub(crate) fn cloned_from_union(
+        sources: Vec<CloneSource>,
+        rand: Arc<DbRand>,
+    ) -> Result<Manifest, SlateDBError> {
         let mut ranges = vec![];
         for source in &sources {
             let range = source.manifest.range();
@@ -762,12 +775,15 @@ impl Manifest {
         }
         ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
 
-        // Ensure manifests are non-overlapping
+        // Ensure source key ranges are non-overlapping. Surfaces as a typed
+        // error since the source set is user-supplied.
         let mut previous_range = None;
         for (_, range) in ranges.iter() {
             if let Some(previous_range) = previous_range {
                 if range.intersect(previous_range).is_some() {
-                    unreachable!("overlapping ranges found");
+                    return Err(SlateDBError::InvalidUnionOverlappingRanges {
+                        ranges: ranges.iter().map(|(_, r)| (*r).clone()).collect(),
+                    });
                 }
             }
             previous_range = Some(range);
@@ -776,7 +792,7 @@ impl Manifest {
         // Now we can zip the manifests together
         let mut external_dbs = vec![];
         let mut core = ManifestCore::new();
-        core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources);
+        core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources)?;
         // The same segment prefix can appear in multiple sources — e.g.
         // hourly segmentation with sources sliced by label — since
         // non-overlap is enforced at the SST-view level, not the segment
@@ -828,7 +844,7 @@ impl Manifest {
             }
         }
 
-        Self::assert_union_prefix_antichain(segments_by_prefix.keys());
+        Self::validate_union_prefix_antichain(segments_by_prefix.keys())?;
         core.segments = segments_by_prefix
             .into_iter()
             .map(|(prefix, tree)| Segment { prefix, tree })
@@ -859,12 +875,12 @@ impl Manifest {
             })
             .collect();
 
-        Self {
+        Ok(Self {
             external_dbs: external_dbs_merged,
             core,
             writer_epoch: 0,
             compactor_epoch: 0,
-        }
+        })
     }
 
     fn range(&self) -> Option<BytesRange> {
@@ -953,6 +969,7 @@ mod tests {
     use crate::clone::CloneSource;
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
+    use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::{LsmTreeState, ManifestCore, Segment};
     use crate::rand::DbRand;
@@ -1318,7 +1335,7 @@ mod tests {
         let expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
-        let union = Manifest::cloned_from_union(sources, rand);
+        let union = Manifest::cloned_from_union(sources, rand).unwrap();
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
@@ -1909,7 +1926,8 @@ mod tests {
                 },
             ],
             rand,
-        );
+        )
+        .unwrap();
 
         // After union, we should have 5 SRs with IDs 4, 3, 2, 1, 0
         // (renumber assigns descending ids in walk order so that within
@@ -1964,7 +1982,8 @@ mod tests {
                 },
             ],
             Arc::new(DbRand::default()),
-        );
+        )
+        .unwrap();
 
         assert_eq!(union.core.last_l0_seq, 200);
     }
@@ -2021,7 +2040,8 @@ mod tests {
                 },
             ],
             rand,
-        );
+        )
+        .unwrap();
 
         // db1 (owned SSTs only), grandparent (carried over), db2
         assert_eq!(union.external_dbs.len(), 3);
@@ -2472,7 +2492,7 @@ mod tests {
             },
         ];
 
-        let result = Manifest::cloned_from_union(sources, rand);
+        let result = Manifest::cloned_from_union(sources, rand).unwrap();
 
         let shared_entries: Vec<_> = result
             .external_dbs
@@ -2569,7 +2589,8 @@ mod tests {
                 },
             ],
             rand,
-        );
+        )
+        .unwrap();
 
         assert_eq!(union.core.segment_extractor_name.as_deref(), Some("hour"));
         let prefixes: Vec<&Bytes> = union.core.segments.iter().map(|s| &s.prefix).collect();
@@ -2679,7 +2700,8 @@ mod tests {
                 },
             ],
             Arc::new(DbRand::default()),
-        );
+        )
+        .unwrap();
 
         let mut all_sr_ids: Vec<u32> = union
             .core
@@ -2707,7 +2729,8 @@ mod tests {
                 checkpoint: new_checkpoint(Uuid::new_v4()),
             }],
             Arc::new(DbRand::default()),
-        );
+        )
+        .unwrap();
 
         let owned_external: HashSet<SsTableId> = union
             .external_dbs
@@ -2808,7 +2831,8 @@ mod tests {
                 },
             ],
             Arc::new(DbRand::default()),
-        );
+        )
+        .unwrap();
 
         // One segment under hour=12/, with both sources' L0 and SRs
         // concatenated.
@@ -2826,8 +2850,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "segment prefixes are not an antichain")]
-    fn test_union_unreachable_on_non_antichain_prefixes() {
+    fn test_union_returns_error_on_non_antichain_prefixes() {
         // Two sources whose extractor names match but whose persisted
         // segment prefixes are in a proper-prefix relationship. Even
         // though the SST-view ranges happen to be non-overlapping, the
@@ -2883,7 +2906,7 @@ mod tests {
             Manifest::initial(core)
         };
 
-        let _ = Manifest::cloned_from_union(
+        let result = Manifest::cloned_from_union(
             vec![
                 CloneSource {
                     manifest: m1,
@@ -2898,11 +2921,15 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidUnionSegmentPrefixOverlap { ref shorter, ref longer })
+                if shorter.as_ref() == b"foo/" && longer.as_ref() == b"foo/bar/"
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "clone sources disagree on segment extractor")]
-    fn test_union_unreachable_on_extractor_mismatch() {
+    fn test_union_returns_error_on_extractor_mismatch() {
         let (m1, _, _) = manifest_with_segment(
             b"hour=11/",
             Some("hour"),
@@ -2912,7 +2939,7 @@ mod tests {
         let (m2, _, _) =
             manifest_with_segment(b"day=1/", Some("day"), b"m", BytesRange::from_ref("m"..));
 
-        let _ = Manifest::cloned_from_union(
+        let result = Manifest::cloned_from_union(
             vec![
                 CloneSource {
                     manifest: m1,
@@ -2927,11 +2954,14 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidUnionExtractorMismatch { .. })
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "clone sources disagree on segment extractor")]
-    fn test_union_unreachable_on_mixed_extractor_presence() {
+    fn test_union_returns_error_on_mixed_extractor_presence() {
         // One source has an extractor configured; the other doesn't.
         // Even though SST-view ranges are disjoint, unsegmented data in
         // the no-extractor source may match an extractor prefix from the
@@ -2948,7 +2978,7 @@ mod tests {
             BytesRange::from_ref("m"..),
         );
 
-        let _ = Manifest::cloned_from_union(
+        let result = Manifest::cloned_from_union(
             vec![
                 CloneSource {
                     manifest: m_with,
@@ -2963,6 +2993,47 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidUnionExtractorMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_union_returns_error_on_overlapping_ranges() {
+        // Two sources whose effective key ranges intersect must be
+        // rejected since the unioned manifest cannot disambiguate which
+        // source owns the overlap.
+        let m1 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let m2 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"f",
+            BytesRange::from_ref("f".."z"),
+        );
+
+        let result = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidUnionOverlappingRanges { .. })
+        ));
     }
 
     #[test]
