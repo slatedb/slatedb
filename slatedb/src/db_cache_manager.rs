@@ -304,6 +304,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await

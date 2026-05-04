@@ -360,6 +360,7 @@ impl DbInner {
     #[inline]
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
+            self.check_closed()?;
             let (wal_size_bytes, imm_memtable_size_bytes) = {
                 let wal_size_bytes = self.wal_buffer.estimated_bytes()?;
                 let imm_memtable_size_bytes = {
@@ -438,10 +439,18 @@ impl DbInner {
                 };
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
+                let await_closed = async {
+                    let mut watcher = self.status_manager.result_reader();
+                    match watcher.await_value().await {
+                        Ok(()) => Err(SlateDBError::Closed),
+                        Err(e) => Err(e),
+                    }
+                };
 
                 tokio::select! {
                     result = await_memtable_uploaded => result?,
                     result = await_flush_wal => result?,
+                    result = await_closed => result?,
                     _ = timeout_fut => {
                         warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
@@ -522,12 +531,12 @@ impl DbInner {
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         };
 
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
-            min_memtable_bytes: self.settings.l0_sst_size_bytes,
-            max_memtable_bytes: usize::MAX,
+            max_memtable_bytes: self.settings.l0_sst_size_bytes,
             sst_iter_options,
             min_seq: None,
         };
@@ -706,11 +715,10 @@ impl Db {
         // Mark the database as closed before flushing.
         self.inner.status_manager.write_result(Ok(()));
 
-        if should_flush {
+        let result = if should_flush {
             // Flush memtables to L0 so that the WAL does not need to be
             // replayed on the next startup.
-            if let Err(e) = self
-                .inner
+            self.inner
                 .flush(
                     FlushOptions {
                         flush_type: FlushType::MemTable,
@@ -718,10 +726,11 @@ impl Db {
                     false,
                 )
                 .await
-            {
-                warn!("failed to flush db during close [error={:?}]", e);
-            }
-        }
+                .map_err(Into::into)
+                .inspect_err(|e| warn!("failed to flush db during close [error={:?}]", e))
+        } else {
+            Ok(())
+        };
 
         MemtableFlusher::shutdown(&self.task_executor).await;
 
@@ -750,7 +759,7 @@ impl Db {
         }
 
         info!("db closed");
-        Ok(())
+        result
     }
 
     /// Create a snapshot of the database.
@@ -2318,6 +2327,7 @@ mod tests {
                                 &PutOptions::default(),
                                 &WriteOptions {
                                     await_durable: false,
+                                    ..Default::default()
                                 },
                             )
                             .await
@@ -2330,6 +2340,7 @@ mod tests {
                                         durability_filter: Memory,
                                         dirty: false,
                                         cache_blocks: true,
+                                        filter_context: None,
                                     }
                                 )
                                 .await
@@ -2366,6 +2377,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2402,6 +2414,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2460,6 +2473,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2511,6 +2525,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2555,6 +2570,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2589,6 +2605,7 @@ mod tests {
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let get_memory_options = ReadOptions::new().with_durability_filter(Memory);
         let get_remote_options = ReadOptions::new().with_durability_filter(Remote);
@@ -2648,6 +2665,7 @@ mod tests {
                 },
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3395,6 +3413,7 @@ mod tests {
             &[b'b'; 4],
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -3444,6 +3463,7 @@ mod tests {
                 .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         db.put_with_options(
@@ -3463,6 +3483,7 @@ mod tests {
         // at this put_with_options call.
         let write_options = WriteOptions {
             await_durable: true,
+            ..Default::default()
         };
         clock.set(10);
         db.put_with_options(
@@ -3601,6 +3622,7 @@ mod tests {
 
         let write_options: WriteOptions = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
 
@@ -3722,6 +3744,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3736,6 +3759,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3832,6 +3856,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3900,6 +3925,7 @@ mod tests {
                 .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
 
@@ -4012,6 +4038,7 @@ mod tests {
 
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         async fn put_with_timestamp(
@@ -4145,6 +4172,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4159,6 +4187,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4222,6 +4251,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4283,6 +4313,7 @@ mod tests {
         let metrics_recorder_clone = metrics_recorder.clone();
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
@@ -4341,6 +4372,88 @@ mod tests {
         // Shutdown the background task
         join_handle.abort();
         let _ = join_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_backpressure_waiter_exits_when_db_is_fenced() {
+        // Build a DB whose WAL will not flush on a timer and whose backpressure
+        // threshold is low enough for one write to exceed it.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024 * 1024, None);
+        options.flush_interval = None;
+        options.max_unflushed_bytes = 1;
+
+        // Use a metrics recorder so the test can observe when the spawned task
+        // has actually entered maybe_apply_backpressure().
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_backpressure_waiter_exits_when_db_is_fenced",
+            object_store,
+        )
+        .with_settings(options)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // Write enough data to leave bytes buffered in the WAL while avoiding
+        // any automatic WAL or memtable flush.
+        let large_value = vec![b'x'; 8 * 1024];
+        db.put_with_options(b"key1", &large_value, &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        // Start backpressure on a cloned inner handle. This parks the task on
+        // the same wait path used by writers before they enqueue a batch.
+        let inner = db.inner.clone();
+        let mut backpressure_task =
+            tokio::spawn(async move { inner.maybe_apply_backpressure().await });
+
+        // Wait until the task has observed the buffered WAL bytes and incremented
+        // the backpressure counter, proving it is inside the wait path.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if lookup_metric(&metrics_recorder, crate::db_stats::BACKPRESSURE_COUNT)
+                    .is_some_and(|v| v > 0)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for backpressure to be applied");
+
+        // Simulate the DB being fenced while the writer is already parked in
+        // backpressure.
+        db.inner
+            .status_manager
+            .write_result(Err(SlateDBError::Fenced));
+
+        // The lifecycle signal should wake the waiter promptly even though no
+        // WAL flush or memtable upload will notify it.
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut backpressure_task).await;
+        if result.is_err() {
+            backpressure_task.abort();
+            let _ = backpressure_task.await;
+        }
+        db.close().await.unwrap();
+
+        // Assert that the waiter exits with the terminal fenced error, not a
+        // successful write path or some unrelated task failure.
+        let backpressure_result = result
+            .expect("backpressure waiter did not exit after DB was fenced")
+            .expect("backpressure task panicked");
+        assert!(
+            matches!(backpressure_result, Err(SlateDBError::Fenced)),
+            "expected fenced error, got {:?}",
+            backpressure_result
+        );
     }
 
     #[tokio::test]
@@ -4436,6 +4549,7 @@ mod tests {
         // do all flushes manually
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         // do a few writes that will result in l0 flushes
@@ -4543,6 +4657,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -4553,6 +4668,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -4563,12 +4679,14 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
         .unwrap();
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // Disable the failpoint so the restored DB can flush normally.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
@@ -4694,6 +4812,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4747,6 +4866,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4795,6 +4915,7 @@ mod tests {
                 "foo".as_bytes(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4858,6 +4979,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4869,6 +4991,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4945,6 +5068,9 @@ mod tests {
             .unwrap();
         next_wal_id += 1;
 
+        // subscribe to status manager to get notified when db is closed
+        let mut rx = db.inner.status_manager.subscribe();
+
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
@@ -4999,6 +5125,16 @@ mod tests {
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        // wait for the background task to report the Fenced error
+        rx.wait_for(|status| status.close_reason.is_some())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.inner.status_manager.status().close_reason,
+            Some(crate::error::CloseReason::Fenced)
+        );
+
         db.close().await.unwrap();
         reader.close().await.unwrap();
     }
@@ -5029,7 +5165,8 @@ mod tests {
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
         // Let background flush attempts fail while WAL durability preserves recovery.
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // pause write-compacted-sst-io-error to prevent immutable tables
         // from being flushed, so we can snapshot the state when there is
@@ -5141,6 +5278,45 @@ mod tests {
         // in manifest is greater than the next_wal_sst_id based on what's currently in the object
         // store unless ALL the wals are flushed.
         assert!(manifest.manifest.core.next_wal_sst_id > next_wal_sst_id);
+    }
+
+    #[tokio::test]
+    async fn test_close_should_return_error_if_wal_flush_fails() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+
+        let mut settings = test_db_options(0, 128, None);
+        // Disable automatic flush
+        settings.flush_interval = None;
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Turn on the io error failpoint for WAL
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "return").unwrap();
+
+        // Write data without awaiting durable so it goes into the WAL buffer
+        db.put_with_options(
+            b"foo",
+            b"bar",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Close triggers the WAL flush, which should fail due to the io error
+        db.close()
+            .await
+            .expect_err("close should error out due to WAL IO error");
     }
 
     async fn do_test_should_read_compacted_db(mut options: Settings) {
@@ -5314,6 +5490,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: true,
+                    ..Default::default()
                 },
             )
             .await
@@ -5365,6 +5542,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5379,7 +5557,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
+                    await_durable: false, ..Default::default()
                 },
             )
             .await
@@ -5412,6 +5590,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5431,7 +5610,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
+                    await_durable: false, ..Default::default()
                 },
             )
             .await
@@ -5513,6 +5692,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5524,14 +5704,15 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
         .expect("write batch failed");
 
-        // close the db to flush the manifest
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
@@ -5784,6 +5965,7 @@ mod tests {
             let put_option = PutOptions::default();
             let write_option = WriteOptions {
                 await_durable: false,
+                ..Default::default()
             };
             db.put_with_options(key.as_bytes(), value.clone(), &put_option, &write_option)
                 .await
@@ -5842,9 +6024,9 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 1,
             min_filter_keys,
-            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
@@ -6190,6 +6372,7 @@ mod tests {
         // do a write and flush memtable only (not wal)
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         db.put_with_options(&b"foo", &b"bar", &PutOptions::default(), &write_opts)
             .await
@@ -6420,6 +6603,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -6579,6 +6763,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6598,6 +6783,7 @@ mod tests {
                 &put_opts,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6612,6 +6798,7 @@ mod tests {
                 b"key1",
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6629,6 +6816,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6659,6 +6847,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6676,6 +6865,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6692,6 +6882,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6715,6 +6906,7 @@ mod tests {
                 WriteBatch::new(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6845,6 +7037,7 @@ mod tests {
         .unwrap();
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         // Establish and flush seq=1 so the L0 manifest writer has a known
@@ -7246,6 +7439,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7256,6 +7450,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7317,6 +7512,7 @@ mod tests {
             }),
         );
         settings.l0_max_ssts = 10_000;
+        settings.l0_max_ssts_per_key = 10_000;
         settings.flush_interval = None;
         settings.wal_enabled = false;
 
@@ -7341,6 +7537,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7356,6 +7553,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -7466,6 +7664,7 @@ mod tests {
             }),
         );
         settings.l0_max_ssts = 10_000;
+        settings.l0_max_ssts_per_key = 10_000;
         settings.flush_interval = None;
         settings.wal_enabled = false;
 
@@ -7491,6 +7690,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7508,6 +7708,7 @@ mod tests {
                 &MergeOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -7607,6 +7808,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7639,6 +7841,7 @@ mod tests {
         };
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         clock.set(100);
@@ -7714,6 +7917,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7728,6 +7932,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7852,6 +8057,7 @@ mod tests {
             batch,
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7895,6 +8101,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7906,6 +8113,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7945,6 +8153,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await

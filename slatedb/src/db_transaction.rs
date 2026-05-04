@@ -970,6 +970,7 @@ mod tests {
         // Commit without waiting for durability
         txn.commit_with_options(&WriteOptions {
             await_durable: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1817,9 +1818,9 @@ mod tests {
             manifest_update_timeout: std::time::Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 1,
             min_filter_keys,
-            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
@@ -1851,6 +1852,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1868,6 +1870,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1882,6 +1885,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1901,6 +1905,7 @@ mod tests {
         let result = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap();

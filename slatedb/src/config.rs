@@ -48,9 +48,9 @@
 //! manifest_poll_interval = "1s"
 //! manifest_update_timeout = "300s"
 //! min_filter_keys = 1000
-//! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
+//! l0_max_ssts_per_key = 8
 //! l0_flush_parallelism = 4
 //! max_unflushed_bytes = 536870912
 //!
@@ -96,9 +96,9 @@
 //!  "manifest_poll_interval": "1s",
 //!  "manifest_update_timeout": "300s",
 //!  "min_filter_keys": 1000,
-//!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
+//!  "l0_max_ssts_per_key": 8,
 //!  "l0_flush_parallelism": 4,
 //!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
@@ -147,9 +147,9 @@
 //! manifest_poll_interval: '1s'
 //! manifest_update_timeout: '300s'
 //! min_filter_keys: 1000
-//! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
+//! l0_max_ssts_per_key: 8
 //! l0_flush_parallelism: 1
 //! max_unflushed_bytes: 536870912
 //! compactor_options:
@@ -181,6 +181,7 @@
 //!     min_age: '86400s'
 //! ```
 //!
+use crate::filter_policy::FilterContext;
 use crate::iter::IterationOrder;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
@@ -273,6 +274,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ReadOptions {
@@ -281,6 +285,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            filter_context: None,
         }
     }
 }
@@ -307,6 +312,13 @@ impl ReadOptions {
             ..self
         }
     }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -328,6 +340,12 @@ pub struct ScanOptions {
     pub max_fetch_tasks: usize,
     /// The iteration order for the scan. Defaults to [`IterationOrder::Ascending`].
     pub order: IterationOrder,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. See [`FilterContext`].
+    ///
+    /// Only consulted for `scan_prefix` today. Plain range scans do not
+    /// evaluate SST filters, so this field has no effect on `scan`.
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ScanOptions {
@@ -340,6 +358,7 @@ impl Default for ScanOptions {
             cache_blocks: false,
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
+            filter_context: None,
         }
     }
 }
@@ -384,6 +403,13 @@ impl ScanOptions {
     pub fn with_order(self, order: IterationOrder) -> Self {
         Self { order, ..self }
     }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
+    }
 }
 
 /// Enum representing the type of flush to perform.
@@ -423,6 +449,11 @@ pub struct WriteOptions {
     #[cfg(dst)]
     /// Force the current timestamp for DST operations. See #719 for details.
     pub now: i64,
+    /// An optional user-defined sequence number for this write. When non-zero, the
+    /// provided value is used instead of the internally generated sequence number.
+    /// The value must be strictly greater than the current maximum sequence number
+    /// or the write will fail with an `InvalidSequenceNumber` error.
+    pub seqnum: u64,
 }
 
 impl Default for WriteOptions {
@@ -432,6 +463,7 @@ impl Default for WriteOptions {
             await_durable: true,
             #[cfg(dst)]
             now: 0,
+            seqnum: 0,
         }
     }
 }
@@ -609,13 +641,6 @@ pub struct Settings {
     /// faster without a bloom filter.
     pub min_filter_keys: u32,
 
-    /// The number of bits to use per key for bloom filters. We recommend setting this
-    /// to the default value of 10, which yields a filter with an expected fpp of ~.0082
-    /// Note that this is evaluated per-sorted-run, so the expected number of false positives
-    /// per request is the fpp * number of sorted runs. So for large dbs with lots of runs,
-    /// you may benefit from setting this higher (if you have enough memory available)
-    pub filter_bits_per_key: u32,
-
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
     /// (based on flush_interval) regardless of this value. Memtable sizes are checked
@@ -644,9 +669,27 @@ pub struct Settings {
     ///   secondary readers to see new data.
     pub l0_sst_size_bytes: usize,
 
-    /// Defines the max number of SSTs in l0. Memtables will not be flushed if there are more
-    /// l0 ssts than this value, until compaction can compact the ssts into compacted.
+    /// Defines the max total number of SSTs in L0 across the entire key space. Memtables
+    /// will not be flushed if the total L0 count (including in-flight uploads) would exceed
+    /// this value, until compaction can compact the ssts into compacted.
+    ///
+    /// This cap primarily bounds manifest size and global bookkeeping. Read amplification
+    /// and write backpressure are governed by [`Self::l0_max_ssts_per_key`], which enforces
+    /// a cap on L0 SSTs overlapping any single key. After a manifest union (rescaling),
+    /// the total L0 count can exceed a single source's `l0_max_ssts` while no individual
+    /// key is covered by more than `l0_max_ssts_per_key` SSTs; `l0_max_ssts` should be
+    /// set generously in that case (e.g. `l0_max_ssts_per_key * expected_max_shards`).
     pub l0_max_ssts: usize,
+
+    /// Defines the max number of L0 SSTs whose effective ranges cover any single key.
+    /// Memtables will not be flushed if dispatching a new L0 upload would cause any point
+    /// in the key space to be covered by more L0 SSTs than this value.
+    ///
+    /// This is the per-key analogue of [`Self::l0_max_ssts`]: it bounds the number of L0
+    /// SSTs a point read may need to consult (read amplification) and drives write
+    /// backpressure. Because in-flight uploads have no known key range yet, each reserved
+    /// slot is treated conservatively as contributing to the peak at every point.
+    pub l0_max_ssts_per_key: usize,
 
     /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
     /// Higher values increase L0 flush throughput at the cost of more concurrent
@@ -704,6 +747,7 @@ impl std::fmt::Debug for Settings {
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
             .field("l0_max_ssts", &self.l0_max_ssts)
+            .field("l0_max_ssts_per_key", &self.l0_max_ssts_per_key)
             .field("l0_flush_parallelism", &self.l0_flush_parallelism)
             .field("compactor_options", &self.compactor_options)
             .field("compression_codec", &self.compression_codec)
@@ -712,7 +756,6 @@ impl std::fmt::Debug for Settings {
                 &self.object_store_cache_options,
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
-            .field("filter_bits_per_key", &self.filter_bits_per_key)
             .field("default_ttl", &self.default_ttl);
         data.finish()
     }
@@ -902,12 +945,12 @@ impl Default for Settings {
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
             l0_max_ssts: 8,
+            l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
-            filter_bits_per_key: 10,
             default_ttl: None,
             #[cfg(test)]
             block_format: None,

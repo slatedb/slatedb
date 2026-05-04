@@ -841,7 +841,8 @@ mod tests {
             "return",
         )
         .unwrap();
-        parent_db.close().await.unwrap();
+        // expect to fail since l0 flush is blocked
+        assert!(parent_db.close().await.is_err());
         fail_parallel::cfg(
             Arc::clone(&fp_registry),
             "write-compacted-sst-io-error",
@@ -969,6 +970,7 @@ mod tests {
             .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
         let l0_and_wal_data = [
@@ -1059,6 +1061,7 @@ mod tests {
             .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
         let l0_and_wal_data = [
@@ -1110,7 +1113,8 @@ mod tests {
             "return",
         )
         .unwrap();
-        parent_db.close().await.unwrap();
+        // expect to fail since l0 upload is blocked
+        assert!(parent_db.close().await.is_err());
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
         // Pass main store as WAL store — WAL SSTs won't be found there

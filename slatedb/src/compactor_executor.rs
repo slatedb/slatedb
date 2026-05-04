@@ -283,6 +283,7 @@ impl TokioCompactionExecutorInner {
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         };
 
         let max_parallel = compute_max_parallel(job_args.sst_views.len(), &job_args.sorted_runs, 4);

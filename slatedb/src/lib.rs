@@ -52,7 +52,9 @@ pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
-pub use filter_policy::{BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery};
+pub use filter_policy::{
+    BloomFilterPolicy, Filter, FilterBuilder, FilterContext, FilterPolicy, FilterQuery,
+};
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
@@ -91,6 +93,8 @@ mod batch_write;
 mod blob;
 mod block_iterator;
 mod block_iterator_v2;
+#[cfg(feature = "bench-internal")]
+pub use block_iterator_v2::benches as block_iterator_v2_benches;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;
@@ -142,6 +146,7 @@ mod rand;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;
+mod single_flight;
 mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;

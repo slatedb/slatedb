@@ -81,6 +81,7 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
     let (config, memory_cache) = args.db_args.config().unwrap();
     let write_options = WriteOptions {
         await_durable: args.await_durable,
+        ..Default::default()
     };
 
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
@@ -153,6 +154,7 @@ async fn exec_benchmark_transaction(
     let (config, memory_cache) = args.db_args.config().unwrap();
     let write_options = WriteOptions {
         await_durable: args.await_durable,
+        ..Default::default()
     };
 
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);

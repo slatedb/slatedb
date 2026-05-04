@@ -9,15 +9,16 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::{Rng, RngCore};
 use rstest::rstest;
-use slatedb::{Db, DbRand};
+use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
     actors::{
-        initialize_accounts, AuditorActor, BankOptions, CompactorActor, CompactorActorOptions,
-        ShutdownActor, TransferActor,
+        initialize_accounts, AuditorActor, BankAuditView, BankMergeOperator, BankOptions,
+        CompactorActor, CompactorActorOptions, DbFencerActor, DbFencerActorOptions, ShutdownActor,
+        SuppressFenced, TransferActor, TransferMode,
     },
-    utils::{build_settings, build_settings_compactor, build_toxic},
-    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
+    utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
+    DeterministicLocalFilesystem, Harness, StartupCtx,
 };
 use tempfile::TempDir;
 
@@ -38,63 +39,31 @@ fn test_dst_bank_with_toxics(
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
 
-    // Build a shared toxic controller with randomized toxics.
-    let failure_seed = rand.rng().next_u64();
-    let failure_rand = Arc::new(DbRand::new(failure_seed));
-    let failures = FailingObjectStoreController::new(failure_rand.clone());
-    for index in 0..10 {
-        let toxic = build_toxic(failure_rand.as_ref(), "bank", index);
-        failures.add_toxic(toxic);
-    }
-
-    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
-        failures.clone(),
-        system_clock.clone(),
-    ));
-    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
-        failures,
-        system_clock.clone(),
-    ));
+    let main_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
+    let wal_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
 
     let bank_options = random_bank_options(&rand);
     info!("dst bank options: {bank_options:?}");
     let audit_interval = Duration::from_millis(1000);
+    let reader_options = build_reader_options(&rand);
+    let fencer_restart_interval = Duration::from_secs(120);
     let compactor_options = build_settings_compactor(&mut *rand.rng());
+    let merge_operator = Arc::new(BankMergeOperator::new(&bank_options)?);
 
     let harness = Harness::new("bank", seed, {
         let bank_options = bank_options.clone();
         move |ctx| async move {
-            let db_seed = ctx.rand().rng().next_u64();
-            let mut settings = build_settings(ctx.rand()).await;
+            let failures = ctx.failure_controller();
+            for index in 0..10 {
+                failures.add_toxic(build_toxic(ctx.rand(), ctx.path().as_ref(), index));
+            }
 
-            // Clock ticks in the harness and `Toxic` clock advances go _very_ fast.
-            // This can cause the auditor's scan to appear to take longer than 15
-            // minutes. Since the compactor sets a checkpoint with a 15m timeout before
-            // updating the manifest, scans that take longer than 15m can result in a
-            // "FileNotFound" if the GC removes an SST in the scan after the checkpoint
-            // expires. Disable `compacted` GC until #319 is done.
-            settings
-                .garbage_collector_options
-                .as_mut()
-                .expect("build_settings should configure garbage collection")
-                .compacted_options = None;
+            let db = open_bank_db(ctx).await?;
+            initialize_accounts(db.as_ref(), &bank_options).await?;
 
-            // The test registers the standalone compactor actor below.
-            settings.compactor_options = None;
-
-            let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
-                .with_wal_object_store(ctx.wal_object_store().expect("configured"))
-                .with_system_clock(ctx.system_clock())
-                .with_fp_registry(ctx.fp_registry())
-                .with_seed(db_seed)
-                .with_settings(settings)
-                .build()
-                .await?;
-            initialize_accounts(&db, &bank_options).await?;
-
-            Ok(Arc::new(db))
+            Ok(db)
         }
     })
     .with_rand(rand)
@@ -102,22 +71,73 @@ fn test_dst_bank_with_toxics(
     .with_path(Path::from("bank"))
     .with_main_object_store(main_store)
     .with_wal_object_store(wal_store)
+    .with_merge_operator(merge_operator)
     .with_clock_advance(1..=5);
 
     let harness = harness
-        .actor("transfer-1", TransferActor::new(bank_options.clone())?)
-        .actor("transfer-2", TransferActor::new(bank_options.clone())?)
-        .actor("transfer-3", TransferActor::new(bank_options.clone())?)
-        .actor("transfer-4", TransferActor::new(bank_options.clone())?)
-        .actor("transfer-5", TransferActor::new(bank_options.clone())?)
-        .actor("transfer-6", TransferActor::new(bank_options.clone())?)
         .actor(
-            "auditor-1",
-            AuditorActor::new(bank_options.clone(), audit_interval)?,
+            "transfer-1",
+            SuppressFenced::new(TransferActor::new(bank_options.clone(), TransferMode::Put)?),
         )
         .actor(
-            "auditor-2",
-            AuditorActor::new(bank_options, audit_interval)?,
+            "transfer-2",
+            SuppressFenced::new(TransferActor::new(bank_options.clone(), TransferMode::Put)?),
+        )
+        .actor(
+            "transfer-3",
+            SuppressFenced::new(TransferActor::new(bank_options.clone(), TransferMode::Put)?),
+        )
+        .actor(
+            "transfer-4",
+            SuppressFenced::new(TransferActor::new(
+                bank_options.clone(),
+                TransferMode::Merge,
+            )?),
+        )
+        .actor(
+            "transfer-5",
+            SuppressFenced::new(TransferActor::new(
+                bank_options.clone(),
+                TransferMode::Merge,
+            )?),
+        )
+        .actor(
+            "transfer-6",
+            SuppressFenced::new(TransferActor::new(
+                bank_options.clone(),
+                TransferMode::Merge,
+            )?),
+        )
+        .actor(
+            "regular-auditor",
+            SuppressFenced::new(AuditorActor::new(bank_options.clone(), audit_interval)?),
+        )
+        .actor(
+            "snapshot-auditor",
+            SuppressFenced::new(AuditorActor::new_with_view(
+                bank_options.clone(),
+                audit_interval,
+                BankAuditView::Snapshot,
+            )?),
+        )
+        .actor(
+            "reader-auditor",
+            AuditorActor::new_with_view(
+                bank_options,
+                audit_interval,
+                BankAuditView::Reader {
+                    options: reader_options,
+                },
+            )?,
+        )
+        .actor(
+            "db-fencer",
+            DbFencerActor::new(
+                DbFencerActorOptions {
+                    restart_interval: fencer_restart_interval,
+                },
+                |ctx| async move { open_bank_db(ctx.startup_ctx().clone()).await },
+            )?,
         )
         .actor(
             "compactor",
@@ -131,6 +151,47 @@ fn test_dst_bank_with_toxics(
     harness.run()?;
 
     Ok(())
+}
+
+async fn open_bank_db(ctx: StartupCtx) -> Result<Arc<Db>, Error> {
+    let db_seed = ctx.rand().rng().next_u64();
+    let mut settings = build_settings(ctx.rand()).await;
+
+    // Clock ticks in the harness and `Toxic` clock advances go _very_ fast.
+    // This can cause the auditor's scan to appear to take longer than 15
+    // minutes. Since the compactor sets a checkpoint with a 15m timeout before
+    // updating the manifest, scans that take longer than 15m can result in a
+    // "FileNotFound" if the GC removes an SST in the scan after the checkpoint
+    // expires. Disable `compacted` GC until #319 is done.
+    settings
+        .garbage_collector_options
+        .as_mut()
+        .expect("build_settings should configure garbage collection")
+        .compacted_options = None;
+
+    // The test registers the standalone compactor actor below.
+    settings.compactor_options = None;
+
+    // DB fencing currently relies on WAL barrier files.
+    #[cfg(feature = "wal_disable")]
+    {
+        settings.wal_enabled = true;
+    }
+
+    let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
+        .with_wal_object_store(ctx.wal_object_store().expect("configured"))
+        .with_system_clock(ctx.system_clock())
+        .with_fp_registry(ctx.fp_registry())
+        .with_seed(db_seed)
+        .with_settings(settings);
+
+    if let Some(merge_operator) = ctx.merge_operator() {
+        builder = builder.with_merge_operator(merge_operator);
+    }
+
+    let db = builder.build().await?;
+
+    Ok(Arc::new(db))
 }
 
 fn random_bank_options(rand: &DbRand) -> BankOptions {

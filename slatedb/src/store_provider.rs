@@ -1,4 +1,5 @@
 use crate::db_cache::DbCache;
+use crate::filter_policy::FilterPolicy;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::manifest::store::ManifestStore;
 use crate::object_stores::ObjectStores;
@@ -18,11 +19,13 @@ pub(crate) struct DefaultStoreProvider {
     pub(crate) wal_object_store: Option<Arc<dyn ObjectStore>>,
     pub(crate) block_cache: Option<Arc<dyn DbCache>>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
+    pub(crate) filter_policies: Vec<Arc<dyn FilterPolicy>>,
 }
 
 impl StoreProvider for DefaultStoreProvider {
     fn table_store(&self) -> Arc<TableStore> {
         let sst_format = SsTableFormat {
+            filter_policies: self.filter_policies.clone(),
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };

@@ -25,17 +25,16 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use rstest::rstest;
-use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
+use slatedb::config::{CompactorOptions, DurabilityLevel, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
     actors::{
         CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
-        WorkloadActorOptions,
+        WorkloadActorOptions, WorkloadMergeOperator,
     },
-    utils::build_settings,
-    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    Operation, StreamDirection, Toxic, ToxicKind,
+    utils::{build_settings, build_toxic},
+    DeterministicLocalFilesystem, Harness,
 };
 use tempfile::TempDir;
 use tracing::instrument;
@@ -54,7 +53,7 @@ type TestResult<T> = Result<T, TestError>;
 /// fails or panics.
 #[rstest]
 #[cfg_attr(not(slow), case::regular(4, 200))]
-#[cfg_attr(slow, case::slow(4, 2_000))]
+#[cfg_attr(slow, case::slow(2, 10_000))]
 fn test_dst_is_deterministic(
     #[case] simulations: u32,
     #[case] shutdown_at_ms: i64,
@@ -148,11 +147,12 @@ fn run_seed_is_deterministic(
 /// state after the harness shuts down.
 ///
 /// Each invocation builds a fresh temporary main and WAL object-store root,
-/// fresh root RNG, fresh mock clock, and fresh fault-injection controller. The
-/// harness then opens a real `Db`, starts workload, flusher, compactor, and
-/// shutdown actors, and runs until the shutdown actor cancels the simulation.
-/// Returning the next root RNG value and current mock-clock time gives callers a
-/// compact fingerprint of the deterministic execution path.
+/// fresh root RNG, and fresh mock clock. The harness then owns the
+/// fault-injection controller, opens a real `Db`, starts workload, flusher,
+/// compactor, and shutdown actors, and runs until the shutdown actor cancels
+/// the simulation. Returning the next root RNG value and current mock-clock
+/// time gives callers a compact fingerprint of the deterministic execution
+/// path.
 #[instrument(level = "debug", skip_all, fields(seed = seed))]
 fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Utc>)> {
     let tempdir = TempDir::new()?;
@@ -163,30 +163,14 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
 
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
-    let failure_seed = rand.rng().next_u64();
-    let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(failure_seed)));
-    failures.add_toxic(Toxic {
-        name: "put-latency".into(),
-        kind: ToxicKind::Latency {
-            latency: Duration::from_millis(1),
-            jitter: Duration::from_millis(3),
-        },
-        direction: StreamDirection::Upstream,
-        toxicity: 1.0,
-        operations: vec![Operation::PutOpts],
-        path_prefix: None,
-    });
-    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
-        failures.clone(),
-        system_clock.clone(),
-    ));
-    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
-        failures,
-        system_clock.clone(),
-    ));
-    let workload_options = WorkloadActorOptions::default();
+    let main_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
+    let wal_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
+    let workload_options = WorkloadActorOptions {
+        read_durability: DurabilityLevel::Remote,
+        ..WorkloadActorOptions::default()
+    };
     let compactor_options = CompactorOptions {
         poll_interval: Duration::from_millis(10),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
@@ -198,6 +182,11 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
         ..CompactorOptions::default()
     };
     let harness = Harness::new("determinism", seed, move |ctx| async move {
+        let failures = ctx.failure_controller();
+        for index in 0..10 {
+            failures.add_toxic(build_toxic(ctx.rand(), ctx.path().as_ref(), index));
+        }
+
         let db_seed = ctx.rand().rng().next_u64();
         let mut settings = build_settings(ctx.rand()).await;
 
@@ -209,21 +198,24 @@ fn run_seed_once(seed: u64, shutdown_at_ms: i64) -> TestResult<(u64, DateTime<Ut
         // Disable since we're using the standalone compactor actor.
         settings.compactor_options = None;
 
-        let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+        let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
             .with_wal_object_store(ctx.wal_object_store().expect("configured"))
             .with_system_clock(ctx.system_clock())
             .with_fp_registry(ctx.fp_registry())
             .with_seed(db_seed)
-            .with_settings(settings)
-            .build()
-            .await?;
+            .with_settings(settings);
+        if let Some(merge_operator) = ctx.merge_operator() {
+            builder = builder.with_merge_operator(merge_operator);
+        }
+        let db = builder.build().await?;
         Ok(Arc::new(db))
     })
     .with_rand(Arc::clone(&rand))
     .with_system_clock(Arc::clone(&system_clock))
     .with_path(Path::from("determinism"))
     .with_main_object_store(main_store)
-    .with_wal_object_store(wal_store);
+    .with_wal_object_store(wal_store)
+    .with_merge_operator(Arc::new(WorkloadMergeOperator));
 
     let harness = harness
         .actor("workload-1", WorkloadActor::new(workload_options.clone())?)

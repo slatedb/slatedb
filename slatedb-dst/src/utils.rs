@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use rand::Rng;
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-    GarbageCollectorScheduleOptions, SizeTieredCompactionSchedulerOptions,
+    CompactorOptions, CompressionCodec, DbReaderOptions, GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions, GarbageCollectorScheduleOptions, SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -39,9 +39,9 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let manifest_update_timeout = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let min_filter_keys = rng.random_range(100..1000);
-    let filter_bits_per_key = rng.random_range(1..20);
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
     let l0_max_ssts = rng.random_range(4..8);
+    let l0_max_ssts_per_key = l0_max_ssts;
     let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
@@ -55,9 +55,9 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         manifest_poll_interval,
         manifest_update_timeout,
         min_filter_keys,
-        filter_bits_per_key,
         l0_sst_size_bytes,
         l0_max_ssts,
+        l0_max_ssts_per_key,
         max_unflushed_bytes,
         compression_codec,
         compactor_options: Some(build_settings_compactor(&mut *rng)),
@@ -66,15 +66,31 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     };
-
     settings
+}
+
+/// Builds randomized deterministic reader options for DST scenarios.
+pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
+    let mut rng = rand.rng();
+    let manifest_poll_interval =
+        rng.random_range(Duration::from_millis(100)..Duration::from_secs(5));
+    // Lifetime must always be greater than twice the poll interval.
+    let min_checkpoint_lifetime = manifest_poll_interval * 2 + Duration::from_micros(1);
+    let checkpoint_lifetime =
+        rng.random_range(min_checkpoint_lifetime..Duration::from_secs(4 * 60 * 60));
+    let max_memtable_bytes = rng.random_range((MIB_1 as u64)..=(MIB_500 as u64));
+    DbReaderOptions {
+        manifest_poll_interval,
+        checkpoint_lifetime,
+        max_memtable_bytes,
+        ..DbReaderOptions::default()
+    }
 }
 
 /// Builds randomized deterministic compactor options for DST scenarios.
 pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
     let min_compaction_sources = rng.random_range(2..=4);
     let max_compaction_sources = rng.random_range(min_compaction_sources..=16);
-
     CompactorOptions {
         poll_interval: rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         manifest_update_timeout: rng

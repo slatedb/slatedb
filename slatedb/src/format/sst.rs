@@ -212,7 +212,7 @@ impl SsTableInfo {
         let data = raw_info.slice(..raw_info.len() - 4).clone();
         let checksum = raw_info.slice(raw_info.len() - 4..).get_u32();
         if checksum != crc32fast::hash(&data) {
-            return Err(SlateDBError::ChecksumMismatch);
+            return Err(SlateDBError::ChecksumMismatch { path: None });
         }
 
         let info = sst_codec.decode(&data)?;
@@ -1008,7 +1008,7 @@ impl SsTableFormat {
         let checksum = crc32fast::hash(&data_bytes);
         let stored_checksum = checksum_bytes.get_u32();
         if checksum != stored_checksum {
-            return Err(SlateDBError::ChecksumMismatch);
+            return Err(SlateDBError::ChecksumMismatch { path: None });
         }
         Ok(data_bytes)
     }

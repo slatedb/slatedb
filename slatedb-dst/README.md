@@ -11,6 +11,8 @@ real `slatedb::Db`:
 - deterministic main and optional WAL object-store stacks
 - a shared installed `Arc<slatedb::Db>` slot that actors can read or replace
 - actor-local `slatedb::DbRand` instances derived from the root seed
+- an optional shared `MergeOperator` handle for scenarios that exercise merge
+  operands
 
 This is primarily a test crate for SlateDB itself and is currently
 `publish = false`. It is intended to be used from a workspace checkout or as an
@@ -24,8 +26,9 @@ internal path dependency rather than from crates.io.
   compactor, shutdown, and bank-transfer/auditor actors
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
   metadata, in-memory attribute preservation, and deterministic listing behavior
-- `FailingObjectStore`: `ObjectStore` wrapper that injects deterministic
-  latency, bandwidth, reset-peer, slow-close, and synthetic HTTP failures
+- `FailingObjectStore`: harness-installed `ObjectStore` wrapper that injects
+  deterministic latency, bandwidth, reset-peer, slow-close, and synthetic HTTP
+  failures
 - `Toxic`: fault-injection building blocks
 - `HttpFailBefore` and `HttpStatusError`: synthetic HTTP failures injected
   before request dispatch
@@ -38,15 +41,15 @@ The harness is built around one root seed:
 
 1. `Harness::new(name, seed, factory)` creates the root `DbRand`.
 2. The harness derives seeds for the Tokio runtime, database startup
-   (`StartupCtx::rand()`), and the harness-owned background clock task.
+   (`StartupCtx::rand()`), the harness-owned background clock task, and the
+   failure controller.
 3. The simulation runs on a seeded current-thread Tokio runtime.
 4. After startup, the harness derives one actor-local seed per registered actor
    (`ActorCtx::rand()`).
-5. The harness wraps the configured main and optional WAL object stores with an
-   internal clock-aware layer that reports deterministic `last_modified`
-   metadata.
-6. If your scenario uses `FailingObjectStore`, seed its controller explicitly
-   so fault sampling stays reproducible.
+5. The harness wraps the configured main and optional WAL object stores with
+   internal fault-injecting and clock-aware layers.
+6. The harness owns a seeded failure controller and exposes it through
+   `StartupCtx::failure_controller()`.
 7. The shared `MockSystemClock` advances from the harness-owned background
    clock task, when your test advances it explicitly, or when a configured
    toxic adds latency/bandwidth/slow-close delay.
@@ -101,12 +104,11 @@ use std::time::Duration;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
-use slatedb::{Db, DbRand};
+use slatedb::Db;
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
     actors::{ShutdownActor, WorkloadActor, WorkloadActorOptions}, utils::build_settings,
-    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
-    Operation, StreamDirection, Toxic, ToxicKind,
+    DeterministicLocalFilesystem, Harness, Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -119,43 +121,38 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&wal_dir)?;
 
     let system_clock = Arc::new(MockSystemClock::new());
-    let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(11)));
-    failures.add_toxic(Toxic {
-        name: "put-latency".into(),
-        kind: ToxicKind::Latency {
-            latency: Duration::from_millis(2),
-            jitter: Duration::from_millis(3),
-        },
-        direction: StreamDirection::Upstream,
-        toxicity: 1.0,
-        operations: vec![Operation::PutOpts],
-        path_prefix: None,
-    });
-
-    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
-        failures.clone(),
-        system_clock.clone(),
-    ));
-    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
-        failures,
-        system_clock.clone(),
-    ));
+    let main_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
+    let wal_store: Arc<dyn ObjectStore> =
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
     let shutdown_at_millis = 10i64;
     let workload_options = WorkloadActorOptions::default();
     let harness = Harness::new("smoke", 7, move |ctx| async move {
+        ctx.failure_controller().add_toxic(Toxic {
+            name: "put-latency".into(),
+            kind: ToxicKind::Latency {
+                latency: Duration::from_millis(2),
+                jitter: Duration::from_millis(3),
+            },
+            direction: StreamDirection::Upstream,
+            toxicity: 1.0,
+            operations: vec![Operation::PutOpts],
+            path_prefix: None,
+        });
+
         let db_seed = ctx.rand().rng().next_u64();
         let settings = build_settings(ctx.rand()).await;
 
-        let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+        let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
             .with_wal_object_store(ctx.wal_object_store().expect("configured"))
             .with_system_clock(ctx.system_clock())
             .with_fp_registry(ctx.fp_registry())
             .with_seed(db_seed)
-            .with_settings(settings)
-            .build()
-            .await?;
+            .with_settings(settings);
+        if let Some(merge_operator) = ctx.merge_operator() {
+            builder = builder.with_merge_operator(merge_operator);
+        }
+        let db = builder.build().await?;
 
         Ok(Arc::new(db))
     })
@@ -184,8 +181,12 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 - `with_system_clock(clock)`: injects a shared `MockSystemClock`
 - `with_clock_advance(min_ms..=max_ms)`: overrides the inclusive millisecond
   range used by the harness-owned background clock task
-- `with_main_object_store(store)`: replaces the default in-memory main store
-- `with_wal_object_store(store)`: configures a separate WAL store
+- `with_main_object_store(store)`: replaces the default in-memory main base
+  store, which the harness wraps before use
+- `with_wal_object_store(store)`: configures a separate WAL base store, which
+  the harness wraps before use
+- `with_merge_operator(merge_operator)`: configures an optional shared
+  `MergeOperator` handle for SlateDB writers, readers, and standalone compactors
 - `actor(name, actor)`: registers one actor instance under a unique name
 - `run()`: builds the seeded runtime, starts the harness-owned background
   clock task, opens the DB, spawns one Tokio task per registered actor, and
@@ -205,6 +206,8 @@ to the database builder.
 - `wal_object_store()`
 - `system_clock()`
 - `fp_registry()`
+- `merge_operator()`
+- `failure_controller()`
 - `rand()`
 
 Typical startup responsibilities:
@@ -213,6 +216,9 @@ Typical startup responsibilities:
 - build randomized deterministic settings with `utils::build_settings(...)`
 - open `Db::builder(...)` using the harness-provided object stores and clock
 - pass through the shared failpoint registry
+- pass `ctx.merge_operator()` to `DbBuilder::with_merge_operator(...)` when it
+  is present
+- install initial object-store toxics with `ctx.failure_controller()`
 
 ### `ActorCtx`
 
@@ -222,6 +228,8 @@ Each registered actor instance receives its own `ActorCtx`.
 
 - `name()` for actor identity
 - `rand()` for actor-local deterministic randomness
+- `startup_ctx()` to reuse the startup path, object stores, clock, failpoint
+  registry, failure controller, and startup RNG when reopening a database
 - `db()` to read the currently installed shared `Arc<Db>`
 - `swap_db(new_db)` to replace the shared DB handle for all actors
 - `swap_compactor(new_compactor)` to replace the shared standalone compactor handle
@@ -229,6 +237,8 @@ Each registered actor instance receives its own `ActorCtx`.
 - `advance_time(duration)` to move the shared mock clock forward
 - `path()`, `main_object_store()`, `wal_object_store()`
 - `system_clock()` and `fp_registry()`
+- `merge_operator()` to reuse the shared merge operator when opening readers,
+  compactors, or replacement DB handles
 
 `swap_db(...)` is useful for reopen scenarios and tests that intentionally
 replace the database instance mid-run.
@@ -249,14 +259,13 @@ callback.
 
 ## Failure injection
 
-To inject faults, wrap the relevant object stores with `FailingObjectStore`
-before passing them to the harness. Reuse the same
-`FailingObjectStoreController` anywhere you want a shared fault configuration,
-for example across the main store and WAL store.
+The harness wraps configured object stores with `FailingObjectStore`
+automatically. To inject faults, get the shared controller from
+`StartupCtx::failure_controller()` during startup or through
+`ActorCtx::startup_ctx().failure_controller()` while actors are running.
 
 ### Controller operations
 
-- `FailingObjectStoreController::new(rand)`: creates a deterministic controller
 - `add_toxic(toxic)`: appends a toxic to the active set
 - `clear_toxics()`: removes all toxics
 - `set_http_fail_before(failure)`: installs a synthetic HTTP failure policy
@@ -301,12 +310,9 @@ Supported `ToxicKind` values:
 is dispatched to the wrapped store.
 
 ```rust,ignore
-use std::sync::Arc;
+use slatedb_dst::{HttpFailBefore, Operation};
 
-use slatedb::DbRand;
-use slatedb_dst::{FailingObjectStoreController, HttpFailBefore, Operation};
-
-let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(7)));
+let failures = ctx.failure_controller();
 failures.set_http_fail_before(HttpFailBefore {
     percentage: 100,
     status_code: 503,

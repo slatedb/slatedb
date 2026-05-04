@@ -145,6 +145,7 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
+            ..Default::default()
         }
     }
 }
@@ -252,6 +253,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                 })
             })?,
             order: value.order.unwrap_or_default().into(),
+            ..Default::default()
         })
     }
 }
@@ -275,6 +277,7 @@ impl From<WriteOptions> for slatedb::config::WriteOptions {
     fn from(value: WriteOptions) -> Self {
         slatedb::config::WriteOptions {
             await_durable: value.await_durable,
+            ..Default::default()
         }
     }
 }
