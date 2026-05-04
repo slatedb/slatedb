@@ -8204,4 +8204,144 @@ mod tests {
         );
         db.close().await.unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_replay_l0_boundary_does_not_skip_unflushed_replay_batches() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_l0_boundary_does_not_skip_unflushed_replay_batches";
+
+        // Start with a large L0/WAL size so the source writer only creates WAL
+        // files. The data stays out of L0 until recovery replays it.
+        let mut source_settings = test_db_options(0, 16 * 1024, None);
+        source_settings.flush_interval = None;
+
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(source_settings)
+            .build()
+            .await
+            .unwrap();
+
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // Write two records, each flushed into its own WAL. With the smaller
+        // replay settings below, these WALs are replayed into the first
+        // memtable, and that memtable is the only one that reaches L0 before
+        // the second simulated crash.
+        let l0_flushed_records = [
+            (b"l0-flushed-replay-batch-1".as_slice(), vec![b'a'; 128]),
+            (b"l0-flushed-replay-batch-2".as_slice(), vec![b'b'; 1024]),
+        ];
+        let mut l0_flushed_seq = 0;
+        let mut first_l0_flushed_wal_id = 0;
+        for (i, (key, value)) in l0_flushed_records.iter().enumerate() {
+            let write = source
+                .put_with_options(*key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+            source
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::Wal,
+                })
+                .await
+                .unwrap();
+            if i == 0 {
+                first_l0_flushed_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+            }
+            l0_flushed_seq = write.seqnum();
+        }
+        let l0_flushed_boundary_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(l0_flushed_boundary_wal_id > first_l0_flushed_wal_id);
+
+        // Write several smaller records, each flushed into a separate WAL. On
+        // replay, these WALs remain after the first replayed memtable's WAL
+        // boundary, so they must still be eligible for replay after the next
+        // reopen.
+        let unflushed_replay_records = [
+            (b"unflushed-replay-batch-1".as_slice(), vec![b'c'; 128]),
+            (b"unflushed-replay-batch-2".as_slice(), vec![b'd'; 128]),
+            (b"unflushed-replay-batch-3".as_slice(), vec![b'e'; 128]),
+        ];
+        for (key, value) in &unflushed_replay_records {
+            source
+                .put_with_options(*key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+            source
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::Wal,
+                })
+                .await
+                .unwrap();
+        }
+        let final_source_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(final_source_wal_id >= l0_flushed_boundary_wal_id + 2);
+
+        // Recover with a much smaller replay target so WAL replay splits into
+        // multiple replayed memtables. Limit L0 to one table so only the first
+        // replayed memtable can be flushed before the next reopen.
+        let mut replay_settings = test_db_options(0, 512, None);
+        replay_settings.flush_interval = None;
+        replay_settings.l0_max_ssts = 1;
+        replay_settings.l0_max_ssts_per_key = 1;
+
+        // First recovery: replay the WAL and allow the first replayed memtable
+        // to publish to L0.
+        let _first_recovery = Db::builder(path, object_store.clone())
+            .with_settings(replay_settings.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Wait until the manifest has durably published that first replayed
+        // memtable. The manifest now has one L0 with last_l0_seq and
+        // replay_after_wal_id matching the first replayed memtable's actual
+        // sequence and WAL boundaries.
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let first_l0_manifest = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |state| !state.tree.l0.is_empty() && state.last_l0_seq >= l0_flushed_seq,
+            Duration::from_secs(60),
+        )
+        .await;
+        assert_eq!(first_l0_manifest.last_l0_seq, l0_flushed_seq);
+        assert_eq!(
+            first_l0_manifest.replay_after_wal_id,
+            l0_flushed_boundary_wal_id
+        );
+        assert!(final_source_wal_id >= first_l0_manifest.replay_after_wal_id + 2);
+        assert_eq!(first_l0_manifest.tree.l0.len(), 1);
+
+        // Second recovery: simulate crashing after only the first replayed
+        // memtable reached L0. Recovery must resume after that first
+        // memtable's actual WAL boundary, not after the later replay batch's
+        // boundary.
+        let recovered = Db::builder(path, object_store.clone())
+            .with_settings(replay_settings)
+            .build()
+            .await
+            .unwrap();
+
+        // The L0-flushed keys are present from L0. The later keys must still
+        // come from WAL replay because they were not covered by the published
+        // L0 boundary.
+        for (key, value) in &l0_flushed_records {
+            assert_eq!(
+                recovered.get(*key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+        for (key, value) in &unflushed_replay_records {
+            assert_eq!(
+                recovered.get(*key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+    }
 }
