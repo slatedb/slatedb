@@ -692,11 +692,14 @@ impl Manifest {
         for source in iter {
             let cur = source.manifest.core.segment_extractor_name.as_ref();
             if agreed != cur {
-                let extractors = sources
+                let extractors: Vec<Option<String>> = sources
                     .iter()
                     .map(|s| s.manifest.core.segment_extractor_name.clone())
                     .collect();
-                return Err(SlateDBError::InvalidUnionExtractorMismatch { extractors });
+                return Err(SlateDBError::InvalidUnion(format!(
+                    "clone sources disagree on segment extractor. extractors=`{:?}`",
+                    extractors
+                )));
             }
         }
         Ok(agreed.cloned())
@@ -722,34 +725,64 @@ impl Manifest {
             // (collected via BTreeMap/HashMap dedup), so a < b strictly.
             // If b also starts with a, then a is a proper prefix of b.
             if b.starts_with(a) {
-                return Err(SlateDBError::InvalidUnionSegmentPrefixOverlap {
-                    shorter: a.clone(),
-                    longer: b.clone(),
-                });
+                return Err(SlateDBError::InvalidUnion(format!(
+                    "segment prefixes are not an antichain: `{:?}` is a proper prefix of `{:?}`",
+                    a, b
+                )));
             }
         }
         Ok(())
     }
 
-    /// Build the per-prefix LSM-state accumulator for a union. Each
-    /// source contributes its `core.segments` keyed by segment prefix,
-    /// plus its `core.tree` keyed under `""` when non-empty (RFC-0024:
-    /// unsegmented data is the singleton segment with empty prefix).
-    /// Watermarks are intentionally not carried over — the unioned
-    /// manifest is a fresh DB that begins compaction tracking from
-    /// scratch.
-    fn build_segments_by_prefix(sources: &[&CloneSource]) -> BTreeMap<Bytes, LsmTreeState> {
-        let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
+    /// No-extractor case. Concatenate every source's `core.tree` into
+    /// the unioned `core.tree`. Rejects any source carrying segments —
+    /// segments require a configured extractor. Watermarks are
+    /// intentionally not carried over: the unioned manifest is a fresh
+    /// DB that begins compaction tracking from scratch.
+    fn build_unsegmented_lsm_state(
+        core: &mut ManifestCore,
+        sources: &[&CloneSource],
+    ) -> Result<(), SlateDBError> {
+        let stray_prefixes: Vec<Bytes> = sources
+            .iter()
+            .flat_map(|s| {
+                s.manifest
+                    .core
+                    .segments
+                    .iter()
+                    .map(|seg| seg.prefix.clone())
+            })
+            .collect();
+        if !stray_prefixes.is_empty() {
+            return Err(SlateDBError::InvalidUnion(format!(
+                "clone source has segments but no extractor is configured. prefixes=`{:?}`",
+                stray_prefixes
+            )));
+        }
         for source in sources {
             let manifest = &source.manifest;
-            if !manifest.core.tree.is_empty() {
-                let entry = segments_by_prefix.entry(Bytes::new()).or_default();
-                entry.l0.extend(manifest.core.tree.l0.iter().cloned());
-                entry
-                    .compacted
-                    .extend(manifest.core.tree.compacted.iter().cloned());
-            }
-            for segment in &manifest.core.segments {
+            core.tree.l0.extend(manifest.core.tree.l0.iter().cloned());
+            core.tree
+                .compacted
+                .extend(manifest.core.tree.compacted.iter().cloned());
+        }
+        Ok(())
+    }
+
+    /// Extractor-configured case. Build a per-prefix accumulator from
+    /// every source's `core.segments`, validate the antichain, and write
+    /// the result into `core.segments`. Drain-marker (empty) entries
+    /// produced by the loop are dropped to preserve
+    /// `LsmTreeState::is_empty`'s invariant. Watermarks are intentionally
+    /// not carried over: the unioned manifest is a fresh DB that begins
+    /// compaction tracking from scratch.
+    fn build_segmented_lsm_state(
+        core: &mut ManifestCore,
+        sources: &[&CloneSource],
+    ) -> Result<(), SlateDBError> {
+        let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
+        for source in sources {
+            for segment in &source.manifest.core.segments {
                 let entry = segments_by_prefix
                     .entry(segment.prefix.clone())
                     .or_default();
@@ -759,7 +792,13 @@ impl Manifest {
                     .extend(segment.tree.compacted.iter().cloned());
             }
         }
-        segments_by_prefix
+        Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
+        core.segments = segments_by_prefix
+            .into_iter()
+            .filter(|(_, tree)| !tree.is_empty())
+            .map(|(prefix, tree)| Segment { prefix, tree })
+            .collect();
+        Ok(())
     }
 
     /// Build the union's `external_dbs` list. Forwards every source's
@@ -789,51 +828,6 @@ impl Manifest {
             }
         }
         external_dbs
-    }
-
-    /// Validate the per-prefix LSM state collected from union sources and
-    /// write it into `core`. Performs antichain validation, routes the
-    /// `""` entry by extractor presence (unsegmented → `core.tree`,
-    /// segmented → `core.segments`), rejects sources with segments but
-    /// no configured extractor, and drops drain-marker (empty) entries
-    /// before writing `core.segments`.
-    fn finalize_union_lsm_state(
-        core: &mut ManifestCore,
-        mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState>,
-    ) -> Result<(), SlateDBError> {
-        Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
-        // Route the `""` entry by extractor presence: with no extractor,
-        // the whole DB is unsegmented and `""` is the singleton segment
-        // that lives in `core.tree`. With an extractor configured, every
-        // entry — including `""` — belongs in `core.segments`.
-        if core.segment_extractor_name.is_none() {
-            // The `""` entry is absent only when every source had no SSTs
-            // (we're cloning from empty sources). Leave `core.tree` empty
-            // in that case.
-            if let Some(unsegmented) = segments_by_prefix.remove(&Bytes::new()) {
-                core.tree = unsegmented;
-            }
-            // After removing `""`, any remaining keys came from a source
-            // whose manifest had segments despite no extractor being
-            // configured — a structurally invalid input.
-            if !segments_by_prefix.is_empty() {
-                return Err(SlateDBError::InvalidUnionSegmentsWithoutExtractor {
-                    prefixes: segments_by_prefix.keys().cloned().collect(),
-                });
-            }
-        } else {
-            // Drop empty entries: a source-side drain-marker segment (no
-            // L0, no compacted, watermark set) contributes nothing during
-            // the source loop, leaving a truly-empty `LsmTreeState`. Such
-            // trees must not appear in the manifest (see
-            // `LsmTreeState::is_empty`).
-            core.segments = segments_by_prefix
-                .into_iter()
-                .filter(|(_, tree)| !tree.is_empty())
-                .map(|(prefix, tree)| Segment { prefix, tree })
-                .collect();
-        }
-        Ok(())
     }
 
     /// Reassign every sorted run in `core` a fresh sequential id. The
@@ -885,9 +879,11 @@ impl Manifest {
         for (_, range) in ranges.iter() {
             if let Some(previous_range) = previous_range {
                 if range.intersect(previous_range).is_some() {
-                    return Err(SlateDBError::InvalidUnionOverlappingRanges {
-                        ranges: ranges.iter().map(|(_, r)| (*r).clone()).collect(),
-                    });
+                    let all: Vec<BytesRange> = ranges.iter().map(|(_, r)| (*r).clone()).collect();
+                    return Err(SlateDBError::InvalidUnion(format!(
+                        "clone sources have overlapping key ranges. ranges=`{:?}`",
+                        all
+                    )));
                 }
             }
             previous_range = Some(range);
@@ -897,8 +893,11 @@ impl Manifest {
         let mut core = ManifestCore::new();
         core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources)?;
 
-        let segments_by_prefix = Self::build_segments_by_prefix(&ordered_sources);
-        Self::finalize_union_lsm_state(&mut core, segments_by_prefix)?;
+        if core.segment_extractor_name.is_none() {
+            Self::build_unsegmented_lsm_state(&mut core, &ordered_sources)?;
+        } else {
+            Self::build_segmented_lsm_state(&mut core, &ordered_sources)?;
+        }
         Self::renumber_union_sorted_runs(&mut core);
 
         for source in &sources {
@@ -3095,11 +3094,7 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
-        assert!(matches!(
-            result,
-            Err(SlateDBError::InvalidUnionSegmentPrefixOverlap { ref shorter, ref longer })
-                if shorter.as_ref() == b"foo/" && longer.as_ref() == b"foo/bar/"
-        ));
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
     }
 
     #[test]
@@ -3128,10 +3123,7 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
-        assert!(matches!(
-            result,
-            Err(SlateDBError::InvalidUnionExtractorMismatch { .. })
-        ));
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
     }
 
     #[test]
@@ -3167,10 +3159,7 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
-        assert!(matches!(
-            result,
-            Err(SlateDBError::InvalidUnionExtractorMismatch { .. })
-        ));
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
     }
 
     #[test]
@@ -3204,10 +3193,7 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
-        assert!(matches!(
-            result,
-            Err(SlateDBError::InvalidUnionOverlappingRanges { .. })
-        ));
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
     }
 
     #[test]
@@ -3235,13 +3221,7 @@ mod tests {
             ],
             Arc::new(DbRand::default()),
         );
-        assert!(matches!(
-            result,
-            Err(SlateDBError::InvalidUnionSegmentsWithoutExtractor { ref prefixes })
-                if prefixes.len() == 2
-                    && prefixes.iter().any(|p| p.as_ref() == b"foo/")
-                    && prefixes.iter().any(|p| p.as_ref() == b"bar/")
-        ));
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
     }
 
     #[test]
