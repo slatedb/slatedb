@@ -117,7 +117,7 @@ Definitions used below:
 | `filter_cache_hits`            | Number of filter blocks read from cache                                                       |
 | `filter_cache_misses`          | Number of filter blocks not found in cache                                                    |
 | `block_fetched_from_store`     | Number of data blocks fetched from object store                                               |
-| `filter_fetched_from_store`    | Numebr of filter blocks fetched from object store                                             |
+| `filter_fetched_from_store`    | Number of filter blocks fetched from object store                                             |
 | `index_fetched_from_store`     | Number of index blocks fetched from object store                                              |
 | `bytes_fetched_from_store`     | Number of bytes fetched from object store                                                     |
 | `merge_operands`               | Number of operands passed to `merge_batch`                                                    |
@@ -164,7 +164,7 @@ shows per-SST timing in a waterfall. Users who want aggregate timing
 without a subscriber can use the duration counters above
 (`trace.block_read_duration()`, etc.).
 
-Defintion of the fields:
+Definition of the fields:
 - `key`: Key of the query
 - `value`: Found value of the `key`
 - `sst_id`: ID of the SST
