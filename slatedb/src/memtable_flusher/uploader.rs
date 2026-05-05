@@ -164,9 +164,9 @@ impl UploadHandler {
     }
 
     async fn upload_with_retry(&self, job: &UploadJob) -> Result<UploadedMemtable, SlateDBError> {
+        let encoded_sst = self.db.build_imm_sst(job.imm_memtable.table()).await?;
         loop {
-            let encoded_sst = self.db.build_imm_sst(job.imm_memtable.table()).await?;
-            match self.try_upload_once(job, encoded_sst).await {
+            match self.try_upload_once(job, &encoded_sst).await {
                 Ok(success) => return Ok(success),
                 Err(e) => {
                     // When the WAL is enabled and the database is shutting
@@ -188,11 +188,8 @@ impl UploadHandler {
     async fn try_upload_once(
         &self,
         job: &UploadJob,
-        encoded_sst: EncodedSsTable,
+        encoded_sst: &EncodedSsTable,
     ) -> Result<UploadedMemtable, SlateDBError> {
-        // TODO: consider changing the low-level upload path so failed uploads
-        // return ownership of the built SST. That would let the worker build
-        // once and retry uploads without rebuilding.
         let first_seq = job
             .imm_memtable
             .table()
