@@ -1359,9 +1359,12 @@ mod tests {
             .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
-        let encoded = builder.build().await.unwrap();
         let sst = writer
-            .write_sst(&SsTableId::Compacted(ulid::Ulid::new()), &encoded, false)
+            .write_sst(
+                &SsTableId::Compacted(ulid::Ulid::new()),
+                &builder.build().await.unwrap(),
+                false,
+            )
             .await
             .unwrap();
         let handle = SsTableView::identity(sst);

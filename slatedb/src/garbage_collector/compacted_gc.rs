@@ -607,8 +607,10 @@ mod tests {
 
         // Newest L0 in the manifest has a later timestamp (9_000ms).
         let l0_id = SsTableId::Compacted(ulid::Ulid::from_parts(9_000, 0));
-        let l0_sst = build_test_sst(&format, 1).await;
-        let l0_handle = table_store.write_sst(&l0_id, &l0_sst, false).await.unwrap();
+        let l0_handle = table_store
+            .write_sst(&l0_id, &build_test_sst(&format, 1).await, false)
+            .await
+            .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
         dirty_manifest
             .value
@@ -621,9 +623,12 @@ mod tests {
         // Simulate a compaction that starts after GC reads compaction state, writes an
         // output SST (6_000ms), but hasn't updated the manifest yet.
         let compaction_output_id = SsTableId::Compacted(ulid::Ulid::from_parts(6_000, 0));
-        let compaction_output_sst = build_test_sst(&format, 1).await;
         table_store
-            .write_sst(&compaction_output_id, &compaction_output_sst, false)
+            .write_sst(
+                &compaction_output_id,
+                &build_test_sst(&format, 1).await,
+                false,
+            )
             .await
             .unwrap();
 

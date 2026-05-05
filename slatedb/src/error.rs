@@ -182,6 +182,9 @@ pub(crate) enum SlateDBError {
     #[error("Source manifest set must not be empty")]
     InvalidUnionSetEmpty(),
 
+    #[error("invalid union: {0}")]
+    InvalidUnion(String),
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -603,6 +606,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
             SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
+            SlateDBError::InvalidUnion(_) => Error::invalid(msg),
         }
     }
 }

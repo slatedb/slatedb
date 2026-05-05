@@ -221,10 +221,11 @@ impl TableStore {
         if let Some(ref cache) = self.cache {
             if write_cache {
                 for block in &encoded_sst.unconsumed_blocks {
-                    let offset = block.offset;
-                    let block_arc = Arc::new(block.block.clone());
                     cache
-                        .insert((*id, offset).into(), CachedEntry::with_block(block_arc))
+                        .insert(
+                            (*id, block.offset).into(),
+                            CachedEntry::with_block(Arc::clone(&block.block)),
+                        )
                         .await;
                 }
                 cache
@@ -238,7 +239,7 @@ impl TableStore {
         self.cache_filters(
             *id,
             encoded_sst.info.filter_offset,
-            Arc::clone(&encoded_sst.filters),
+            encoded_sst.filters.clone(),
         )
         .await;
         Ok(SsTableHandle::new(
@@ -1283,8 +1284,10 @@ mod tests {
             .await
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let encoded = builder.build().await.unwrap();
-        let handle = writer.write_sst(&id, &encoded, false).await.unwrap();
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
 
         let meta_cache = Arc::new(TestCache::new());
         let cache = Arc::new(
@@ -1339,8 +1342,10 @@ mod tests {
             .await
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let encoded = builder.build().await.unwrap();
-        let handle = writer.write_sst(&id, &encoded, false).await.unwrap();
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
 
         let meta_cache = Arc::new(TestCache::new());
         let cache = Arc::new(

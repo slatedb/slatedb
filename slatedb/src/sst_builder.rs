@@ -460,7 +460,7 @@ mod tests {
         assert!(size_with_filter > size_without_filter); // Should be larger due to filter
     }
 
-    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorLatest<Block> {
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorLatest<Arc<Block>> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;
@@ -611,7 +611,7 @@ mod tests {
                 .read_block_raw(&sst.info, &index, i, &bytes)
                 .await
                 .unwrap();
-            assert!(encoded_block.block == read_block);
+            assert!(*encoded_block.block == read_block);
         }
     }
 
