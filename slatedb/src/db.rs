@@ -120,9 +120,6 @@ pub(crate) struct DbInner {
     /// key through this extractor and groups flush output into per-segment
     /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
     /// segment encoded in the manifest's top-level tree.
-    // TODO(rfc-24): remove allow(dead_code) once the flush/write paths read
-    // this field.
-    #[allow(dead_code)]
     pub(crate) segment_extractor: Option<Arc<dyn PrefixExtractor>>,
 }
 

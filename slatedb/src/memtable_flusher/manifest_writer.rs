@@ -464,6 +464,7 @@ impl ManifestWriterHandler {
         .into_iter()
         .flatten()
         .min();
+        let segmented = self.db.segment_extractor.is_some();
         let mut guard = self.db.state.write();
         let manifest = guard.modify(|modifier| {
             for uploaded in staged_batch {
@@ -474,19 +475,17 @@ impl ManifestWriterHandler {
                     .pop_back()
                     .expect("expected imm memtable");
                 assert!(Arc::ptr_eq(&popped, &uploaded.imm_memtable));
+                let core = &mut modifier.state.manifest.value.core;
                 // `segments` may legitimately be empty when an extractor
                 // is configured and retention pruned every entry: no
-                // builders open → no SSTs uploaded. We still apply the
-                // memtable's seq/tick bookkeeping below so progress
-                // advances.
-                let segmented = self.db.segment_extractor.is_some();
+                // builders open → no SSTs uploaded. The memtable's
+                // seq/tick bookkeeping below still advances.
                 for segment in &uploaded.segments {
                     let view = SsTableView::new(
                         self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
                         segment.sst_handle.clone(),
                     );
-                    let core = &mut modifier.state.manifest.value.core;
-                    let tree: &mut crate::manifest::LsmTreeState = if segmented {
+                    let tree = if segmented {
                         // Extractor configured — every flush handle, including
                         // any with empty prefix, is routed into `segments`.
                         core.maybe_insert_tree(&segment.prefix)?
@@ -501,35 +500,23 @@ impl ManifestWriterHandler {
                     };
                     tree.l0.push_front(view);
                 }
-                modifier.state.manifest.value.core.replay_after_wal_id =
-                    uploaded.imm_memtable.recent_flushed_wal_id();
+                core.replay_after_wal_id = uploaded.imm_memtable.recent_flushed_wal_id();
 
                 let memtable_tick = uploaded.imm_memtable.table().last_tick();
-                modifier.state.manifest.value.core.last_l0_clock_tick = cmp::max(
-                    modifier.state.manifest.value.core.last_l0_clock_tick,
-                    memtable_tick,
-                );
-                if modifier.state.manifest.value.core.last_l0_clock_tick != memtable_tick {
+                core.last_l0_clock_tick = cmp::max(core.last_l0_clock_tick, memtable_tick);
+                if core.last_l0_clock_tick != memtable_tick {
                     return Err(SlateDBError::InvalidClockTick {
-                        last_tick: modifier.state.manifest.value.core.last_l0_clock_tick,
+                        last_tick: core.last_l0_clock_tick,
                         next_tick: memtable_tick,
                     });
                 }
 
                 // The same sequence number can't span multiple L0' SSTs--only SSTs in SRs
                 // can do that. So assert `>` rather than `>=`.
-                assert!(uploaded.last_seq > modifier.state.manifest.value.core.last_l0_seq);
-                modifier.state.manifest.value.core.last_l0_seq = uploaded.last_seq;
-                modifier.state.manifest.value.core.recent_snapshot_min_seq =
-                    min_active_snapshot_seq.unwrap_or(uploaded.last_seq);
-
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .sequence_tracker
-                    .extend_from(uploaded_tracker);
+                assert!(uploaded.last_seq > core.last_l0_seq);
+                core.last_l0_seq = uploaded.last_seq;
+                core.recent_snapshot_min_seq = min_active_snapshot_seq.unwrap_or(uploaded.last_seq);
+                core.sequence_tracker.extend_from(uploaded_tracker);
             }
             Ok(modifier.state.manifest.clone())
         })?;
@@ -1587,6 +1574,43 @@ mod tests {
         assert_eq!(core.segments[1].prefix.as_ref(), b"bbb");
         assert_eq!(core.segments[0].tree.l0.len(), 2);
         assert_eq!(core.segments[1].tree.l0.len(), 1);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_advance_progress_when_segments_is_empty() {
+        // With an extractor configured and post-retention pruning that
+        // drops every entry, the upload pipeline yields an UploadedMemtable
+        // with an empty segments Vec. The manifest writer must still
+        // advance per-memtable bookkeeping (last_l0_seq, replay frontier)
+        // even though no SSTs land in any tree.
+        let harness = setup_harness_with_extractor(
+            "/tmp/test_manifest_writer_empty_segments",
+            Arc::new(FailPointRegistry::new()),
+            Some(Arc::new(StubExtractor)),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        let uploaded = next_uploaded_memtable_with_segments(&inner, b"k1", b"v1", &[]).await;
+        let last_seq = uploaded.last_seq;
+        started.notify_uploaded(uploaded).await.unwrap();
+
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, last_seq);
+
+        // No SST landed in any tree, but the per-memtable progress
+        // markers still advanced.
+        let core = inner.state.read().state().core().clone();
+        assert!(core.tree.l0.is_empty(), "root tree should be empty");
+        assert!(core.segments.is_empty(), "no segments should be created");
+        assert_eq!(core.last_l0_seq, last_seq);
 
         started.shutdown().await;
     }

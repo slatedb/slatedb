@@ -179,7 +179,7 @@ impl UploadHandler {
         // Build once, retry only the upload. `write_sst` takes
         // `&EncodedSsTable`, so the encoded SSTs stay alive for retries —
         // no need to rebuild from the memtable on transient upload errors.
-        let segments_built = self.db.build_imm_ssts(job.imm_memtable.table()).await?;
+        let built = self.db.build_imm_ssts(job.imm_memtable.table()).await?;
         let first_seq = job
             .imm_memtable
             .table()
@@ -192,14 +192,12 @@ impl UploadHandler {
             .expect("flush of l0 with no entries");
 
         // Upload all segment SSTs concurrently. `try_join_all` short-circuits
-        // on the first fatal error and drops the remaining futures, giving
-        // us the abort-on-failure semantics from RFC-0024 Q2. SSTs from
-        // sibling uploads that completed before (or raced to land after)
-        // the abort are left for the garbage collector to reclaim — the
-        // worker does not allocate ids upstream, so those orphans cannot
-        // be enumerated here for explicit cleanup.
+        // on the first fatal error and drops the remaining futures; sibling
+        // uploads that already landed before the abort are left for the
+        // garbage collector to reclaim, since the worker allocates ids
+        // internally and they are not visible here for explicit cleanup.
         let segments =
-            futures::future::try_join_all(segments_built.iter().map(|(prefix, encoded)| {
+            futures::future::try_join_all(built.iter().map(|(prefix, encoded)| {
                 self.upload_one_segment(&job.imm_memtable, prefix, encoded)
             }))
             .await?;
@@ -297,6 +295,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
+    use crate::test_utils::FixedThreeBytePrefixExtractor;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
@@ -669,26 +668,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Test extractor that always extracts a fixed 3-byte prefix.
-    #[derive(Debug)]
-    struct FixedThreeBytePrefixExtractor;
-    impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor {
-        fn name(&self) -> &str {
-            "fixed-3"
-        }
-        fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
-            let len = match target {
-                crate::prefix_extractor::PrefixTarget::Point(b)
-                | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.len(),
-            };
-            if len >= 3 {
-                Some(3)
-            } else {
-                None
-            }
-        }
-    }
-
     #[tokio::test]
     async fn should_emit_one_segment_handle_per_prefix() {
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -753,5 +732,62 @@ mod tests {
         }
 
         test.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_abort_concurrent_segment_uploads_on_shutdown_when_wal_enabled() {
+        // With multiple segments uploading concurrently via try_join_all,
+        // every per-segment retry loop must independently observe the
+        // shutdown signal and bail out — otherwise one stuck upload would
+        // hold the worker open. Configure the fail point to fail every
+        // upload and verify the worker reports an error after the db is
+        // closed.
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+        let db = setup_db_with_extractor(
+            "/tmp/test_parallel_l0_flush_uploader_multi_segment_shutdown",
+            fp_registry,
+            Some(Arc::new(FixedThreeBytePrefixExtractor)),
+        )
+        .await;
+        assert!(db.wal_enabled);
+        // Stage entries that route to three distinct segments.
+        {
+            let mut guard = db.state.write();
+            for (key, value, seq) in [
+                (&b"aaa-1"[..], b"v1", 1),
+                (&b"bbb-1"[..], b"v2", 2),
+                (&b"ccc-1"[..], b"v3", 3),
+            ] {
+                guard.memtable().put(RowEntry::new_value(key, value, seq));
+            }
+            guard.freeze_memtable(0);
+        }
+        let imm_memtable = db
+            .state
+            .read()
+            .state()
+            .imm_memtable
+            .front()
+            .cloned()
+            .unwrap();
+        let job = UploadJob::new(imm_memtable);
+
+        let test = start_test_uploader(&db);
+        test.submit(job).unwrap();
+
+        // Mark the database as closed (simulates Db::close()). Every
+        // in-flight per-segment upload future should bail out.
+        db.status_manager.write_result(Ok(()));
+
+        let result = timeout(Duration::from_secs(5), test.await_closed())
+            .await
+            .expect("uploader should stop retrying on shutdown");
+        assert!(result.is_err());
     }
 }

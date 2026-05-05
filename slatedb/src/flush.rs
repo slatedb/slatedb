@@ -10,6 +10,7 @@ use crate::oracle::Oracle;
 use crate::prefix_extractor::PrefixTarget;
 use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
+use crate::sst_builder::EncodedSsTableBuilder;
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -41,9 +42,6 @@ impl DbInner {
     /// prefix and the result is exactly one entry — the call delegates to
     /// [`Self::build_imm_sst`] and wraps the result, preserving today's
     /// "always emit one SST" behavior.
-    // TODO(rfc-24): remove allow(dead_code) once slice 3 wires this into
-    // the upload path.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn build_imm_ssts(
         &self,
         imm_table: Arc<KVTable>,
@@ -54,7 +52,7 @@ impl DbInner {
         };
         let mut iter = self.iter_imm_table(imm_table).await?;
         let mut out: Vec<(Bytes, EncodedSsTable)> = Vec::new();
-        let mut current: Option<(Bytes, crate::sst_builder::EncodedSsTableBuilder<'_>)> = None;
+        let mut current: Option<(Bytes, EncodedSsTableBuilder<'_>)> = None;
         while let Some(entry) = iter.next().await? {
             // The write path enforces mandatory full segmentation, so by
             // the time we reach the build path every key routes.
@@ -64,11 +62,10 @@ impl DbInner {
                 .prefix_len(&PrefixTarget::Point(entry.key.clone()))
                 .expect("extractor returned None for a key already in the memtable");
             let prefix = entry.key.slice(0..n);
-            let same_segment = current.as_ref().map(|(p, _)| p == &prefix).unwrap_or(false);
+            let same_segment = current.as_ref().is_some_and(|(p, _)| p == &prefix);
             if !same_segment {
                 if let Some((cur_prefix, builder)) = current.take() {
-                    let encoded = builder.build().await?;
-                    out.push((cur_prefix, encoded));
+                    out.push((cur_prefix, builder.build().await?));
                 }
                 current = Some((prefix, self.table_store.table_builder()));
             }
@@ -76,8 +73,7 @@ impl DbInner {
             builder.add(entry).await?;
         }
         if let Some((cur_prefix, builder)) = current {
-            let encoded = builder.build().await?;
-            out.push((cur_prefix, encoded));
+            out.push((cur_prefix, builder.build().await?));
         }
         Ok(out)
     }
@@ -174,7 +170,9 @@ mod tests {
     use crate::mem_table::WritableKVTable;
     use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
-    use crate::test_utils::{lookup_merge_operator_operands, StringConcatMergeOperator};
+    use crate::test_utils::{
+        lookup_merge_operator_operands, FixedThreeBytePrefixExtractor, StringConcatMergeOperator,
+    };
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
@@ -619,26 +617,6 @@ mod tests {
 
         verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
         db.close().await.unwrap();
-    }
-
-    /// Test extractor that always extracts a fixed 3-byte prefix.
-    #[derive(Debug)]
-    struct FixedThreeBytePrefixExtractor;
-    impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor {
-        fn name(&self) -> &str {
-            "fixed-3"
-        }
-        fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
-            let len = match target {
-                crate::prefix_extractor::PrefixTarget::Point(b)
-                | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.len(),
-            };
-            if len >= 3 {
-                Some(3)
-            } else {
-                None
-            }
-        }
     }
 
     async fn setup_test_db_with_extractor(
