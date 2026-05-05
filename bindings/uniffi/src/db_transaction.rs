@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 
@@ -135,13 +136,20 @@ impl DbTransaction {
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;
-        let options = options.into();
+        let timeout_ms = options.timeout_ms;
+        let read_options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        Ok(tx
-            .get_with_options(key, &options)
-            .await?
-            .map(|value| value.to_vec()))
+        let fut = tx.get_with_options(key, &read_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("get timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(|value| value.to_vec()))
     }
 
     /// Reads the row version visible to this transaction for `key`.
@@ -159,13 +167,20 @@ impl DbTransaction {
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
         validate_key(&key)?;
-        let options = options.into();
+        let timeout_ms = options.timeout_ms;
+        let read_options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        Ok(tx
-            .get_key_value_with_options(key, &options)
-            .await?
-            .map(KeyValue::from))
+        let fut = tx.get_key_value_with_options(key, &read_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("get_key_value timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(KeyValue::from))
     }
 
     /// Scans rows inside `range` as visible to this transaction.
@@ -230,14 +245,21 @@ impl DbTransaction {
         &self,
         options: WriteOptions,
     ) -> Result<Option<WriteHandle>, Error> {
-        let options = options.into();
+        let timeout_ms = options.timeout_ms;
+        let write_options = options.into();
         let tx = {
             let mut guard = self.inner.lock().await;
             guard.take().ok_or(SlateDbError::TransactionCompleted)?
         };
-        Ok(tx
-            .commit_with_options(&options)
-            .await?
-            .map(WriteHandle::from))
+        let fut = tx.commit_with_options(&write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("commit timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(WriteHandle::from))
     }
 }

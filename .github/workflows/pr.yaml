@@ -208,6 +208,9 @@ jobs:
           LD_LIBRARY_PATH: "${{ github.workspace }}/target/debug:${LD_LIBRARY_PATH}"
         run: go test ./...
 
+      - name: Run S3-backed Go timeout tests
+        run: scripts/run_go_timeout_tests.sh
+
   bindings-java:
     runs-on: ubuntu-latest
     needs: tests

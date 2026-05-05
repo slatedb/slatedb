@@ -8781,12 +8781,15 @@ type ReadOptions struct {
 	Dirty bool
 	// Whether fetched blocks should be inserted into the block cache.
 	CacheBlocks bool
+	// Timeout in milliseconds for the read. Defaults to no timeout.
+	TimeoutMs *uint64
 }
 
 func (r *ReadOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
+	FfiDestroyerOptionalUint64{}.Destroy(r.TimeoutMs)
 }
 
 type FfiConverterReadOptions struct{}
@@ -8802,6 +8805,7 @@ func (c FfiConverterReadOptions) Read(reader io.Reader) ReadOptions {
 		FfiConverterDurabilityLevelINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -8817,6 +8821,7 @@ func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeoutMs)
 }
 
 type FfiDestroyerReadOptions struct{}
@@ -9546,10 +9551,13 @@ func (_ FfiDestroyerWriteHandle) Destroy(value WriteHandle) {
 type WriteOptions struct {
 	// Whether the call waits for the write to become durable before returning.
 	AwaitDurable bool
+	// Timeout in milliseconds for the write. Defaults to no timeout.
+	TimeoutMs *uint64
 }
 
 func (r *WriteOptions) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.AwaitDurable)
+	FfiDestroyerOptionalUint64{}.Destroy(r.TimeoutMs)
 }
 
 type FfiConverterWriteOptions struct{}
@@ -9563,6 +9571,7 @@ func (c FfiConverterWriteOptions) Lift(rb RustBufferI) WriteOptions {
 func (c FfiConverterWriteOptions) Read(reader io.Reader) WriteOptions {
 	return WriteOptions{
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -9576,6 +9585,7 @@ func (c FfiConverterWriteOptions) LowerExternal(value WriteOptions) ExternalCRus
 
 func (c FfiConverterWriteOptions) Write(writer io.Writer, value WriteOptions) {
 	FfiConverterBoolINSTANCE.Write(writer, value.AwaitDurable)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeoutMs)
 }
 
 type FfiDestroyerWriteOptions struct{}
@@ -9866,6 +9876,7 @@ var ErrErrorUnavailable = fmt.Errorf("ErrorUnavailable")
 var ErrErrorInvalid = fmt.Errorf("ErrorInvalid")
 var ErrErrorData = fmt.Errorf("ErrorData")
 var ErrErrorInternal = fmt.Errorf("ErrorInternal")
+var ErrErrorTimeout = fmt.Errorf("ErrorTimeout")
 
 // Variant structs
 // Transaction-specific failure.
@@ -10055,6 +10066,36 @@ func (self ErrorInternal) Is(target error) bool {
 	return target == ErrErrorInternal
 }
 
+// The operation exceeded the configured timeout.
+type ErrorTimeout struct {
+	Message string
+}
+
+// The operation exceeded the configured timeout.
+func NewErrorTimeout(
+	message string,
+) *Error {
+	return &Error{err: &ErrorTimeout{
+		Message: message}}
+}
+
+func (e ErrorTimeout) destroy() {
+	FfiDestroyerString{}.Destroy(e.Message)
+}
+
+func (err ErrorTimeout) Error() string {
+	return fmt.Sprint("Timeout",
+		": ",
+
+		"Message=",
+		err.Message,
+	)
+}
+
+func (self ErrorTimeout) Is(target error) bool {
+	return target == ErrErrorTimeout
+}
+
 type FfiConverterError struct{}
 
 var FfiConverterErrorINSTANCE = FfiConverterError{}
@@ -10100,6 +10141,10 @@ func (c FfiConverterError) Read(reader io.Reader) *Error {
 		return &Error{&ErrorInternal{
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
+	case 7:
+		return &Error{&ErrorTimeout{
+			Message: FfiConverterStringINSTANCE.Read(reader),
+		}}
 	default:
 		panic(fmt.Sprintf("Unknown error code %d in FfiConverterError.Read()", errorID))
 	}
@@ -10126,6 +10171,9 @@ func (c FfiConverterError) Write(writer io.Writer, value *Error) {
 	case *ErrorInternal:
 		writeInt32(writer, 6)
 		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+	case *ErrorTimeout:
+		writeInt32(writer, 7)
+		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
 	default:
 		_ = variantValue
 		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterError.Write", value))
@@ -10147,6 +10195,8 @@ func (_ FfiDestroyerError) Destroy(value *Error) {
 	case ErrorData:
 		variantValue.destroy()
 	case ErrorInternal:
+		variantValue.destroy()
+	case ErrorTimeout:
 		variantValue.destroy()
 	default:
 		_ = variantValue
