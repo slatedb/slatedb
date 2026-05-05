@@ -238,6 +238,37 @@ application span (e.g. via `span.set_parent(...)` with
 query). Internal call sites use `pub(crate)` increment helpers and
 the same `span()` accessor for attaching child spans.
 
+### `Display` implementation
+
+`QueryTrace` implements `std::fmt::Display` to pretty-print all
+counters and durations as a human-readable summary. This is intended
+for debugging (`println!("{trace}")`).
+
+```rust
+impl std::fmt::Display for QueryTrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        ...
+    }
+}
+```
+
+Example output:
+
+```text
+QueryTrace {
+  sources: memtables=2 ssts_l0=3 ssts_compacted=5 sr=2
+  bloom_filter: checks=8 positives=5 negatives=3 false_positives=1
+  cache: block=12h/3m index=5h/0m filter=5h/0m
+  object_store: blocks=3 indexes=0 filters=0 bytes=49152
+  skipped: seq_filtered=7 shadowed=2
+  merge_operands=0
+  durations: block=1.2ms index=300µs filter=100µs memtable=50µs merge=0ns
+}
+```
+
+The exact layout is not part of the API contract — callers that need
+stable values should use the typed accessors directly.
+
 ### Attaching to options
 
 ```rust
@@ -460,9 +491,7 @@ users.
    `tracing::Span` so users can nest it under their application span?
 2. Should duration fields track only object store I/O or also include
    cache lookup time?
-3. Should we add a `Display` impl on `QueryTrace` that pretty-prints
-   all stats for quick debugging?
-4. Should we distinguish between:
+3. Should we distinguish between:
     - number of sources that were consulted
     - number of sources that contained a candidate
     - number of sources that contained a result
