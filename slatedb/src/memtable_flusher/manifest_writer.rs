@@ -27,6 +27,7 @@ use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use std::cmp;
@@ -489,14 +490,15 @@ impl ManifestWriterHandler {
                         // Extractor configured — every flush handle, including
                         // any with empty prefix, is routed into `segments`.
                         core.maybe_insert_tree(&segment.prefix)?
-                    } else {
+                    } else if segment.prefix.is_empty() {
                         // No extractor — singleton compatibility-encoded
                         // `prefix=""` segment lives in the top-level tree.
-                        debug_assert!(
-                            segment.prefix.is_empty(),
-                            "non-empty prefix produced without an extractor"
-                        );
                         &mut core.tree
+                    } else {
+                        return Err(SlateDBError::InvalidSegmentPrefix {
+                            prefix: segment.prefix.clone(),
+                            conflict: Bytes::new(),
+                        });
                     };
                     tree.l0.push_front(view);
                 }
