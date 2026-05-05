@@ -17,7 +17,7 @@ use crate::db_state::{SsTableHandle, SsTableId};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
-use crate::format::sst::EncodedSsTable;
+use crate::flush::EncodedSegmentSst;
 use crate::mem_table::ImmutableMemtable;
 use crate::utils::{IdGenerator, SafeSender};
 use async_trait::async_trait;
@@ -199,7 +199,7 @@ impl UploadHandler {
         let segments = futures::future::try_join_all(
             built
                 .iter()
-                .map(|sst| self.upload_one_segment(&job.imm_memtable, &sst.prefix, &sst.encoded)),
+                .map(|sst| self.upload_sst(&job.imm_memtable, sst)),
         )
         .await?;
 
@@ -212,27 +212,26 @@ impl UploadHandler {
     }
 
     /// Upload a single segment SST with retry. Each retry reuses the
-    /// already-built `encoded` so the upload loop never rebuilds from the
+    /// already-encoded SST so the upload loop never rebuilds from the
     /// memtable.
-    async fn upload_one_segment(
+    async fn upload_sst(
         &self,
         imm_memtable: &Arc<ImmutableMemtable>,
-        prefix: &Bytes,
-        encoded: &EncodedSsTable,
+        sst: &EncodedSegmentSst,
     ) -> Result<SegmentHandle, SlateDBError> {
         let sst_id =
             SsTableId::Compacted(self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()));
-        let written_bytes = encoded.remaining_len() as u64;
+        let written_bytes = sst.encoded.remaining_len() as u64;
         loop {
             match self
                 .db
-                .upload_compacted_sst(&sst_id, imm_memtable.table(), encoded, true)
+                .upload_compacted_sst(&sst_id, imm_memtable.table(), &sst.encoded, true)
                 .await
             {
                 Ok(sst_handle) => {
                     self.db.db_stats.l0_flush_bytes.increment(written_bytes);
                     return Ok(SegmentHandle {
-                        prefix: prefix.clone(),
+                        prefix: sst.prefix.clone(),
                         sst_handle,
                     });
                 }
