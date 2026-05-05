@@ -106,6 +106,7 @@ Definitions used below:
 | `memtables_consulted`          | Number of memtable + imm iterators accessed                                                   |
 | `ssts_consulted_l0`            | Number of L0 SSTs accessed                                                                    |
 | `ssts_consulted_compacted`     | Number of compacted SSTs accessed                                                             |
+| `sr_consulted`                 | Number of sorted runs accessed                                                                |
 | `bloom_filter_positives`       | Number of positive filter results: `might_contain` -> true                                    |
 | `bloom_filter_negatives`       | Number of negative filter results: `might_contain` -> false                                   |
 | `bloom_filter_false_positives` | Number of positive filter results, that turned out to be wrong                                |
@@ -129,12 +130,13 @@ Derived counters:
 
 ### Aggregate durations
 
-| Duration               | Description                        |
-|------------------------|------------------------------------|
-| `block_read_duration`  | Time spent in data block reads     |
-| `index_read_duration`  | Time spent in index reads          |
-| `filter_read_duration` | Time spent in filter reads         |
-| `merge_duration`       | Time spent in merge operator calls |
+| Duration                 | Description                        |
+|--------------------------|------------------------------------|
+| `block_read_duration`    | Time spent in data block reads     |
+| `index_read_duration`    | Time spent in index reads          |
+| `filter_read_duration`   | Time spent in filter reads         |
+| `memtable_read_duration` | Time spent in memtable reads       |
+| `merge_duration`         | Time spent in merge operator calls |
 
 Stored as `AtomicU64` microseconds internally. Exposed via accessors
 returning `std::time::Duration`. Measured with `Instant::now()` around
