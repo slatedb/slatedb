@@ -1166,6 +1166,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.rand,
             stats,
             self.system_clock,
+            true,
         )
         .await?;
         Ok((handler, rx))
