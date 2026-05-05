@@ -196,11 +196,12 @@ impl UploadHandler {
         // uploads that already landed before the abort are left for the
         // garbage collector to reclaim, since the worker allocates ids
         // internally and they are not visible here for explicit cleanup.
-        let segments =
-            futures::future::try_join_all(built.iter().map(|(prefix, encoded)| {
-                self.upload_one_segment(&job.imm_memtable, prefix, encoded)
-            }))
-            .await?;
+        let segments = futures::future::try_join_all(
+            built
+                .iter()
+                .map(|sst| self.upload_one_segment(&job.imm_memtable, &sst.prefix, &sst.encoded)),
+        )
+        .await?;
 
         Ok(UploadedMemtable {
             imm_memtable: Arc::clone(&job.imm_memtable),

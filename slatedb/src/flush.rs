@@ -14,6 +14,14 @@ use crate::sst_builder::EncodedSsTableBuilder;
 use bytes::Bytes;
 use std::sync::Arc;
 
+/// One encoded-but-not-yet-uploaded SST from a memtable flush, tagged with
+/// the segment it belongs to (RFC-0024). Mirrors the shape of post-upload
+/// [`crate::memtable_flusher::uploader::SegmentHandle`].
+pub(crate) struct EncodedSegmentSst {
+    pub(crate) prefix: Bytes,
+    pub(crate) encoded: EncodedSsTable,
+}
+
 impl DbInner {
     pub(crate) async fn build_imm_sst(
         &self,
@@ -45,19 +53,18 @@ impl DbInner {
     pub(crate) async fn build_imm_ssts(
         &self,
         imm_table: Arc<KVTable>,
-    ) -> Result<Vec<(Bytes, EncodedSsTable)>, SlateDBError> {
+    ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
         let Some(extractor) = self.segment_extractor.as_ref() else {
             let encoded = self.build_imm_sst(imm_table).await?;
-            return Ok(vec![(Bytes::new(), encoded)]);
+            return Ok(vec![EncodedSegmentSst {
+                prefix: Bytes::new(),
+                encoded,
+            }]);
         };
         let mut iter = self.iter_imm_table(imm_table).await?;
-        let mut out: Vec<(Bytes, EncodedSsTable)> = Vec::new();
+        let mut out: Vec<EncodedSegmentSst> = Vec::new();
         let mut current: Option<(Bytes, EncodedSsTableBuilder<'_>)> = None;
         while let Some(entry) = iter.next().await? {
-            // The write path enforces mandatory full segmentation, so by
-            // the time we reach the build path every key routes.
-            // Belt-and-suspenders panic until the write-time check is
-            // wired up.
             let n = extractor
                 .prefix_len(&PrefixTarget::Point(entry.key.clone()))
                 .expect("extractor returned None for a key already in the memtable");
@@ -65,7 +72,10 @@ impl DbInner {
             let same_segment = current.as_ref().is_some_and(|(p, _)| p == &prefix);
             if !same_segment {
                 if let Some((cur_prefix, builder)) = current.take() {
-                    out.push((cur_prefix, builder.build().await?));
+                    out.push(EncodedSegmentSst {
+                        prefix: cur_prefix,
+                        encoded: builder.build().await?,
+                    });
                 }
                 current = Some((prefix, self.table_store.table_builder()));
             }
@@ -73,7 +83,10 @@ impl DbInner {
             builder.add(entry).await?;
         }
         if let Some((cur_prefix, builder)) = current {
-            out.push((cur_prefix, builder.build().await?));
+            out.push(EncodedSegmentSst {
+                prefix: cur_prefix,
+                encoded: builder.build().await?,
+            });
         }
         Ok(out)
     }
@@ -646,7 +659,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(ssts.len(), 1);
-        assert!(ssts[0].0.is_empty());
+        assert!(ssts[0].prefix.is_empty());
         db.close().await.unwrap();
     }
 
@@ -696,7 +709,7 @@ mod tests {
             .await
             .unwrap();
 
-        let prefixes: Vec<&[u8]> = ssts.iter().map(|(p, _)| p.as_ref()).collect();
+        let prefixes: Vec<&[u8]> = ssts.iter().map(|s| s.prefix.as_ref()).collect();
         assert_eq!(prefixes, vec![&b"aaa"[..], &b"bbb"[..], &b"ccc"[..]]);
 
         // Upload each SST and verify it carries exactly its prefix's entries.
@@ -731,11 +744,11 @@ mod tests {
                 ),
             ],
         ];
-        for ((_, encoded), entries) in ssts.into_iter().zip(expected.into_iter()) {
+        for (sst, entries) in ssts.into_iter().zip(expected.into_iter()) {
             let id = SsTableId::Compacted(Ulid::new());
             let handle = db
                 .inner
-                .upload_compacted_sst(&id, table.table().clone(), &encoded, false)
+                .upload_compacted_sst(&id, table.table().clone(), &sst.encoded, false)
                 .await
                 .unwrap();
             verify_sst(&db, &handle, &entries).await;
@@ -762,7 +775,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0.as_ref(), b"aaa");
+        assert_eq!(ssts[0].prefix.as_ref(), b"aaa");
         db.close().await.unwrap();
     }
 }
