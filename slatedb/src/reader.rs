@@ -491,7 +491,7 @@ mod tests {
 
             let encoded = builder.build().await?;
             let id = SsTableId::Compacted(Ulid::new());
-            self.table_store.write_sst(&id, encoded, false).await
+            self.table_store.write_sst(&id, &encoded, false).await
         }
     }
 
