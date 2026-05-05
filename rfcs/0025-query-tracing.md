@@ -224,12 +224,19 @@ impl QueryTrace {
     pub fn index_read_duration(&self) -> Duration;
     pub fn filter_read_duration(&self) -> Duration;
     pub fn merge_duration(&self) -> Duration;
+
+    // Public: parent span accessor
+    pub fn span(&self) -> &tracing::Span;
 }
 ```
 
-The public API consists of a constructor and one read accessor per
-counter / duration. Internal call sites use `pub(crate)` increment
-helpers and a `span()` accessor for attaching child spans.
+The public API consists of a constructor, one read accessor per
+counter / duration, and a `span()` accessor that returns the parent
+`slatedb.query` span so callers can nest it under their own
+application span (e.g. via `span.set_parent(...)` with
+`tracing-opentelemetry`, or by entering it before issuing the
+query). Internal call sites use `pub(crate)` increment helpers and
+the same `span()` accessor for attaching child spans.
 
 ### Attaching to options
 
