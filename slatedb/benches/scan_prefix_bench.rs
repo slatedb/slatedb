@@ -254,6 +254,57 @@ fn bench_scan_prefix(c: &mut Criterion) {
             });
         });
     }
+
+    // The `*_by_recency` variants exercise `Db::scan_prefix_by_recency`, which
+    // walks sources newest-first and stops at the first source that yields a
+    // matching entry. Only run them with the prefix bloom filter: without a
+    // filter, every SST passes the filter check so lazy init doesn't help,
+    // and the comparison we care about is recency-vs-merge under the same
+    // (filtered) source set.
+    group.bench_function(
+        BenchmarkId::new("first_entry_by_recency", "prefix_bloom"),
+        |b| {
+            b.to_async(&runtime).iter(|| async {
+                let mut iter = prefix_bloom
+                    .db
+                    .scan_prefix_by_recency_with_options(
+                        Bytes::from_static(QUERY_PREFIX),
+                        &scan_options(),
+                    )
+                    .await
+                    .expect("scan_prefix_by_recency failed");
+                let entry = iter.next_entry().await.expect("iterator next_entry failed");
+                assert!(entry.is_some());
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new("full_scan_by_recency", "prefix_bloom"),
+        |b| {
+            b.to_async(&runtime).iter(|| async {
+                let mut iter = prefix_bloom
+                    .db
+                    .scan_prefix_by_recency_with_options(
+                        Bytes::from_static(QUERY_PREFIX),
+                        &scan_options(),
+                    )
+                    .await
+                    .expect("scan_prefix_by_recency failed");
+                let mut count = 0usize;
+                while iter
+                    .next_entry()
+                    .await
+                    .expect("iterator next_entry failed")
+                    .is_some()
+                {
+                    count += 1;
+                }
+                assert!(count > 0);
+            });
+        },
+    );
+
     group.finish();
 
     disable_throttle(&no_filter.store);

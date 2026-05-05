@@ -46,7 +46,7 @@ pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_cache_manager::CacheTarget;
-pub use db_iter::DbIterator;
+pub use db_iter::{DbIterator, RecencyPrefixIterator};
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
