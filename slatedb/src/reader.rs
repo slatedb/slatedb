@@ -8,7 +8,7 @@ use crate::manifest::ManifestCore;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
-use crate::segment_range_iterator::{SegmentRangeIterator, SegmentScanContext};
+use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
@@ -139,6 +139,7 @@ impl Reader {
         write_batch_iter: Option<WriteBatchIterator>,
         sst_iter_options: &SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
+        max_seq: Option<u64>,
     ) -> Result<IteratorSources, SlateDBError> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
@@ -157,13 +158,6 @@ impl Reader {
         let total_ssts: usize = segments.iter().map(|s| s.tree.total_ssts()).sum();
         let max_parallel = total_ssts.clamp(1, 4);
 
-        // A single `SegmentRangeIterator` walks the LSM state. Each
-        // segment's `LsmTreeState` becomes a `Pending` child inside the
-        // chain; the shared `SegmentScanContext` describes how to build that
-        // segment's L0 + sorted-run merge on promotion. Promotion is
-        // lazy — segments a query never reaches incur no SST opens.
-        // `range.as_point()` is what distinguishes get from scan inside
-        // the build path, so the context just carries `range` directly.
         let context = SegmentScanContext {
             table_store: self.table_store.clone(),
             range: range.clone(),
@@ -173,8 +167,7 @@ impl Reader {
             db_stats: self.db_stats.clone(),
         };
 
-        let segment_iter: Box<dyn RowEntryIterator> =
-            Box::new(SegmentRangeIterator::new(segments, context));
+        let segment_iter = build_segment_iter(segments, context, max_seq)?;
 
         Ok(IteratorSources {
             write_batch_iter,
@@ -233,6 +226,7 @@ impl Reader {
                 write_batch_iter,
                 &sst_iter_options,
                 Some(self.db_stats.clone()),
+                max_seq,
             )
             .await?;
 
@@ -305,6 +299,7 @@ impl Reader {
                 ctx.write_batch_iter,
                 &sst_iter_options,
                 None,
+                max_seq,
             )
             .await?;
 

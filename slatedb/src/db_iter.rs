@@ -3,10 +3,12 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
+use crate::manifest::LsmTreeState;
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
+use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
 use async_trait::async_trait;
@@ -89,7 +91,7 @@ impl DbIteratorRangeTracker {
     }
 }
 
-struct GetIterator {
+pub(crate) struct GetIterator {
     key: Bytes,
     iters: Vec<Box<dyn RowEntryIterator + 'static>>,
     idx: usize,
@@ -109,6 +111,27 @@ impl GetIterator {
             .collect();
 
         Self { key, iters, idx: 0 }
+    }
+
+    /// Build a per-tree `GetIterator` over the L0 + sorted-run iterators
+    /// produced by `tree`. The chain stays flat (no `MergeIterator`) so a
+    /// bloom-positive hit in the newest L0 SST short-circuits without
+    /// opening any older SSTs — the same laziness the pre-segment GET path
+    /// had, scoped to one segment.
+    ///
+    /// `max_seq` is applied per leaf via `FilterIterator` so above-bound
+    /// tombstones are dropped before the outer flat-walk encounters them
+    /// and stops the search.
+    pub(crate) fn from_lsm_tree(
+        key: Bytes,
+        tree: LsmTreeState,
+        ctx: &SegmentScanContext,
+        max_seq: Option<u64>,
+    ) -> Result<Self, SlateDBError> {
+        let l0 = build_l0_point_iters(tree.l0, ctx)?;
+        let sr = build_sr_point_iters(&key, &tree.compacted, ctx)?;
+        let iters = apply_filters(l0.into_iter().chain(sr), max_seq);
+        Ok(Self { key, iters, idx: 0 })
     }
 }
 
