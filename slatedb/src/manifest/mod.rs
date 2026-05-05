@@ -399,6 +399,34 @@ impl ManifestCore {
         std::iter::once(&self.tree).chain(self.segments.iter().map(|s| &s.tree))
     }
 
+    /// Look up the LSM tree for a given segment prefix. An empty `prefix`
+    /// returns the root tree (compatibility-encoded `prefix=""` segment);
+    /// a non-empty prefix returns the named segment's tree, or `None` if no
+    /// segment with that prefix exists.
+    pub(crate) fn tree_for_segment(&self, prefix: &[u8]) -> Option<&LsmTreeState> {
+        if prefix.is_empty() {
+            Some(&self.tree)
+        } else {
+            self.segments
+                .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
+                .ok()
+                .map(|idx| &self.segments[idx].tree)
+        }
+    }
+
+    /// Mutable variant of [`tree_for_segment`].
+    pub(crate) fn tree_for_segment_mut(&mut self, prefix: &[u8]) -> Option<&mut LsmTreeState> {
+        if prefix.is_empty() {
+            Some(&mut self.tree)
+        } else {
+            let idx = self
+                .segments
+                .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
+                .ok()?;
+            Some(&mut self.segments[idx].tree)
+        }
+    }
+
     /// Iterate every SST view referenced by this manifest — L0 views and
     /// sorted-run views across the unsegmented tree and every segment.
     pub(crate) fn all_sst_views(&self) -> impl Iterator<Item = &SsTableView> {
