@@ -101,28 +101,28 @@ Definitions used below:
 - **skipped**: The entry was collected during the read path but discarded
   before becoming part of the final visible answer
 
-| Counter                        | Description                                                                                   |
-|--------------------------------|-----------------------------------------------------------------------------------------------|
-| `memtables_consulted`          | Number of memtable + imm iterators accessed                                                   |
-| `ssts_consulted_l0`            | Number of L0 SSTs accessed                                                                    |
-| `ssts_consulted_compacted`     | Number of compacted SSTs accessed                                                             |
-| `sr_consulted`                 | Number of sorted runs accessed                                                                |
-| `bloom_filter_positives`       | Number of positive filter results: `might_contain` -> true                                    |
-| `bloom_filter_negatives`       | Number of negative filter results: `might_contain` -> false                                   |
-| `bloom_filter_false_positives` | Number of positive filter results, that turned out to be wrong                                |
-| `block_cache_hits`             | Number of data blocks read from cache                                                         |
-| `block_cache_misses`           | Number of data blocks not found in cache                                                      |
-| `index_cache_hits`             | Number of index blocks read from cache                                                        |
-| `index_cache_misses`           | Number of index blocks not found in cache                                                     |
-| `filter_cache_hits`            | Number of filter blocks read from cache                                                       |
-| `filter_cache_misses`          | Number of filter blocks not found in cache                                                    |
-| `block_fetched_from_store`     | Number of data blocks fetched from object store                                               |
-| `filter_fetched_from_store`    | Number of filter blocks fetched from object store                                             |
-| `index_fetched_from_store`     | Number of index blocks fetched from object store                                              |
-| `bytes_fetched_from_store`     | Number of bytes fetched from object store                                                     |
-| `merge_operands`               | Number of operands passed to `merge_batch`                                                    |
-| `skipped_entries_seq_filtered` | Number of entries skipped because their sequence number exceeded the query's visibility bound |
-| `skipped_entries_shadowed`     | Number of entries skipped because they were hidden by a tombstone or newer value              |
+| Counter                        | Description                                                                                             |
+|--------------------------------|---------------------------------------------------------------------------------------------------------|
+| `memtables_consulted`          | Number of memtable + imm iterators accessed                                                             |
+| `ssts_consulted_l0`            | Number of L0 SSTs accessed                                                                              |
+| `ssts_consulted_compacted`     | Number of compacted SSTs accessed                                                                       |
+| `sr_consulted`                 | Number of sorted runs accessed                                                                          |
+| `bloom_filter_positives`       | Number of positive filter results: `might_contain` -> true                                              |
+| `bloom_filter_negatives`       | Number of negative filter results: `might_contain` -> false                                             |
+| `bloom_filter_false_positives` | Number of positive filter results, that turned out to be wrong                                          |
+| `block_cache_hits`             | Number of data blocks read from cache                                                                   |
+| `block_cache_misses`           | Number of data blocks not found in cache                                                                |
+| `index_cache_hits`             | Number of index blocks read from cache                                                                  |
+| `index_cache_misses`           | Number of index blocks not found in cache                                                               |
+| `filter_cache_hits`            | Number of filter blocks read from cache                                                                 |
+| `filter_cache_misses`          | Number of filter blocks not found in cache                                                              |
+| `block_fetched_from_store`     | Number of data blocks fetched from object store                                                         |
+| `filter_fetched_from_store`    | Number of filter blocks fetched from object store                                                       |
+| `index_fetched_from_store`     | Number of index blocks fetched from object store                                                        |
+| `bytes_fetched_from_store`     | Number of bytes fetched from object store                                                               |
+| `merge_operands`               | Number of operands passed to `merge_batch`                                                              |
+| `skipped_entries_seq_filtered` | Number of entries read, but skipped because their sequence number exceeded the query's visibility bound |
+| `skipped_entries_shadowed`     | Number of entries read, but skipped because they were hidden by a tombstone or newer value              |
 
 Derived counters:
 - `ssts_consulted_total = ssts_consulted_l0 + ssts_consulted_compacted`.
