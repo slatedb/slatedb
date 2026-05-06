@@ -1120,7 +1120,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1362,7 +1362,7 @@ mod tests {
         let sst = writer
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
-                builder.build().await.unwrap(),
+                &builder.build().await.unwrap(),
                 false,
             )
             .await
@@ -1454,7 +1454,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -1492,7 +1492,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1711,7 +1711,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // Initialize iterator in descending order with full range
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -1891,7 +1891,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
@@ -1970,7 +1970,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -2105,7 +2105,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
@@ -2167,7 +2167,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle = table_store.write_sst(&id, &encoded, false).await.unwrap();
 
         // Verify we have multiple blocks
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2235,7 +2235,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: searching for a non-existent key (odd number)
         let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -2287,7 +2287,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: seeking past the last key
         let iter = SstIterator::new_borrowed_initialized(
@@ -2346,7 +2346,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2482,7 +2482,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();

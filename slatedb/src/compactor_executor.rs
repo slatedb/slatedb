@@ -1474,7 +1474,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
         let retention_min_seq_num = 2;
@@ -1619,7 +1619,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
 
@@ -1720,7 +1720,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
 
@@ -1786,7 +1786,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
 

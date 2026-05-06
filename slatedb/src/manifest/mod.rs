@@ -1,12 +1,13 @@
 use std::cmp::{max, min, Ordering};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
-use std::ops::Bound;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::clone::CloneSource;
+use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
@@ -77,6 +78,18 @@ impl LsmTreeState {
             && self.compacted.is_empty()
             && self.last_compacted_l0_sst_view_id.is_none()
             && self.last_compacted_l0_sst_id.is_none()
+    }
+
+    /// Total number of SST views referenced by this tree — L0 plus every
+    /// SST in every sorted run. Used by the read path to size scan
+    /// parallelism.
+    pub(crate) fn total_ssts(&self) -> usize {
+        self.l0.len()
+            + self
+                .compacted
+                .iter()
+                .map(|sr| sr.sst_views.len())
+                .sum::<usize>()
     }
 
     /// Canonical merge of a single LSM tree, called by both
@@ -398,6 +411,16 @@ impl ManifestCore {
         std::iter::once(&self.tree).chain(self.segments.iter().map(|s| &s.tree))
     }
 
+    /// Iterate every SST view referenced by this manifest — L0 views and
+    /// sorted-run views across the unsegmented tree and every segment.
+    pub(crate) fn all_sst_views(&self) -> impl Iterator<Item = &SsTableView> {
+        self.trees().flat_map(|tree| {
+            tree.l0
+                .iter()
+                .chain(tree.compacted.iter().flat_map(|sr| sr.sst_views.iter()))
+        })
+    }
+
     pub(crate) fn init_clone_db(&self) -> ManifestCore {
         let mut clone = self.clone();
         clone.initialized = false;
@@ -422,6 +445,75 @@ impl ManifestCore {
 
     pub(crate) fn find_checkpoint(&self, checkpoint_id: Uuid) -> Option<&Checkpoint> {
         self.checkpoints.iter().find(|c| c.id == checkpoint_id)
+    }
+
+    /// Returns owned `Segment`s whose intervals may contain entries in
+    /// `range`. Used by the read path to route a query to the relevant
+    /// tree(s) and by `SegmentRangeIterator` to binary-search seek
+    /// across the chain.
+    ///
+    /// In an unconfigured database (no segments) the routing collapses to
+    /// the unsegmented `tree`, returned as a single segment with empty
+    /// prefix — the empty prefix's interval `[b"", +∞)` trivially covers
+    /// every key, which is what unsegmented mode requires. In an
+    /// extractor-configured database (mandatory full segmentation:
+    /// `tree` empty, `segments` non-empty), returns every segment whose
+    /// `[prefix, prefix++)` interval overlaps `range`, in prefix-
+    /// ascending order. Because segments are pairwise disjoint and
+    /// sorted, the matching set is a contiguous slice of `segments`
+    /// located via binary search on the query bounds.
+    ///
+    /// A point query that lands outside every segment's interval — and
+    /// any query against a configured-but-empty database — returns an
+    /// empty vector: no tree can hold a matching key.
+    pub(crate) fn select_segments(&self, range: &BytesRange) -> Vec<Segment> {
+        if self.segments.is_empty() {
+            return vec![Segment {
+                prefix: Bytes::new(),
+                tree: self.tree.clone(),
+            }];
+        }
+        let indices = self.overlapping_segment_indices(range);
+        self.segments[indices].to_vec()
+    }
+
+    /// Half-open `[start, end)` index range of segments whose intervals
+    /// overlap `range`. Each side is computed with a single
+    /// `partition_point`; combined with the antichain invariant this
+    /// pinpoints the contiguous overlap window in O(log n).
+    fn overlapping_segment_indices(&self, range: &BytesRange) -> std::ops::Range<usize> {
+        let start = match range.start_bound() {
+            Bound::Unbounded => 0,
+            Bound::Included(lo) | Bound::Excluded(lo) => {
+                let lo = lo.as_ref();
+                let after = self.segments.partition_point(|s| s.prefix.as_ref() <= lo);
+                // The largest prefix `<= lo` (if any) is the unique
+                // candidate that could contain `lo` (antichain
+                // invariant). If `lo` starts with that prefix, the
+                // segment overlaps the start of the query. Otherwise the
+                // segment's interval ends before `lo`, so the first
+                // overlapping segment (if any) sits at `after`.
+                if after > 0 && lo.starts_with(&self.segments[after - 1].prefix) {
+                    after - 1
+                } else {
+                    after
+                }
+            }
+        };
+        let end = match range.end_bound() {
+            Bound::Unbounded => self.segments.len(),
+            Bound::Excluded(hi) => self
+                .segments
+                .partition_point(|s| s.prefix.as_ref() < hi.as_ref()),
+            Bound::Included(hi) => self
+                .segments
+                .partition_point(|s| s.prefix.as_ref() <= hi.as_ref()),
+        };
+        if start < end {
+            start..end
+        } else {
+            0..0
+        }
     }
 }
 
@@ -566,11 +658,10 @@ impl Manifest {
         source_checkpoint_id: Uuid,
         rand: Arc<DbRand>,
     ) -> Self {
-        let mut parent_external_sst_ids = HashSet::<SsTableId>::new();
         let mut clone_external_dbs = vec![];
 
+        // Carry over each inherited external_db with a fresh final_checkpoint_id.
         for parent_external_db in &parent_manifest.external_dbs {
-            parent_external_sst_ids.extend(&parent_external_db.sst_ids);
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
                 source_checkpoint_id: parent_external_db.source_checkpoint_id,
@@ -579,21 +670,13 @@ impl Manifest {
             });
         }
 
-        let parent_owned_sst_ids = parent_manifest
-            .core
-            .tree
-            .compacted
-            .iter()
-            .flat_map(|sr| sr.sst_views.iter().map(|s| s.sst.id))
-            .chain(parent_manifest.core.tree.l0.iter().map(|s| s.sst.id))
-            .filter(|id| !parent_external_sst_ids.contains(id))
-            .collect();
-
+        // Add a single external_db pointing at the parent for everything the
+        // parent owns directly (across all trees, including segments).
         clone_external_dbs.push(ExternalDb {
             path: parent_path,
             source_checkpoint_id,
             final_checkpoint_id: Some(rand.rng().gen_uuid()),
-            sst_ids: parent_owned_sst_ids,
+            sst_ids: parent_manifest.owned_ssts(),
         });
 
         Self {
@@ -606,32 +689,44 @@ impl Manifest {
 
     pub(crate) fn projected(source_manifest: &Manifest, range: BytesRange) -> Manifest {
         let mut projected = source_manifest.clone();
-        let mut sorter_runs_filtered = vec![];
-        for sorter_run in &projected.core.tree.compacted {
-            let sst_views = Self::filter_view_handles(&sorter_run.sst_views, false, &range);
-            if !sst_views.is_empty() {
-                sorter_runs_filtered.push(SortedRun {
-                    id: sorter_run.id,
-                    sst_views,
-                });
-            }
-        }
-        projected.core.tree.l0 =
-            Self::filter_view_handles(&projected.core.tree.l0, true, &range).into();
-        projected.core.tree.compacted = sorter_runs_filtered;
-        // drop unused external_dbs
-        let used_sst_ids: HashSet<SsTableId> = projected
-            .core
-            .tree
-            .compacted
-            .iter()
-            .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
-            .chain(projected.core.tree.l0.iter().map(|v| v.sst.id))
-            .collect();
+        Self::project_tree_in_place(&mut projected.core.tree, &range);
+        // Project each segment's tree against the range; drop segments
+        // that become empty (no L0 and no compacted views remain). The
+        // projector is acting as the first writer of the resulting clone,
+        // so segments are derived from data: any source-side drain
+        // marker carries no meaning in the new DB and is dropped along
+        // with the segment.
+        projected.core.segments.retain_mut(|segment| {
+            Self::project_tree_in_place(&mut segment.tree, &range);
+            !segment.tree.l0.is_empty() || !segment.tree.compacted.is_empty()
+        });
+        // Drop unused external_dbs based on the surviving SST set across
+        // every tree (unsegmented + segments).
+        let used_sst_ids: HashSet<SsTableId> =
+            projected.core.all_sst_views().map(|v| v.sst.id).collect();
         projected
             .external_dbs
             .retain(|e| e.sst_ids.iter().any(|id| used_sst_ids.contains(id)));
         projected
+    }
+
+    /// Filter `tree.l0` and `tree.compacted` views against `range` in place.
+    /// Sorted runs that lose all views are removed. Watermark fields are
+    /// untouched (the caller decides whether to keep them).
+    fn project_tree_in_place(tree: &mut LsmTreeState, range: &BytesRange) {
+        let l0: VecDeque<SsTableView> = Self::filter_view_handles(&tree.l0, true, range).into();
+        let mut sorted_runs_filtered = vec![];
+        for sr in &tree.compacted {
+            let sst_views = Self::filter_view_handles(&sr.sst_views, false, range);
+            if !sst_views.is_empty() {
+                sorted_runs_filtered.push(SortedRun {
+                    id: sr.id,
+                    sst_views,
+                });
+            }
+        }
+        tree.l0 = l0;
+        tree.compacted = sorted_runs_filtered;
     }
 
     fn filter_view_handles<'a, T>(
@@ -659,7 +754,195 @@ impl Manifest {
         filtered_handles
     }
 
-    pub(crate) fn cloned_from_union(sources: Vec<CloneSource>, rand: Arc<DbRand>) -> Manifest {
+    /// Return the `segment_extractor_name` shared by all sources, or
+    /// `None` if every source has `None`. Per RFC-0024, all sources must
+    /// agree exactly — either every source has `None` or every source
+    /// has the same `Some(name)`. Mixed configurations are rejected
+    /// because unsegmented data in a no-extractor source may match an
+    /// extractor prefix from another source, and after the union a read
+    /// for that key would route through the extractor to a segment that
+    /// does not contain it.
+    fn ensure_consistent_segment_extractor(
+        sources: &[CloneSource],
+    ) -> Result<Option<String>, SlateDBError> {
+        let mut iter = sources.iter();
+        let Some(first) = iter.next() else {
+            return Ok(None);
+        };
+        let agreed = first.manifest.core.segment_extractor_name.as_ref();
+        for source in iter {
+            let cur = source.manifest.core.segment_extractor_name.as_ref();
+            if agreed != cur {
+                let extractors: Vec<Option<String>> = sources
+                    .iter()
+                    .map(|s| s.manifest.core.segment_extractor_name.clone())
+                    .collect();
+                return Err(SlateDBError::InvalidUnion(format!(
+                    "clone sources disagree on segment extractor. extractors=`{:?}`",
+                    extractors
+                )));
+            }
+        }
+        Ok(agreed.cloned())
+    }
+
+    /// Verify the antichain invariant on segment prefixes for a union: no
+    /// prefix is a proper prefix of another. Defends against stale
+    /// extractor-name matches where two sources happen to agree on
+    /// `segment_extractor_name` but their persisted prefixes were
+    /// produced by extractors of different lengths. Non-overlap of source
+    /// ranges usually implies this, but the check is explicit per
+    /// RFC-0024.
+    ///
+    /// Returns `Err` on violation.
+    fn ensure_union_prefix_antichain<'a>(
+        prefixes: impl IntoIterator<Item = &'a Bytes>,
+    ) -> Result<(), SlateDBError> {
+        let mut prefixes: Vec<&Bytes> = prefixes.into_iter().collect();
+        prefixes.sort();
+        for window in prefixes.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            // After sort, a <= b. Prefixes are unique by construction
+            // (collected via BTreeMap/HashMap dedup), so a < b strictly.
+            // If b also starts with a, then a is a proper prefix of b.
+            if b.starts_with(a) {
+                return Err(SlateDBError::InvalidUnion(format!(
+                    "segment prefixes are not an antichain: `{:?}` is a proper prefix of `{:?}`",
+                    a, b
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// No-extractor case. Concatenate every source's `core.tree` into
+    /// the unioned `core.tree`. Rejects any source carrying segments —
+    /// segments require a configured extractor. Watermarks are
+    /// intentionally not carried over: the unioned manifest is a fresh
+    /// DB that begins compaction tracking from scratch.
+    fn build_unsegmented_lsm_state(
+        core: &mut ManifestCore,
+        sources: &[&CloneSource],
+    ) -> Result<(), SlateDBError> {
+        let stray_prefixes: Vec<Bytes> = sources
+            .iter()
+            .flat_map(|s| {
+                s.manifest
+                    .core
+                    .segments
+                    .iter()
+                    .map(|seg| seg.prefix.clone())
+            })
+            .collect();
+        if !stray_prefixes.is_empty() {
+            return Err(SlateDBError::InvalidUnion(format!(
+                "clone source has segments but no extractor is configured. prefixes=`{:?}`",
+                stray_prefixes
+            )));
+        }
+        for source in sources {
+            let manifest = &source.manifest;
+            core.tree.l0.extend(manifest.core.tree.l0.iter().cloned());
+            core.tree
+                .compacted
+                .extend(manifest.core.tree.compacted.iter().cloned());
+        }
+        Ok(())
+    }
+
+    /// Extractor-configured case. Build a per-prefix accumulator from
+    /// every source's `core.segments`, validate the antichain, and write
+    /// the result into `core.segments`. Drain-marker (empty) entries
+    /// produced by the loop are dropped to preserve
+    /// `LsmTreeState::is_empty`'s invariant. Watermarks are intentionally
+    /// not carried over: the unioned manifest is a fresh DB that begins
+    /// compaction tracking from scratch.
+    fn build_segmented_lsm_state(
+        core: &mut ManifestCore,
+        sources: &[&CloneSource],
+    ) -> Result<(), SlateDBError> {
+        let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
+        for source in sources {
+            for segment in &source.manifest.core.segments {
+                let entry = segments_by_prefix
+                    .entry(segment.prefix.clone())
+                    .or_default();
+                entry.l0.extend(segment.tree.l0.iter().cloned());
+                entry
+                    .compacted
+                    .extend(segment.tree.compacted.iter().cloned());
+            }
+        }
+        Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
+        core.segments = segments_by_prefix
+            .into_iter()
+            .filter(|(_, tree)| !tree.is_empty())
+            .map(|(prefix, tree)| Segment { prefix, tree })
+            .collect();
+        Ok(())
+    }
+
+    /// Build the union's `external_dbs` list. Forwards every source's
+    /// inherited `external_dbs` and adds one entry per source that owns
+    /// SSTs directly. `final_checkpoint_id` is left as `None`; it is
+    /// regenerated after the post-loop deduplication.
+    fn build_external_dbs(sources: &[&CloneSource]) -> Vec<ExternalDb> {
+        let mut external_dbs = vec![];
+        for source in sources {
+            let manifest = &source.manifest;
+            for parent_external_db in &manifest.external_dbs {
+                external_dbs.push(ExternalDb {
+                    path: parent_external_db.path.clone(),
+                    source_checkpoint_id: parent_external_db.source_checkpoint_id,
+                    final_checkpoint_id: None,
+                    sst_ids: parent_external_db.sst_ids.clone(),
+                });
+            }
+            let owned_ssts = manifest.owned_ssts();
+            if !owned_ssts.is_empty() {
+                external_dbs.push(ExternalDb {
+                    path: source.path.clone().into(),
+                    source_checkpoint_id: source.checkpoint.id,
+                    final_checkpoint_id: None,
+                    sst_ids: owned_ssts,
+                });
+            }
+        }
+        external_dbs
+    }
+
+    /// Reassign every sorted run in `core` a fresh sequential id. The
+    /// union concatenates per-source `compacted` lists across the
+    /// unsegmented tree and every segment, so ids must be regenerated
+    /// to avoid cross-source collisions. RFC-0024 requires SR ids to be
+    /// globally unique across all trees.
+    ///
+    /// Ids are assigned in descending order of walk position so that
+    /// within each tree, the first list entry gets the highest id and
+    /// the last gets the lowest. This preserves the existing convention
+    /// that `compacted` is sorted by descending id, mirroring the
+    /// per-source state pre-union.
+    fn renumber_union_sorted_runs(core: &mut ManifestCore) {
+        let count: usize = core.tree.compacted.len()
+            + core
+                .segments
+                .iter()
+                .map(|s| s.tree.compacted.len())
+                .sum::<usize>();
+        let all_compacted = core.tree.compacted.iter_mut().chain(
+            core.segments
+                .iter_mut()
+                .flat_map(|s| s.tree.compacted.iter_mut()),
+        );
+        for (idx, sr) in all_compacted.enumerate() {
+            sr.id = (count - 1 - idx) as u32;
+        }
+    }
+
+    pub(crate) fn cloned_from_union(
+        sources: Vec<CloneSource>,
+        rand: Arc<DbRand>,
+    ) -> Result<Manifest, SlateDBError> {
         let mut ranges = vec![];
         for source in &sources {
             let range = source.manifest.range();
@@ -671,62 +954,38 @@ impl Manifest {
         }
         ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
 
-        // Ensure manifests are non-overlapping
+        // Ensure source key ranges are non-overlapping. Surfaces as a typed
+        // error since the source set is user-supplied.
         let mut previous_range = None;
         for (_, range) in ranges.iter() {
             if let Some(previous_range) = previous_range {
                 if range.intersect(previous_range).is_some() {
-                    unreachable!("overlapping ranges found");
+                    let all: Vec<BytesRange> = ranges.iter().map(|(_, r)| (*r).clone()).collect();
+                    return Err(SlateDBError::InvalidUnion(format!(
+                        "clone sources have overlapping key ranges. ranges=`{:?}`",
+                        all
+                    )));
                 }
             }
             previous_range = Some(range);
         }
 
-        // Now we can zip the manifests together
-        let mut external_dbs = vec![];
+        let ordered_sources: Vec<&CloneSource> = ranges.iter().map(|(s, _)| *s).collect();
         let mut core = ManifestCore::new();
+        core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources)?;
 
-        for (source, _) in ranges {
-            let manifest = &source.manifest;
-
-            // First, we need to add all the external dbs
-            for parent_external_db in &manifest.external_dbs {
-                external_dbs.push(ExternalDb {
-                    path: parent_external_db.path.clone(),
-                    source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                    final_checkpoint_id: None, // regenerated after deduplication
-                    sst_ids: parent_external_db.sst_ids.clone(),
-                });
-            }
-            // Then, we can add all the l0 ssts
-            for sst in &manifest.core.tree.l0 {
-                core.tree.l0.push_back(sst.clone());
-            }
-            // Finally, we can add all the sorted runs
-            for sorted_run in &manifest.core.tree.compacted {
-                core.tree.compacted.push(sorted_run.clone());
-            }
-
-            let owned_ssts = manifest.owned_ssts();
-            if !owned_ssts.is_empty() {
-                external_dbs.push(ExternalDb {
-                    path: source.path.clone().into(),
-                    source_checkpoint_id: source.checkpoint.id,
-                    final_checkpoint_id: None, // regenerated after deduplication
-                    sst_ids: owned_ssts,
-                });
-            }
+        if core.segment_extractor_name.is_none() {
+            Self::build_unsegmented_lsm_state(&mut core, &ordered_sources)?;
+        } else {
+            Self::build_segmented_lsm_state(&mut core, &ordered_sources)?;
         }
-
-        // Renumber sorted runs to ensure sequential IDs without duplicates
-        for (idx, sorted_run) in core.tree.compacted.iter_mut().enumerate() {
-            sorted_run.id = idx as u32;
-        }
+        Self::renumber_union_sorted_runs(&mut core);
 
         for source in &sources {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
         }
-        let external_dbs_merged = external_dbs
+
+        let external_dbs_merged = Self::build_external_dbs(&ordered_sources)
             .into_iter()
             .fold(
                 HashMap::new(),
@@ -746,25 +1005,18 @@ impl Manifest {
             })
             .collect();
 
-        Self {
+        Ok(Self {
             external_dbs: external_dbs_merged,
             core,
             writer_epoch: 0,
             compactor_epoch: 0,
-        }
+        })
     }
 
     fn range(&self) -> Option<BytesRange> {
         let mut start_bound = None;
         let mut end_bound = None;
-        let all_views = self.core.tree.l0.iter().chain(
-            self.core
-                .tree
-                .compacted
-                .iter()
-                .flat_map(|sr| sr.sst_views.iter()),
-        );
-        for sst in all_views {
+        for sst in self.core.all_sst_views() {
             let range = sst.compacted_effective_range();
             start_bound = start_bound
                 .map(|b| min(b, range.comparable_start_bound()))
@@ -811,17 +1063,13 @@ impl Manifest {
             .iter()
             .flat_map(|db| db.sst_ids.iter().copied())
             .collect();
-        // Owned SSTs = SSTs in core not already delegated to an external_db
-        let owned_sst_ids: Vec<SsTableId> = self
-            .core
-            .tree
-            .compacted
-            .iter()
-            .flat_map(|sr| sr.sst_views.iter().map(|s| s.sst.id))
-            .chain(self.core.tree.l0.iter().map(|s| s.sst.id))
+        // Owned SSTs = SSTs in any tree (unsegmented + each segment) not
+        // already delegated to an external_db.
+        self.core
+            .all_sst_views()
+            .map(|v| v.sst.id)
             .filter(|id| !source_external_sst_ids.contains(id))
-            .collect();
-        owned_sst_ids
+            .collect()
     }
 
     pub(crate) fn has_wal_sst_reference(&self, wal_sst_id: u64) -> bool {
@@ -833,14 +1081,8 @@ impl Manifest {
     /// `sst_ids` becomes empty — detaching a clone from its parent is done by the GC,
     /// not here, because it also requires that no live checkpoint references those IDs.
     pub(crate) fn prune_external_sst_ids(&mut self) {
-        let used_sst_ids: HashSet<SsTableId> = self
-            .core
-            .tree
-            .compacted
-            .iter()
-            .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
-            .chain(self.core.tree.l0.iter().map(|v| v.sst.id))
-            .collect();
+        let used_sst_ids: HashSet<SsTableId> =
+            self.core.all_sst_views().map(|v| v.sst.id).collect();
         for external_db in self.external_dbs.iter_mut() {
             external_db.sst_ids.retain(|id| used_sst_ids.contains(id));
         }
@@ -857,8 +1099,9 @@ mod tests {
     use crate::clone::CloneSource;
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
+    use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-    use crate::manifest::{LsmTreeState, ManifestCore};
+    use crate::manifest::{LsmTreeState, ManifestCore, Segment};
     use crate::rand::DbRand;
     use crate::Checkpoint;
     use bytes::Bytes;
@@ -867,7 +1110,7 @@ mod tests {
     use object_store::ObjectStore;
     use proptest::proptest;
     use rstest::rstest;
-    use std::collections::{BTreeSet, HashMap, VecDeque};
+    use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
@@ -1222,7 +1465,7 @@ mod tests {
         let expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
-        let union = Manifest::cloned_from_union(sources, rand);
+        let union = Manifest::cloned_from_union(sources, rand).unwrap();
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
@@ -1813,13 +2056,20 @@ mod tests {
                 },
             ],
             rand,
-        );
+        )
+        .unwrap();
 
-        // After union, we should have 5 SRs with IDs 0, 1, 2, 3, 4
+        // After union, we should have 5 SRs with IDs 4, 3, 2, 1, 0
+        // (renumber assigns descending ids in walk order so that within
+        // each tree the first list entry has the highest id).
         assert_eq!(union.core.tree.compacted.len(), 5);
 
         let sr_ids: Vec<u32> = union.core.tree.compacted.iter().map(|sr| sr.id).collect();
-        assert_eq!(sr_ids, vec![0, 1, 2, 3, 4], "SR IDs should be sequential");
+        assert_eq!(
+            sr_ids,
+            vec![4, 3, 2, 1, 0],
+            "SR IDs should descend in list order"
+        );
 
         // Verify no duplicates
         let mut seen = std::collections::HashSet::new();
@@ -1862,7 +2112,8 @@ mod tests {
                 },
             ],
             Arc::new(DbRand::default()),
-        );
+        )
+        .unwrap();
 
         assert_eq!(union.core.last_l0_seq, 200);
     }
@@ -1919,7 +2170,8 @@ mod tests {
                 },
             ],
             rand,
-        );
+        )
+        .unwrap();
 
         // db1 (owned SSTs only), grandparent (carried over), db2
         assert_eq!(union.external_dbs.len(), 3);
@@ -2238,7 +2490,55 @@ mod tests {
         assert!(manifest.external_dbs[1].final_checkpoint_id.is_some());
     }
 
-    fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8; 1]) -> SsTableView {
+    #[test]
+    fn test_prune_external_sst_ids_retains_segment_referenced_ssts() {
+        // Regression: prune_external_sst_ids must walk segment trees in
+        // addition to the unsegmented tree. Otherwise SSTs referenced
+        // only by a segment get treated as stale and dropped from
+        // external_dbs.sst_ids, which would let parent detach/GC remove
+        // files the clone still needs.
+        let unsegmented_l0 = SsTableId::Compacted(Ulid::new());
+        let segment_l0 = SsTableId::Compacted(Ulid::new());
+        let segment_compacted = SsTableId::Compacted(Ulid::new());
+        let stale = SsTableId::Compacted(Ulid::new());
+
+        let mut core = ManifestCore::new();
+        core.tree
+            .l0
+            .push_back(create_sst_view(unsegmented_l0, b"a"));
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"seg/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![create_sst_view(segment_l0, b"seg/a")]),
+                compacted: vec![SortedRun {
+                    id: 0,
+                    sst_views: vec![create_sst_view(segment_compacted, b"seg/b")],
+                }],
+            },
+        }];
+
+        let mut manifest = Manifest::initial(core);
+        manifest.external_dbs = vec![ExternalDb {
+            path: "/path/to/parent".to_string(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![unsegmented_l0, segment_l0, segment_compacted, stale],
+        }];
+
+        manifest.prune_external_sst_ids();
+
+        assert_eq!(manifest.external_dbs.len(), 1);
+        let retained: HashSet<SsTableId> =
+            manifest.external_dbs[0].sst_ids.iter().copied().collect();
+        let expected: HashSet<SsTableId> = [unsegmented_l0, segment_l0, segment_compacted]
+            .into_iter()
+            .collect();
+        assert_eq!(retained, expected);
+    }
+
+    fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8]) -> SsTableView {
         SsTableView::new_projected(
             sst_id.unwrap_compacted_id(),
             SsTableHandle::new(
@@ -2322,7 +2622,7 @@ mod tests {
             },
         ];
 
-        let result = Manifest::cloned_from_union(sources, rand);
+        let result = Manifest::cloned_from_union(sources, rand).unwrap();
 
         let shared_entries: Vec<_> = result
             .external_dbs
@@ -2338,5 +2638,1099 @@ mod tests {
         let merged_ids: HashSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
         let expected_ids: HashSet<SsTableId> = [sst_a, sst_b, sst_c].iter().copied().collect();
         assert_eq!(merged_ids, expected_ids);
+    }
+
+    fn segment_with_prefix(prefix: &[u8], seed: u64) -> super::Segment {
+        let view_id = Ulid::from_parts(seed, 0);
+        let handle = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::from_parts(seed, 1)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        );
+        super::Segment {
+            prefix: Bytes::copy_from_slice(prefix),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![SsTableView::new(view_id, handle)]),
+                compacted: vec![],
+            },
+        }
+    }
+
+    fn collect_prefixes(segments: &[super::Segment]) -> Vec<Bytes> {
+        segments.iter().map(|s| s.prefix.clone()).collect()
+    }
+
+    #[test]
+    fn test_select_segments_unconfigured_returns_unsegmented_tree() {
+        // No segments configured -> route always lands on `core.tree`,
+        // identical to today's single-tree read path.
+        let core = ManifestCore::new();
+        let segments = core.select_segments(&BytesRange::unbounded());
+        assert_eq!(collect_prefixes(&segments), vec![Bytes::new()]);
+    }
+
+    #[test]
+    fn test_select_segments_point_inside_segment() {
+        // Point query whose key starts with a segment prefix routes to
+        // exactly that segment's tree.
+        let mut core = ManifestCore::new();
+        core.segments = vec![
+            segment_with_prefix(b"a/", 1),
+            segment_with_prefix(b"b/", 2),
+            segment_with_prefix(b"c/", 3),
+        ];
+        let range = BytesRange::from_slice(b"b/k".as_ref()..=b"b/k".as_ref());
+        let segments = core.select_segments(&range);
+        assert_eq!(collect_prefixes(&segments), vec![Bytes::from_static(b"b/")]);
+    }
+
+    #[test]
+    fn test_select_segments_point_outside_any_segment() {
+        // Point query that falls in a gap between segment prefixes routes
+        // to nothing — the key cannot exist in this database.
+        let mut core = ManifestCore::new();
+        core.segments = vec![segment_with_prefix(b"a/", 1), segment_with_prefix(b"c/", 3)];
+        let range = BytesRange::from_slice(b"b/k".as_ref()..=b"b/k".as_ref());
+        let segments = core.select_segments(&range);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_select_segments_range_overlapping_contiguous_segments() {
+        // Range query collects every overlapping segment in prefix order.
+        let mut core = ManifestCore::new();
+        core.segments = vec![
+            segment_with_prefix(b"a/", 1),
+            segment_with_prefix(b"b/", 2),
+            segment_with_prefix(b"c/", 3),
+            segment_with_prefix(b"d/", 4),
+        ];
+        let range = BytesRange::from_slice(b"b/".as_ref()..b"d/".as_ref());
+        let segments = core.select_segments(&range);
+        assert_eq!(
+            collect_prefixes(&segments),
+            vec![Bytes::from_static(b"b/"), Bytes::from_static(b"c/")]
+        );
+    }
+
+    #[test]
+    fn test_select_segments_range_outside_all_segments() {
+        // Range that falls entirely outside every segment interval routes
+        // to no trees.
+        let mut core = ManifestCore::new();
+        core.segments = vec![segment_with_prefix(b"a/", 1), segment_with_prefix(b"c/", 3)];
+        let range = BytesRange::from_slice(b"x/".as_ref()..b"y/".as_ref());
+        let segments = core.select_segments(&range);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_select_segments_unbounded_range_returns_all_segments() {
+        // Unbounded range covers every segment interval.
+        let mut core = ManifestCore::new();
+        core.segments = vec![
+            segment_with_prefix(b"a/", 1),
+            segment_with_prefix(b"b/", 2),
+            segment_with_prefix(b"c/", 3),
+        ];
+        let segments = core.select_segments(&BytesRange::unbounded());
+        assert_eq!(
+            collect_prefixes(&segments),
+            vec![
+                Bytes::from_static(b"a/"),
+                Bytes::from_static(b"b/"),
+                Bytes::from_static(b"c/"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_select_segments_excluded_hi_at_segment_boundary() {
+        // For Excluded(hi), a segment whose prefix == hi is skipped — its
+        // interval starts exactly at hi, which is outside the half-open
+        // query.
+        let mut core = ManifestCore::new();
+        core.segments = vec![
+            segment_with_prefix(b"a/", 1),
+            segment_with_prefix(b"b/", 2),
+            segment_with_prefix(b"c/", 3),
+        ];
+        let range = BytesRange::from_slice(b"a/".as_ref()..b"b/".as_ref());
+        let segments = core.select_segments(&range);
+        assert_eq!(collect_prefixes(&segments), vec![Bytes::from_static(b"a/")]);
+    }
+
+    #[test]
+    fn test_select_segments_included_hi_at_segment_boundary() {
+        // For Included(hi), a segment whose prefix == hi is included — its
+        // interval starts at hi, which is inside the closed query.
+        let mut core = ManifestCore::new();
+        core.segments = vec![
+            segment_with_prefix(b"a/", 1),
+            segment_with_prefix(b"b/", 2),
+            segment_with_prefix(b"c/", 3),
+        ];
+        let range = BytesRange::from_slice(b"a/".as_ref()..=b"b/".as_ref());
+        let segments = core.select_segments(&range);
+        assert_eq!(
+            collect_prefixes(&segments),
+            vec![Bytes::from_static(b"a/"), Bytes::from_static(b"b/")]
+        );
+    }
+
+    #[test]
+    fn test_select_segments_lo_inside_segment_interval() {
+        // `lo` lands deep inside a segment's interval; that segment must
+        // be included even though its prefix is strictly less than `lo`.
+        let mut core = ManifestCore::new();
+        core.segments = vec![
+            segment_with_prefix(b"a/", 1),
+            segment_with_prefix(b"b/", 2),
+            segment_with_prefix(b"c/", 3),
+        ];
+        let range = BytesRange::from_slice(b"b/middle".as_ref()..b"d/".as_ref());
+        let segments = core.select_segments(&range);
+        assert_eq!(
+            collect_prefixes(&segments),
+            vec![Bytes::from_static(b"b/"), Bytes::from_static(b"c/")]
+        );
+    }
+
+    #[test]
+    fn test_select_segments_matches_brute_force_filter() {
+        // Property: binary-search routing agrees with a naive
+        // intersect-based filter on every (segments, range) shape we
+        // could generate. Catches off-by-ones around the lower-bound
+        // antichain check and the included-vs-excluded upper bound.
+        use proptest::prelude::*;
+
+        fn brute_force(core: &ManifestCore, range: &BytesRange) -> Vec<Bytes> {
+            if core.segments.is_empty() {
+                return vec![Bytes::new()];
+            }
+            core.segments
+                .iter()
+                .filter(|s| {
+                    BytesRange::from_prefix(&s.prefix)
+                        .intersect(range)
+                        .is_some()
+                })
+                .map(|s| s.prefix.clone())
+                .collect()
+        }
+
+        // Antichain-respecting prefix universe: short, distinct, and
+        // none is a prefix of another.
+        let prefixes = ["a/", "b/", "c/", "d/", "e/"];
+
+        proptest!(|(
+            mask in proptest::collection::vec(any::<bool>(), prefixes.len()),
+            lo_kind in 0u8..3,
+            hi_kind in 0u8..3,
+            lo_key in "[a-f][/0-9]{0,3}",
+            hi_key in "[a-f][/0-9]{0,3}",
+        )| {
+            let mut core = ManifestCore::new();
+            core.segments = mask
+                .iter()
+                .zip(prefixes.iter())
+                .enumerate()
+                .filter(|(_, (keep, _))| **keep)
+                .map(|(i, (_, p))| segment_with_prefix(p.as_bytes(), i as u64 + 1))
+                .collect();
+
+            let lo_bytes = Bytes::copy_from_slice(lo_key.as_bytes());
+            let hi_bytes = Bytes::copy_from_slice(hi_key.as_bytes());
+            let lo_bound = match lo_kind {
+                0 => Bound::Unbounded,
+                1 => Bound::Included(lo_bytes.clone()),
+                _ => Bound::Excluded(lo_bytes.clone()),
+            };
+            let hi_bound = match hi_kind {
+                0 => Bound::Unbounded,
+                1 => Bound::Included(hi_bytes.clone()),
+                _ => Bound::Excluded(hi_bytes.clone()),
+            };
+            let Some(range) = BytesRange::try_new(lo_bound, hi_bound) else {
+                return Ok(());
+            };
+
+            let actual = collect_prefixes(&core.select_segments(&range));
+            let expected = brute_force(&core, &range);
+            prop_assert_eq!(actual, expected);
+        });
+    }
+
+    /// Helper for the segment-aware union tests: build a clone source with
+    /// a single segment whose tree carries one L0 view and one sorted run.
+    /// Each SST view is given an explicit `visible_range` so the
+    /// non-overlap check in `cloned_from_union` sees disjoint sources.
+    fn manifest_with_segment(
+        prefix: &'static [u8],
+        extractor_name: Option<&str>,
+        first_entry: &'static [u8],
+        visible_range: BytesRange,
+    ) -> (Manifest, SsTableId, SsTableId) {
+        let l0_sst = SsTableId::Compacted(Ulid::new());
+        let sr_sst = SsTableId::Compacted(Ulid::new());
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = extractor_name.map(|s| s.to_string());
+        core.segments = vec![Segment {
+            prefix: Bytes::copy_from_slice(prefix),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![SsTableView::new_projected(
+                    l0_sst.unwrap_compacted_id(),
+                    SsTableHandle::new(
+                        l0_sst,
+                        SST_FORMAT_VERSION_LATEST,
+                        SsTableInfo {
+                            first_entry: Some(Bytes::from_static(first_entry)),
+                            ..SsTableInfo::default()
+                        },
+                    ),
+                    Some(visible_range.clone()),
+                )]),
+                compacted: vec![SortedRun {
+                    id: 0, // gets renumbered globally by the union
+                    sst_views: vec![SsTableView::new_projected(
+                        sr_sst.unwrap_compacted_id(),
+                        SsTableHandle::new(
+                            sr_sst,
+                            SST_FORMAT_VERSION_LATEST,
+                            SsTableInfo {
+                                first_entry: Some(Bytes::from_static(first_entry)),
+                                ..SsTableInfo::default()
+                            },
+                        ),
+                        Some(visible_range),
+                    )],
+                }],
+            },
+        }];
+        (Manifest::initial(core), l0_sst, sr_sst)
+    }
+
+    #[test]
+    fn test_union_carries_through_segments() {
+        // Two non-overlapping sources each contribute a segment; the union
+        // contains both, sorted by prefix.
+        let (m1, _, _) = manifest_with_segment(
+            b"hour=11/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let (m2, _, _) =
+            manifest_with_segment(b"hour=12/", Some("hour"), b"m", BytesRange::from_ref("m"..));
+
+        let rand = Arc::new(DbRand::default());
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            rand,
+        )
+        .unwrap();
+
+        assert_eq!(union.core.segment_extractor_name.as_deref(), Some("hour"));
+        let prefixes: Vec<&Bytes> = union.core.segments.iter().map(|s| &s.prefix).collect();
+        assert_eq!(
+            prefixes,
+            vec![
+                &Bytes::from_static(b"hour=11/"),
+                &Bytes::from_static(b"hour=12/")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_renumber_union_sorted_runs_assigns_unique_sequential_ids() {
+        // Property: after `renumber_union_sorted_runs`, every sorted run
+        // across the unsegmented tree and every segment has an id in
+        // 0..N (one per run) with no duplicates. Walk order is
+        // unsegmented first, then segments in `core.segments` order.
+        // Ids descend in walk order, so within each tree the first list
+        // entry has the highest id (matching the descending-id-by-list-
+        // position convention).
+        fn make_sr(id: u32) -> SortedRun {
+            SortedRun {
+                id, // intentionally collides across trees pre-renumber
+                sst_views: vec![],
+            }
+        }
+
+        let mut core = ManifestCore::new();
+        // Unsegmented tree carries two SRs sharing the same id.
+        core.tree.compacted = vec![make_sr(7), make_sr(7)];
+        core.segments = vec![
+            Segment {
+                prefix: Bytes::from_static(b"hour=11/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![make_sr(0), make_sr(7)],
+                },
+            },
+            Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![make_sr(0)],
+                },
+            },
+        ];
+
+        Manifest::renumber_union_sorted_runs(&mut core);
+
+        let ids: Vec<u32> = core
+            .trees()
+            .flat_map(|t| t.compacted.iter().map(|sr| sr.id))
+            .collect();
+        // 5 runs total → ids descend from N-1 down to 0 in walk order.
+        assert_eq!(ids, vec![4, 3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_union_renumbers_sr_ids_globally_across_trees() {
+        // Two sources, each with a single segment under the same
+        // extractor. After union, the SR ids drawn from both segments
+        // must be unique and sequential — exercises that renumber walks
+        // multiple segment trees, not just one.
+        let (m1, _, _) = manifest_with_segment(
+            b"hour=11/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let (m2, _, _) =
+            manifest_with_segment(b"hour=12/", Some("hour"), b"m", BytesRange::from_ref("m"..));
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        let mut all_sr_ids: Vec<u32> = union
+            .core
+            .trees()
+            .flat_map(|t| t.compacted.iter().map(|sr| sr.id))
+            .collect();
+        all_sr_ids.sort();
+        // 2 segments × 1 run each = 2 total, ids 0..1.
+        assert_eq!(all_sr_ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_union_owned_ssts_includes_segment_ssts() {
+        // The clone source's owned_ssts must enumerate SSTs from segments
+        // too, otherwise the resulting external_db wouldn't list them and
+        // GC could later reap them.
+        use std::collections::HashSet;
+
+        let (m, l0_sst, sr_sst) =
+            manifest_with_segment(b"hour=12/", Some("hour"), b"a", BytesRange::from_ref("a"..));
+        let union = Manifest::cloned_from_union(
+            vec![CloneSource {
+                manifest: m,
+                path: Path::from("/tmp/db1"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            }],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        let owned_external: HashSet<SsTableId> = union
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == "tmp/db1")
+            .flat_map(|db| db.sst_ids.iter().copied())
+            .collect();
+        assert!(owned_external.contains(&l0_sst));
+        assert!(owned_external.contains(&sr_sst));
+    }
+
+    #[test]
+    fn test_union_drops_drain_marker_segments() {
+        // A source whose `core.segments` mixes a data-bearing segment
+        // with a drain-marker segment (no L0, no compacted, watermark
+        // set). The drain marker carries no meaning in the resulting
+        // clone and must not produce an empty entry in `core.segments`
+        // (which would violate `LsmTreeState::is_empty`'s invariant).
+        let (mut m1, _, _) = manifest_with_segment(
+            b"hour=11/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        // Add a drain-marker segment alongside the data-bearing one.
+        m1.core.segments.push(Segment {
+            prefix: Bytes::from_static(b"hour=99/"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(Ulid::new()),
+                last_compacted_l0_sst_id: Some(Ulid::new()),
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        });
+        // `manifest.core.segments` invariant: sorted by prefix.
+        m1.core.segments.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+        debug_assert!(m1.core.segments[1].tree.is_drained());
+
+        let (m2, _, _) =
+            manifest_with_segment(b"hour=12/", Some("hour"), b"m", BytesRange::from_ref("m"..));
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        // Only the two data-bearing segments survive; the drain marker
+        // is dropped.
+        assert_eq!(union.core.segments.len(), 2);
+        let prefixes: Vec<&Bytes> = union.core.segments.iter().map(|s| &s.prefix).collect();
+        assert_eq!(
+            prefixes,
+            vec![
+                &Bytes::from_static(b"hour=11/"),
+                &Bytes::from_static(b"hour=12/"),
+            ]
+        );
+        // No surviving segment is empty.
+        assert!(union.core.segments.iter().all(|s| !s.tree.is_empty()));
+    }
+
+    #[test]
+    fn test_union_concatenates_segments_with_shared_prefix() {
+        // Two sources both have segment hour=12/, with disjoint key
+        // ranges within that prefix. The union concatenates their L0
+        // and compacted lists; SR ids are regenerated globally.
+        let l0_a = SsTableId::Compacted(Ulid::new());
+        let sr_a = SsTableId::Compacted(Ulid::new());
+        let l0_b = SsTableId::Compacted(Ulid::new());
+        let sr_b = SsTableId::Compacted(Ulid::new());
+
+        fn segment_with_views(
+            prefix: &'static [u8],
+            l0_id: SsTableId,
+            sr_id: SsTableId,
+            first_entry: &'static [u8],
+            range: BytesRange,
+        ) -> Segment {
+            Segment {
+                prefix: Bytes::from_static(prefix),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![SsTableView::new_projected(
+                        l0_id.unwrap_compacted_id(),
+                        SsTableHandle::new(
+                            l0_id,
+                            SST_FORMAT_VERSION_LATEST,
+                            SsTableInfo {
+                                first_entry: Some(Bytes::from_static(first_entry)),
+                                ..SsTableInfo::default()
+                            },
+                        ),
+                        Some(range.clone()),
+                    )]),
+                    compacted: vec![SortedRun {
+                        id: 0,
+                        sst_views: vec![SsTableView::new_projected(
+                            sr_id.unwrap_compacted_id(),
+                            SsTableHandle::new(
+                                sr_id,
+                                SST_FORMAT_VERSION_LATEST,
+                                SsTableInfo {
+                                    first_entry: Some(Bytes::from_static(first_entry)),
+                                    ..SsTableInfo::default()
+                                },
+                            ),
+                            Some(range),
+                        )],
+                    }],
+                },
+            }
+        }
+
+        let mut core1 = ManifestCore::new();
+        core1.segment_extractor_name = Some("hour".into());
+        core1.segments = vec![segment_with_views(
+            b"hour=12/",
+            l0_a,
+            sr_a,
+            b"hour=12/00",
+            BytesRange::from_ref("hour=12/00".."hour=12/30"),
+        )];
+        let m1 = Manifest::initial(core1);
+
+        let mut core2 = ManifestCore::new();
+        core2.segment_extractor_name = Some("hour".into());
+        core2.segments = vec![segment_with_views(
+            b"hour=12/",
+            l0_b,
+            sr_b,
+            b"hour=12/30",
+            BytesRange::from_ref("hour=12/30".."hour=12/59"),
+        )];
+        let m2 = Manifest::initial(core2);
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        // One segment under hour=12/, with both sources' L0 and SRs
+        // concatenated.
+        assert_eq!(union.core.segments.len(), 1);
+        let seg = &union.core.segments[0];
+        assert_eq!(seg.prefix, Bytes::from_static(b"hour=12/"));
+        assert_eq!(seg.tree.l0.len(), 2);
+        assert_eq!(seg.tree.compacted.len(), 2);
+        // Watermark is reset, matching unsegmented union behavior.
+        assert!(seg.tree.last_compacted_l0_sst_view_id.is_none());
+        // SR ids are unique across the merged segment.
+        let sr_ids: Vec<u32> = seg.tree.compacted.iter().map(|sr| sr.id).collect();
+        assert_eq!(sr_ids.len(), 2);
+        assert_ne!(sr_ids[0], sr_ids[1]);
+    }
+
+    #[test]
+    fn test_union_unsegmented_sources_land_in_core_tree() {
+        // Two sources with no extractor configured. The unioned manifest
+        // must keep `segment_extractor_name = None`, place the merged
+        // data in `core.tree`, and leave `core.segments` empty — not
+        // route the data into `core.segments[""]`.
+        let m1 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let m2 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"m",
+            BytesRange::from_ref("m"..),
+        );
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        assert!(union.core.segment_extractor_name.is_none());
+        assert!(union.core.segments.is_empty());
+        assert_eq!(union.core.tree.compacted.len(), 2);
+    }
+
+    #[test]
+    fn test_union_routes_explicit_empty_prefix_segment_to_segments() {
+        // A configured extractor that maps some keys to `""` produces a
+        // segment with prefix `""` in `core.segments`. Under union, that
+        // data must stay in `core.segments[""]`, NOT get extracted back
+        // into `core.tree` — `core.tree` is only used when no extractor
+        // is configured.
+        let (m1, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"a", BytesRange::from_ref("a".."m"));
+        let (m2, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"m", BytesRange::from_ref("m"..));
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        assert_eq!(union.core.segment_extractor_name.as_deref(), Some("legacy"));
+        // Data stays in segments under the empty prefix; core.tree is
+        // untouched because the unioned manifest has an extractor.
+        assert!(union.core.tree.l0.is_empty());
+        assert!(union.core.tree.compacted.is_empty());
+        assert_eq!(union.core.segments.len(), 1);
+        let seg = &union.core.segments[0];
+        assert_eq!(seg.prefix, Bytes::new());
+        assert_eq!(seg.tree.l0.len(), 2);
+        assert_eq!(seg.tree.compacted.len(), 2);
+    }
+
+    #[test]
+    fn test_union_returns_error_on_non_antichain_prefixes() {
+        // Two sources whose extractor names match but whose persisted
+        // segment prefixes are in a proper-prefix relationship. Even
+        // though the SST-view ranges happen to be non-overlapping, the
+        // antichain invariant rejects the union.
+        let m1 = {
+            let mut core = ManifestCore::new();
+            core.segment_extractor_name = Some("test".into());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"foo/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![SsTableView::new_projected(
+                        Ulid::new(),
+                        SsTableHandle::new(
+                            SsTableId::Compacted(Ulid::new()),
+                            SST_FORMAT_VERSION_LATEST,
+                            SsTableInfo {
+                                first_entry: Some(Bytes::from_static(b"foo/a")),
+                                ..SsTableInfo::default()
+                            },
+                        ),
+                        Some(BytesRange::from_ref("foo/a".."foo/h")),
+                    )]),
+                    compacted: vec![],
+                },
+            }];
+            Manifest::initial(core)
+        };
+        let m2 = {
+            let mut core = ManifestCore::new();
+            core.segment_extractor_name = Some("test".into());
+            core.segments = vec![Segment {
+                prefix: Bytes::from_static(b"foo/bar/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![SsTableView::new_projected(
+                        Ulid::new(),
+                        SsTableHandle::new(
+                            SsTableId::Compacted(Ulid::new()),
+                            SST_FORMAT_VERSION_LATEST,
+                            SsTableInfo {
+                                first_entry: Some(Bytes::from_static(b"q")),
+                                ..SsTableInfo::default()
+                            },
+                        ),
+                        Some(BytesRange::from_ref("q".."z")),
+                    )]),
+                    compacted: vec![],
+                },
+            }];
+            Manifest::initial(core)
+        };
+
+        let result = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
+    }
+
+    #[test]
+    fn test_union_returns_error_on_extractor_mismatch() {
+        let (m1, _, _) = manifest_with_segment(
+            b"hour=11/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let (m2, _, _) =
+            manifest_with_segment(b"day=1/", Some("day"), b"m", BytesRange::from_ref("m"..));
+
+        let result = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
+    }
+
+    #[test]
+    fn test_union_returns_error_on_mixed_extractor_presence() {
+        // One source has an extractor configured; the other doesn't.
+        // Even though SST-view ranges are disjoint, unsegmented data in
+        // the no-extractor source may match an extractor prefix from the
+        // other source, so the union is rejected (RFC-0024).
+        let (m_with, _, _) = manifest_with_segment(
+            b"hour=11/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let m_without = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"m",
+            BytesRange::from_ref("m"..),
+        );
+
+        let result = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m_with,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m_without,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
+    }
+
+    #[test]
+    fn test_union_returns_error_on_overlapping_ranges() {
+        // Two sources whose effective key ranges intersect must be
+        // rejected since the unioned manifest cannot disambiguate which
+        // source owns the overlap.
+        let m1 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        let m2 = manifest_with_one_compacted_sst(
+            SsTableId::Compacted(Ulid::new()),
+            b"f",
+            BytesRange::from_ref("f".."z"),
+        );
+
+        let result = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
+    }
+
+    #[test]
+    fn test_union_returns_error_on_segments_without_extractor() {
+        // Degenerate source manifests: no extractor configured but
+        // `core.segments` is non-empty. The union must reject this
+        // rather than silently dropping the segment data. Use two
+        // non-overlapping prefixes so the antichain check passes and
+        // we reach the `is_none()` branch.
+        let (m1, _, _) = manifest_with_segment(b"foo/", None, b"a", BytesRange::from_ref("a".."m"));
+        let (m2, _, _) = manifest_with_segment(b"bar/", None, b"m", BytesRange::from_ref("m"..));
+
+        let result = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: m1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: m2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        );
+        assert!(matches!(result, Err(SlateDBError::InvalidUnion(_))));
+    }
+
+    #[test]
+    fn test_range_includes_segment_ssts() {
+        // A manifest whose only key data lives in a segment must still
+        // produce a non-None range — otherwise `cloned_from_union` would
+        // silently skip the source.
+        let (m, _, _) =
+            manifest_with_segment(b"hour=12/", Some("hour"), b"a", BytesRange::from_ref("a"..));
+        assert!(m.range().is_some());
+    }
+
+    #[test]
+    fn test_cloned_includes_segment_ssts() {
+        // Single-source clone: parent_owned SSTs must include segment-
+        // resident views.
+        use std::collections::HashSet;
+
+        let (parent, l0_sst, sr_sst) =
+            manifest_with_segment(b"hour=12/", Some("hour"), b"a", BytesRange::from_ref("a"..));
+        let clone = Manifest::cloned(
+            &parent,
+            "tmp/parent".into(),
+            Uuid::new_v4(),
+            Arc::new(DbRand::default()),
+        );
+
+        let parent_external: HashSet<SsTableId> = clone
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == "tmp/parent")
+            .flat_map(|db| db.sst_ids.iter().copied())
+            .collect();
+        assert!(parent_external.contains(&l0_sst));
+        assert!(parent_external.contains(&sr_sst));
+    }
+
+    #[test]
+    fn test_projected_drops_segment_when_all_views_filtered_out() {
+        // Projection range fully disjoint from the segment's data: the
+        // segment drops out, but `segment_extractor_name` is preserved.
+        let (manifest, _, _) = manifest_with_segment(
+            b"hour=12/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+
+        let projected = Manifest::projected(&manifest, BytesRange::from_ref("z"..));
+        assert!(projected.core.segments.is_empty());
+        assert_eq!(
+            projected.core.segment_extractor_name.as_deref(),
+            Some("hour")
+        );
+    }
+
+    #[test]
+    fn test_projected_keeps_in_range_segment_views() {
+        // Two segments — one whose views overlap the projection range and
+        // one whose views are fully disjoint. Only the overlapping
+        // segment survives.
+        let l0_a = SsTableId::Compacted(Ulid::new());
+        let sr_a = SsTableId::Compacted(Ulid::new());
+        let sr_b = SsTableId::Compacted(Ulid::new());
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some("hour".into());
+        core.segments = vec![
+            Segment {
+                prefix: Bytes::from_static(b"hour=11/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![SsTableView::new_projected(
+                        l0_a.unwrap_compacted_id(),
+                        SsTableHandle::new(
+                            l0_a,
+                            SST_FORMAT_VERSION_LATEST,
+                            SsTableInfo {
+                                first_entry: Some(Bytes::from_static(b"a")),
+                                ..SsTableInfo::default()
+                            },
+                        ),
+                        Some(BytesRange::from_ref("a".."d")),
+                    )]),
+                    compacted: vec![SortedRun {
+                        id: 0,
+                        sst_views: vec![SsTableView::new_projected(
+                            sr_a.unwrap_compacted_id(),
+                            SsTableHandle::new(
+                                sr_a,
+                                SST_FORMAT_VERSION_LATEST,
+                                SsTableInfo {
+                                    first_entry: Some(Bytes::from_static(b"a")),
+                                    ..SsTableInfo::default()
+                                },
+                            ),
+                            Some(BytesRange::from_ref("a".."m")),
+                        )],
+                    }],
+                },
+            },
+            Segment {
+                prefix: Bytes::from_static(b"hour=12/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![SortedRun {
+                        id: 1,
+                        sst_views: vec![SsTableView::new_projected(
+                            sr_b.unwrap_compacted_id(),
+                            SsTableHandle::new(
+                                sr_b,
+                                SST_FORMAT_VERSION_LATEST,
+                                SsTableInfo {
+                                    first_entry: Some(Bytes::from_static(b"n")),
+                                    ..SsTableInfo::default()
+                                },
+                            ),
+                            Some(BytesRange::from_ref("n".."z")),
+                        )],
+                    }],
+                },
+            },
+        ];
+        let manifest = Manifest::initial(core);
+
+        let projected = Manifest::projected(&manifest, BytesRange::from_ref("a".."m"));
+
+        assert_eq!(projected.core.segments.len(), 1);
+        assert_eq!(
+            projected.core.segments[0].prefix,
+            Bytes::from_static(b"hour=11/")
+        );
+        assert_eq!(projected.core.segments[0].tree.l0.len(), 1);
+        assert_eq!(projected.core.segments[0].tree.compacted.len(), 1);
+    }
+
+    #[test]
+    fn test_projected_preserves_empty_prefix_segment_under_extractor() {
+        // A source with `Some(extractor)` and a `""` segment must keep
+        // that segment in `core.segments` after projection — projection
+        // only filters; it never moves data into `core.tree` (which is
+        // only populated when no extractor is configured).
+        let (manifest, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"a", BytesRange::from_ref("a".."z"));
+
+        let projected = Manifest::projected(&manifest, BytesRange::from_ref("a".."m"));
+        assert_eq!(
+            projected.core.segment_extractor_name.as_deref(),
+            Some("legacy")
+        );
+        assert!(projected.core.tree.l0.is_empty());
+        assert!(projected.core.tree.compacted.is_empty());
+        assert_eq!(projected.core.segments.len(), 1);
+        assert_eq!(projected.core.segments[0].prefix, Bytes::new());
+    }
+
+    #[test]
+    fn test_cloned_preserves_empty_prefix_segment_under_extractor() {
+        // Single-source clone of a parent with `Some(extractor)` + `""`
+        // segment: the clone's core inherits the same shape. `core.tree`
+        // stays empty; `core.segments` carries the `""` entry.
+        let (parent, _, _) =
+            manifest_with_segment(b"", Some("legacy"), b"a", BytesRange::from_ref("a"..));
+
+        let clone = Manifest::cloned(
+            &parent,
+            "tmp/parent".into(),
+            Uuid::new_v4(),
+            Arc::new(DbRand::default()),
+        );
+
+        assert_eq!(clone.core.segment_extractor_name.as_deref(), Some("legacy"));
+        assert!(clone.core.tree.l0.is_empty());
+        assert!(clone.core.tree.compacted.is_empty());
+        assert_eq!(clone.core.segments.len(), 1);
+        assert_eq!(clone.core.segments[0].prefix, Bytes::new());
+    }
+
+    #[test]
+    fn test_projected_external_db_pruning_considers_segment_ssts() {
+        // An external_db whose SSTs are referenced only via a segment must
+        // be retained after projection (otherwise the clone loses external
+        // SSTs that segments still need).
+        let (mut manifest, l0_sst, _) = manifest_with_segment(
+            b"hour=12/",
+            Some("hour"),
+            b"a",
+            BytesRange::from_ref("a".."m"),
+        );
+        manifest.external_dbs.push(ExternalDb {
+            path: "tmp/parent".into(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![l0_sst],
+        });
+
+        let projected = Manifest::projected(&manifest, BytesRange::from_ref("a".."m"));
+        assert!(
+            projected
+                .external_dbs
+                .iter()
+                .any(|db| db.sst_ids.contains(&l0_sst)),
+            "external_db with segment-resident SST must be retained after projection"
+        );
     }
 }
