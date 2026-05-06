@@ -601,7 +601,12 @@ impl FlatBufferCompactionsCodec {
                 sources.extend(sorted_runs.iter().copied().map(SourceId::SortedRun));
                 // Destination is not explicitly encoded in the flatbuffer; derive it from SR inputs.
                 let destination = sorted_runs.iter().copied().min().unwrap_or(0);
-                Ok(CompactorCompactionSpec::new(sources, destination))
+                let segment = Bytes::copy_from_slice(spec.segment().bytes());
+                Ok(CompactorCompactionSpec::for_segment(
+                    segment,
+                    sources,
+                    destination,
+                ))
             }
             _ => Err(SlateDBError::InvalidCompaction),
         }
@@ -939,12 +944,14 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let l0_view_ids = (!view_ids.is_empty()).then(|| self.add_ulids(view_ids.iter()));
         let sorted_runs =
             (!sorted_runs.is_empty()).then(|| self.builder.create_vector(sorted_runs.as_slice()));
+        let segment = self.builder.create_vector(spec.segment().as_ref());
         let tiered_spec = TieredCompactionSpec::create(
             &mut self.builder,
             &TieredCompactionSpecArgs {
                 ssts: None,
                 sorted_runs,
                 l0_view_ids,
+                segment: Some(segment),
             },
         );
         (
@@ -1737,9 +1744,22 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
         )
         .with_status(CompactionStatus::Failed);
+        // Targets a named segment to exercise the non-empty `segment` path
+        // through encode/decode.
+        let segment_prefix = Bytes::from_static(b"hour=12/");
+        let compaction_segment = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::for_segment(
+                segment_prefix.clone(),
+                vec![SourceId::SortedRun(8), SourceId::SortedRun(6)],
+                6,
+            ),
+        )
+        .with_status(CompactionStatus::Running);
         let mut compactions = Compactions::new(9);
         compactions.insert(compaction_l0.clone());
         compactions.insert(compaction_sr.clone());
+        compactions.insert(compaction_segment.clone());
 
         let codec = FlatBufferCompactionsCodec {};
         let bytes = codec.encode(&compactions);
@@ -1758,6 +1778,11 @@ mod tests {
                 .expect("missing sr compaction"),
             &compaction_sr
         );
+        let decoded_segment = decoded
+            .get(&compaction_segment.id())
+            .expect("missing segment compaction");
+        assert_eq!(decoded_segment, &compaction_segment);
+        assert_eq!(decoded_segment.spec().segment(), &segment_prefix);
     }
 
     #[test]
@@ -2139,12 +2164,14 @@ mod tests {
             },
         );
         let source_ssts = fbb.create_vector(&[source_id]);
+        let segment_bytes = fbb.create_vector::<u8>(&[]);
         let spec = TieredCompactionSpec::create(
             &mut fbb,
             &TieredCompactionSpecArgs {
                 ssts: Some(source_ssts),
                 sorted_runs: None,
                 l0_view_ids: None,
+                segment: Some(segment_bytes),
             },
         );
         let compaction_ulid = ulid::Ulid::new();

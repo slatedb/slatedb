@@ -25,6 +25,11 @@ table TieredCompactionSpec {
 
     // input L0 SSTable View IDs
     l0_view_ids: [Ulid];
+
+    // Target segment prefix. Empty bytes target the compatibility-encoded
+    // `prefix=""` segment (i.e. the root tree). Required so that every spec
+    // names exactly one segment to compact within.
+    segment: [ubyte] (required);
 }
 
 table Compaction {
