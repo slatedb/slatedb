@@ -8,15 +8,13 @@ use crate::manifest::ManifestCore;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
-use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
+use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
-use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
 use bytes::Bytes;
-use futures::future::join;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -29,8 +27,11 @@ pub(crate) trait DbStateReader {
 struct IteratorSources {
     write_batch_iter: Option<WriteBatchIterator>,
     mem_iters: Vec<Box<dyn RowEntryIterator + 'static>>,
-    l0_iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
-    sr_iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
+    /// Single chain over the on-disk LSM state. Each segment's L0 and
+    /// sorted-run iterators are merged together inside the chain (see
+    /// `SegmentRangeIterator`); the top-level scan path treats the
+    /// chain as one merge arm alongside `mem_iters` and `write_batch_iter`.
+    segment_iter: Box<dyn RowEntryIterator + 'static>,
 }
 
 /// Context for [`Reader::scan_with_options`].
@@ -138,6 +139,7 @@ impl Reader {
         write_batch_iter: Option<WriteBatchIterator>,
         sst_iter_options: &SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
+        max_seq: Option<u64>,
     ) -> Result<IteratorSources, SlateDBError> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
@@ -152,160 +154,26 @@ impl Reader {
             })
             .collect::<Vec<_>>();
 
-        let max_parallel = compute_max_parallel(
-            db_state.core().tree.l0.len(),
-            &db_state.core().tree.compacted,
-            4,
-        );
+        let segments = db_state.core().select_segments(range);
+        let total_ssts: usize = segments.iter().map(|s| s.tree.total_ssts()).sum();
+        let max_parallel = total_ssts.clamp(1, 4);
 
-        let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point() {
-            let l0 = self.build_point_l0_iters(
-                range,
-                db_state,
-                sst_iter_options,
-                point_lookup_stats.clone(),
-            )?;
-            let sr = self.build_point_sr_iters(
-                range,
-                point_key.as_ref(),
-                db_state,
-                sst_iter_options,
-                point_lookup_stats,
-            )?;
-            (l0, sr)
-        } else {
-            let l0_future =
-                self.build_range_l0_iters(range, db_state, sst_iter_options, max_parallel);
-            let sr_future =
-                self.build_range_sr_iters(range, db_state, sst_iter_options, max_parallel);
-            let (l0_res, sr_res) = join(l0_future, sr_future).await;
-            (l0_res?, sr_res?)
+        let context = SegmentScanContext {
+            table_store: self.table_store.clone(),
+            range: range.clone(),
+            sst_iter_options: sst_iter_options.clone(),
+            max_parallel,
+            point_lookup_stats,
+            db_stats: self.db_stats.clone(),
         };
+
+        let segment_iter = build_segment_iter(segments, context, max_seq)?;
 
         Ok(IteratorSources {
             write_batch_iter,
             mem_iters,
-            l0_iters,
-            sr_iters,
+            segment_iter,
         })
-    }
-
-    fn build_point_l0_iters<'a>(
-        &self,
-        range: &BytesRange,
-        db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: &SstIteratorOptions,
-        db_stats: Option<DbStats>,
-    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
-        let mut iters = VecDeque::new();
-        for sst in &db_state.core().tree.l0 {
-            let iterator = SstIterator::new_owned_with_stats(
-                range.clone(),
-                sst.clone(),
-                self.table_store.clone(),
-                sst_iter_options.clone(),
-                db_stats.clone(),
-            )?;
-            if let Some(iterator) = iterator {
-                iters.push_back(Box::new(iterator) as Box<dyn RowEntryIterator + 'a>);
-            }
-        }
-        Ok(iters)
-    }
-
-    fn build_point_sr_iters<'a>(
-        &self,
-        range: &BytesRange,
-        key: &[u8],
-        db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: &SstIteratorOptions,
-        db_stats: Option<DbStats>,
-    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
-        let mut iters = VecDeque::new();
-        for sr in &db_state.core().tree.compacted {
-            for handle in sr.tables_covering_point_key(key) {
-                let iterator = SstIterator::new_owned_with_stats(
-                    range.clone(),
-                    handle.clone(),
-                    self.table_store.clone(),
-                    sst_iter_options.clone(),
-                    db_stats.clone(),
-                )?;
-                if let Some(iterator) = iterator {
-                    iters.push_back(Box::new(iterator) as Box<dyn RowEntryIterator + 'a>);
-                }
-            }
-        }
-        Ok(iters)
-    }
-
-    async fn build_range_l0_iters<'a>(
-        &self,
-        range: &BytesRange,
-        db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: &SstIteratorOptions,
-        max_parallel: usize,
-    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
-        let range_clone = range.clone();
-        let table_store = self.table_store.clone();
-        let sst_iter_options = sst_iter_options.clone();
-        build_concurrent(
-            db_state.core().tree.l0.iter().cloned(),
-            max_parallel,
-            move |sst| {
-                let table_store = table_store.clone();
-                let range = range_clone.clone();
-                let sst_iter_options = sst_iter_options.clone();
-                async move {
-                    SstIterator::new_owned_initialized(
-                        range.clone(),
-                        sst,
-                        table_store,
-                        sst_iter_options,
-                    )
-                    .await
-                    .map(|maybe_iter| {
-                        maybe_iter.map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'a>)
-                    })
-                }
-            },
-        )
-        .await
-    }
-
-    async fn build_range_sr_iters<'a>(
-        &self,
-        range: &BytesRange,
-        db_state: &(dyn DbStateReader + Sync),
-        sst_iter_options: &SstIteratorOptions,
-        max_parallel: usize,
-    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
-        let range_clone = range.clone();
-        let table_store = self.table_store.clone();
-        let overlapping: Vec<_> = db_state
-            .core()
-            .tree
-            .compacted
-            .iter()
-            .filter(|sr| sr.overlaps_range(range))
-            .cloned()
-            .collect();
-        build_concurrent(overlapping.into_iter(), max_parallel, move |sr| {
-            let table_store = table_store.clone();
-            let range = range_clone.clone();
-            async move {
-                SortedRunIterator::new_owned_initialized_with_stats(
-                    range.clone(),
-                    sr,
-                    table_store,
-                    sst_iter_options.clone(),
-                    Some(self.db_stats.clone()),
-                )
-                .await
-                .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
-            }
-        })
-        .await
     }
 
     /// Get the full row entry for the given key.
@@ -350,8 +218,7 @@ impl Reader {
         let IteratorSources {
             write_batch_iter,
             mem_iters,
-            l0_iters,
-            sr_iters,
+            segment_iter,
         } = self
             .build_iterator_sources(
                 &range,
@@ -359,6 +226,7 @@ impl Reader {
                 write_batch_iter,
                 &sst_iter_options,
                 Some(self.db_stats.clone()),
+                max_seq,
             )
             .await?;
 
@@ -366,8 +234,7 @@ impl Reader {
             range,
             write_batch_iter,
             mem_iters,
-            l0_iters,
-            sr_iters,
+            segment_iter,
             max_seq,
             None,
             self.read_merge_operator.clone(),
@@ -424,8 +291,7 @@ impl Reader {
         let IteratorSources {
             write_batch_iter,
             mem_iters,
-            l0_iters,
-            sr_iters,
+            segment_iter,
         } = self
             .build_iterator_sources(
                 &range,
@@ -433,6 +299,7 @@ impl Reader {
                 ctx.write_batch_iter,
                 &sst_iter_options,
                 None,
+                max_seq,
             )
             .await?;
 
@@ -440,8 +307,7 @@ impl Reader {
             range,
             write_batch_iter,
             mem_iters,
-            l0_iters,
-            sr_iters,
+            segment_iter,
             max_seq,
             ctx.range_tracker,
             self.read_merge_operator.clone(),
