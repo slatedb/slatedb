@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::future::try_join;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -49,8 +50,12 @@ struct RangeTreeIterators {
 
 impl RangeTreeIterators {
     async fn build(tree: LsmTreeState, ctx: &SegmentScanContext) -> Result<Self, SlateDBError> {
-        let l0 = build_l0_range_iters(tree.l0, ctx).await?;
-        let sr = build_sr_range_iters(tree.compacted, ctx).await?;
+        // Range scans need both L0 and SR iterators, so build them in parallel
+        let (l0, sr) = try_join(
+            build_l0_range_iters(tree.l0, ctx),
+            build_sr_range_iters(tree.compacted, ctx),
+        )
+        .await?;
         Ok(Self { l0, sr })
     }
 }
