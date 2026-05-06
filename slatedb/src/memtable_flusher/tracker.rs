@@ -134,9 +134,7 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
         let err = result.err().unwrap_or(SlateDBError::Closed);
         self.drain_with_error(&mut messages, &err).await;
         // Orphan SSTs from in-flight uploads at shutdown are reaped by the
-        // background garbage collector. With per-segment uploads the
-        // tracker no longer pre-allocates a single id to delete, so the
-        // immediate cleanup pathway is gone.
+        // background garbage collector.
         Ok(())
     }
 }

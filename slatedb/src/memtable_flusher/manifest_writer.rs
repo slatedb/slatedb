@@ -810,7 +810,7 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
-    use crate::memtable_flusher::uploader::{SegmentHandle, UploadedMemtable};
+    use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
@@ -1473,7 +1473,7 @@ mod tests {
                 .flush_imm_table(&sst_id, imm_memtable.table(), true)
                 .await
                 .unwrap();
-            segments.push(SegmentHandle {
+            segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,
             });

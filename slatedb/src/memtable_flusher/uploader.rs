@@ -57,21 +57,21 @@ impl UploadJob {
 /// belongs to (RFC-0024). An empty `prefix` denotes the compatibility-encoded
 /// `prefix=""` segment whose state lives in the manifest's top-level tree.
 #[derive(Clone)]
-pub(crate) struct SegmentHandle {
+pub(crate) struct SegmentedSstHandle {
     pub(crate) prefix: Bytes,
     pub(crate) sst_handle: SsTableHandle,
 }
 
 #[derive(Clone)]
 /// Result of a successfully uploaded immutable memtable. A flush produces
-/// one [`SegmentHandle`] per segment touched. Without an extractor configured
+/// one [`SegmentedSstHandle`] per segment touched. Without an extractor configured
 /// every flush yields a single handle with empty prefix.
 pub(crate) struct UploadedMemtable {
     /// Same immutable memtable that was uploaded.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
     /// Per-segment uploaded SSTs, sorted ascending by `prefix`. Always
     /// non-empty.
-    pub(crate) segments: Vec<SegmentHandle>,
+    pub(crate) segments: Vec<SegmentedSstHandle>,
     /// Lowest sequence number present in the immutable memtable.
     pub(crate) first_seq: u64,
     /// Highest sequence number present in the immutable memtable.
@@ -89,7 +89,7 @@ impl UploadedMemtable {
         assert!(first_seq <= last_seq);
         Self {
             imm_memtable,
-            segments: vec![SegmentHandle {
+            segments: vec![SegmentedSstHandle {
                 prefix: Bytes::new(),
                 sst_handle,
             }],
@@ -218,7 +218,7 @@ impl UploadHandler {
         &self,
         imm_memtable: &Arc<ImmutableMemtable>,
         sst: &EncodedSegmentSst,
-    ) -> Result<SegmentHandle, SlateDBError> {
+    ) -> Result<SegmentedSstHandle, SlateDBError> {
         let sst_id =
             SsTableId::Compacted(self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()));
         let written_bytes = sst.encoded.remaining_len() as u64;
@@ -230,7 +230,7 @@ impl UploadHandler {
             {
                 Ok(sst_handle) => {
                     self.db.db_stats.l0_flush_bytes.increment(written_bytes);
-                    return Ok(SegmentHandle {
+                    return Ok(SegmentedSstHandle {
                         prefix: sst.prefix.clone(),
                         sst_handle,
                     });
@@ -679,7 +679,7 @@ mod tests {
         .await;
         // Stage three segments worth of entries in a single memtable, then
         // freeze it. The uploader should emit a single UploadComplete with
-        // three SegmentHandles, sorted by prefix.
+        // three SegmentedSstHandles, sorted by prefix.
         {
             let mut guard = db.state.write();
             for (key, value, seq) in [

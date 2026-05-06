@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// One encoded-but-not-yet-uploaded SST from a memtable flush, tagged with
 /// the segment it belongs to (RFC-0024). Mirrors the shape of post-upload
-/// [`crate::memtable_flusher::uploader::SegmentHandle`].
+/// [`crate::memtable_flusher::uploader::SegmentedSstHandle`].
 pub(crate) struct EncodedSegmentSst {
     pub(crate) prefix: Bytes,
     pub(crate) encoded: EncodedSsTable,
