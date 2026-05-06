@@ -127,13 +127,18 @@ We will add a `.boundary` file for each storage file type whose filename is the 
 - `/gc/compactions.boundary`
 - `/gc/wal.boundary`
 
-Each boundary file contains a single lexicographically sortable ASCII-encoded string:
+Each boundary file contains a single ASCII-encoded `u64` integer:
 
-- `/gc/manifest.boundary`: 00000000000000000012
-- `/gc/compactions.boundary`: 00000000000000000013
-- `/gc/wal.boundary`: 00000000000000008495
+- `/gc/manifest.boundary`: 12
+- `/gc/compactions.boundary`: 13
+- `/gc/wal.boundary`: 8495
 
-These values represent filenames with suffixes stripped. Sequence storage protocol files and WAL SST files are zero-padded 20-char strings (that fit the full u64 range). No boundary-tracked write may be treated as successful if its name (without suffix) is lexicographically less than or equal to the boundary value after the write occurred.
+These values are inclusive numeric high-watermarks over the file IDs in each namespace. A boundary value `B` means that GC has durably fenced every boundary-tracked file ID `i <= B`. No boundary-tracked write may be treated as successful unless it observes `B < i` after the write occurred.
+
+The boundary protocol has two invariants:
+
+1. Before GC may delete boundary-tracked file ID `i`, the durable boundary for that namespace must be `>= i`.
+2. Before a writer may return success for boundary-tracked file ID `i`, it must observe the durable boundary for that namespace as `< i` after the write occurred.
 
 There is intentionally no separate boundary file for compacted SSTs. Compacted SST writes are tentative data-file writes. They only become visible when a later `.manifest` or `.compactions` file references them, and those metadata files are protected by their own boundary files. Compacted SST safety therefore comes from the GC cutoff validation rules below.
 
@@ -143,10 +148,10 @@ Boundary files will always live in the `main` object store (even if a `wal` obje
 
 The garbage collector updates the boundary files prior to each GC run.
 
-1. GC calculates the new boundary value (see _Garbage collector changes_, below), which must be lexicographically greater than the current value.
+1. GC calculates the new boundary value (see _Garbage collector changes_, below), which must be numerically greater than the current value.
 2. GC reads the current boundary value and ETag.
-3. GC verifies the new boundary value is lexicographically greater than the current boundary value.
-    a. If not, the GC is skipped since the current boundary is already greater than the new boundary.
+3. GC verifies the new boundary value is numerically greater than the current boundary value.
+    a. If not, the GC is skipped since the current boundary is already greater than or equal to the new boundary.
 4. GC updates the boundary file using `PUT If-Match` with the ETag from (2).
     a. If the update succeeds, the new boundary value is in effect.
     b. If the update fails with a precondition error, the GC is skipped since another GC has updated the boundary file.
@@ -157,10 +162,10 @@ After the boundary file is updated successfully, the GC may proceed with its del
 
 Each boundary-tracked writer must follow this protocol:
 
-1. Verify the file to be written is lexicographically greater than the current in-memory boundary value.
+1. Verify the file ID to be written is numerically greater than the current in-memory boundary value.
     a. If not, return an error (defined per-file type, below).
 1. `GET If-None-Match` the boundary file after each write.
-    a. If it's 304, the epoch is unchanged and the write is successful.
+    a. If it's 304, the boundary is unchanged and the write is successful.
     b. If it's 200
         - If the new value is >= the just-written file ID, return an error (defined per-file type, below).
         - Else, update the in-memory boundary value and ETag, and treat the write as successful.
@@ -190,8 +195,8 @@ Together with `manifest.boundary` and `compactions.boundary`, these rules make a
 
 The following write paths must be updated to follow the boundary file check protocol described above:
 
-- `ObjectStoreSequencedStorageProtocol::write` (covers `.manifest` and `.compactions` files) must check and return `ObjectVersionExists` if the boundary value has advanced past the just-written file ID.
-- `TableStore::write_sst` (covers `wal.boundary`) must check and return `Fenced` if the boundary value has advanced past the just-written WAL ID.
+- `ObjectStoreSequencedStorageProtocol::write` (covers `.manifest` and `.compactions` files) must check and return `ObjectVersionExists` if the boundary value has advanced to or past the just-written file ID.
+- `TableStore::write_sst` (covers `wal.boundary`) must check and return `Fenced` if the boundary value has advanced to or past the just-written WAL ID.
 
 If no boundary file has ever been seen, the check is skipped. If a boundary file has been seen, but no longer exists, panic.
 
@@ -211,11 +216,11 @@ The GC must be updated to compute the new boundary values for each boundary-trac
 
 The GC computes the boundary as follows:
 
-1. let `file_list` = `ManifestStore::list_manifests()/CompactionsStore::list_compactions()`, newest to oldest
-2. let `min_boundary` = `file_list.keep_while(|file| file.timestamp() > min_age).last()`
-3. let `boundary` = `min_boundary.unwrap_or(file_list[0])`
+1. let `file_list` = `ManifestStore::list_manifests()/CompactionsStore::list_compactions()`
+2. let `eligible_by_age` = `file_list.filter(|file| file.timestamp() <= now - min_age)`
+3. let `boundary` = `eligible_by_age.map(|file| file.id).max()`
 
-If no files exist, the `.boundary` update and GC process are skipped.
+If no files are eligible by age, the `.boundary` update and GC process are skipped.
 
 _NOTE: `timestamp()` represents the timestamp of the object in the object store._
 
@@ -224,12 +229,12 @@ _NOTE: `timestamp()` represents the timestamp of the object in the object store.
 The GC computes `wal.boundary` as follows:
 
 1. let `manifest` = `ManifestStore::read_latest_manifest()`
-2. let `wal_list` = `TableStore::list_wal_ssts()`, newest to oldest
-3. let `min_boundary` = `wal_list.keep_while(|wal| wal.timestamp() > min_age).last()`
-4. let `replay_boundary` = `manifest.replay_after_wal_id`
-5. let `boundary` = min(`min_boundary`, `replay_boundary`)
+2. let `wal_list` = `TableStore::list_wal_ssts()`
+3. let `age_boundary` = `wal_list.filter(|wal| wal.timestamp() <= now - min_age).map(|wal| wal.id).max()`
+4. let `replay_boundary` = `manifest.replay_after_wal_id.saturating_sub(1)`
+5. let `boundary` = min(`age_boundary`, `replay_boundary`)
 
-If no WAL files exist, the `.boundary` update and GC process are skipped.
+If no WAL files are eligible by age, or `manifest.replay_after_wal_id == 0`, the `.boundary` update and GC process are skipped.
 
 _NOTE: `timestamp()` represents the timestamp of the object in the object store._
 
@@ -254,9 +259,9 @@ _NOTE: `timestamp()` represents the 48-bit timestamp component of the SST's ULID
 
 For boundary-tracked files, the GC may delete:
 
-- `.manifest` files lexicographically less than `manifest.boundary` if they are not the latest manifest and are not referenced by any active checkpoint.
-- `.compactions` files lexicographically less than `compactions.boundary` if they are not the latest compactions file.
-- WAL SST files lexicographically less than `wal.boundary` if they are not referenced by any active manifest. A WAL SST is active when its ID is between `manifest.replay_after_wal_id` and `manifest.next_wal_sst_id`.
+- `.manifest` files with IDs less than or equal to `manifest.boundary` if they are not the latest manifest and are not referenced by any active checkpoint.
+- `.compactions` files with IDs less than or equal to `compactions.boundary` if they are not the latest compactions file.
+- WAL SST files with IDs less than or equal to `wal.boundary` if they are not referenced by any active manifest. A WAL SST is active when its ID is between `manifest.replay_after_wal_id` and `manifest.next_wal_sst_id`.
 
 For compacted SST files, the GC may delete any file that is:
 
