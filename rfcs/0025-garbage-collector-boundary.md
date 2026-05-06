@@ -1,4 +1,4 @@
-# SlateDB RFC Title
+# Garbage Collector Boundary Files
 
 <!-- Replace "RFC Title" with your RFC's short, descriptive title. -->
 
