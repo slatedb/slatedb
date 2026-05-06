@@ -112,30 +112,30 @@ Each of these time windows creates a vulnerability for stalled writers:
 
 ## Design
 
-In this RFC, we will fix both write patterns by:
+In this RFC, we will fix these unsafe write windows by:
 
-1. Introducing a `.boundary` file that defines the low GC boundary for all file types
+1. Introducing `.boundary` files for files whose names are the create-if-absent commit point
 2. Updating each `.boundary` file prior to garbage collection
-3. Preventing any write from returning success if it precedes the current `.boundary` value
-4. Enforcing GC cutoff rules when adding SSTs to `.manifest` and `.compactions` files
+3. Preventing any boundary-tracked write from returning success if it precedes the current `.boundary` value
+4. Enforcing GC cutoff rules when adding compacted SST references to `.manifest` and `.compactions` files
 
 ### Boundary files
 
-We will add a `.boundary` file for each storage file type:
+We will add a `.boundary` file for each storage file type whose filename is the commit point:
 
 - `/gc/manifest.boundary`
 - `/gc/compactions.boundary`
 - `/gc/wal.boundary`
-- `/gc/compacted.boundary`
 
 Each boundary file contains a single lexicographically sortable ASCII-encoded string:
 
 - `/gc/manifest.boundary`: 00000000000000000012
 - `/gc/compactions.boundary`: 00000000000000000013
 - `/gc/wal.boundary`: 00000000000000008495
-- `/gc/compacted.boundary`: 01AN4Z07BY0000000000000000
 
-These values represent filenames with suffixes stripped. Sequence storage protocol files are zero-padded 20-char strings (that fit the full u64 range). ULID-based file names are ULID values with the random component zero'd out (only the 48-bit timestamp component is non-zero). No write may be treated as successful if its name (without suffix) is lexicographically less than or equal to the boundary value after the write occurred.
+These values represent filenames with suffixes stripped. Sequence storage protocol files and WAL SST files are zero-padded 20-char strings (that fit the full u64 range). No boundary-tracked write may be treated as successful if its name (without suffix) is lexicographically less than or equal to the boundary value after the write occurred.
+
+There is intentionally no separate boundary file for compacted SSTs. Compacted SST writes are tentative data-file writes. They only become visible when a later `.manifest` or `.compactions` file references them, and those metadata files are protected by their own boundary files. Compacted SST safety therefore comes from the GC cutoff validation rules below.
 
 Boundary files will always live in the `main` object store (even if a `wal` object store is used for WAL files).
 
@@ -155,7 +155,7 @@ After the boundary file is updated successfully, the GC may proceed with its del
 
 #### Boundary file checks
 
-Each writer must follow this protocol:
+Each boundary-tracked writer must follow this protocol:
 
 1. Verify the file to be written is lexicographically greater than the current in-memory boundary value.
     a. If not, return an error (defined per-file type, below).
@@ -169,12 +169,12 @@ _TODO: We can add an optional background refresher if we see latency spikes._
 
 ### GC cutoff rule enforcement
 
-We must enforce GC cutoff rules when adding SSTs to `.manifest` and `.compactions` files. This prevents writers from adding references to SSTs that are already past the GC cutoff and thus vulnerable to deletion.
+We must enforce GC cutoff rules when adding compacted SST references to `.manifest` and `.compactions` files. This prevents writers from adding references to SSTs that are already past the GC cutoff and thus vulnerable to deletion.
 
 We will enforce the following rules:
 
 - Newly added L0 SSTs in `.manifest` must have an SST ULID timestamp greater than `last_compacted_l0_sst_view_id.id().timestamp()` across all tree segments (including the root).
-- Newly added SR SSTs in `.compactions` must have an SST ULID timestamp greater than the compaction job's ID timestamp.
+- Newly added SR SSTs in `.manifest` or `.compactions` must have an SST ULID timestamp greater than the compaction job's ID timestamp.
 - Newly added compaction jobs in `.compactions` must have an ID timestamp greater than the most recent compaction job's ID timestamp in the file.
 
 These rules guarantee:
@@ -182,21 +182,22 @@ These rules guarantee:
 - Untracked L0s are greater than every tree segment's `last_compacted_l0_sst_view_id` (including the root).
 - Untracked SR SSTs are > the oldest compaction job ID in the current `.compactions` file.
 
+Together with `manifest.boundary` and `compactions.boundary`, these rules make a separate compacted SST boundary file unnecessary. If an unreferenced compacted SST has become eligible for deletion, then a later attempt to publish it must either fail the metadata boundary check or fail cutoff validation.
+
 ## Implementation
 
 ### Writer changes
 
-The following two functions must be updated to follow the boundary file check protocol described above:
+The following write paths must be updated to follow the boundary file check protocol described above:
 
 - `ObjectStoreSequencedStorageProtocol::write` (covers `.manifest` and `.compactions` files) must check and return `ObjectVersionExists` if the boundary value has advanced past the just-written file ID.
-- `TableStore::write_sst` (covers `wal.boundary` and `compacted.boundary`) must check and
-    - return `Fenced` if the boundary value has advanced past the just-written WAL ID
-    - return `InvalidClockTick` if the boundary value has advanced past the just-written L0 SST ID
-- `TableStore::table_writer(...).close()` (covers `compacted.boundary`) must check and return `InvalidClockTick` if the boundary value has advanced past the just-written compacted (sorted run) SST ID.
+- `TableStore::write_sst` (covers `wal.boundary`) must check and return `Fenced` if the boundary value has advanced past the just-written WAL ID.
 
 If no boundary file has ever been seen, the check is skipped. If a boundary file has been seen, but no longer exists, panic.
 
-We will need to update the MemtableFlusher to retry `InvalidClockTick` errors with a new SST ULID.
+`TableStore::write_sst` and `TableStore::table_writer(...).close()` do not perform boundary checks for `SsTableId::Compacted`.
+
+Manifest update validation for newly added L0 SSTs should return `InvalidClockTick` when the SST timestamp is not greater than the L0 compaction watermark it must clear. We will need to update the MemtableFlusher to retry `InvalidClockTick` errors with a new SST ULID.
 
 _TODO: More detail on the memtable flusher retry logic._
 
@@ -204,7 +205,7 @@ We must also update the manifest/compactions file writing logic enforce GC cutof
 
 ### Garbage collector changes
 
-The GC must be updated to compute the new boundary values for each file type and update the boundary files prior to deleting any files.
+The GC must be updated to compute the new boundary values for each boundary-tracked file type and update the boundary files prior to deleting any boundary-tracked files. It must also compute the compacted SST GC cutoff prior to deleting compacted SSTs.
 
 #### Computing `manifest.boundary` and `compactions.boundary`
 
@@ -232,18 +233,18 @@ If no WAL files exist, the `.boundary` update and GC process are skipped.
 
 _NOTE: `timestamp()` represents the timestamp of the object in the object store._
 
-### Computing `compacted.boundary`
+#### Computing the compacted SST GC cutoff
 
-The GC computes `compacted.boundary` as follows:
+The GC computes the compacted SST GC cutoff as follows:
 
 1. let `compactor_state` = `CompactorStateReader::read_view()`
 2. let `compacted_list` = `TableStore::list_compacted_ssts()`
-3. let `min_boundary` = `compacted_list.filter(|sst| sst.id().timestamp() > min_age).min()`
-4. let `writer_boundary` = `manifest.trees.max(last_compacted_l0_sst_view_id.timestamp())`
-5. let `compactor_boundary` = `compactor_state.recent_compactions().map(|compaction| compaction.id.timestamp()).min()`
-6. let `boundary` = min(`min_boundary`, `writer_boundary`, `compactor_boundary`)
+3. let `min_age_cutoff` = `compacted_list.filter(|sst| sst.id().timestamp() > min_age).min()`
+4. let `writer_cutoff` = `manifest.trees.max(last_compacted_l0_sst_view_id.timestamp())`
+5. let `compactor_cutoff` = `compactor_state.recent_compactions().map(|compaction| compaction.id.timestamp()).min()`
+6. let `cutoff` = min(`min_age_cutoff`, `writer_cutoff`, `compactor_cutoff`)
 
-If no `last_compacted_l0_sst_view_id` exists, the `.boundary` update and GC process are skipped.
+If no `last_compacted_l0_sst_view_id` exists, the compacted SST GC process is skipped.
 
 We intentionally drop the `manifest.l0` check in (4) and instead only check `last_compacted_l0_sst_view_id` for all segments. This is a more conservative approach that leaves L0s around for longer. This is done to simplify the protocol.
 
@@ -251,13 +252,16 @@ _NOTE: `timestamp()` represents the 48-bit timestamp component of the SST's ULID
 
 #### Deletion process
 
-The GC may delete any file that is:
+For boundary-tracked files, the GC may delete:
 
-1. Lexicographically less than the new boundary value, and
-2. Not an active manifest (the latest manifest or any checkpointed manifest)
-3. Not referenced by any active manifest
-    - WAL SST ID is not between `manifest.replay_after_wal_id` and `manifest.next_wal_sst_id`
-    - Compacted SST is not in `manifest.ssts`
+- `.manifest` files lexicographically less than `manifest.boundary` if they are not the latest manifest and are not referenced by any active checkpoint.
+- `.compactions` files lexicographically less than `compactions.boundary` if they are not the latest compactions file.
+- WAL SST files lexicographically less than `wal.boundary` if they are not referenced by any active manifest. A WAL SST is active when its ID is between `manifest.replay_after_wal_id` and `manifest.next_wal_sst_id`.
+
+For compacted SST files, the GC may delete any file that is:
+
+1. Older than the compacted SST GC cutoff, and
+2. Not referenced by any active manifest.
 
 ## Impact Analysis
 
