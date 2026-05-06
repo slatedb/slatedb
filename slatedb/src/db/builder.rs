@@ -187,6 +187,7 @@ pub struct DbBuilder<P: Into<Path>> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
+    segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -209,7 +210,21 @@ impl<P: Into<Path>> DbBuilder<P> {
             block_transformer: None,
             filter_policies: default_filter_policies(),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
+            segment_extractor: None,
         }
+    }
+
+    /// Set the segment extractor (RFC-0024). Internal-only for now —
+    /// public API surface lands once the read/write paths are wired up.
+    // TODO(rfc-24): remove allow(dead_code) and lift to public API once
+    // the full segment write/read path is integrated.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_segment_extractor(
+        mut self,
+        extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
+    ) -> Self {
+        self.segment_extractor = Some(extractor);
+        self
     }
 
     /// Sets the database settings.
@@ -562,6 +577,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
                 status_manager.clone(),
+                self.segment_extractor.clone(),
             )
             .await?,
         );

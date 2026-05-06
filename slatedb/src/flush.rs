@@ -7,9 +7,20 @@ use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
+use crate::prefix_extractor::PrefixTarget;
 use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
+use crate::sst_builder::EncodedSsTableBuilder;
+use bytes::Bytes;
 use std::sync::Arc;
+
+/// One encoded-but-not-yet-uploaded SST from a memtable flush, tagged with
+/// the segment it belongs to (RFC-0024). Mirrors the shape of post-upload
+/// [`crate::memtable_flusher::uploader::SegmentedSstHandle`].
+pub(crate) struct EncodedSegmentSst {
+    pub(crate) prefix: Bytes,
+    pub(crate) encoded: EncodedSsTable,
+}
 
 impl DbInner {
     pub(crate) async fn build_imm_sst(
@@ -23,6 +34,61 @@ impl DbInner {
         }
 
         sst_builder.build().await
+    }
+
+    /// Build one or more L0 SSTs from a single immutable memtable, grouping
+    /// entries by the segment prefix derived from the configured extractor.
+    ///
+    /// Returns one `(prefix, EncodedSsTable)` per segment that received at
+    /// least one post-retention entry, sorted ascending by `prefix`. The
+    /// memtable iterator yields keys in sorted order and segments own
+    /// disjoint key intervals, so all entries for a given prefix arrive
+    /// consecutively — the implementation streams one open builder at a
+    /// time, finalizing on prefix transitions.
+    ///
+    /// When no extractor is configured, every entry routes to the empty
+    /// prefix and the result is exactly one entry — the call delegates to
+    /// [`Self::build_imm_sst`] and wraps the result, preserving today's
+    /// "always emit one SST" behavior.
+    pub(crate) async fn build_imm_ssts(
+        &self,
+        imm_table: Arc<KVTable>,
+    ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
+        let Some(extractor) = self.segment_extractor.as_ref() else {
+            let encoded = self.build_imm_sst(imm_table).await?;
+            return Ok(vec![EncodedSegmentSst {
+                prefix: Bytes::new(),
+                encoded,
+            }]);
+        };
+        let mut iter = self.iter_imm_table(imm_table).await?;
+        let mut out: Vec<EncodedSegmentSst> = Vec::new();
+        let mut current: Option<(Bytes, EncodedSsTableBuilder<'_>)> = None;
+        while let Some(entry) = iter.next().await? {
+            let n = extractor
+                .prefix_len(&PrefixTarget::Point(entry.key.clone()))
+                .expect("extractor returned None for a key already in the memtable");
+            let prefix = entry.key.slice(0..n);
+            let same_segment = current.as_ref().is_some_and(|(p, _)| p == &prefix);
+            if !same_segment {
+                if let Some((cur_prefix, builder)) = current.take() {
+                    out.push(EncodedSegmentSst {
+                        prefix: cur_prefix,
+                        encoded: builder.build().await?,
+                    });
+                }
+                current = Some((prefix, self.table_store.table_builder()));
+            }
+            let (_, builder) = current.as_mut().expect("set on first iteration");
+            builder.add(entry).await?;
+        }
+        if let Some((cur_prefix, builder)) = current {
+            out.push(EncodedSegmentSst {
+                prefix: cur_prefix,
+                encoded: builder.build().await?,
+            });
+        }
+        Ok(out)
     }
 
     pub(crate) async fn upload_compacted_sst(
@@ -117,7 +183,9 @@ mod tests {
     use crate::mem_table::WritableKVTable;
     use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
-    use crate::test_utils::{lookup_merge_operator_operands, StringConcatMergeOperator};
+    use crate::test_utils::{
+        lookup_merge_operator_operands, FixedThreeBytePrefixExtractor, StringConcatMergeOperator,
+    };
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
@@ -561,6 +629,153 @@ mod tests {
             .unwrap();
 
         verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
+        db.close().await.unwrap();
+    }
+
+    async fn setup_test_db_with_extractor(
+        path: &str,
+        extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
+    ) -> Db {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn build_imm_ssts_without_extractor_emits_single_empty_prefix() {
+        let db = setup_test_db_without_merge_operator().await;
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"k1", b"v1", 1));
+        table.put(RowEntry::new_value(b"k2", b"v2", 2));
+
+        let ssts = db
+            .inner
+            .build_imm_ssts(table.table().clone())
+            .await
+            .unwrap();
+
+        assert_eq!(ssts.len(), 1);
+        assert!(ssts[0].prefix.is_empty());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_imm_ssts_with_extractor_yields_empty_vec_when_no_entries() {
+        // With an extractor configured, an empty memtable produces no
+        // entries and therefore opens no builders — the result is an
+        // empty Vec. (The no-extractor path delegates to build_imm_sst
+        // and always emits a single SST, even if empty.)
+        let db = setup_test_db_with_extractor(
+            "/tmp/test_build_imm_ssts_empty",
+            Arc::new(FixedThreeBytePrefixExtractor),
+        )
+        .await;
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+        let table = WritableKVTable::new();
+
+        let ssts = db
+            .inner
+            .build_imm_ssts(table.table().clone())
+            .await
+            .unwrap();
+
+        assert!(ssts.is_empty());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_imm_ssts_with_extractor_groups_by_prefix() {
+        let db = setup_test_db_with_extractor(
+            "/tmp/test_build_imm_ssts_groups",
+            Arc::new(FixedThreeBytePrefixExtractor),
+        )
+        .await;
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+        let table = WritableKVTable::new();
+        // Sorted within and across prefixes.
+        table.put(RowEntry::new_value(b"aaa-1", b"v1", 1));
+        table.put(RowEntry::new_value(b"aaa-2", b"v2", 2));
+        table.put(RowEntry::new_value(b"bbb-1", b"v3", 3));
+        table.put(RowEntry::new_value(b"ccc-1", b"v4", 4));
+        table.put(RowEntry::new_value(b"ccc-2", b"v5", 5));
+
+        let ssts = db
+            .inner
+            .build_imm_ssts(table.table().clone())
+            .await
+            .unwrap();
+
+        let prefixes: Vec<&[u8]> = ssts.iter().map(|s| s.prefix.as_ref()).collect();
+        assert_eq!(prefixes, vec![&b"aaa"[..], &b"bbb"[..], &b"ccc"[..]]);
+
+        // Upload each SST and verify it carries exactly its prefix's entries.
+        let expected: Vec<Vec<(Bytes, u64, ValueDeletable)>> = vec![
+            vec![
+                (
+                    Bytes::from("aaa-1"),
+                    1,
+                    ValueDeletable::Value(Bytes::from("v1")),
+                ),
+                (
+                    Bytes::from("aaa-2"),
+                    2,
+                    ValueDeletable::Value(Bytes::from("v2")),
+                ),
+            ],
+            vec![(
+                Bytes::from("bbb-1"),
+                3,
+                ValueDeletable::Value(Bytes::from("v3")),
+            )],
+            vec![
+                (
+                    Bytes::from("ccc-1"),
+                    4,
+                    ValueDeletable::Value(Bytes::from("v4")),
+                ),
+                (
+                    Bytes::from("ccc-2"),
+                    5,
+                    ValueDeletable::Value(Bytes::from("v5")),
+                ),
+            ],
+        ];
+        for (sst, entries) in ssts.into_iter().zip(expected.into_iter()) {
+            let id = SsTableId::Compacted(Ulid::new());
+            let handle = db
+                .inner
+                .upload_compacted_sst(&id, table.table().clone(), &sst.encoded, false)
+                .await
+                .unwrap();
+            verify_sst(&db, &handle, &entries).await;
+        }
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_imm_ssts_with_extractor_single_segment_yields_one() {
+        let db = setup_test_db_with_extractor(
+            "/tmp/test_build_imm_ssts_single",
+            Arc::new(FixedThreeBytePrefixExtractor),
+        )
+        .await;
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"aaa-1", b"v1", 1));
+        table.put(RowEntry::new_value(b"aaa-2", b"v2", 2));
+
+        let ssts = db
+            .inner
+            .build_imm_ssts(table.table().clone())
+            .await
+            .unwrap();
+
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].prefix.as_ref(), b"aaa");
         db.close().await.unwrap();
     }
 }

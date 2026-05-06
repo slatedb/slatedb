@@ -1166,6 +1166,29 @@ pub(crate) fn format_backtrace(bt: &backtrace::Backtrace) -> String {
     output
 }
 
+/// Test extractor that always extracts a fixed 3-byte prefix. Returns
+/// `None` for inputs shorter than 3 bytes; callers that exercise the
+/// extractor's segmentation path should use keys ≥ 3 bytes.
+#[derive(Debug)]
+pub(crate) struct FixedThreeBytePrefixExtractor;
+
+impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor {
+    fn name(&self) -> &str {
+        "fixed-3"
+    }
+    fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+        let len = match target {
+            crate::prefix_extractor::PrefixTarget::Point(b)
+            | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.len(),
+        };
+        if len >= 3 {
+            Some(3)
+        } else {
+            None
+        }
+    }
+}
+
 static INIT_LOGGING: Once = Once::new();
 static INIT_DEADLOCK_DETECTOR: Once = Once::new();
 
