@@ -12,7 +12,7 @@ Status: Draft
 
 Authors:
 
-* [Your Name](https://github.com/your_github_profile)
+* [Chris Riccomini](https://github.com/criccomini)
 
 ## Summary
 
