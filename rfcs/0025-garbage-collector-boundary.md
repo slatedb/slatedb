@@ -402,5 +402,3 @@ Log major changes to this RFC over time (optional).
 - Include FizzBee proof in design.
 - Do we care about CDC honoring boundary files?
 - How is Db split/merge affected (if at all)?
-
-WDYT of this proposal? Think really fucking hard. This shit is complicated as fuck. Read the full GH issue and comments using your GH skill. Read https://nvartolomei.com/ oswald, too.
