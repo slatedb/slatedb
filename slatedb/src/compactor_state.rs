@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
 use bytes::Bytes;
-use log::{error, info};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -68,28 +68,57 @@ impl SourceId {
     }
 }
 
-/// Immutable spec that describes a compaction. Holds the target segment, the
-/// input sources, and the destination SR id for a compaction.
+/// Immutable spec that describes a compaction. Two variants are supported
+/// per RFC-0024:
 ///
-/// Every spec names exactly one segment (see RFC 24): an empty `segment`
-/// targets the compatibility-encoded `prefix=""` segment (i.e. the root tree),
-/// and a non-empty `segment` targets the named segment with that prefix. All
-/// `sources` for a single spec must come from the named segment's tree;
-/// mixing trees is invalid.
+/// - [`CompactionSpec::Tiered`] is the standard merge: read input sources,
+///   write a single output sorted run with a destination id.
+/// - [`CompactionSpec::DrainSegment`] retires a named segment without
+///   merging — the compactor names the L0s and SRs it has observed, and the
+///   commit advances the segment's watermark and clears its `compacted` list.
+///
+/// Every spec names exactly one segment (see RFC 24). For tiered specs an
+/// empty `segment` targets the compatibility-encoded `prefix=""` segment
+/// (root tree); a non-empty `segment` targets the named segment. Drain
+/// specs require a non-empty `segment` — the empty-prefix segment cannot
+/// be drained.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CompactionSpec {
+pub enum CompactionSpec {
+    Tiered(TieredCompactionSpec),
+    DrainSegment(DrainSegmentSpec),
+}
+
+/// Tiered compaction spec: read inputs, merge into one output sorted run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TieredCompactionSpec {
     /// Target segment prefix. Empty `Bytes` targets the `prefix=""` segment.
     segment: Bytes,
     /// Input sources for the compaction.
     sources: Vec<SourceId>,
-    /// Destination sorted run id for the compaction.
+    /// Destination sorted run id for the compaction output.
     destination: u32,
 }
 
+/// Drain-segment spec: retire a named segment as part of segment retention.
+/// No merge is performed; on commit the segment's watermark advances to
+/// cover the listed L0s and the listed sorted runs are removed from
+/// `compacted`. The result is a "drain marker" that the writer prunes once
+/// observed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DrainSegmentSpec {
+    /// Target segment prefix. Must be non-empty — the `prefix=""` segment
+    /// (root tree) cannot be drained.
+    segment: Bytes,
+    /// L0 SSTs and sorted runs the compactor has observed in the segment
+    /// and is draining.
+    sources: Vec<SourceId>,
+}
+
 impl CompactionSpec {
-    /// Creates a new compaction spec targeting the compatibility-encoded
+    /// Creates a tiered compaction spec targeting the compatibility-encoded
     /// `prefix=""` segment (the root tree). For specs that target a named
-    /// segment, use [`CompactionSpec::for_segment`].
+    /// segment, use [`CompactionSpec::for_segment`]. For drain operations,
+    /// use [`CompactionSpec::drain_segment`].
     ///
     /// ## Arguments
     /// - `sources`: Ordered list of sources (L0 SST ULIDs and/or existing SR ids).
@@ -98,7 +127,7 @@ impl CompactionSpec {
         Self::for_segment(Bytes::new(), sources, destination)
     }
 
-    /// Creates a new compaction spec targeting the named segment with the
+    /// Creates a tiered compaction spec targeting the named segment with the
     /// given prefix. An empty `segment` is equivalent to [`CompactionSpec::new`]
     /// and targets the compatibility-encoded `prefix=""` segment.
     ///
@@ -107,39 +136,61 @@ impl CompactionSpec {
     /// - `sources`: Ordered list of sources (L0 SST ULIDs and/or existing SR ids).
     /// - `destination`: Sorted Run id for the compaction output.
     pub fn for_segment(segment: Bytes, sources: Vec<SourceId>, destination: u32) -> Self {
-        Self {
+        CompactionSpec::Tiered(TieredCompactionSpec {
             segment,
             sources,
             destination,
-        }
+        })
+    }
+
+    /// Creates a drain-segment spec targeting the named (non-empty-prefix)
+    /// segment. `sources` lists the L0s and SRs the compactor has observed in
+    /// the segment and is draining.
+    pub fn drain_segment(segment: Bytes, sources: Vec<SourceId>) -> Self {
+        CompactionSpec::DrainSegment(DrainSegmentSpec { segment, sources })
     }
 
     /// The target segment prefix. Empty bytes mean the compatibility-encoded
-    /// `prefix=""` segment (the root tree).
+    /// `prefix=""` segment (only valid for tiered specs).
     pub fn segment(&self) -> &Bytes {
-        &self.segment
+        match self {
+            CompactionSpec::Tiered(s) => &s.segment,
+            CompactionSpec::DrainSegment(s) => &s.segment,
+        }
     }
 
     /// The sources (input SSTs and sorted runs) for this compaction.
-    pub fn sources(&self) -> &Vec<SourceId> {
-        &self.sources
+    pub fn sources(&self) -> &[SourceId] {
+        match self {
+            CompactionSpec::Tiered(s) => &s.sources,
+            CompactionSpec::DrainSegment(s) => &s.sources,
+        }
     }
 
-    /// The destination sorted run id that will be produced by this compaction.
-    pub fn destination(&self) -> u32 {
-        self.destination
+    /// The destination sorted run id this compaction will produce, or `None`
+    /// for drain specs (which produce no new SR).
+    pub fn destination(&self) -> Option<u32> {
+        match self {
+            CompactionSpec::Tiered(s) => Some(s.destination),
+            CompactionSpec::DrainSegment(_) => None,
+        }
+    }
+
+    /// Returns true if this is a [`CompactionSpec::DrainSegment`] spec.
+    pub fn is_drain(&self) -> bool {
+        matches!(self, CompactionSpec::DrainSegment(_))
     }
 
     /// Returns true if any of the compaction sources are L0 SST views.
     pub fn has_l0_sources(&self) -> bool {
-        self.sources
+        self.sources()
             .iter()
             .any(|s| matches!(s, SourceId::SstView(_)))
     }
 
     /// Returns true if any of the compaction sources are sorted runs.
     pub fn has_sr_sources(&self) -> bool {
-        self.sources
+        self.sources()
             .iter()
             .any(|s| matches!(s, SourceId::SortedRun(_)))
     }
@@ -149,16 +200,27 @@ impl Display for CompactionSpec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let displayed_sources: Vec<String> =
             self.sources().iter().map(|s| format!("{}", s)).collect();
-        if self.segment.is_empty() {
-            write!(f, "{:?} -> SR({})", displayed_sources, self.destination())
-        } else {
-            write!(
+        let segment = self.segment();
+        match self {
+            CompactionSpec::Tiered(spec) => {
+                if segment.is_empty() {
+                    write!(f, "{:?} -> SR({})", displayed_sources, spec.destination)
+                } else {
+                    write!(
+                        f,
+                        "[seg={}] {:?} -> SR({})",
+                        String::from_utf8_lossy(segment),
+                        displayed_sources,
+                        spec.destination,
+                    )
+                }
+            }
+            CompactionSpec::DrainSegment(_) => write!(
                 f,
-                "[seg={}] {:?} -> SR({})",
-                String::from_utf8_lossy(&self.segment),
+                "[seg={}] drain {:?}",
+                String::from_utf8_lossy(segment),
                 displayed_sources,
-                self.destination()
-            )
+            ),
         }
     }
 }
@@ -334,21 +396,9 @@ impl Compaction {
 
 impl Display for Compaction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let displayed_sources: Vec<_> = self
-            .spec
-            .sources()
-            .iter()
-            .map(|s| format!("{}", s))
-            .collect();
-        write!(
-            f,
-            "{:?} -> SR({})",
-            displayed_sources,
-            self.spec.destination(),
-        )?;
+        write!(f, "{}", self.spec)?;
         if self.bytes_processed > 0 {
             let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
-
             write!(f, " ({} processed)", human_bytes_processed)?;
         }
         Ok(())
@@ -550,6 +600,28 @@ impl CompactorState {
         &self.manifest
     }
 
+    /// Test-only mutable access to the local dirty manifest. Production
+    /// callers should use [`Self::merge_remote_manifest`] or one of the
+    /// `finish_*` methods so the writer/compactor merge protocol stays
+    /// consistent.
+    #[cfg(test)]
+    pub(crate) fn manifest_mut_for_test(&mut self) -> &mut DirtyObject<Manifest> {
+        &mut self.manifest
+    }
+
+    /// Test-only injection of a Submitted compaction into the in-memory
+    /// state. Production callers route through [`Self::add_compaction`]
+    /// (validation + dedup); this helper bypasses both for tests that want
+    /// to set up specific scheduling scenarios.
+    #[cfg(test)]
+    pub(crate) fn insert_compaction_for_test(&mut self, compaction: Compaction) {
+        self.compactions
+            .value
+            .core
+            .recent_compactions
+            .insert(compaction.id(), compaction);
+    }
+
     /// Returns an iterator over all in-flight compactions.
     pub(crate) fn active_compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.compactions.value.iter_active()
@@ -649,22 +721,43 @@ impl CompactorState {
     ///
     /// ## Returns
     /// - `Ok(())` if accepted, or [`SlateDBError::InvalidCompaction`] if the compaction targets a
-    ///   segment that does not exist, conflicts with an existing destination, or violates
-    ///   destination overwrite rules.
+    ///   segment that does not exist, conflicts with an existing destination, violates
+    ///   destination overwrite rules, or — for drain specs — targets the empty-prefix segment.
     pub(crate) fn add_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let spec = compaction.spec();
+        // Drain specs cannot target the empty-prefix segment (RFC-0024): the
+        // root-tree compatibility encoding is not retired by drain.
+        if spec.is_drain() && spec.segment().is_empty() {
+            warn!("rejected drain compaction targeting the empty-prefix segment");
+            return Err(SlateDBError::InvalidCompaction);
+        }
+        // At most one active drain per segment. Drain specs have no
+        // destination, so the destination-collision check below cannot catch
+        // duplicates; an explicit per-segment guard does.
+        if spec.is_drain()
+            && self
+                .compactions
+                .value
+                .iter_active()
+                .any(|c| c.spec().is_drain() && c.spec().segment() == spec.segment())
+        {
+            return Err(SlateDBError::InvalidCompaction);
+        }
         // SR ids are globally unique across all segment trees (RFC-0024), so
         // collisions are checked across every active compaction regardless of
-        // target segment.
-        if self
-            .compactions
-            .value
-            .iter_active()
-            .map(|c| c.spec())
-            .any(|c| c.destination() == spec.destination())
-        {
-            // we already have an ongoing compaction for this destination
-            return Err(SlateDBError::InvalidCompaction);
+        // target segment. Drain specs produce no output SR, so the check only
+        // applies to tiered specs.
+        if let Some(dst) = spec.destination() {
+            if self
+                .compactions
+                .value
+                .iter_active()
+                .filter_map(|c| c.spec().destination())
+                .any(|d| d == dst)
+            {
+                // we already have an ongoing compaction for this destination
+                return Err(SlateDBError::InvalidCompaction);
+            }
         }
         let Some(tree) = self.db_state().tree_for_segment(spec.segment()) else {
             // spec targets a named segment that does not exist
@@ -681,19 +774,22 @@ impl CompactorState {
         }
         // SR ids are globally unique across all segment trees (RFC-0024), so
         // an existing SR with the same id anywhere in the manifest blocks the
-        // spec unless that SR is among its sources.
-        if self
-            .db_state()
-            .trees()
-            .flat_map(|t| t.compacted.iter())
-            .any(|sr| sr.id == spec.destination())
-            && !spec.sources().iter().any(|src| match src {
-                SourceId::SortedRun(sr) => *sr == spec.destination(),
-                SourceId::SstView(_) => false,
-            })
-        {
-            // the compaction overwrites an existing sr but doesn't include the sr
-            return Err(SlateDBError::InvalidCompaction);
+        // spec unless that SR is among its sources. Drain specs produce no
+        // output SR, so the overwrite check applies only to tiered specs.
+        if let Some(dst) = spec.destination() {
+            if self
+                .db_state()
+                .trees()
+                .flat_map(|t| t.compacted.iter())
+                .any(|sr| sr.id == dst)
+                && !spec.sources().iter().any(|src| match src {
+                    SourceId::SortedRun(sr) => *sr == dst,
+                    SourceId::SstView(_) => false,
+                })
+            {
+                // the compaction overwrites an existing sr but doesn't include the sr
+                return Err(SlateDBError::InvalidCompaction);
+            }
         }
         info!("accepted submitted compaction [compaction={}]", compaction);
 
@@ -733,6 +829,11 @@ impl CompactorState {
         if let Some(compaction) = self.compactions.value.get_mut(&compaction_id) {
             let spec = compaction.spec();
             info!("finished compaction [spec={}]", spec);
+            // Tiered finish path; drain specs are completed via
+            // `finish_drain_compaction` and never reach here.
+            let dst = spec
+                .destination()
+                .expect("finish_compaction with output SR called on a non-tiered spec");
             let segment = spec.segment().clone();
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = spec
@@ -743,7 +844,7 @@ impl CompactorState {
             let compaction_srs: HashSet<u32> = spec
                 .sources()
                 .iter()
-                .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
+                .chain(std::iter::once(&SourceId::SortedRun(dst)))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
             let first_source = *spec
@@ -807,6 +908,105 @@ impl CompactorState {
         } else {
             error!("compaction not found [compaction_id={}]", compaction_id);
         }
+    }
+
+    /// Applies the effects of a finished drain compaction to the in-memory
+    /// manifest (RFC-0024). Unlike [`Self::finish_compaction`], drain produces
+    /// no output sorted run — it only:
+    ///
+    /// - advances the target segment's `last_compacted_l0_*` watermark to the
+    ///   newest L0 named in the spec's sources, and
+    /// - removes the named sorted runs from `compacted`.
+    ///
+    /// If every observed L0 and SR is named in `sources`, the result is a
+    /// "drain marker" (`l0=[], compacted=[], watermark=set`) that the writer
+    /// will prune through the merge protocol on its next commit. If the
+    /// segment received late writes (L0s with ids above the watermark) the
+    /// segment stays Live with those L0s remaining, and the next propose()
+    /// pass decides whether to drain them.
+    pub(crate) fn finish_drain_compaction(&mut self, compaction_id: Ulid) {
+        let mut db_state = self.db_state().clone();
+        let Some(compaction) = self.compactions.value.get(&compaction_id) else {
+            error!("compaction not found [compaction_id={}]", compaction_id);
+            return;
+        };
+        let spec = compaction.spec();
+        info!("finished drain compaction [spec={}]", spec);
+        let drain = match spec {
+            CompactionSpec::DrainSegment(d) => d.clone(),
+            CompactionSpec::Tiered(_) => {
+                error!(
+                    "finish_drain_compaction called on a tiered spec [compaction_id={}]",
+                    compaction_id
+                );
+                return;
+            }
+        };
+        let segment = drain.segment.clone();
+        let drained_l0_ids: HashSet<Ulid> = drain
+            .sources
+            .iter()
+            .filter_map(|id| id.maybe_unwrap_sst_view())
+            .collect();
+        let drained_sr_ids: HashSet<u32> = drain
+            .sources
+            .iter()
+            .filter_map(|id| id.maybe_unwrap_sorted_run())
+            .collect();
+
+        let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
+            error!(
+                "finish_drain_compaction: target segment missing [segment={:?}, compaction_id={}]",
+                segment, compaction_id
+            );
+            // Segment was dropped between submission and finish; mark the
+            // compaction terminal so it doesn't linger as Active.
+            self.update_compaction(&compaction_id, |c| {
+                c.set_status(CompactionStatus::Failed);
+            });
+            return;
+        };
+
+        // tree.l0 is sorted newest-first, so the first match is the newest L0
+        // in `sources`. Per RFC-0024 the watermark advances to that L0 only;
+        // late L0s with ids above it survive the writer's later merge.
+        if let Some(view) = tree
+            .l0
+            .iter()
+            .find(|view| drained_l0_ids.contains(&view.id))
+            .cloned()
+        {
+            tree.last_compacted_l0_sst_view_id = Some(view.id);
+            tree.last_compacted_l0_sst_id = Some(view.sst.id.unwrap_compacted_id());
+        }
+
+        tree.l0.retain(|view| !drained_l0_ids.contains(&view.id));
+        tree.compacted.retain(|sr| !drained_sr_ids.contains(&sr.id));
+
+        // Invariant (RFC-0024): a segment that remains in the manifest must
+        // be either non-empty (has L0 or SR) or a valid `is_drained()` marker
+        // (watermark set). The current write paths guarantee this — a
+        // non-empty `compacted` always coexists with a set watermark — but
+        // if that invariant has been violated elsewhere, a drain that ends
+        // in `is_empty()` would later panic `merge_segments_from_writer`.
+        // Fail the drain rather than persist a manifest the writer can't
+        // merge.
+        if tree.is_empty() {
+            error!(
+                "finish_drain_compaction: post-drain segment would be empty without a watermark [segment={:?}, compaction_id={}]",
+                segment, compaction_id
+            );
+            self.update_compaction(&compaction_id, |c| {
+                c.set_status(CompactionStatus::Failed);
+            });
+            return;
+        }
+
+        self.manifest.value.core = db_state;
+        self.manifest.value.prune_external_sst_ids();
+        self.update_compaction(&compaction_id, |c| {
+            c.set_status(CompactionStatus::Completed);
+        });
     }
 
     /// Debug assertion that compacted sorted runs are kept in strictly descending id order.
@@ -1736,50 +1936,6 @@ mod tests {
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
-    /// SR ids are globally unique across all trees (RFC-0024), so the
-    /// active-conflict check rejects a duplicate destination regardless of
-    /// which segment each spec targets.
-    #[test]
-    fn test_add_compaction_active_conflict_check_is_global() {
-        let rt = build_runtime();
-        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
-
-        // Seed real sources so the source-isolation check passes for both
-        // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
-        state.manifest.value.core.tree.compacted = vec![SortedRun {
-            id: 99,
-            sst_views: Vec::new(),
-        }];
-        let prefix = Bytes::from_static(b"seg/");
-        state.manifest.value.core.segments = vec![Segment {
-            prefix: prefix.clone(),
-            tree: LsmTreeState {
-                last_compacted_l0_sst_view_id: None,
-                last_compacted_l0_sst_id: None,
-                l0: VecDeque::new(),
-                compacted: vec![SortedRun {
-                    id: 100,
-                    sst_views: Vec::new(),
-                }],
-            },
-        }];
-
-        let root_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let root_spec = CompactionSpec::new(vec![SourceId::SortedRun(99)], 7);
-        state
-            .add_compaction(Compaction::new(root_id, root_spec))
-            .expect("root-tree compaction must register");
-
-        let seg_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let seg_spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(100)], 7);
-        let err = state
-            .add_compaction(Compaction::new(seg_id, seg_spec))
-            .expect_err(
-                "segment spec must be rejected when an active root-tree compaction shares the destination",
-            );
-        assert!(matches!(err, SlateDBError::InvalidCompaction));
-    }
-
     /// If the target segment is dropped between submission and finish, the
     /// compaction must be marked terminal so it doesn't linger as Active.
     #[test]
@@ -1825,6 +1981,374 @@ mod tests {
             .expect("compaction should still be tracked");
         assert_eq!(compaction.status(), CompactionStatus::Failed);
         assert_eq!(state.compactions.value.iter_active().count(), 0);
+    }
+
+    /// SR ids are globally unique across all trees (RFC-0024), so the
+    /// active-conflict check rejects a duplicate destination regardless of
+    /// which segment each spec targets.
+    #[test]
+    fn test_add_compaction_active_conflict_check_is_global() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Seed real sources so the source-isolation check passes for both
+        // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 99,
+            sst_views: Vec::new(),
+        }];
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 100,
+                    sst_views: Vec::new(),
+                }],
+            },
+        }];
+
+        let root_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let root_spec = CompactionSpec::new(vec![SourceId::SortedRun(99)], 7);
+        state
+            .add_compaction(Compaction::new(root_id, root_spec))
+            .expect("root-tree compaction must register");
+
+        let seg_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let seg_spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(100)], 7);
+        let err = state
+            .add_compaction(Compaction::new(seg_id, seg_spec))
+            .expect_err(
+                "segment spec must be rejected when an active root-tree compaction shares the destination",
+            );
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// Two in-flight compactions targeting the same destination must be
+    /// rejected — covers the trivial intra-segment case.
+    #[test]
+    fn test_add_compaction_active_conflict_rejects_same_segment_same_destination() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Seed SR(7) in the root tree so the source-isolation check passes
+        // for the first submission; the spec rewrites that SR (destination=7).
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        }];
+
+        let first_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let first = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
+        state
+            .add_compaction(Compaction::new(first_id, first))
+            .expect("first compaction must register");
+
+        let second_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let second = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
+        let err = state
+            .add_compaction(Compaction::new(second_id, second))
+            .expect_err("same-segment same-destination must be rejected");
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// Drain specs have no destination, so the destination-collision check
+    /// doesn't catch duplicates; the explicit per-segment guard must reject
+    /// a second drain targeting the same segment while the first is active.
+    #[test]
+    fn test_add_compaction_rejects_concurrent_drain_on_same_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix = Bytes::from_static(b"seg/");
+        let l0_a = drain_test_view(1);
+        let l0_b = drain_test_view(2);
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![l0_b.clone(), l0_a.clone()]),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let first_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let first = CompactionSpec::drain_segment(prefix.clone(), vec![SourceId::SstView(l0_a.id)]);
+        state
+            .add_compaction(Compaction::new(first_id, first))
+            .expect("first drain must register");
+
+        let second_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let second = CompactionSpec::drain_segment(prefix, vec![SourceId::SstView(l0_b.id)]);
+        let err = state
+            .add_compaction(Compaction::new(second_id, second))
+            .expect_err("second drain on same segment must be rejected");
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// Drain specs on different segments may run concurrently — the
+    /// per-segment guard only blocks duplicates on the same target.
+    #[test]
+    fn test_add_compaction_allows_concurrent_drains_on_different_segments() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix_a = Bytes::from_static(b"seg-a/");
+        let prefix_b = Bytes::from_static(b"seg-b/");
+        let l0_a = drain_test_view(1);
+        let l0_b = drain_test_view(2);
+        state.manifest.value.core.segments = vec![
+            Segment {
+                prefix: prefix_a.clone(),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![l0_a.clone()]),
+                    compacted: Vec::new(),
+                },
+            },
+            Segment {
+                prefix: prefix_b.clone(),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![l0_b.clone()]),
+                    compacted: Vec::new(),
+                },
+            },
+        ];
+
+        let first_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let first = CompactionSpec::drain_segment(prefix_a, vec![SourceId::SstView(l0_a.id)]);
+        state
+            .add_compaction(Compaction::new(first_id, first))
+            .expect("first drain must register");
+
+        let second_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let second = CompactionSpec::drain_segment(prefix_b, vec![SourceId::SstView(l0_b.id)]);
+        state
+            .add_compaction(Compaction::new(second_id, second))
+            .expect("drain on a different segment must register");
+    }
+
+    /// Same as the tiered case: a drain compaction whose segment disappears
+    /// between submission and finish must be marked terminal.
+    #[test]
+    fn test_finish_drain_compaction_marks_failed_when_segment_missing() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix = Bytes::from_static(b"seg/");
+        let l0 = drain_test_view(1);
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![l0.clone()]),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::drain_segment(prefix, vec![SourceId::SstView(l0.id)]);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("drain submission must register");
+
+        // Segment dropped after submission, before finish.
+        state.manifest.value.core.segments = Vec::new();
+
+        state.finish_drain_compaction(compaction_id);
+
+        let compaction = state
+            .compactions
+            .value
+            .get(&compaction_id)
+            .expect("compaction should still be tracked");
+        assert_eq!(compaction.status(), CompactionStatus::Failed);
+        assert_eq!(state.compactions.value.iter_active().count(), 0);
+    }
+
+    /// If the post-drain state would be `is_empty()` rather than a valid
+    /// `is_drained()` marker (no L0, no compacted, no watermark), the merge
+    /// protocol would panic on the next refresh. The current write paths
+    /// can't reach this state, but if the invariant is ever violated
+    /// upstream the drain must fail safely rather than persist a manifest
+    /// the writer can't merge.
+    #[test]
+    fn test_finish_drain_compaction_marks_failed_when_result_would_be_empty() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Synthetic broken input: SR(7) in `compacted` with no watermark —
+        // a state the system cannot produce organically.
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 7,
+                    sst_views: Vec::new(),
+                }],
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::drain_segment(prefix.clone(), vec![SourceId::SortedRun(7)]);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("drain submission must register");
+
+        state.finish_drain_compaction(compaction_id);
+
+        let compaction = state
+            .compactions
+            .value
+            .get(&compaction_id)
+            .expect("compaction should still be tracked");
+        assert_eq!(compaction.status(), CompactionStatus::Failed);
+        // Manifest is not mutated when the drain bails.
+        let tree = state
+            .manifest
+            .value
+            .core
+            .tree_for_segment(&prefix)
+            .expect("segment must still be present");
+        assert_eq!(tree.compacted.len(), 1);
+        assert_eq!(tree.compacted[0].id, 7);
+    }
+
+    fn drain_test_view(seed: u64) -> SsTableView {
+        let ulid = Ulid::from_parts(seed, 0);
+        SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(ulid),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        ))
+    }
+
+    /// Drain on a segment that contains exactly the observed L0s and SRs
+    /// produces a "drain marker" (RFC-0024): empty `l0`, empty `compacted`,
+    /// watermark advanced to the newest drained L0.
+    #[test]
+    fn test_finish_drain_compaction_produces_marker() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Two L0s (newest first) and one SR in the segment.
+        let l0_newer = drain_test_view(2);
+        let l0_older = drain_test_view(1);
+        let sr = SortedRun {
+            id: 5,
+            sst_views: Vec::new(),
+        };
+        let prefix = Bytes::from_static(b"hour=10/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![l0_newer.clone(), l0_older.clone()]),
+                compacted: vec![sr.clone()],
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::drain_segment(
+            prefix.clone(),
+            vec![
+                SourceId::SstView(l0_newer.id),
+                SourceId::SstView(l0_older.id),
+                SourceId::SortedRun(sr.id),
+            ],
+        );
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("drain compaction must register");
+
+        state.finish_drain_compaction(compaction_id);
+
+        let seg = state
+            .db_state()
+            .tree_for_segment(&prefix)
+            .expect("segment present");
+        assert!(seg.l0.is_empty(), "drained L0s must be removed");
+        assert!(seg.compacted.is_empty(), "drained SRs must be removed");
+        assert_eq!(
+            seg.last_compacted_l0_sst_view_id,
+            Some(l0_newer.id),
+            "watermark must advance to the newest drained L0"
+        );
+        assert!(seg.is_drained(), "segment must be a drain marker");
+    }
+
+    /// A drain spec that lists only the L0s the compactor observed must not
+    /// remove L0s above the watermark (concurrent late writes survive).
+    /// The segment stays Live.
+    #[test]
+    fn test_finish_drain_compaction_with_late_l0_stays_live() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Compactor observed only `l0_observed`. The newer `l0_late` arrived
+        // afterward (seed > observed, so its ULID sorts higher in tree.l0).
+        let l0_late = drain_test_view(2);
+        let l0_observed = drain_test_view(1);
+        let prefix = Bytes::from_static(b"hour=10/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![l0_late.clone(), l0_observed.clone()]),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec =
+            CompactionSpec::drain_segment(prefix.clone(), vec![SourceId::SstView(l0_observed.id)]);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("drain compaction must register");
+
+        state.finish_drain_compaction(compaction_id);
+
+        let seg = state
+            .db_state()
+            .tree_for_segment(&prefix)
+            .expect("segment present");
+        // Late L0 survives.
+        assert_eq!(seg.l0.len(), 1);
+        assert_eq!(seg.l0.front().expect("late L0").id, l0_late.id);
+        // Watermark advances only to the observed L0.
+        assert_eq!(seg.last_compacted_l0_sst_view_id, Some(l0_observed.id));
+        // Segment is not a drain marker — still Live.
+        assert!(!seg.is_drained());
+    }
+
+    /// `add_compaction` rejects a drain spec that targets the empty-prefix
+    /// segment. RFC-0024: the root-tree compatibility encoding cannot be
+    /// drained.
+    #[test]
+    fn test_add_compaction_rejects_drain_for_empty_prefix() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::drain_segment(Bytes::new(), vec![SourceId::SortedRun(0)]);
+
+        let result = state.add_compaction(Compaction::new(compaction_id, spec));
+
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {

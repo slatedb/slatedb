@@ -1195,8 +1195,8 @@ mod tests {
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(3)], 3);
         let compaction = admin.submit_compaction(spec).await.unwrap();
 
-        assert_eq!(compaction.spec().destination(), 3);
-        assert_eq!(compaction.spec().sources(), &vec![SourceId::SortedRun(3)]);
+        assert_eq!(compaction.spec().destination(), Some(3));
+        assert_eq!(compaction.spec().sources(), &[SourceId::SortedRun(3)]);
         assert_eq!(compaction.status(), CompactionStatus::Submitted);
     }
 

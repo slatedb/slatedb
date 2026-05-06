@@ -54,8 +54,11 @@ impl ConflictChecker {
         for source in compaction.sources().iter() {
             self.sources_used.insert(*source);
         }
-        self.sources_used
-            .insert(SourceId::SortedRun(compaction.destination()));
+        // Drain specs produce no destination SR; only tiered specs reserve
+        // a destination id in the conflict set.
+        if let Some(dst) = compaction.destination() {
+            self.sources_used.insert(SourceId::SortedRun(dst));
+        }
     }
 }
 
@@ -274,7 +277,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         // Validate if the compaction sources are strictly consecutive elements in the target tree.
         if !sources_logical_order
             .windows(compaction.sources().len())
-            .any(|w| w == compaction.sources().as_slice())
+            .any(|w| w == compaction.sources())
         {
             warn!("submitted compaction is not a consecutive series of sources from db state: {:?} {:?}",
             compaction.sources(), sources_logical_order);
@@ -289,14 +292,15 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             .any(|s| matches!(s, SourceId::SortedRun(_)));
 
         if has_sr {
-            // Must merge into the lowest-id SR among sources
+            // Must merge into the lowest-id SR among sources. Only tiered
+            // specs have a destination; drain specs skip this check.
             let min_sr = compaction
                 .sources()
                 .iter()
                 .filter_map(|s| s.maybe_unwrap_sorted_run())
                 .min()
                 .expect("at least one SR in sources");
-            if compaction.destination() != min_sr {
+            if compaction.destination() != Some(min_sr) {
                 warn!(
                     "destination does not match lowest-id SR among sources: {:?} {:?}",
                     compaction.destination(),
@@ -453,9 +457,10 @@ fn next_global_sr_id(db_state: &ManifestCore, active_compactions: &[&Compaction]
         .trees()
         .flat_map(|tree| tree.compacted.iter().map(|sr| sr.id))
         .max();
+    // Drain specs have no destination — `filter_map` skips them.
     let max_in_flight = active_compactions
         .iter()
-        .map(|c| c.spec().destination())
+        .filter_map(|c| c.spec().destination())
         .max();
     [max_committed, max_in_flight]
         .into_iter()
@@ -534,7 +539,7 @@ mod tests {
         let request = requests.first().unwrap();
         let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(request.sources(), &expected_sources);
-        assert_eq!(request.destination(), 0);
+        assert_eq!(request.destination(), Some(0));
     }
 
     #[test]
@@ -587,7 +592,7 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        assert_eq!(request.destination(), 11);
+        assert_eq!(request.destination(), Some(11));
     }
 
     #[test]
@@ -909,9 +914,10 @@ mod tests {
 
         let mut l0 = state.db_state().tree.l0.clone();
         let request = create_l0_compaction(l0.make_contiguous(), 0);
-        let mut new_sources: Vec<SourceId> = request.sources().clone();
+        let mut new_sources: Vec<SourceId> = request.sources().to_vec();
         new_sources.push(SourceId::SortedRun(5));
-        let new_request = CompactionSpec::new(new_sources, request.destination());
+        let new_request =
+            CompactionSpec::new(new_sources, request.destination().expect("tiered spec"));
         // when:
         let result = scheduler.validate(&state.into(), &new_request);
 
@@ -1054,7 +1060,7 @@ mod tests {
         assert_eq!(spec.segment().as_ref(), b"hour=12/");
         let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(spec.sources(), &expected_sources);
-        assert_eq!(spec.destination(), 0);
+        assert_eq!(spec.destination(), Some(0));
     }
 
     /// Cross-tree priority: when two trees are both eligible, the tree with
@@ -1079,8 +1085,8 @@ mod tests {
         assert_eq!(requests[0].segment().as_ref(), b"hour=12/");
         assert!(requests[1].segment().is_empty());
         // Globally-unique destination ids: segment gets 0, root gets 1.
-        assert_eq!(requests[0].destination(), 0);
-        assert_eq!(requests[1].destination(), 1);
+        assert_eq!(requests[0].destination(), Some(0));
+        assert_eq!(requests[1].destination(), Some(1));
     }
 
     /// Fresh L0 → SR destinations skip past every committed SR id in every
@@ -1103,7 +1109,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let spec = &requests[0];
         assert_eq!(spec.segment().as_ref(), b"seg/");
-        assert_eq!(spec.destination(), 21);
+        assert_eq!(spec.destination(), Some(21));
     }
 
     /// Round-robin fairness: when one tree could absorb the entire budget on
