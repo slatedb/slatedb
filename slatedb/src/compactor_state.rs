@@ -1620,6 +1620,59 @@ mod tests {
         assert_eq!(state.db_state().tree.compacted, root_compacted_before);
     }
 
+    /// `add_compaction` rejects a spec whose target segment is not present in
+    /// the manifest. The empty-prefix segment (root tree) always exists, so
+    /// only non-empty prefixes can fail this lookup.
+    #[test]
+    fn test_add_compaction_rejects_unknown_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix = Bytes::from_static(b"missing/");
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(0)], 0);
+
+        let result = state.add_compaction(Compaction::new(compaction_id, spec));
+
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    /// The destination-overwrite check in `add_compaction` is scoped to the
+    /// spec's target segment. A segment-targeted spec must not be rejected
+    /// because an SR with the same destination id happens to live in the
+    /// root tree (a different segment).
+    #[test]
+    fn test_add_compaction_destination_overwrite_check_is_per_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Place SR(7) in the root tree. The segment-targeted spec below uses
+        // 7 as its destination but does not list it among its sources, which
+        // would be rejected if the check were not scoped per segment.
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        }];
+
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
+
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("segment-targeted spec must not be blocked by an SR in the root tree");
+    }
+
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         let opts = Settings {
             l0_sst_size_bytes: 256,

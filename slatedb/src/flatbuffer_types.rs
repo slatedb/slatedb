@@ -1744,9 +1744,22 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
         )
         .with_status(CompactionStatus::Failed);
+        // Targets a named segment to exercise the non-empty `segment` path
+        // through encode/decode.
+        let segment_prefix = Bytes::from_static(b"hour=12/");
+        let compaction_segment = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::for_segment(
+                segment_prefix.clone(),
+                vec![SourceId::SortedRun(8), SourceId::SortedRun(6)],
+                6,
+            ),
+        )
+        .with_status(CompactionStatus::Running);
         let mut compactions = Compactions::new(9);
         compactions.insert(compaction_l0.clone());
         compactions.insert(compaction_sr.clone());
+        compactions.insert(compaction_segment.clone());
 
         let codec = FlatBufferCompactionsCodec {};
         let bytes = codec.encode(&compactions);
@@ -1765,6 +1778,11 @@ mod tests {
                 .expect("missing sr compaction"),
             &compaction_sr
         );
+        let decoded_segment = decoded
+            .get(&compaction_segment.id())
+            .expect("missing segment compaction");
+        assert_eq!(decoded_segment, &compaction_segment);
+        assert_eq!(decoded_segment.spec().segment(), &segment_prefix);
     }
 
     #[test]
