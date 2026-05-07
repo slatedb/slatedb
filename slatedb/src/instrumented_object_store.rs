@@ -23,7 +23,6 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::object_stores::ObjectStoreType;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -34,6 +33,8 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use slatedb_common::metrics::MetricsRecorderHelper;
+
+use crate::object_stores::ObjectStoreType;
 
 /// Which SlateDB component is issuing object store requests.
 ///
