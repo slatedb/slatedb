@@ -1853,7 +1853,6 @@ mod tests {
         GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
-    use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
     use crate::instrumented_object_store::stats::{
@@ -3601,11 +3600,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_flushes_memtable_after_max_wal_flushes() {
+        const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 16;
+
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_memtable_max_wal_flushes";
 
         let mut settings = test_db_options(0, usize::MAX, None);
         settings.flush_interval = None; // Disable flushing
+        settings.max_wal_flushes_before_l0_flush = MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
 
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(settings)
@@ -6027,6 +6029,7 @@ mod tests {
             l0_flush_parallelism: 1,
             min_filter_keys,
             l0_sst_size_bytes,
+            max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
