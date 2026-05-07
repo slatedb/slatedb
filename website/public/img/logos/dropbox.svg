@@ -1,0 +1,10 @@
+<svg viewBox="0 0 145 33" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g transform="translate(0, 0.5) scale(0.78)">
+<polygon points="10.6,1.7 0,8.5 10.6,15.3 21.2,8.5" fill="#0061FE"/>
+<polygon points="31.8,1.7 21.2,8.5 31.8,15.3 42.4,8.5" fill="#0061FE"/>
+<polygon points="0,22.1 10.6,28.9 21.2,22.1 10.6,15.3" fill="#0061FE"/>
+<polygon points="31.8,15.3 21.2,22.1 31.8,28.9 42.4,22.1" fill="#0061FE"/>
+<polygon points="10.6,31.1 21.2,37.9 31.8,31.1 21.2,24.3" fill="#0061FE"/>
+</g>
+<text x="42" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#0061FE">Dropbox</text>
+</svg>
