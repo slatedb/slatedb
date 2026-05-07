@@ -344,23 +344,25 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-This will add latency to all object store writes, which is managed in two ways:
-
-1. Keeping user-facing operations mostly non-blocking.
-   a. Users generally write with `await_durable` set to `false`.
-   b. By default, `.manifest` writes (L0 updates, and so on) occur in the background using the memtable flusher.
-   c. By default, WAL writes occur in the background using the WAL buffer.
-   d. Users that call `flush()` will still need to wait, which will incur the added latency.
-2. Reduce the boundary check latency.
-   a. Writers can refresh boundary files in the background periodically and save the value and ETag
-   b. Writers call `GET If-None-Match` on the boundary file after writes. If it's 304, they can use their in-memory value. The [maximum p999 latency across Azure, GCS, S3, S3E1Z, GCS Rapid, and Tigris is 68ms](https://x.com/Sirupsen/status/2050895383866249618) (max p99=30ms, and max p50=14ms).
-
-(2a) is left as future work if it's actually needed.
-
 - Latency (reads/writes/compactions)
+    - This will add latency to all object store writes, which is managed in two ways:
+        1. Keeping user-facing operations mostly non-blocking.
+            a. Users generally write with `await_durable` set to `false`.
+            b. By default, `.manifest` writes (L0 updates, and so on) occur in the background using the memtable flusher.
+            c. By default, WAL writes occur in the background using the WAL buffer.
+            d. Users that call `flush()` will still need to wait, which will incur the added latency.
+        2. Reduce the boundary check latency.
+            a. Writers can refresh boundary files in the background periodically and save the value and ETag
+            b. Writers call `GET If-None-Match` on the boundary file after writes. If it's 304, they can use their in-memory value. The [maximum p999 latency across Azure, GCS, S3, S3E1Z, GCS Rapid, and Tigris is 68ms](https://x.com/Sirupsen/status/2050895383866249618) (max p99=30ms, and max p50=14ms).
+        (2a) is left as future work if it's actually needed.
 - Throughput (reads/writes/compactions)
+    - No major considerations other than latency impact described above.
 - Object-store request (GET/LIST/PUT) and cost profile
+    - `.manifest`, `.compactions`, and WAL `.sst` writes now require an additional `GET` to read the boundary file after the write.
+    - A continuous `flush_interval=100ms` results in 10 flushes/sec * 60 sec/min * 60 min/hr * 24 hr/day * 30 day/month = 25,920,000 GET requests/month. 25,920,000 * $0.0004 / 1000 requests = $10.37/month in added GET costs for WAL writes.
 - Space, read, and write amplification
+    - Minor increase in space amplification from the addition of boundary files, which are small (a few bytes each).
+    - Minor increase in space amplification from being more conservative with L0 SST GC.
 
 ### Observability
 
