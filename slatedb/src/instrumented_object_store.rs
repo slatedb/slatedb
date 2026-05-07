@@ -20,16 +20,13 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::ops::Range;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Instant;
 
-use crate::instrumented_object_store_stats::RequestMetrics;
 use crate::object_stores::ObjectStoreType;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{BoxStream, Stream, StreamExt};
+use futures::stream::BoxStream;
 use futures::FutureExt;
 use object_store::path::Path;
 use object_store::{
@@ -143,70 +140,6 @@ impl MultipartUpload for InstrumentedMultipartUpload {
     }
 }
 
-struct InstrumentedStream {
-    inner: BoxStream<'static, object_store::Result<ObjectMeta>>,
-    start: Instant,
-    stats: Arc<stats::ObjectStoreStats>,
-    stream_complete: bool,
-    is_list_with_offset: bool,
-}
-
-impl InstrumentedStream {
-    fn new(
-        inner: BoxStream<'static, object_store::Result<ObjectMeta>>,
-        stats: Arc<stats::ObjectStoreStats>,
-        is_list_with_offset: bool,
-    ) -> Self {
-        Self {
-            inner,
-            start: Instant::now(),
-            stats,
-            stream_complete: false,
-            is_list_with_offset,
-        }
-    }
-
-    fn get_request_metrics(&self) -> &RequestMetrics {
-        if self.is_list_with_offset {
-            return &self.stats.list_with_offset;
-        }
-        &self.stats.list
-    }
-}
-
-impl Stream for InstrumentedStream {
-    type Item = object_store::Result<ObjectMeta>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.stream_complete {
-            return Poll::Ready(None);
-        }
-
-        match self.inner.poll_next_unpin(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => {
-                self.stream_complete = true;
-                // Stream completed successfully after yielding items_seen items
-                self.get_request_metrics()
-                    .record(self.start.elapsed(), true);
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(Err(e))) => {
-                self.stream_complete = true;
-                // Stream failed with an error
-                self.get_request_metrics()
-                    .record(self.start.elapsed(), false);
-                Poll::Ready(Some(Err(e)))
-            }
-            result => result,
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
 #[async_trait]
 impl ObjectStore for InstrumentedObjectStore {
     async fn get_opts(
@@ -293,11 +226,8 @@ impl ObjectStore for InstrumentedObjectStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        Box::pin(InstrumentedStream::new(
-            self.inner.list(prefix),
-            Arc::clone(&self.stats),
-            false,
-        ))
+        self.stats.list.increment(1);
+        self.inner.list(prefix)
     }
 
     fn list_with_offset(
@@ -305,11 +235,8 @@ impl ObjectStore for InstrumentedObjectStore {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        Box::pin(InstrumentedStream::new(
-            self.inner.list_with_offset(prefix, offset),
-            Arc::clone(&self.stats),
-            true,
-        ))
+        self.stats.list_with_offset.increment(1);
+        self.inner.list_with_offset(prefix, offset)
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
@@ -371,8 +298,8 @@ pub mod stats {
         pub(crate) get_range: RequestMetrics,
         pub(crate) get_ranges: RequestMetrics,
         pub(crate) head: RequestMetrics,
-        pub(crate) list: RequestMetrics,
-        pub(crate) list_with_offset: RequestMetrics,
+        pub(crate) list: Arc<dyn CounterFn>,
+        pub(crate) list_with_offset: Arc<dyn CounterFn>,
         pub(crate) list_with_delimiter: RequestMetrics,
         pub(crate) put: RequestMetrics,
         pub(crate) multipart_init: RequestMetrics,
@@ -398,14 +325,21 @@ pub mod stats {
                     "get_ranges",
                 ),
                 head: RequestMetrics::new(recorder, component, store_type, "get", "head"),
-                list: RequestMetrics::new(recorder, component, store_type, "get", "list"),
-                list_with_offset: RequestMetrics::new(
-                    recorder,
-                    component,
-                    store_type,
-                    "get",
-                    "list_with_offset",
-                ),
+                list: recorder
+                    .counter(REQUEST_COUNT)
+                    .description("Object store API requests")
+                    .labels(&get_labels(component, store_type, "get", "list"))
+                    .register(),
+                list_with_offset: recorder
+                    .counter(REQUEST_COUNT)
+                    .description("Object store API requests")
+                    .labels(&get_labels(
+                        component,
+                        store_type,
+                        "get",
+                        "list_with_offset",
+                    ))
+                    .register(),
                 list_with_delimiter: RequestMetrics::new(
                     recorder,
                     component,
@@ -440,6 +374,20 @@ pub mod stats {
         }
     }
 
+    pub(crate) fn get_labels(
+        component: ObjectStoreComponent,
+        store_type: ObjectStoreType,
+        op: &'static str,
+        api: &'static str,
+    ) -> [(&'static str, &'static str); 4] {
+        [
+            ("component", component.as_str()),
+            ("store_type", store_type.as_str()),
+            ("op", op),
+            ("api", api),
+        ]
+    }
+
     /// Metrics for a single object store API (e.g. `get` or `put`).
     ///
     /// Each instance holds three pre-registered metric handles that
@@ -464,12 +412,7 @@ pub mod stats {
             op: &'static str,
             api: &'static str,
         ) -> Self {
-            let labels = [
-                ("component", component.as_str()),
-                ("store_type", store_type.as_str()),
-                ("op", op),
-                ("api", api),
-            ];
+            let labels = get_labels(component, store_type, op, api);
 
             Self {
                 request_count: recorder
