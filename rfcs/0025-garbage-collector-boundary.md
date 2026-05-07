@@ -172,7 +172,8 @@ Each boundary-tracked writer must follow this protocol:
 1. Write the file with a create-if-absent operation.
     a. If the write fails because the file already exists, return a `ObjectVersionExists` error.
 2. Read the boundary file.
-    a. If the boundary file does not exist, .. ?
+    a. If the boundary file does not exist, and has never been seen, use a boundary value of 0.
+    b. If the boundary file does not exist, but has been seen before, panic since the GC should never delete a boundary file.
 3. Verify the just-written file ID is numerically greater than the boundary value read in (2).
     a. If not, return a `ObjectVersionExists` error.
 4. Return success.
@@ -198,6 +199,8 @@ We will enforce the following rules:
 - Newly added SR SSTs in `.manifest` or `.compactions` must have an SST ULID timestamp greater than the compaction job's ID timestamp.
 - Newly added compaction jobs in `.compactions` must have an ID timestamp greater than the most recent compaction job's ID timestamp in the file.
 
+_TODO: With a large amount of segments and/or L0's, this could iterate quite a few SSTs. It might burn CPU._
+
 These rules guarantee:
 
 - Untracked L0s are greater than every tree segment's `last_compacted_l0_sst_view_id` (including the root).
@@ -214,15 +217,13 @@ The following write paths must be updated to follow the boundary file check prot
 - `ObjectStoreSequencedStorageProtocol::write` (covers `.manifest` and `.compactions` files) must check and return `ObjectVersionExists` if the boundary value has advanced to or past the just-written file ID.
 - `TableStore::write_sst` (covers `wal.boundary`) must check and return `Fenced` if the boundary value has advanced to or past the just-written WAL ID.
 
-If no boundary file has ever been seen, the check is skipped. If a boundary file has been seen, but no longer exists, panic.
+`TableStore::write_sst` and `TableStore::table_writer(...).close()` do not perform boundary checks for `SsTableId::Compacted`. Compacted `.sst` files are managed using the rules described in _GC cutoff rule enforcement_. Enforcement for the `.manifest`/`.compactions` GC cutoff rules is achieved by adding `TransactionalObject::validate()`. Dirty manifests and compactions can then compare against the current value to enforce the rules defined in _GC cutoff rule enforcement_.
 
-`TableStore::write_sst` and `TableStore::table_writer(...).close()` do not perform boundary checks for `SsTableId::Compacted`.
+_TODO: sketch out how to plumb the manifest/compactions validation rules in `TransactionalObject::validate()`._
 
-Manifest update validation for newly added L0 SSTs should return `InvalidClockTick` when the SST timestamp is not greater than the L0 compaction watermark it must clear. We will need to update the MemtableFlusher to retry `InvalidClockTick` errors with a new SST ULID.
+`.manifest` and `.compactions` update validation for newly added SSTs should return `InvalidClockTick` when the SST timestamp violates the GC cutoff rules. We will need to update the `MemTable` flusher code to retry `InvalidClockTick` errors with a new L0 SST ULID. We will also need to update the compactor code to fail a compaction job if it receives an `InvalidClockTick` for an SR SST or compaction job.
 
-_TODO: More detail on the memtable flusher retry logic._
-
-We must also update the manifest/compactions file writing logic enforce GC cutoff rules. We can do this by adding `TransactionalObject::validate()`. Dirty manifests and compactions can then compare against the current value to enforce the rules defined in _GC cutoff rule enforcement_.
+_TODO: sketch out how to have the MemTable flusher handle `InvalidClockTick` errors._
 
 ### Garbage collector changes
 
