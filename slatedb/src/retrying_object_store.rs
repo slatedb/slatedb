@@ -8,9 +8,9 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use async_trait::async_trait;
-use backon::{ExponentialBuilder, Retryable, Sleeper};
+use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder, Retryable, Sleeper};
 use futures::stream::BoxStream;
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::{stream, StreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
@@ -138,6 +138,81 @@ impl RetryingObjectStore {
             }
             Err(_) => None,
         }
+    }
+
+    /// Retrying list stream that resumes pagination after a transient error.
+    ///
+    /// `list()` paginates and returns a stream of results, so the underlying call can
+    /// fail mid-iteration. Rather than discarding partial progress and restarting from
+    /// page 1 (which costs us the latency for every already-paginated page on every
+    /// retry), we track the last successfully yielded path and, on a retryable error,
+    /// sleep for backoff and re-open the stream via `list_with_offset(prefix, last)` —
+    /// `list_with_offset` returns objects with location strictly greater than `offset`,
+    /// so the caller observes a single, continuous, deduplicated stream.
+    ///
+    /// If `initial_offset` is `Some`, the first attempt is itself a `list_with_offset`,
+    /// reproducing the user-requested offset semantics. After we've yielded any item,
+    /// `last` advances past `initial_offset` and is used for subsequent retries.
+    fn retrying_list_stream(
+        inner: Arc<dyn ObjectStore>,
+        clock: Arc<dyn SystemClock>,
+        prefix: Option<Path>,
+        initial_offset: Option<Path>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        struct StreamState {
+            stream: BoxStream<'static, object_store::Result<ObjectMeta>>,
+            last: Option<Path>,
+            initial_offset: Option<Path>,
+            backoff: ExponentialBackoff,
+        }
+
+        fn open_stream(
+            inner: &Arc<dyn ObjectStore>,
+            prefix: Option<&Path>,
+            offset: Option<&Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            match offset {
+                Some(o) => inner.list_with_offset(prefix, o),
+                None => inner.list(prefix),
+            }
+        }
+
+        let initial_stream = open_stream(&inner, prefix.as_ref(), initial_offset.as_ref());
+        let state = Some(StreamState {
+            stream: initial_stream,
+            last: None,
+            initial_offset,
+            backoff: Self::retry_builder().build(),
+        });
+
+        stream::unfold(state, move |state| {
+            let inner = Arc::clone(&inner);
+            let clock = Arc::clone(&clock);
+            let prefix = prefix.clone();
+            async move {
+                let mut s = state?;
+                loop {
+                    match s.stream.next().await {
+                        None => return None,
+                        Some(Ok(item)) => {
+                            s.last = Some(item.location.clone());
+                            return Some((Ok(item), Some(s)));
+                        }
+                        Some(Err(e)) => {
+                            if !Self::should_retry(&e) {
+                                return Some((Err(e), None));
+                            }
+                            let delay = s.backoff.next().unwrap_or(Duration::from_secs(1));
+                            Self::notify(&e, delay);
+                            clock.sleep(delay).await;
+                            let resume_from = s.last.as_ref().or(s.initial_offset.as_ref());
+                            s.stream = open_stream(&inner, prefix.as_ref(), resume_from);
+                        }
+                    }
+                }
+            }
+        })
+        .boxed()
     }
 
     /// Creates a new Attributes with our ULID attribute merged with existing attributes.
@@ -393,44 +468,12 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        let inner = Arc::clone(&self.inner);
-        let sleeper = self.sleeper();
-        let prefix_owned = prefix.cloned();
-
-        // list() is a little more complex than the other functions because:
-        // 1. it's sync, not async
-        // 2. it paginates and returns a stream of results
-        //
-        // (2) is particularly challenging because it means it returns before we know the full
-        // result. This is problematic--because we can't easily retry half-way through the
-        // iteration.
-        //
-        // To get around this, we convert the entire list into a vector in a single attempt,
-        // and then return a stream of those results.
-        stream::once(async move {
-            (|| async {
-                let stream = inner.list(prefix_owned.as_ref());
-                // Any error in the stream will return an error for try_collect
-                stream.try_collect::<Vec<_>>().await
-            })
-            .retry(Self::retry_builder())
-            .sleep(sleeper)
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-        })
-        .map_ok(|entries| {
-            // If the list() call succeeded, we need to convert the vector back into
-            // a stream of results.
-            stream::iter(
-                entries
-                    .into_iter()
-                    .map(Ok::<ObjectMeta, object_store::Error>),
-            )
-            .boxed()
-        })
-        .try_flatten()
-        .boxed()
+        Self::retrying_list_stream(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.clock),
+            prefix.cloned(),
+            None,
+        )
     }
 
     fn list_with_offset(
@@ -438,33 +481,12 @@ impl ObjectStore for RetryingObjectStore {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        let inner = Arc::clone(&self.inner);
-        let sleeper = self.sleeper();
-        let prefix_owned = prefix.cloned();
-        let offset_owned = offset.clone();
-
-        // See the comment in list() for details on why we do this.
-        stream::once(async move {
-            (|| async {
-                let stream = inner.list_with_offset(prefix_owned.as_ref(), &offset_owned);
-                stream.try_collect::<Vec<_>>().await
-            })
-            .retry(Self::retry_builder())
-            .sleep(sleeper)
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-        })
-        .map_ok(|entries| {
-            stream::iter(
-                entries
-                    .into_iter()
-                    .map(Ok::<ObjectMeta, object_store::Error>),
-            )
-            .boxed()
-        })
-        .try_flatten()
-        .boxed()
+        Self::retrying_list_stream(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.clock),
+            prefix.cloned(),
+            Some(offset.clone()),
+        )
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
@@ -519,7 +541,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::test_utils::FlakyObjectStore;
     use bytes::Bytes;
-    use futures::TryStreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
@@ -711,14 +733,17 @@ mod tests {
         let mut expected: Vec<_> = paths.iter().map(|p| p.to_string()).collect();
         expected.sort();
         assert_eq!(names, expected);
-        assert_eq!(flaky.list_attempts(), 2);
+        // Initial list() failed after 1 item; retry resumed via list_with_offset.
+        assert_eq!(flaky.list_attempts(), 1);
+        assert_eq!(flaky.list_with_offset_attempts(), 1);
     }
 
     #[tokio::test]
-    async fn test_list_failure_mid_pagination_restarts_from_scratch() {
-        // Reproduces the bug in RetryingObjectStore::list: a single error mid-pagination
-        // causes the entire pagination to retry from page 1 — work already done is
-        // discarded and re-fetched, so the inner store yields more items than exist.
+    async fn test_list_failure_mid_pagination_resumes_from_offset() {
+        // Verifies the fix for the bug where a single transient error mid-pagination
+        // caused RetryingObjectStore::list to restart pagination from page 1, wasting
+        // all work already done. The fix: track the last successfully yielded path and
+        // resume via list_with_offset on retry, so progress is durable across attempts.
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let paths: Vec<Path> = (0..6)
             .map(|i| Path::from(format!("/items/{i:02}")))
@@ -733,8 +758,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Fail once after the inner stream has yielded 3 items: the first attempt
-        // streams 3 items + an error; the second attempt restarts and streams all 6.
+        // Fail once after the inner stream has yielded 3 items.
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 3));
         let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
 
@@ -744,7 +768,7 @@ mod tests {
             .await
             .expect("list should eventually succeed");
 
-        // Caller still sees exactly the 6 distinct objects.
+        // Caller sees exactly the 6 distinct objects.
         assert_eq!(listed.len(), 6);
         let mut names: Vec<_> = listed.into_iter().map(|m| m.location.to_string()).collect();
         names.sort();
@@ -752,21 +776,114 @@ mod tests {
         expected.sort();
         assert_eq!(names, expected);
 
-        // The inner store was invoked twice: once that failed mid-pagination, once that
-        // succeeded.
-        assert_eq!(flaky.list_attempts(), 2);
+        // Initial attempt called list() once (and failed mid-pagination); the retry
+        // resumed via list_with_offset(prefix, last_seen_path).
+        assert_eq!(flaky.list_attempts(), 1);
+        assert_eq!(flaky.list_with_offset_attempts(), 1);
 
-        // The bug: the first 3 items already streamed on attempt 1 are re-fetched on
-        // attempt 2. Total items pulled from the inner stream = 3 (failed) + 6 (retry) = 9,
-        // even though only 6 unique objects exist. Pagination progress is per-attempt,
-        // not durable across attempts.
-        assert_eq!(
-            flaky.list_items_yielded(),
-            9,
-            "expected the failed page (3 items) plus a full restart (6 items) = 9; \
-             if the retry resumed at the continuation token instead of restarting, \
-             this would be 6"
-        );
+        // No wasted pagination: the inner stream produced 3 items on the failed attempt,
+        // then 3 more on the resumed attempt — total 6, matching the object count.
+        // Before the fix this would have been 9 (3 failed + 6 full restart).
+        assert_eq!(flaky.list_items_yielded(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_list_propagates_non_retryable_error() {
+        // A non-retryable error (e.g. NotFound) should be surfaced to the caller after
+        // any items already yielded, not retried indefinitely.
+        struct OneItemThenNotFound;
+
+        #[async_trait::async_trait]
+        impl object_store::ObjectStore for OneItemThenNotFound {
+            async fn put_opts(
+                &self,
+                _: &Path,
+                _: PutPayload,
+                _: PutOptions,
+            ) -> object_store::Result<object_store::PutResult> {
+                unimplemented!()
+            }
+            async fn put_multipart_opts(
+                &self,
+                _: &Path,
+                _: object_store::PutMultipartOptions,
+            ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+                unimplemented!()
+            }
+            async fn get_opts(
+                &self,
+                _: &Path,
+                _: object_store::GetOptions,
+            ) -> object_store::Result<object_store::GetResult> {
+                unimplemented!()
+            }
+            async fn delete(&self, _: &Path) -> object_store::Result<()> {
+                unimplemented!()
+            }
+            fn list(
+                &self,
+                _: Option<&Path>,
+            ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+            {
+                use futures::StreamExt;
+                let item = Ok(object_store::ObjectMeta {
+                    location: Path::from("/x"),
+                    last_modified: chrono::Utc::now(),
+                    size: 0,
+                    e_tag: None,
+                    version: None,
+                });
+                let err = Err(object_store::Error::NotFound {
+                    path: "/missing".into(),
+                    source: Box::new(std::io::Error::other("missing")),
+                });
+                futures::stream::iter(vec![item, err]).boxed()
+            }
+            fn list_with_offset(
+                &self,
+                _: Option<&Path>,
+                _: &Path,
+            ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+            {
+                unimplemented!("retry should not be issued for non-retryable error")
+            }
+            async fn list_with_delimiter(
+                &self,
+                _: Option<&Path>,
+            ) -> object_store::Result<object_store::ListResult> {
+                unimplemented!()
+            }
+            async fn copy(&self, _: &Path, _: &Path) -> object_store::Result<()> {
+                unimplemented!()
+            }
+            async fn copy_if_not_exists(&self, _: &Path, _: &Path) -> object_store::Result<()> {
+                unimplemented!()
+            }
+        }
+
+        impl std::fmt::Display for OneItemThenNotFound {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "OneItemThenNotFound")
+            }
+        }
+        impl std::fmt::Debug for OneItemThenNotFound {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "OneItemThenNotFound")
+            }
+        }
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(OneItemThenNotFound);
+        let retrying = RetryingObjectStore::new(inner, test_rand(), test_clock());
+
+        let mut stream = retrying.list(None);
+        let first = stream.next().await.expect("first item");
+        assert!(first.is_ok());
+        let second = stream.next().await.expect("error");
+        match second {
+            Err(object_store::Error::NotFound { .. }) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert!(stream.next().await.is_none(), "stream should terminate");
     }
 
     #[tokio::test]
