@@ -18,25 +18,25 @@ Authors:
 
 SlateDB currently relies on a combination of heuristics and time boundaries to:
 
-1. Prevent the garbage collector from deleting files it shouldn't, and
+1. Prevent the garbage collector (GC) from deleting files it shouldn't, and
 2. Properly detect that a client has been fenced.
 
-If a client violates time boundaries, these two guarantees do not hold. Worse still, the client can think its writes were successful when they weren't.
+If a client exceeds time boundaries, these two guarantees do not hold. In most cases, this is not an issue. A properly configured client should never be stalled for longer than the time boundaries. Still, in [pathological configurations](https://github.com/slatedb/slatedb/issues/1622), it can cause data loss.
 
-This RFC introduces a boundary file to properly detect stalled clients and prevent valid writes from being deleted.
+This RFC introduces a boundary file to remove timing dependencies from the GC safety and fencing protocols.
 
-## Motivation
+## Background
 
 We currently GC four file types:
 
-- .manifest (sequential flatbuffer, e.g. 00000000000000000012.manifest)
-- .compactions (sequential flatbuffer, e.g. 00000000000000000013.compactions)
+- `.manifest` (sequential flatbuffer, e.g. 00000000000000000012.manifest)
+- `.compactions` (sequential flatbuffer, e.g. 00000000000000000013.compactions)
 - WAL files (sequential SSTs, e.g. 00000000000000008495.sst)
 - compacted SSTs (ULID-based SSTs, e.g. 01KQWJPHB2GE3KJE07JV5NXGJA.sst)
 
 The files fall into three categories:
 
-1. Sequenced storage protocol files (.manifest and .compactions)
+1. Sequenced storage protocol files (`.manifest` and `.compactions`)
 2. Sequenced SST files (WAL files)
 3. ULID-based SST files (compacted SSTs)
 
@@ -74,22 +74,24 @@ All write patterns currently depend on time windows to protect recent writes aga
         - else older than `l0_last_compacted` if there are no current L0s
         - else older than Unix epoch 0 if there has never been any L0 (fresh DB)
 
-NOTE: `min_age` evaluates against the object store's timestamp for .manifest, .compactions, and WAL files. For compacted SST files, `min_age` evaluates against the ULID timestamp, which is based on wall-clock time of the writer machine at the time of SST file creation.
+NOTE: `min_age` evaluates against the object store's metadata timestamp for `.manifest`, `.compactions`, and WAL files. For compacted SST files, `min_age` evaluates against the ULID timestamp, which is based on wall-clock time of the writer machine at the time of SST file creation.
 
-Each of these time windows creates a vulnerability for stalled writers:
+## Motivation
+
+Each of the `min_age` time windows creates a vulnerability for stalled writers:
 
 - `.manifest` / `.compactions` GC:
     - t0: writer A reads manifest N and prepares update N -> N+1.
     - t1: writer A stalls before put(Create, N+1).
     - t2: writer B writes N+1; later writers advance to N+2, N+3, ...
-    - t3: N+1.manifest is older than min_age, not current, and not checkpoint-referenced, so GC deletes it.
+    - t3: N+1.manifest is older than `min_age`, not current, and not checkpoint-referenced, so GC deletes it.
     - t4: writer A resumes and put(Create, N+1.manifest) succeeds because N+1 no longer exists.
     - t5: writer A treats its stale manifest update as committed, even though the normal create-if-absent CAS path should have rejected it.
 - `/wal`:
     - t0: writer A prepares to write N.sst.
     - t1: writer A stalls before put(Create, N.sst).
     - t2: writer B writes N.sst; later writers advance WALs to N+1, N+2, and writes a new manifest that advances `replay_after_wal_id` to N+1.
-    - t3: N.sst is older than min_age, older than `manifest.replay_after_wal_id`, and outside any active checkpoint WAL range, so GC deletes it.
+    - t3: N.sst is older than `min_age`, older than `manifest.replay_after_wal_id`, and outside any active checkpoint WAL range, so GC deletes it.
     - t4: writer A resumes and put(Create, N.sst) succeeds because N.sst no longer exists.
     - t5: writer A treats its stale WAL write as committed, even though the normal create-if-absent fencing path should have rejected it.
 - `/compacted`:
@@ -107,7 +109,7 @@ Each of these time windows creates a vulnerability for stalled writers:
 
 ## Non-Goals
 
-- Move garbage collection logic in-process (e.g. have `Db`/`Compactor` delete .manifest/.compactions/.sst files).
+- Move garbage collection logic in-process (e.g. have `Db`/`Compactor` delete `.manifest`/`.compactions`/`.sst` files).
 - Significantly modify the existing protocols.
 
 ## Design
@@ -331,7 +333,7 @@ This will add latency to all object store writes, which is managed in two ways:
 
 1. Keeping user-facing operations mostly non-blocking.
    a. Users generally write with `await_durable` set to `false`.
-   b. By default, .manifest writes (L0 updates, and so on) occur in the background using the memtable flusher.
+   b. By default, `.manifest` writes (L0 updates, and so on) occur in the background using the memtable flusher.
    c. By default, WAL writes occur in the background using the WAL buffer.
    d. Users that call `flush()` will still need to wait, which will incur the added latency.
 2. Reduce the boundary check latency.
@@ -394,8 +396,8 @@ List the serious alternatives and why they were rejected (including “status qu
 
 <!-- Bullet list of related issues, PRs, RFCs, papers, docs, discord discussions, etc. -->
 
-- Reference 1
-- Reference 2
+- https://nvartolomei.com/oswald
+- https://github.com/slatedb/slatedb/issues/1622
 
 ## Updates
 
