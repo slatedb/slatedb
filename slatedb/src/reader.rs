@@ -1,8 +1,8 @@
 use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
-use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
-use crate::db_iter::{apply_filters, RecencyPrefixIterator};
+use crate::config::{DurabilityLevel, ReadOptions, RecencyScanOptions, ScanOptions};
+use crate::db_iter::{apply_filters, RecencyIterator};
 use crate::db_stats::DbStats;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::ManifestCore;
@@ -570,9 +570,9 @@ impl Reader {
     pub(crate) async fn scan_prefix_by_recency(
         &self,
         prefix: Bytes,
-        options: &ScanOptions,
+        options: &RecencyScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-    ) -> Result<RecencyPrefixIterator, SlateDBError> {
+    ) -> Result<RecencyIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(None, options.durability_filter, options.dirty);
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
@@ -618,7 +618,7 @@ impl Reader {
         all_iters.extend(l0_iters);
         all_iters.extend(sr_iters);
 
-        Ok(RecencyPrefixIterator::new(all_iters))
+        Ok(RecencyIterator::new(all_iters))
     }
 }
 

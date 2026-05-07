@@ -22,7 +22,8 @@ use object_store::memory::InMemory;
 use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{
-    DurabilityLevel, FlushOptions, FlushType, PutOptions, ScanOptions, Settings, WriteOptions,
+    DurabilityLevel, FlushOptions, FlushType, PutOptions, RecencyScanOptions, ScanOptions,
+    Settings, WriteOptions,
 };
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::SplitCache;
@@ -124,6 +125,14 @@ fn scan_options() -> ScanOptions {
         cache_blocks: false,
         durability_filter: DurabilityLevel::Remote,
         ..ScanOptions::default()
+    }
+}
+
+fn recency_scan_options() -> RecencyScanOptions {
+    RecencyScanOptions {
+        cache_blocks: false,
+        durability_filter: DurabilityLevel::Remote,
+        ..RecencyScanOptions::default()
     }
 }
 
@@ -269,7 +278,7 @@ fn bench_scan_prefix(c: &mut Criterion) {
                     .db
                     .scan_prefix_by_recency_with_options(
                         Bytes::from_static(QUERY_PREFIX),
-                        &scan_options(),
+                        &recency_scan_options(),
                     )
                     .await
                     .expect("scan_prefix_by_recency failed");
@@ -287,7 +296,7 @@ fn bench_scan_prefix(c: &mut Criterion) {
                     .db
                     .scan_prefix_by_recency_with_options(
                         Bytes::from_static(QUERY_PREFIX),
-                        &scan_options(),
+                        &recency_scan_options(),
                     )
                     .await
                     .expect("scan_prefix_by_recency failed");

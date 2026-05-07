@@ -408,7 +408,7 @@ where
 }
 
 /// See [`crate::Db::scan_prefix_by_recency`] for the full contract.
-pub struct RecencyPrefixIterator {
+pub struct RecencyIterator {
     /// Source iterators ordered from most recent to least recent. The
     /// front of the deque is the source currently being drained;
     /// exhausted sources are popped off as the walk proceeds. Each
@@ -426,7 +426,7 @@ pub struct RecencyPrefixIterator {
     invalidated_error: Option<SlateDBError>,
 }
 
-impl RecencyPrefixIterator {
+impl RecencyIterator {
     pub(crate) fn new(iters: VecDeque<Box<dyn RowEntryIterator + 'static>>) -> Self {
         Self {
             iters,

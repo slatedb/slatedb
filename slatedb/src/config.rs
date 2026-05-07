@@ -412,6 +412,97 @@ impl ScanOptions {
     }
 }
 
+/// Options for a recency-ordered prefix scan.
+///
+/// Mirrors [`ScanOptions`] minus the `order` field: the recency walk emits
+/// sources newest-first and each source iterates ascending internally, so
+/// cross-source ordering is fixed by the API contract and there is no
+/// per-source order knob to tune. Exposing `order` on the options struct
+/// would be a footgun (callers would expect descending traversal but get
+/// ascending silently), so the field is omitted entirely.
+#[derive(Clone, Debug)]
+pub struct RecencyScanOptions {
+    /// Specifies the minimum durability level for data returned by this scan.
+    pub durability_filter: DurabilityLevel,
+    /// Whether to include dirty data in the scan.
+    pub dirty: bool,
+    /// The number of bytes to read ahead. Rounded up to the nearest block
+    /// size when fetching from object storage. Default is 1, which rounds
+    /// up to one block.
+    pub read_ahead_bytes: usize,
+    /// Whether fetched blocks should be cached. Recency scans frequently
+    /// want this `false` (one-shot freshness checks shouldn't pollute the
+    /// block cache), so the default mirrors [`ScanOptions::default`].
+    pub cache_blocks: bool,
+    /// The maximum number of concurrent tasks for fetching blocks during
+    /// scans. Higher values can improve throughput but use more resources.
+    pub max_fetch_tasks: usize,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. Recency scans use this when evaluating SST prefix
+    /// filters so the walk can skip non-matching SSTs without a data-block
+    /// fetch.
+    pub filter_context: Option<FilterContext>,
+}
+
+impl Default for RecencyScanOptions {
+    /// Defaults match [`ScanOptions::default`] for the shared fields.
+    fn default() -> Self {
+        Self {
+            durability_filter: DurabilityLevel::default(),
+            dirty: false,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
+            max_fetch_tasks: 1,
+            filter_context: None,
+        }
+    }
+}
+
+impl RecencyScanOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dirty(self, dirty: bool) -> Self {
+        Self { dirty, ..self }
+    }
+
+    pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
+        Self {
+            durability_filter,
+            ..self
+        }
+    }
+
+    pub fn with_read_ahead_bytes(self, read_ahead_bytes: usize) -> Self {
+        Self {
+            read_ahead_bytes,
+            ..self
+        }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
+            ..self
+        }
+    }
+
+    pub fn with_max_fetch_tasks(self, max_fetch_tasks: usize) -> Self {
+        Self {
+            max_fetch_tasks,
+            ..self
+        }
+    }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
+    }
+}
+
 /// Enum representing the type of flush to perform.
 #[derive(Clone)]
 pub enum FlushType {

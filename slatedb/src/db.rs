@@ -48,10 +48,10 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
-    FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
-    WriteOptions,
+    FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, RecencyScanOptions,
+    ScanOptions, Settings, WriteOptions,
 };
-use crate::db_iter::{DbIterator, RecencyPrefixIterator};
+use crate::db_iter::{DbIterator, RecencyIterator};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -278,8 +278,8 @@ impl DbInner {
     pub(crate) async fn scan_prefix_by_recency(
         &self,
         prefix: Bytes,
-        options: &ScanOptions,
-    ) -> Result<RecencyPrefixIterator, SlateDBError> {
+        options: &RecencyScanOptions,
+    ) -> Result<RecencyIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
@@ -1175,23 +1175,119 @@ impl Db {
     /// non-matching SSTs without a data-block fetch, which keeps I/O
     /// proportional to how recent the data is rather than to the size of
     /// the LSM.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<RecencyIterator, Error>`: an iterator that yields raw
+    ///   `RowEntry` values newest-first. Use
+    ///   [`RecencyIterator::next_entry`] to pull the next entry, and
+    ///   inspect `entry.value` for the [`crate::types::ValueDeletable`]
+    ///   variant (`Value`, `Merge`, or `Tombstone`).
+    ///
+    /// ## Examples
+    ///
+    /// Pull just the freshest write for a prefix and stop. Because
+    /// sources are walked newest-first and lazily initialized, an
+    /// early-return like this only touches the source that actually
+    /// holds the latest entry.
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use slatedb::ValueDeletable;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"user:42", b"alice").await?;
+    ///     db.put(b"user:42", b"alice2").await?;
+    ///     db.put(b"user:99", b"bob").await?;
+    ///
+    ///     let mut iter = db.scan_prefix_by_recency(b"user:").await?;
+    ///     let entry = iter.next_entry().await?.unwrap();
+    ///     // The most-recently-written entry under the prefix is yielded first.
+    ///     // Note that across sources the same key may appear more than once,
+    ///     // so callers that want only the freshest value per key should dedupe.
+    ///     assert_eq!(entry.key.as_ref(), b"user:42");
+    ///     match entry.value {
+    ///         ValueDeletable::Value(v) => assert_eq!(v.as_ref(), b"alice2"),
+    ///         _ => panic!("expected a regular value"),
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn scan_prefix_by_recency<P>(
         &self,
         prefix: P,
-    ) -> Result<RecencyPrefixIterator, crate::Error>
+    ) -> Result<RecencyIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_prefix_by_recency_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_by_recency_with_options(prefix, &RecencyScanOptions::default())
             .await
     }
 
-    /// See [`Self::scan_prefix_by_recency`].
+    /// Recency-ordered prefix scan with custom options.
+    ///
+    /// Same contract as [`Self::scan_prefix_by_recency`] (raw entries
+    /// emitted newest-source-first; caller handles dedupe, tombstones, and
+    /// merge operands). The `options` argument lets you tune the scan, for
+    /// example disabling block-cache pollution for one-shot scans or
+    /// passing a `filter_context` that participates in prefix bloom-filter
+    /// evaluation so the recency walk skips SSTs whose filters reject the
+    /// prefix.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<RecencyIterator, Error>`: an iterator that yields raw
+    ///   `RowEntry` values newest-first.
+    ///
+    /// ## Examples
+    ///
+    /// Use `cache_blocks: false` to scan recent data without polluting
+    /// the block cache, and stop after the first match. Combined with the
+    /// recency ordering this is a cheap way to ask "is there a recent
+    /// entry under this prefix?" without warming the cache for cold
+    /// blocks the answer doesn't depend on.
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::RecencyScanOptions;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"event:001", b"old").await?;
+    ///     db.put(b"event:002", b"new").await?;
+    ///
+    ///     let options = RecencyScanOptions {
+    ///         cache_blocks: false,
+    ///         ..RecencyScanOptions::default()
+    ///     };
+    ///     let mut iter = db
+    ///         .scan_prefix_by_recency_with_options(b"event:", &options)
+    ///         .await?;
+    ///     let first = iter.next_entry().await?.unwrap();
+    ///     assert!(first.key.starts_with(b"event:"));
+    ///     // Stop here: we only needed the freshest match.
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn scan_prefix_by_recency_with_options<P>(
         &self,
         prefix: P,
-        options: &ScanOptions,
-    ) -> Result<RecencyPrefixIterator, crate::Error>
+        options: &RecencyScanOptions,
+    ) -> Result<RecencyIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
     {
@@ -1917,7 +2013,8 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
-        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, RecencyScanOptions, Settings,
+        Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
@@ -2599,9 +2696,9 @@ mod tests {
         .await
         .unwrap();
 
-        let opts = ScanOptions {
+        let opts = RecencyScanOptions {
             durability_filter: Remote,
-            ..ScanOptions::default()
+            ..RecencyScanOptions::default()
         };
         let mut iter = db
             .scan_prefix_by_recency_with_options(b"px:", &opts)
