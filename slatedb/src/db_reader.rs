@@ -289,8 +289,11 @@ impl DbReaderInner {
         if self.options.skip_wal_replay {
             return Ok(());
         }
-        let last_seen_wal_id = self.table_store.last_seen_wal_id().await?;
         let last_replayed_wal_id = self.state.read().last_wal_id;
+        let last_seen_wal_id = self
+            .table_store
+            .last_seen_wal_id(last_replayed_wal_id)
+            .await?;
         if last_seen_wal_id > last_replayed_wal_id {
             let current_checkpoint = Arc::clone(&self.state.read());
             let mut imm_memtable = current_checkpoint.imm_memtable().clone();
@@ -477,7 +480,7 @@ impl DbReaderInner {
                 (core.replay_after_wal_id, core.last_l0_seq)
             };
         let wal_id_end = if replay_new_wals {
-            table_store.last_seen_wal_id().await? + 1
+            table_store.last_seen_wal_id(replay_after_wal_id).await? + 1
         } else {
             core.next_wal_sst_id
         };
@@ -1836,7 +1839,7 @@ mod tests {
 
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
