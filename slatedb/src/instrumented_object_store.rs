@@ -20,12 +20,16 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
+use crate::instrumented_object_store_stats::RequestMetrics;
+use crate::object_stores::ObjectStoreType;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 use object_store::path::Path;
 use object_store::{
@@ -33,8 +37,6 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use slatedb_common::metrics::MetricsRecorderHelper;
-
-use crate::object_stores::ObjectStoreType;
 
 /// Which SlateDB component is issuing object store requests.
 ///
@@ -141,6 +143,70 @@ impl MultipartUpload for InstrumentedMultipartUpload {
     }
 }
 
+struct InstrumentedStream {
+    inner: BoxStream<'static, object_store::Result<ObjectMeta>>,
+    start: Instant,
+    stats: Arc<stats::ObjectStoreStats>,
+    stream_complete: bool,
+    is_list_with_offset: bool,
+}
+
+impl InstrumentedStream {
+    fn new(
+        inner: BoxStream<'static, object_store::Result<ObjectMeta>>,
+        stats: Arc<stats::ObjectStoreStats>,
+        is_list_with_offset: bool,
+    ) -> Self {
+        Self {
+            inner,
+            start: Instant::now(),
+            stats,
+            stream_complete: false,
+            is_list_with_offset,
+        }
+    }
+
+    fn get_request_metrics(&self) -> &RequestMetrics {
+        if self.is_list_with_offset {
+            return &self.stats.list_with_offset;
+        }
+        &self.stats.list
+    }
+}
+
+impl Stream for InstrumentedStream {
+    type Item = object_store::Result<ObjectMeta>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.stream_complete {
+            return Poll::Ready(None);
+        }
+
+        match self.inner.poll_next_unpin(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => {
+                self.stream_complete = true;
+                // Stream completed successfully after yielding items_seen items
+                self.get_request_metrics()
+                    .record(self.start.elapsed(), true);
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(e))) => {
+                self.stream_complete = true;
+                // Stream failed with an error
+                self.get_request_metrics()
+                    .record(self.start.elapsed(), false);
+                Poll::Ready(Some(Err(e)))
+            }
+            result => result,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
 #[async_trait]
 impl ObjectStore for InstrumentedObjectStore {
     async fn get_opts(
@@ -227,7 +293,11 @@ impl ObjectStore for InstrumentedObjectStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner.list(prefix)
+        Box::pin(InstrumentedStream::new(
+            self.inner.list(prefix),
+            Arc::clone(&self.stats),
+            false,
+        ))
     }
 
     fn list_with_offset(
@@ -235,11 +305,20 @@ impl ObjectStore for InstrumentedObjectStore {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner.list_with_offset(prefix, offset)
+        Box::pin(InstrumentedStream::new(
+            self.inner.list_with_offset(prefix, offset),
+            Arc::clone(&self.stats),
+            true,
+        ))
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-        self.inner.list_with_delimiter(prefix).await
+        let start = Instant::now();
+        let result = self.inner.list_with_delimiter(prefix).await;
+        self.stats
+            .list_with_delimiter
+            .record(start.elapsed(), result.is_ok());
+        result
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
@@ -292,6 +371,9 @@ pub mod stats {
         pub(crate) get_range: RequestMetrics,
         pub(crate) get_ranges: RequestMetrics,
         pub(crate) head: RequestMetrics,
+        pub(crate) list: RequestMetrics,
+        pub(crate) list_with_offset: RequestMetrics,
+        pub(crate) list_with_delimiter: RequestMetrics,
         pub(crate) put: RequestMetrics,
         pub(crate) multipart_init: RequestMetrics,
         pub(crate) multipart_part: RequestMetrics,
@@ -316,6 +398,21 @@ pub mod stats {
                     "get_ranges",
                 ),
                 head: RequestMetrics::new(recorder, component, store_type, "get", "head"),
+                list: RequestMetrics::new(recorder, component, store_type, "get", "list"),
+                list_with_offset: RequestMetrics::new(
+                    recorder,
+                    component,
+                    store_type,
+                    "get",
+                    "list_with_offset",
+                ),
+                list_with_delimiter: RequestMetrics::new(
+                    recorder,
+                    component,
+                    store_type,
+                    "get",
+                    "list_with_delimiter",
+                ),
                 put: RequestMetrics::new(recorder, component, store_type, "put", "put"),
                 multipart_init: RequestMetrics::new(
                     recorder,
