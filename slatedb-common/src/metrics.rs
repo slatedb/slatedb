@@ -1006,9 +1006,6 @@ pub fn lookup_metric_with_labels(
     labels: &[(&str, &str)],
 ) -> Option<i64> {
     let snap = recorder.snapshot();
-    snap.all().iter().for_each(|m| {
-        println!("{} {:?} {:?}", m.name, m.labels, m.value)
-    });
     snap.by_name_and_labels(name, labels)
         .map(|m| match &m.value {
             MetricValue::Counter(v) => *v as i64,

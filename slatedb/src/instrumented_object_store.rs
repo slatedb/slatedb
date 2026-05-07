@@ -286,6 +286,7 @@ pub mod stats {
     pub const REQUEST_COUNT: &str = object_store_stat_name!("request_count");
     pub const ERROR_COUNT: &str = object_store_stat_name!("error_count");
     pub const REQUEST_DURATION_SECONDS: &str = object_store_stat_name!("request_duration_seconds");
+    const REQUEST_COUNT_DESCRIPTION: &str = "Object store API requests";
 
     /// Pre-registered [`RequestMetrics`] for every object store API that
     /// SlateDB calls.
@@ -328,12 +329,12 @@ pub mod stats {
                 head: RequestMetrics::new(recorder, component, store_type, "get", "head"),
                 list: recorder
                     .counter(REQUEST_COUNT)
-                    .description("Object store API requests")
+                    .description(REQUEST_COUNT_DESCRIPTION)
                     .labels(&get_labels(component, store_type, "get", "list"))
                     .register(),
                 list_with_offset: recorder
                     .counter(REQUEST_COUNT)
-                    .description("Object store API requests")
+                    .description(REQUEST_COUNT_DESCRIPTION)
                     .labels(&get_labels(
                         component,
                         store_type,
@@ -418,7 +419,7 @@ pub mod stats {
             Self {
                 request_count: recorder
                     .counter(REQUEST_COUNT)
-                    .description("Object store API requests")
+                    .description(REQUEST_COUNT_DESCRIPTION)
                     .labels(&labels)
                     .register(),
                 error_count: recorder
