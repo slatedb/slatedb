@@ -97,10 +97,11 @@ Each of the `min_age` time windows creates a vulnerability for stalled writers:
 - `/compacted`:
     - t0: writer A uploads ULID SST X.sst to /compacted.
     - t1: writer A stalls before publishing the manifest update that references X.
-    - t2: other writers advance the manifest/compaction state, moving the GC cutoffs past X.
-    - t3: X.sst is older than `min_age`, unreferenced by active/checkpoint manifests, and older than the compacted-SST cutoffs, so GC deletes X.
-    - t4: writer A resumes and successfully publishes a manifest update referencing X.
-    - t5: the latest manifest now points at a missing SST.
+    - t2: writer B flushes and publishes a newer L0 SST Y.sst whose ULID timestamp is greater than X's timestamp, so the latest manifest's most-recent-L0 cutoff moves past X.
+    - t3: the compactor publishes a newer compaction job J whose `compaction.id.timestamp()` is greater than X's timestamp, and any older compaction jobs complete, so the current `.compactions` file's oldest-job cutoff also moves past X.
+    - t4: X.sst is older than `min_age`, unreferenced by active/checkpoint manifests, and older than both compacted-SST cutoffs, so GC deletes X.
+    - t5: writer A resumes and successfully publishes a manifest update referencing X.
+    - t6: the latest manifest now points at a missing SST.
 
 ## Goals
 
@@ -142,9 +143,11 @@ The boundary protocol has two invariants:
 1. Before GC may delete boundary-tracked file ID `i`, the durable boundary for that namespace must be `>= i`.
 2. Before a writer may return success for boundary-tracked file ID `i`, it must observe the durable boundary for that namespace as `< i` after the write occurred.
 
-There is intentionally no separate boundary file for compacted SSTs. Compacted SST writes are tentative data-file writes. They only become visible when a later `.manifest` or `.compactions` file references them, and those metadata files are protected by their own boundary files. Compacted SST safety therefore comes from the GC cutoff validation rules below.
+There is intentionally no separate boundary file for compacted SSTs. Compacted SST writes are tentative data-file writes. They only become visible when a later `.manifest` or `.compactions` file references them; those metadata files are protected by their own boundary files. Compacted SST safety therefore comes from the GC cutoff validation rules defined in _GC cutoff rule enforcement_, below.
 
 Boundary files will always live in the `main` object store (even if a `wal` object store is used for WAL files).
+
+_TODO: Do we want to colocate /gc/wa.boundary in the WAL store? If a WAL object store is used specifically to reduce latency, it would make sense to colocate the boundary file there to keep latency low when doing WAL boundary checks._
 
 #### Boundary file updates
 
@@ -160,19 +163,30 @@ The garbage collector updates the boundary files prior to each GC run.
 
 After the boundary file is updated successfully, the GC may proceed with its deletion process (see _Garbage collector changes_).
 
+Multiple GC processes may run concurrently. If they contend on the boundary file update, one will succeed and the others will skip since they observe the updated boundary.
+
 #### Boundary file checks
 
 Each boundary-tracked writer must follow this protocol:
 
-1. Verify the file ID to be written is numerically greater than the current in-memory boundary value.
-    a. If not, return an error (defined per-file type, below).
-1. `GET If-None-Match` the boundary file after each write.
-    a. If it's 304, the boundary is unchanged and the write is successful.
+1. Write the file with a create-if-absent operation.
+    a. If the write fails because the file already exists, return a `ObjectVersionExists` error.
+2. Read the boundary file.
+    a. If the boundary file does not exist, .. ?
+3. Verify the just-written file ID is numerically greater than the boundary value read in (2).
+    a. If not, return a `ObjectVersionExists` error.
+4. Return success.
+
+This protocol can be optimized to:
+
+1. cache the previously read boundary value and ETag in memory, and
+2. `GET If-None-Match` the boundary file after each write.
+    a. If it's 304, the boundary is unchanged and the cached value is used.
     b. If it's 200
-        - If the new value is >= the just-written file ID, return an error (defined per-file type, below).
+        - If the new value is >= the just-written file ID, return an `ObjectVersionExists` error.
         - Else, update the in-memory boundary value and ETag, and treat the write as successful.
 
-_TODO: We can add an optional background refresher if we see latency spikes._
+We can further optimize this protocol to poll the boundary file in the background and keep the value updated in memory. Polling is left as future work if the added latency of a boundary file read on each write proves to be a problem in practice.
 
 ### GC cutoff rule enforcement
 
@@ -180,7 +194,7 @@ We must enforce GC cutoff rules when adding compacted SST references to `.manife
 
 We will enforce the following rules:
 
-- Newly added L0 SSTs in `.manifest` must have an SST ULID timestamp greater than `last_compacted_l0_sst_view_id.id().timestamp()` across all tree segments (including the root).
+- Newly added L0 SSTs in `.manifest` must have an SST ULID timestamp greater than both `last_compacted_l0_sst_view_id.id().timestamp()` and `max(l0.id().timestamp())` across all tree segments (including the root).
 - Newly added SR SSTs in `.manifest` or `.compactions` must have an SST ULID timestamp greater than the compaction job's ID timestamp.
 - Newly added compaction jobs in `.compactions` must have an ID timestamp greater than the most recent compaction job's ID timestamp in the file.
 
@@ -189,7 +203,7 @@ These rules guarantee:
 - Untracked L0s are greater than every tree segment's `last_compacted_l0_sst_view_id` (including the root).
 - Untracked SR SSTs are > the oldest compaction job ID in the current `.compactions` file.
 
-Together with `manifest.boundary` and `compactions.boundary`, these rules make a separate compacted SST boundary file unnecessary. If an unreferenced compacted SST has become eligible for deletion, then a later attempt to publish it must either fail the metadata boundary check or fail cutoff validation.
+Together with `manifest.boundary` and `compactions.boundary`, these rules make a separate compacted SST boundary file unnecessary. If an unreferenced compacted SST has become eligible for deletion, then a later attempt to publish it must either fail the `.manifest`/`.compactions` boundary check or fail cutoff validation.
 
 ## Implementation
 
@@ -253,7 +267,7 @@ The GC computes the compacted SST GC cutoff as follows:
 
 If no `last_compacted_l0_sst_view_id` exists, the compacted SST GC process is skipped.
 
-We intentionally drop the `manifest.l0` check in (4) and instead only check `last_compacted_l0_sst_view_id` for all segments. This is a more conservative approach that leaves L0s around for longer. This is done to simplify the protocol.
+We intentionally drop the `manifest.l0` check in (4) that we used to perform, and instead only check `last_compacted_l0_sst_view_id` for all segments. This is a more conservative approach that leaves L0s around for longer. This is done to simplify the protocol.
 
 _NOTE: `timestamp()` represents the 48-bit timestamp component of the SST's ULID._
 
@@ -265,10 +279,10 @@ For boundary-tracked files, the GC may delete:
 - `.compactions` files with IDs less than or equal to `compactions.boundary` if they are not the latest compactions file.
 - WAL SST files with IDs less than or equal to `wal.boundary` if they are not referenced by any active manifest. A WAL SST is active when its ID is between `manifest.replay_after_wal_id` and `manifest.next_wal_sst_id`.
 
-For compacted SST files, the GC may delete any file that is:
+For compacted SST files, the GC may delete any SST that:
 
-1. Older than the compacted SST GC cutoff, and
-2. Not referenced by any active manifest.
+1. Has an SST ULID timestamp less than the compacted SST GC cutoff, and
+2. Is not referenced by any active manifest.
 
 ## Impact Analysis
 
