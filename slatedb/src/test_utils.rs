@@ -445,6 +445,9 @@ pub(crate) struct FlakyObjectStore {
     list_with_offset_fail_after: AtomicUsize,
     // List with offset: total number of `list_with_offset` invocations
     list_with_offset_attempts: AtomicUsize,
+    // List: total number of items yielded by the inner stream across all list() invocations.
+    // Useful for detecting wasted pagination work when retries restart from scratch.
+    list_items_yielded: Arc<AtomicUsize>,
     // get_range: transient failures on first N attempts
     fail_first_get_range: AtomicUsize,
     get_range_attempts: AtomicUsize,
@@ -467,6 +470,7 @@ impl FlakyObjectStore {
             fail_first_list_with_offset: AtomicUsize::new(0),
             list_with_offset_fail_after: AtomicUsize::new(0),
             list_with_offset_attempts: AtomicUsize::new(0),
+            list_items_yielded: Arc::new(AtomicUsize::new(0)),
             fail_first_get_range: AtomicUsize::new(0),
             get_range_attempts: AtomicUsize::new(0),
         }
@@ -534,6 +538,13 @@ impl FlakyObjectStore {
         self.list_with_offset_attempts.load(Ordering::SeqCst)
     }
 
+    /// Total number of items emitted by the inner store's list stream across all
+    /// `list()` invocations. With a paginating retry that restarts from scratch on
+    /// failure, this number can grow larger than the number of objects actually present.
+    pub(crate) fn list_items_yielded(&self) -> usize {
+        self.list_items_yielded.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn with_get_range_failures(self, n: usize) -> Self {
         self.fail_first_get_range.store(n, Ordering::SeqCst);
         self
@@ -541,6 +552,20 @@ impl FlakyObjectStore {
 
     pub(crate) fn get_range_attempts(&self) -> usize {
         self.get_range_attempts.load(Ordering::SeqCst)
+    }
+
+    /// Wrap a stream so each successful item increments `counter`.
+    fn count_yielded(
+        stream: BoxStream<'static, object_store::Result<ObjectMeta>>,
+        counter: Arc<AtomicUsize>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        stream
+            .inspect(move |item| {
+                if item.is_ok() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .boxed()
     }
 
     /// Inject a failure after `fail_after` successful items in the stream.
@@ -709,6 +734,10 @@ impl ObjectStore for FlakyObjectStore {
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.list_attempts.fetch_add(1, Ordering::SeqCst);
+        let counted = Self::count_yielded(
+            self.inner.list(prefix),
+            Arc::clone(&self.list_items_yielded),
+        );
         if self
             .fail_first_list
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
@@ -721,14 +750,9 @@ impl ObjectStore for FlakyObjectStore {
             .is_ok()
         {
             let fail_after = self.list_fail_after.load(Ordering::SeqCst);
-            return Self::fail_stream(
-                self.inner.list(prefix),
-                fail_after,
-                "flaky_list",
-                "injected list failure",
-            );
+            return Self::fail_stream(counted, fail_after, "flaky_list", "injected list failure");
         }
-        self.inner.list(prefix)
+        counted
     }
 
     fn list_with_offset(
@@ -738,6 +762,10 @@ impl ObjectStore for FlakyObjectStore {
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.list_with_offset_attempts
             .fetch_add(1, Ordering::SeqCst);
+        let counted = Self::count_yielded(
+            self.inner.list_with_offset(prefix, offset),
+            Arc::clone(&self.list_items_yielded),
+        );
         if self
             .fail_first_list_with_offset
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
@@ -751,13 +779,13 @@ impl ObjectStore for FlakyObjectStore {
         {
             let fail_after = self.list_with_offset_fail_after.load(Ordering::SeqCst);
             return Self::fail_stream(
-                self.inner.list_with_offset(prefix, offset),
+                counted,
                 fail_after,
                 "flaky_list_with_offset",
                 "injected list_with_offset failure",
             );
         }
-        self.inner.list_with_offset(prefix, offset)
+        counted
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {

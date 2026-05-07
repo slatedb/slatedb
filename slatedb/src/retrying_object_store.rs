@@ -715,6 +715,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_failure_mid_pagination_restarts_from_scratch() {
+        // Reproduces the bug in RetryingObjectStore::list: a single error mid-pagination
+        // causes the entire pagination to retry from page 1 — work already done is
+        // discarded and re-fetched, so the inner store yields more items than exist.
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let paths: Vec<Path> = (0..6)
+            .map(|i| Path::from(format!("/items/{i:02}")))
+            .collect();
+        for (idx, path) in paths.iter().enumerate() {
+            inner
+                .put(
+                    path,
+                    PutPayload::from_bytes(Bytes::from(format!("val-{idx}").into_bytes())),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Fail once after the inner stream has yielded 3 items: the first attempt
+        // streams 3 items + an error; the second attempt restarts and streams all 6.
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 3));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+
+        let listed: Vec<_> = retrying
+            .list(None)
+            .try_collect()
+            .await
+            .expect("list should eventually succeed");
+
+        // Caller still sees exactly the 6 distinct objects.
+        assert_eq!(listed.len(), 6);
+        let mut names: Vec<_> = listed.into_iter().map(|m| m.location.to_string()).collect();
+        names.sort();
+        let mut expected: Vec<_> = paths.iter().map(|p| p.to_string()).collect();
+        expected.sort();
+        assert_eq!(names, expected);
+
+        // The inner store was invoked twice: once that failed mid-pagination, once that
+        // succeeded.
+        assert_eq!(flaky.list_attempts(), 2);
+
+        // The bug: the first 3 items already streamed on attempt 1 are re-fetched on
+        // attempt 2. Total items pulled from the inner stream = 3 (failed) + 6 (retry) = 9,
+        // even though only 6 unique objects exist. Pagination progress is per-attempt,
+        // not durable across attempts.
+        assert_eq!(
+            flaky.list_items_yielded(),
+            9,
+            "expected the failed page (3 items) plus a full restart (6 items) = 9; \
+             if the retry resumed at the continuation token instead of restarting, \
+             this would be 6"
+        );
+    }
+
+    #[tokio::test]
     async fn test_list_with_offset_retries_transient_until_success() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let paths = [
