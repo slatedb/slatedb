@@ -64,13 +64,16 @@ pub(crate) struct SegmentedSstHandle {
 
 #[derive(Clone)]
 /// Result of a successfully uploaded immutable memtable. A flush produces
-/// one [`SegmentedSstHandle`] per segment touched. Without an extractor configured
-/// every flush yields a single handle with empty prefix.
+/// one [`SegmentedSstHandle`] per segment that received at least one
+/// post-retention entry. Without an extractor configured every flush yields
+/// at most a single handle with empty prefix; with an extractor it yields
+/// one handle per touched segment. The Vec is empty when retention prunes
+/// every entry — per-memtable progress in the manifest still advances.
 pub(crate) struct UploadedMemtable {
     /// Same immutable memtable that was uploaded.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
-    /// Per-segment uploaded SSTs, sorted ascending by `prefix`. Always
-    /// non-empty.
+    /// Per-segment uploaded SSTs, sorted ascending by `prefix`. May be
+    /// empty when retention pruned every entry in the memtable.
     pub(crate) segments: Vec<SegmentedSstHandle>,
     /// Lowest sequence number present in the immutable memtable.
     pub(crate) first_seq: u64,
@@ -199,7 +202,7 @@ impl UploadHandler {
         let segments = futures::future::try_join_all(
             built
                 .iter()
-                .map(|sst| self.upload_sst(&job.imm_memtable, sst)),
+                .map(|sst| self.upload_segment_sst(&job.imm_memtable, sst)),
         )
         .await?;
 
@@ -214,7 +217,7 @@ impl UploadHandler {
     /// Upload a single segment SST with retry. Each retry reuses the
     /// already-encoded SST so the upload loop never rebuilds from the
     /// memtable.
-    async fn upload_sst(
+    async fn upload_segment_sst(
         &self,
         imm_memtable: &Arc<ImmutableMemtable>,
         sst: &EncodedSegmentSst,
@@ -225,7 +228,7 @@ impl UploadHandler {
         loop {
             match self
                 .db
-                .upload_compacted_sst(&sst_id, imm_memtable.table(), &sst.encoded, true)
+                .upload_sst(&sst_id, imm_memtable.table(), &sst.encoded, true)
                 .await
             {
                 Ok(sst_handle) => {

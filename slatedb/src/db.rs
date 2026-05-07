@@ -59,7 +59,6 @@ use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, VersionedManifest};
-use crate::mem_table::WritableKVTable;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
@@ -294,16 +293,8 @@ impl DbInner {
         let mut empty_wal_id = next_wal_id;
 
         loop {
-            let empty_wal = WritableKVTable::new();
-            match self
-                .flush_imm_table(
-                    &SsTableId::Wal(empty_wal_id),
-                    empty_wal.table().clone(),
-                    false,
-                )
-                .await
-            {
-                Ok(_) => {
+            match self.flush_empty_wal(empty_wal_id).await {
+                Ok(()) => {
                     return Ok(());
                 }
                 Err(SlateDBError::Fenced) => {

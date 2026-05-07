@@ -477,10 +477,11 @@ impl ManifestWriterHandler {
                     .expect("expected imm memtable");
                 assert!(Arc::ptr_eq(&popped, &uploaded.imm_memtable));
                 let core = &mut modifier.state.manifest.value.core;
-                // `segments` may legitimately be empty when an extractor
-                // is configured and retention pruned every entry: no
-                // builders open → no SSTs uploaded. The memtable's
-                // seq/tick bookkeeping below still advances.
+                // `segments` may legitimately be empty when retention
+                // pruned every entry: no builders open → no SSTs
+                // uploaded. The memtable's seq/tick bookkeeping below
+                // still advances. (This is true with or without an
+                // extractor configured.)
                 for segment in &uploaded.segments {
                     let view = SsTableView::new(
                         self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
@@ -804,7 +805,6 @@ mod tests {
     use super::{ManifestWriter, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_state::SsTableId;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
@@ -816,7 +816,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::utils::{IdGenerator, WatchableOnceCell};
+    use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -1053,11 +1053,11 @@ mod tests {
         value: &[u8],
     ) -> UploadedMemtable {
         let imm_memtable = freeze_imm(inner, key, value);
-        let sst_id = SsTableId::Compacted(inner.rand.rng().gen_ulid(inner.system_clock.as_ref()));
-        let sst_handle = inner
-            .flush_imm_table(&sst_id, imm_memtable.table(), true)
+        let handles = inner
+            .flush_l0_for_test(imm_memtable.table(), true)
             .await
             .unwrap();
+        let sst_handle = handles.into_iter().next().expect("expected single SST");
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
         UploadedMemtable::new(imm_memtable, sst_handle, first_seq, last_seq)
@@ -1467,12 +1467,11 @@ mod tests {
         let last_seq = imm_memtable.table().last_seq().unwrap();
         let mut segments = Vec::with_capacity(prefixes.len());
         for prefix in prefixes {
-            let sst_id =
-                SsTableId::Compacted(inner.rand.rng().gen_ulid(inner.system_clock.as_ref()));
-            let sst_handle = inner
-                .flush_imm_table(&sst_id, imm_memtable.table(), true)
+            let handles = inner
+                .flush_l0_for_test(imm_memtable.table(), true)
                 .await
                 .unwrap();
+            let sst_handle = handles.into_iter().next().expect("expected single SST");
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,

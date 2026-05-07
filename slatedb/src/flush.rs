@@ -23,17 +23,27 @@ pub(crate) struct EncodedSegmentSst {
 }
 
 impl DbInner {
-    pub(crate) async fn build_imm_sst(
+    /// Build a single SST from an immutable memtable, ignoring any segment
+    /// extractor. Returns `None` when the post-retention iterator yields
+    /// zero entries — callers that want a real blob (e.g. the WAL fence)
+    /// should construct one explicitly rather than relying on this path.
+    /// For L0 flushes use [`Self::build_imm_ssts`] instead, which routes
+    /// entries through segment-aware builders.
+    async fn build_imm_sst(
         &self,
         imm_table: Arc<KVTable>,
-    ) -> Result<EncodedSsTable, SlateDBError> {
+    ) -> Result<Option<EncodedSsTable>, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = self.iter_imm_table(imm_table).await?;
+        let mut any = false;
         while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
+            any = true;
         }
-
-        sst_builder.build().await
+        if !any {
+            return Ok(None);
+        }
+        Ok(Some(sst_builder.build().await?))
     }
 
     /// Build one or more L0 SSTs from a single immutable memtable, grouping
@@ -47,19 +57,25 @@ impl DbInner {
     /// time, finalizing on prefix transitions.
     ///
     /// When no extractor is configured, every entry routes to the empty
-    /// prefix and the result is exactly one entry — the call delegates to
-    /// [`Self::build_imm_sst`] and wraps the result, preserving today's
-    /// "always emit one SST" behavior.
+    /// prefix and the result is at most one entry. If retention prunes
+    /// every entry the result is an empty Vec in both the extractor and
+    /// no-extractor cases — per-memtable progress in the manifest
+    /// (`last_l0_seq`, `replay_after_wal_id`) advances independently of
+    /// whether any SST landed.
     pub(crate) async fn build_imm_ssts(
         &self,
         imm_table: Arc<KVTable>,
     ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
         let Some(extractor) = self.segment_extractor.as_ref() else {
-            let encoded = self.build_imm_sst(imm_table).await?;
-            return Ok(vec![EncodedSegmentSst {
-                prefix: Bytes::new(),
-                encoded,
-            }]);
+            return Ok(self
+                .build_imm_sst(imm_table)
+                .await?
+                .into_iter()
+                .map(|encoded| EncodedSegmentSst {
+                    prefix: Bytes::new(),
+                    encoded,
+                })
+                .collect());
         };
         let mut iter = self.iter_imm_table(imm_table).await?;
         let mut out: Vec<EncodedSegmentSst> = Vec::new();
@@ -91,7 +107,9 @@ impl DbInner {
         Ok(out)
     }
 
-    pub(crate) async fn upload_compacted_sst(
+    /// Write `encoded_sst` to object storage at `id` and advance the
+    /// monotonic durable tick from `imm_table`.
+    pub(crate) async fn upload_sst(
         &self,
         id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
@@ -109,15 +127,52 @@ impl DbInner {
         Ok(handle)
     }
 
-    pub(crate) async fn flush_imm_table(
+    /// Write an empty WAL SST at `wal_id` as a fencing barrier. The
+    /// object-storage put-if-absent at this slot is what fences in-flight
+    /// WAL writes from older-epoch writers — see [`Self::fence_writers`].
+    ///
+    /// Builds the empty SST blob directly from an empty builder; bypasses
+    /// the L0 build pipeline since there's no memtable to flush. L0 data
+    /// must go through the segment-aware upload pipeline
+    /// ([`Self::build_imm_ssts`]).
+    pub(crate) async fn flush_empty_wal(&self, wal_id: u64) -> Result<(), SlateDBError> {
+        let encoded_sst = self.table_store.table_builder().build().await?;
+        let empty = crate::mem_table::WritableKVTable::new();
+        self.upload_sst(
+            &db_state::SsTableId::Wal(wal_id),
+            empty.table().clone(),
+            &encoded_sst,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Test helper: build L0 SSTs from `imm_table` via the segment-aware
+    /// path ([`Self::build_imm_ssts`]) and upload each one with a freshly
+    /// allocated [`db_state::SsTableId::Compacted`]. Returns the resulting
+    /// handles in the same order as the segments. Without an extractor the
+    /// result is at most one handle; an empty Vec means retention pruned
+    /// every entry.
+    #[cfg(test)]
+    pub(crate) async fn flush_l0_for_test(
         &self,
-        id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
         write_cache: bool,
-    ) -> Result<SsTableHandle, SlateDBError> {
-        let encoded_sst = self.build_imm_sst(imm_table.clone()).await?;
-        self.upload_compacted_sst(id, imm_table, &encoded_sst, write_cache)
-            .await
+    ) -> Result<Vec<SsTableHandle>, SlateDBError> {
+        use crate::utils::IdGenerator;
+        let built = self.build_imm_ssts(imm_table.clone()).await?;
+        let mut handles = Vec::with_capacity(built.len());
+        for sst in built {
+            let id = db_state::SsTableId::Compacted(
+                self.rand.rng().gen_ulid(self.system_clock.as_ref()),
+            );
+            let handle = self
+                .upload_sst(&id, imm_table.clone(), &sst.encoded, write_cache)
+                .await?;
+            handles.push(handle);
+        }
+        Ok(handles)
     }
 
     async fn iter_imm_table(
@@ -203,7 +258,7 @@ mod tests {
 
     async fn setup_test_db(set_merge_operator: bool) -> Db {
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let builder = Db::builder("/tmp/test_flush_imm_table", object_store);
+        let builder = Db::builder("/tmp/test_flush_unsegmented_sst", object_store);
         let builder = if set_merge_operator {
             builder.with_merge_operator(Arc::new(StringConcatMergeOperator))
         } else {
@@ -428,17 +483,24 @@ mod tests {
             table.put(row_entry);
         }
         assert_eq!(table.table().metadata().entry_num, row_entries_length);
-        let id = SsTableId::Compacted(Ulid::new());
 
         // When
-        let sst_handle = db
+        let handles = db
             .inner
-            .flush_imm_table(&id, table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone(), false)
             .await
             .unwrap();
 
         // Then
-        verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
+        if test_case.expected_entries.is_empty() {
+            assert!(
+                handles.is_empty(),
+                "expected no SSTs for empty post-retention memtable"
+            );
+        } else {
+            let sst_handle = handles.into_iter().next().expect("expected single SST");
+            verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
+        }
 
         db.close().await.unwrap();
     }
@@ -470,11 +532,7 @@ mod tests {
         );
 
         db.inner
-            .flush_imm_table(
-                &SsTableId::Compacted(Ulid::new()),
-                table.table().clone(),
-                false,
-            )
+            .flush_l0_for_test(table.table().clone(), false)
             .await
             .unwrap();
 
@@ -500,11 +558,10 @@ mod tests {
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
-        let id = SsTableId::Compacted(Ulid::new());
 
         // When
         db.inner
-            .flush_imm_table(&id, table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone(), false)
             .await
             .map_or_else(
                 |err| match err {
@@ -524,11 +581,10 @@ mod tests {
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
         table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
-        let id = SsTableId::Compacted(Ulid::new());
 
         // When
         db.inner
-            .flush_imm_table(&id, table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone(), false)
             .await
             .unwrap();
     }
@@ -620,13 +676,13 @@ mod tests {
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value3", 3));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value4", 4));
-        let id = SsTableId::Compacted(Ulid::new());
 
-        let sst_handle = db
+        let handles = db
             .inner
-            .flush_imm_table(&id, table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone(), false)
             .await
             .unwrap();
+        let sst_handle = handles.into_iter().next().expect("expected single SST");
 
         verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
         db.close().await.unwrap();
@@ -667,13 +723,31 @@ mod tests {
     async fn build_imm_ssts_with_extractor_yields_empty_vec_when_no_entries() {
         // With an extractor configured, an empty memtable produces no
         // entries and therefore opens no builders — the result is an
-        // empty Vec. (The no-extractor path delegates to build_imm_sst
-        // and always emits a single SST, even if empty.)
+        // empty Vec.
         let db = setup_test_db_with_extractor(
             "/tmp/test_build_imm_ssts_empty",
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+        let table = WritableKVTable::new();
+
+        let ssts = db
+            .inner
+            .build_imm_ssts(table.table().clone())
+            .await
+            .unwrap();
+
+        assert!(ssts.is_empty());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_imm_ssts_without_extractor_yields_empty_vec_when_no_entries() {
+        // Without an extractor configured, an empty memtable also yields
+        // an empty Vec — symmetric with the extractor case. Manifest
+        // progress (last_l0_seq, replay frontier) advances independently.
+        let db = setup_test_db_without_merge_operator().await;
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
 
@@ -748,7 +822,7 @@ mod tests {
             let id = SsTableId::Compacted(Ulid::new());
             let handle = db
                 .inner
-                .upload_compacted_sst(&id, table.table().clone(), &sst.encoded, false)
+                .upload_sst(&id, table.table().clone(), &sst.encoded, false)
                 .await
                 .unwrap();
             verify_sst(&db, &handle, &entries).await;
