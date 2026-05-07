@@ -283,7 +283,7 @@ For boundary-tracked files, the GC may delete:
 For compacted SST files, the GC may delete any SST that:
 
 1. Has an SST ULID timestamp less than the compacted SST GC cutoff, and
-2. Is not referenced by any active manifest.
+2. Is not referenced by any active `.manifest` or the latest `.compactions` file.
 
 ## Impact Analysis
 
