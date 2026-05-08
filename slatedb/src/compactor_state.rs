@@ -653,21 +653,31 @@ impl CompactorState {
     ///   destination overwrite rules.
     pub(crate) fn add_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let spec = compaction.spec();
-        // SR ids are scoped per segment, so the active-conflict check must
-        // match on both segment and destination — two segments can each
-        // legitimately have an in-flight compaction targeting the same
-        // destination id.
-        if self.compactions.value.iter_active().any(|c| {
-            c.spec().segment() == spec.segment() && c.spec().destination() == spec.destination()
-        }) {
+        // SR ids are globally unique across all segment trees (RFC-0024), so
+        // collisions are checked across every active compaction regardless of
+        // target segment.
+        if self
+            .compactions
+            .value
+            .iter_active()
+            .map(|c| c.spec())
+            .any(|c| c.destination() == spec.destination())
+        {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
         }
-        let Some(tree) = self.db_state().tree_for_segment(spec.segment()) else {
+        if self.db_state().tree_for_segment(spec.segment()).is_none() {
             // spec targets a named segment that does not exist
             return Err(SlateDBError::InvalidCompaction);
-        };
-        if tree.compacted.iter().any(|sr| sr.id == spec.destination())
+        }
+        // SR ids are globally unique across all segment trees (RFC-0024), so
+        // an existing SR with the same id anywhere in the manifest blocks the
+        // spec unless that SR is among its sources.
+        if self
+            .db_state()
+            .trees()
+            .flat_map(|t| t.compacted.iter())
+            .any(|sr| sr.id == spec.destination())
             && !spec.sources().iter().any(|src| match src {
                 SourceId::SortedRun(sr) => *sr == spec.destination(),
                 SourceId::SstView(_) => false,
@@ -1643,18 +1653,16 @@ mod tests {
         assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
     }
 
-    /// The destination-overwrite check in `add_compaction` is scoped to the
-    /// spec's target segment. A segment-targeted spec must not be rejected
-    /// because an SR with the same destination id happens to live in the
-    /// root tree (a different segment).
+    /// SR ids are globally unique across all trees (RFC-0024), so a
+    /// segment-targeted spec must be rejected if its destination already
+    /// exists as an SR anywhere in the manifest — including the root tree.
     #[test]
-    fn test_add_compaction_destination_overwrite_check_is_per_segment() {
+    fn test_add_compaction_destination_overwrite_check_is_global() {
         let rt = build_runtime();
         let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
 
         // Place SR(7) in the root tree. The segment-targeted spec below uses
-        // 7 as its destination but does not list it among its sources, which
-        // would be rejected if the check were not scoped per segment.
+        // 7 as its destination but does not list it among its sources.
         state.manifest.value.core.tree.compacted = vec![SortedRun {
             id: 7,
             sst_views: Vec::new(),
@@ -1674,16 +1682,17 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
 
-        state
+        let err = state
             .add_compaction(Compaction::new(compaction_id, spec))
-            .expect("segment-targeted spec must not be blocked by an SR in the root tree");
+            .expect_err("segment spec must be rejected when destination collides in another tree");
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
-    /// SR ids are scoped per segment, so an in-flight compaction targeting
-    /// SR(7) in the root tree must not block a new compaction targeting
-    /// SR(7) in a different segment.
+    /// SR ids are globally unique across all trees (RFC-0024), so the
+    /// active-conflict check rejects a duplicate destination regardless of
+    /// which segment each spec targets.
     #[test]
-    fn test_add_compaction_active_conflict_check_is_per_segment() {
+    fn test_add_compaction_active_conflict_check_is_global() {
         let rt = build_runtime();
         let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
 
@@ -1706,30 +1715,11 @@ mod tests {
 
         let seg_id = rand.rng().gen_ulid(system_clock.as_ref());
         let seg_spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(7)], 7);
-        state
-            .add_compaction(Compaction::new(seg_id, seg_spec))
-            .expect("segment-targeted spec must not conflict with an active root-tree compaction");
-    }
-
-    /// Two in-flight compactions in the same segment cannot share a
-    /// destination — the active-conflict check still rejects intra-segment
-    /// collisions.
-    #[test]
-    fn test_add_compaction_active_conflict_rejects_same_segment_same_destination() {
-        let rt = build_runtime();
-        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
-
-        let first_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let first = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
-        state
-            .add_compaction(Compaction::new(first_id, first))
-            .expect("first compaction must register");
-
-        let second_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let second = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
         let err = state
-            .add_compaction(Compaction::new(second_id, second))
-            .expect_err("same-segment same-destination must be rejected");
+            .add_compaction(Compaction::new(seg_id, seg_spec))
+            .expect_err(
+                "segment spec must be rejected when an active root-tree compaction shares the destination",
+            );
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
