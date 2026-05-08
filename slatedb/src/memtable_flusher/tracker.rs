@@ -24,7 +24,6 @@ use crate::error::SlateDBError;
 use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter};
 use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
 use crate::memtable_flusher::FlushTarget;
-use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -134,7 +133,8 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
     ) -> Result<(), SlateDBError> {
         let err = result.err().unwrap_or(SlateDBError::Closed);
         self.drain_with_error(&mut messages, &err).await;
-        self.cleanup_orphaned_uploads().await;
+        // Orphan SSTs from in-flight uploads at shutdown are reaped by the
+        // background garbage collector.
         Ok(())
     }
 }
@@ -171,8 +171,14 @@ impl FlushTracker {
 
     async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
         debug!(
-            "l0 upload completed [first_seq={}, last_seq={}, sst_id={:?}]",
-            uploaded.first_seq, uploaded.last_seq, uploaded.sst_handle.id
+            "l0 upload completed [first_seq={}, last_seq={}, sst_ids={:?}]",
+            uploaded.first_seq,
+            uploaded.last_seq,
+            uploaded
+                .segments
+                .iter()
+                .map(|s| &s.sst_handle.id)
+                .collect::<Vec<_>>()
         );
         self.frontier
             .set_state(uploaded.last_seq, TrackedImmState::WritingManifest);
@@ -189,21 +195,23 @@ impl FlushTracker {
             let guard = self.inner.state.read();
             guard.state().imm_memtable.iter().rev().cloned().collect()
         };
-        let inner = &self.inner;
-        self.frontier.register(imm_memtables.into_iter(), &mut || {
-            crate::db_state::SsTableId::Compacted(
-                inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
-            )
-        });
+        self.frontier.register(imm_memtables.into_iter());
         self.dispatch_ready_memtables()
     }
 
     fn available_l0_slots(&self) -> usize {
-        let l0_len = self.inner.state.read().state().core().l0.len();
-        self.inner
-            .settings
-            .l0_max_ssts
-            .saturating_sub(l0_len + self.frontier.reserved_l0_slots())
+        let (l0_len, peak) = {
+            let state = self.inner.state.read().state();
+            let l0 = &state.core().tree.l0;
+            (l0.len(), crate::db_state::max_l0_overlap(l0))
+        };
+        let reserved = self.frontier.reserved_l0_slots();
+        let settings = &self.inner.settings;
+        let total_slots = settings.l0_max_ssts.saturating_sub(l0_len + reserved);
+        // Each reserved (in-flight) upload is treated as +1 at every point
+        // because its output key range is not yet known.
+        let per_key_slots = settings.l0_max_ssts_per_key.saturating_sub(peak + reserved);
+        total_slots.min(per_key_slots)
     }
 
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
@@ -211,15 +219,14 @@ impl FlushTracker {
             let Some(tracked) = self.frontier.prepare_next_upload() else {
                 return Ok(());
             };
-            let sst_id = tracked.sst_id;
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
             let last_seq = tracked.last_seq;
             debug!(
-                "dispatching l0 upload [first_seq={}, last_seq={}, sst_id={:?}]",
-                tracked.first_seq, last_seq, sst_id
+                "dispatching l0 upload [first_seq={}, last_seq={}]",
+                tracked.first_seq, last_seq
             );
 
-            self.uploader.submit(UploadJob::new(imm_memtable, sst_id))?;
+            self.uploader.submit(UploadJob::new(imm_memtable))?;
         }
         Ok(())
     }
@@ -249,30 +256,11 @@ impl FlushTracker {
             }
         }
     }
-
-    /// Delete orphaned SSTs that were uploaded but never passed to the
-    /// manifest writer. Tables already in `WritingManifest` state are left
-    /// for GC since we cannot know whether the manifest write succeeded.
-    async fn cleanup_orphaned_uploads(&mut self) {
-        for tracked in self.frontier.iter() {
-            if matches!(tracked.state, TrackedImmState::Uploading) {
-                if let Err(delete_err) = self.inner.table_store.delete_sst(&tracked.sst_id).await {
-                    log::warn!(
-                        "failed to delete orphaned SST [last_seq={}, id={:?}, error={:?}]",
-                        tracked.last_seq,
-                        tracked.sst_id,
-                        delete_err
-                    );
-                }
-            }
-        }
-    }
 }
 
 struct TrackedImm {
     first_seq: u64,
     last_seq: u64,
-    sst_id: crate::db_state::SsTableId,
     imm_memtable: Arc<crate::mem_table::ImmutableMemtable>,
     state: TrackedImmState,
 }
@@ -295,7 +283,6 @@ impl TrackedImmFrontier {
     fn register(
         &mut self,
         imm_memtables: impl Iterator<Item = Arc<crate::mem_table::ImmutableMemtable>>,
-        gen_sst_id: &mut impl FnMut() -> crate::db_state::SsTableId,
     ) {
         for imm_memtable in imm_memtables {
             let first_seq = imm_memtable
@@ -312,7 +299,6 @@ impl TrackedImmFrontier {
             self.tracked.push_back(TrackedImm {
                 first_seq,
                 last_seq,
-                sst_id: gen_sst_id(),
                 imm_memtable,
                 state: TrackedImmState::PendingDispatch,
             });
@@ -369,11 +355,6 @@ impl TrackedImmFrontier {
         {
             self.tracked.pop_front().expect("checked above");
         }
-    }
-
-    /// Iterate over tracked entries (for orphan cleanup).
-    fn iter(&self) -> impl Iterator<Item = &TrackedImm> {
-        self.tracked.iter()
     }
 }
 
@@ -466,6 +447,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
+                None,
             )
             .await
             .unwrap(),
@@ -522,12 +504,16 @@ mod tests {
     }
 
     fn seeded_l0_handle(first_key: &[u8]) -> SsTableHandle {
+        seeded_l0_handle_with_bounds(first_key, None)
+    }
+
+    fn seeded_l0_handle_with_bounds(first_key: &[u8], last_key: Option<&[u8]>) -> SsTableHandle {
         SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::copy_from_slice(first_key)),
-                last_entry: None,
+                last_entry: last_key.map(Bytes::copy_from_slice),
                 index_offset: 0,
                 index_len: 0,
                 filter_offset: 0,
@@ -541,6 +527,47 @@ mod tests {
         )
     }
 
+    async fn set_remote_l0_disjoint(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+        ranges: &[(&[u8], &[u8])],
+    ) {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.tree.l0.clear();
+        for (first, last) in ranges {
+            dirty.value.core.tree.l0.push_back(SsTableView::new(
+                ulid::Ulid::new(),
+                seeded_l0_handle_with_bounds(first, Some(last)),
+            ));
+        }
+        stored_manifest.update(dirty).await.unwrap();
+    }
+
+    fn set_local_l0_disjoint(harness: &TestHarness, ranges: &[(&[u8], &[u8])]) {
+        let mut guard = harness.inner.state.write();
+        guard.modify(|modifier| {
+            modifier.state.manifest.value.core.tree.l0.clear();
+            for (first, last) in ranges {
+                modifier
+                    .state
+                    .manifest
+                    .value
+                    .core
+                    .tree
+                    .l0
+                    .push_back(SsTableView::new(
+                        ulid::Ulid::new(),
+                        seeded_l0_handle_with_bounds(first, Some(last)),
+                    ));
+            }
+        });
+    }
+
     async fn set_remote_l0_len(path: &str, object_store: Arc<dyn ObjectStore>, l0_len: usize) {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
         let mut stored_manifest =
@@ -548,9 +575,9 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.clear();
+        dirty.value.core.tree.l0.clear();
         for idx in 0..l0_len {
-            dirty.value.core.l0.push_back(SsTableView::new(
+            dirty.value.core.tree.l0.push_back(SsTableView::new(
                 ulid::Ulid::new(),
                 seeded_l0_handle(format!("seed-{idx}").as_bytes()),
             ));
@@ -561,13 +588,14 @@ mod tests {
     fn set_local_l0_len(harness: &TestHarness, l0_len: usize) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.l0.clear();
+            modifier.state.manifest.value.core.tree.l0.clear();
             for idx in 0..l0_len {
                 modifier
                     .state
                     .manifest
                     .value
                     .core
+                    .tree
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -862,7 +890,7 @@ mod tests {
             // Clear both local and remote L0 so the flusher can make progress.
             {
                 let mut guard = flusher.inner.state.write();
-                guard.modify(|modifier| modifier.state.manifest.value.core.l0.clear());
+                guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
             }
             set_remote_l0_len(&path, object_store, 0).await;
 
@@ -872,6 +900,93 @@ mod tests {
                 .unwrap();
             assert_eq!(result.durable_seq, 1);
         }
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn flush_proceeds_when_l0_total_high_but_disjoint_ranges() {
+        // Mirrors a post-rescaling (union) manifest: L0 total exceeds the
+        // single-source `l0_max_ssts`, but each L0 covers a disjoint key
+        // range so no point is covered by more than one L0. The per-key cap
+        // should allow flushes to proceed.
+        let settings = Settings {
+            l0_max_ssts: 100,
+            l0_max_ssts_per_key: 2,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_per_key_disjoint",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let ranges: &[(&[u8], &[u8])] = &[
+            (b"a0", b"a9"),
+            (b"b0", b"b9"),
+            (b"c0", b"c9"),
+            (b"d0", b"d9"),
+            (b"e0", b"e9"),
+        ];
+        set_local_l0_disjoint(&harness, ranges);
+        set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn flush_blocked_by_per_key_cap_when_ranges_overlap() {
+        // A single wide-range L0 covers the whole key space. With per-key
+        // cap of 1, the peak overlap is already 1 so flushes must block
+        // until L0 drains.
+        let settings = Settings {
+            l0_max_ssts: 100,
+            l0_max_ssts_per_key: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_per_key_blocks",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let ranges: &[(&[u8], &[u8])] = &[(b"aaa", b"zzz")];
+        set_local_l0_disjoint(&harness, ranges);
+        set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 42);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        // Blocked — per-key cap reached.
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+
+        // Drain L0 locally and remotely; flush should now progress.
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+        }
+        set_remote_l0_disjoint(&path, object_store, &[]).await;
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
 
         flusher.shutdown().await;
     }
@@ -911,7 +1026,6 @@ mod tests {
     }
 
     mod frontier_tests {
-        use crate::db_state::SsTableId;
         use crate::mem_table::{ImmutableMemtable, WritableKVTable};
         use crate::memtable_flusher::tracker::{TrackedImmFrontier, TrackedImmState};
         use crate::memtable_flusher::FlushTarget;
@@ -928,23 +1042,19 @@ mod tests {
             Arc::new(ImmutableMemtable::new(table, 0))
         }
 
-        fn next_sst_id() -> SsTableId {
-            SsTableId::Compacted(ulid::Ulid::new())
-        }
-
         #[test]
         fn register_deduplicates_by_last_seq() {
             let mut frontier = TrackedImmFrontier::new();
             let imm = make_imm(1);
-            frontier.register(std::iter::once(Arc::clone(&imm)), &mut next_sst_id);
-            frontier.register(std::iter::once(imm), &mut next_sst_id);
+            frontier.register(std::iter::once(Arc::clone(&imm)));
+            frontier.register(std::iter::once(imm));
             assert_eq!(frontier.tracked.len(), 1);
         }
 
         #[test]
         fn register_assigns_sequential_sequences() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
+            frontier.register([make_imm(1), make_imm(2)].into_iter());
             assert_eq!(frontier.tracked[0].first_seq, 1);
             assert_eq!(frontier.tracked[0].last_seq, 1);
             assert_eq!(frontier.tracked[1].first_seq, 2);
@@ -955,21 +1065,21 @@ mod tests {
         fn resolve_target_all_returns_last_seq() {
             let mut frontier = TrackedImmFrontier::new();
             assert_eq!(frontier.resolve_target(FlushTarget::All), None);
-            frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
+            frontier.register([make_imm(1), make_imm(2)].into_iter());
             assert_eq!(frontier.resolve_target(FlushTarget::All), Some(2));
         }
 
         #[test]
         fn resolve_target_current_durable_returns_none() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            frontier.register(std::iter::once(make_imm(1)));
             assert_eq!(frontier.resolve_target(FlushTarget::CurrentDurable), None);
         }
 
         #[test]
         fn prepare_next_upload_transitions_to_uploading() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            frontier.register(std::iter::once(make_imm(1)));
             let tracked = frontier.prepare_next_upload().unwrap();
             assert_eq!(tracked.last_seq, 1);
             assert!(matches!(tracked.state, TrackedImmState::Uploading));
@@ -980,7 +1090,7 @@ mod tests {
         #[test]
         fn set_state_updates_tracked_entry() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            frontier.register(std::iter::once(make_imm(1)));
             frontier.set_state(1, TrackedImmState::WritingManifest);
             assert!(matches!(
                 frontier.tracked[0].state,
@@ -998,10 +1108,7 @@ mod tests {
         #[test]
         fn retire_through_removes_entries() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(
-                [make_imm(1), make_imm(2), make_imm(3)].into_iter(),
-                &mut next_sst_id,
-            );
+            frontier.register([make_imm(1), make_imm(2), make_imm(3)].into_iter());
             frontier.retire_through(2);
             assert_eq!(frontier.tracked.len(), 1);
             assert_eq!(frontier.tracked[0].last_seq, 3);
@@ -1010,10 +1117,7 @@ mod tests {
         #[test]
         fn reserved_l0_slots_counts_in_flight() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(
-                [make_imm(1), make_imm(2), make_imm(3)].into_iter(),
-                &mut next_sst_id,
-            );
+            frontier.register([make_imm(1), make_imm(2), make_imm(3)].into_iter());
             assert_eq!(frontier.reserved_l0_slots(), 0);
             frontier.prepare_next_upload(); // seq 1 -> Uploading
             assert_eq!(frontier.reserved_l0_slots(), 1);

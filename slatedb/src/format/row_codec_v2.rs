@@ -221,13 +221,12 @@ impl SstRowCodecV2 {
 
     /// Decode only the key portion for seek optimization.
     /// Returns (shared_bytes, key_suffix).
-    pub(crate) fn decode_key_only(&self, data: &mut &[u8]) -> (u32, Bytes) {
+    pub(crate) fn decode_key_only(&self, data: &mut impl Buf) -> (u32, Bytes) {
         let shared_bytes = decode_varint(data);
         let unshared_bytes = decode_varint(data) as usize;
         let _value_len = decode_varint(data);
 
-        let key_suffix = Bytes::copy_from_slice(&data[..unshared_bytes]);
-        *data = &data[unshared_bytes..];
+        let key_suffix = data.copy_to_bytes(unshared_bytes);
 
         (shared_bytes, key_suffix)
     }

@@ -288,7 +288,9 @@ mod tests {
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
 
-    fn next_block_to_iter(builder: &mut EncodedWalSsTableBuilder) -> BlockIteratorLatest<Block> {
+    fn next_block_to_iter(
+        builder: &mut EncodedWalSsTableBuilder,
+    ) -> BlockIteratorLatest<Arc<Block>> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;

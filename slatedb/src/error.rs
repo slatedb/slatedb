@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use object_store::path::Path;
 use std::ops::Bound;
 use std::time::Duration;
@@ -18,8 +19,8 @@ pub(crate) enum SlateDBError {
     #[error("io error")]
     IoError(#[from] Arc<std::io::Error>),
 
-    #[error("checksum mismatch")]
-    ChecksumMismatch,
+    #[error("checksum mismatch{}", .path.as_ref().map(|p| format!(" in {p}")).unwrap_or_default())]
+    ChecksumMismatch { path: Option<Path> },
 
     #[error("empty SSTable")]
     EmptySSTable,
@@ -77,6 +78,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid compaction")]
     InvalidCompaction,
+
+    #[error("segment prefix {prefix:?} would nest with existing segment {conflict:?}")]
+    InvalidSegmentPrefix { prefix: Bytes, conflict: Bytes },
 
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
@@ -178,6 +182,9 @@ pub(crate) enum SlateDBError {
     #[error("Source manifest set must not be empty")]
     InvalidUnionSetEmpty(),
 
+    #[error("invalid union: {0}")]
+    InvalidUnion(String),
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -245,6 +252,22 @@ pub(crate) enum SlateDBError {
 
     #[error("unexpected tombstone encountered where a value was expected")]
     UnexpectedTombstone,
+
+    #[error(
+        "invalid sequence number, must be greater than the current max. provided=`{provided}`, current=`{current}`"
+    )]
+    InvalidSequenceNumber { provided: u64, current: u64 },
+}
+
+impl SlateDBError {
+    pub(crate) fn with_path(self, path: &Path) -> Self {
+        match self {
+            SlateDBError::ChecksumMismatch { path: None } => SlateDBError::ChecksumMismatch {
+                path: Some(path.clone()),
+            },
+            other => other,
+        }
+    }
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -525,6 +548,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
+            SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
@@ -532,6 +556,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
+            SlateDBError::InvalidSequenceNumber { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
 
             // Data errors
@@ -560,7 +585,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::EmptyBlockMeta => Error::data(msg),
             SlateDBError::InvalidFilterBlock => Error::data(msg),
             SlateDBError::EmptySSTable => Error::data(msg),
-            SlateDBError::ChecksumMismatch => Error::data(msg),
+            SlateDBError::ChecksumMismatch { .. } => Error::data(msg),
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
@@ -581,6 +606,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
             SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
+            SlateDBError::InvalidUnion(_) => Error::invalid(msg),
         }
     }
 }

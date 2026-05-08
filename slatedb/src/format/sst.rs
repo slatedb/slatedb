@@ -212,7 +212,7 @@ impl SsTableInfo {
         let data = raw_info.slice(..raw_info.len() - 4).clone();
         let checksum = raw_info.slice(raw_info.len() - 4..).get_u32();
         if checksum != crc32fast::hash(&data) {
-            return Err(SlateDBError::ChecksumMismatch);
+            return Err(SlateDBError::ChecksumMismatch { path: None });
         }
 
         let info = sst_codec.decode(&data)?;
@@ -225,7 +225,7 @@ pub(crate) struct EncodedSsTableBlock {
     /// offset of the block within the SST
     pub(crate) offset: u64,
     /// uncompressed and untransformed block
-    pub(crate) block: Block,
+    pub(crate) block: Arc<Block>,
     /// compressed and transformed block
     pub(crate) encoded_bytes: Bytes,
 }
@@ -283,7 +283,7 @@ impl EncodedSsTableBlockBuilder {
         .await?;
         Ok(EncodedSsTableBlock {
             offset: self.offset,
-            block,
+            block: Arc::new(block),
             encoded_bytes: Bytes::from(compressed_and_transformed_block),
         })
     }
@@ -1008,7 +1008,7 @@ impl SsTableFormat {
         let checksum = crc32fast::hash(&data_bytes);
         let stored_checksum = checksum_bytes.get_u32();
         if checksum != stored_checksum {
-            return Err(SlateDBError::ChecksumMismatch);
+            return Err(SlateDBError::ChecksumMismatch { path: None });
         }
         Ok(data_bytes)
     }

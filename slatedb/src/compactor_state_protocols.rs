@@ -398,7 +398,7 @@ mod tests {
     fn test_compactor_state_to_view() {
         let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.compactor_epoch = 11;
-        manifest.core.last_compacted_l0_sst_view_id = Some(Ulid::from_parts(5, 0));
+        manifest.core.tree.last_compacted_l0_sst_view_id = Some(Ulid::from_parts(5, 0));
 
         let mut compactions = Compactions::new(manifest.compactor_epoch);
         let compaction_id = Ulid::from_parts(10, 0);

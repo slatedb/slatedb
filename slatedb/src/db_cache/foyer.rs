@@ -80,11 +80,10 @@ impl FoyerCache {
     }
 
     pub fn new_with_opts(options: FoyerCacheOptions) -> Self {
-        let builder = foyer::CacheBuilder::new(options.max_capacity as _)
-            .with_weighter(|_, v: &CachedEntry| v.size());
-
-        let cache = builder.build();
-
+        let cache = foyer::CacheBuilder::new(options.max_capacity as _)
+            .with_weighter(|_, v: &CachedEntry| v.size())
+            .with_shards(options.shards)
+            .build();
         Self { inner: cache }
     }
 }

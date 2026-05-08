@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::thread;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
@@ -252,7 +253,10 @@ pub(crate) async fn seed_database(
     await_durable: bool,
 ) -> Result<(), crate::Error> {
     let put_options = PutOptions::default();
-    let write_options = WriteOptions { await_durable };
+    let write_options = WriteOptions {
+        await_durable,
+        ..Default::default()
+    };
 
     for (key, value) in table.iter() {
         db.put_with_options(key, value, &put_options, &write_options)
@@ -374,13 +378,14 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
 
         // Create a compaction of all SSTs from L0 and all sorted runs
         let mut sources: Vec<SourceId> = db_state
+            .tree
             .l0
             .iter()
             .map(|view| SourceId::SstView(view.id))
             .collect();
 
         // Add SSTs from all sorted runs
-        for sr in &db_state.compacted {
+        for sr in &db_state.tree.compacted {
             sources.push(SourceId::SortedRun(sr.id));
         }
 
@@ -419,6 +424,7 @@ pub(crate) struct FlakyObjectStore {
     // Put options: transient failures on first N attempts
     fail_first_put_opts: AtomicUsize,
     put_opts_attempts: AtomicUsize,
+    put_opts_attempt_notify: Notify,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
     // Put options: if set, write succeeds but returns AlreadyExists error
@@ -450,6 +456,7 @@ impl FlakyObjectStore {
             inner,
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
+            put_opts_attempt_notify: Notify::new(),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
             put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
@@ -503,6 +510,16 @@ impl FlakyObjectStore {
 
     pub(crate) fn put_attempts(&self) -> usize {
         self.put_opts_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn wait_for_put_attempts(&self, expected: usize) {
+        loop {
+            let notified = self.put_opts_attempt_notify.notified();
+            if self.put_attempts() >= expected {
+                return;
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn head_attempts(&self) -> usize {
@@ -626,6 +643,7 @@ impl ObjectStore for FlakyObjectStore {
         opts: OS_PutOptions,
     ) -> object_store::Result<PutResult> {
         self.put_opts_attempts.fetch_add(1, Ordering::SeqCst);
+        self.put_opts_attempt_notify.notify_waiters();
         if self.put_precondition_always.load(Ordering::SeqCst) {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),
@@ -759,6 +777,250 @@ impl ObjectStore for FlakyObjectStore {
     }
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.rename_if_not_exists(from, to).await
+    }
+}
+
+/// A per-operation gate for deterministic concurrency testing.
+///
+/// Each gate starts **open** (pass-through). Call [`close()`](Self::close) to block
+/// callers, then [`release()`](Self::release) to let them proceed. Use
+/// [`set_error`](Self::set_error) before releasing to inject a specific error.
+pub(crate) struct Gate {
+    open: std::sync::atomic::AtomicBool,
+    arrival_count: AtomicUsize,
+    /// If `Some`, callers receive the produced error after the gate opens.
+    error_fn: std::sync::Mutex<Option<Box<dyn Fn() -> object_store::Error + Send + Sync>>>,
+}
+
+impl fmt::Debug for Gate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Gate")
+            .field("open", &self.open)
+            .field("arrival_count", &self.arrival_count)
+            .field("has_error", &self.error_fn.lock().unwrap().is_some())
+            .finish()
+    }
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self {
+            open: std::sync::atomic::AtomicBool::new(true),
+            arrival_count: AtomicUsize::new(0),
+            error_fn: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Gate {
+    /// Create a gate that starts closed (callers will block).
+    #[allow(dead_code)]
+    pub(crate) fn closed() -> Self {
+        Self {
+            open: std::sync::atomic::AtomicBool::new(false),
+            ..Default::default()
+        }
+    }
+
+    /// Close the gate so subsequent callers block.
+    pub(crate) fn close(&self) {
+        self.open.store(false, Ordering::Release);
+    }
+
+    /// Open the gate, allowing all blocked (and future) callers to proceed.
+    pub(crate) fn release(&self) {
+        self.open.store(true, Ordering::Release);
+    }
+
+    /// Set an error factory. After the gate opens, callers will receive the
+    /// error produced by `f` instead of proceeding to the inner store.
+    pub(crate) fn set_error<F>(&self, f: F)
+    where
+        F: Fn() -> object_store::Error + Send + Sync + 'static,
+    {
+        *self.error_fn.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// Clear any previously set error, restoring success behavior.
+    pub(crate) fn clear_error(&self) {
+        *self.error_fn.lock().unwrap() = None;
+    }
+
+    /// Wait until at least `n` callers have arrived at the gate.
+    pub(crate) async fn wait_for_arrivals(&self, n: usize) {
+        while self.arrival_count.load(Ordering::Acquire) < n {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// How many callers have arrived at the gate (cumulative).
+    pub(crate) fn arrivals(&self) -> usize {
+        self.arrival_count.load(Ordering::Acquire)
+    }
+
+    /// Block at this gate until released. Returns the configured error (if any)
+    /// or `Ok(())` to let the caller proceed to the inner store.
+    async fn wait(&self) -> object_store::Result<()> {
+        // Signal arrival.
+        self.arrival_count.fetch_add(1, Ordering::AcqRel);
+
+        // Spin-yield until the gate is opened.
+        while !self.open.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        // Check if an error is configured.
+        if let Some(error_fn) = self.error_fn.lock().unwrap().as_ref() {
+            Err(error_fn())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A gate-controlled ObjectStore wrapper for deterministic concurrency testing.
+///
+/// Each ObjectStore method has its own [`Gate`] that can be independently closed,
+/// released, and configured to inject errors. Gates default to **open** (pass-through).
+///
+/// # Usage pattern (mirrors `single_flight.rs` tests)
+/// ```ignore
+/// let inner = Arc::new(InMemory::new());
+/// let gated = Arc::new(GatedObjectStore::new(inner));
+///
+/// // Close the gate for the method under test.
+/// gated.get_opts_gate.close();
+///
+/// // Spawn concurrent callers (they block at the gate inside get_opts)
+/// // ...
+///
+/// // Wait until the expected number of callers have arrived.
+/// gated.get_opts_gate.wait_for_arrivals(1).await;
+///
+/// // Release them — success path.
+/// gated.get_opts_gate.release();
+///
+/// // Or: inject failure before releasing.
+/// gated.get_opts_gate.set_should_fail(true);
+/// gated.get_opts_gate.release();
+/// ```
+#[derive(Debug)]
+pub(crate) struct GatedObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    pub(crate) get_opts_gate: Gate,
+    pub(crate) head_gate: Gate,
+    pub(crate) put_opts_gate: Gate,
+    pub(crate) put_multipart_gate: Gate,
+    pub(crate) put_multipart_opts_gate: Gate,
+    pub(crate) delete_gate: Gate,
+    pub(crate) copy_gate: Gate,
+    pub(crate) rename_gate: Gate,
+}
+
+impl GatedObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            inner,
+            get_opts_gate: Gate::default(),
+            head_gate: Gate::default(),
+            put_opts_gate: Gate::default(),
+            put_multipart_gate: Gate::default(),
+            put_multipart_opts_gate: Gate::default(),
+            delete_gate: Gate::default(),
+            copy_gate: Gate::default(),
+            rename_gate: Gate::default(),
+        }
+    }
+}
+
+impl fmt::Display for GatedObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GatedObjectStore({})", self.inner)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for GatedObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.get_opts_gate.wait().await?;
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        self.head_gate.wait().await?;
+        self.inner.head(location).await
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: OS_PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.put_opts_gate.wait().await?;
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart(
+        &self,
+        location: &Path,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.put_multipart_gate.wait().await?;
+        self.inner.put_multipart(location).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.put_multipart_opts_gate.wait().await?;
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        self.delete_gate.wait().await?;
+        self.inner.delete(location).await
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.copy_gate.wait().await?;
+        self.inner.copy(from, to).await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.rename_gate.wait().await?;
+        self.inner.rename(from, to).await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.copy_gate.wait().await?;
+        self.inner.copy_if_not_exists(from, to).await
+    }
+
+    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.rename_gate.wait().await?;
         self.inner.rename_if_not_exists(from, to).await
     }
 }
@@ -902,6 +1164,29 @@ pub(crate) fn format_backtrace(bt: &backtrace::Backtrace) -> String {
     }
 
     output
+}
+
+/// Test extractor that always extracts a fixed 3-byte prefix. Returns
+/// `None` for inputs shorter than 3 bytes; callers that exercise the
+/// extractor's segmentation path should use keys ≥ 3 bytes.
+#[derive(Debug)]
+pub(crate) struct FixedThreeBytePrefixExtractor;
+
+impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor {
+    fn name(&self) -> &str {
+        "fixed-3"
+    }
+    fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+        let len = match target {
+            crate::prefix_extractor::PrefixTarget::Point(b)
+            | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.len(),
+        };
+        if len >= 3 {
+            Some(3)
+        } else {
+            None
+        }
+    }
 }
 
 static INIT_LOGGING: Once = Once::new();

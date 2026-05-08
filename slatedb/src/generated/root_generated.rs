@@ -3518,6 +3518,8 @@ impl<'a> ManifestV2<'a> {
   pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 30;
   pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 32;
   pub const VT_SEQUENCE_TRACKER: flatbuffers::VOffsetT = 34;
+  pub const VT_SEGMENTS: flatbuffers::VOffsetT = 36;
+  pub const VT_SEGMENT_EXTRACTOR_NAME: flatbuffers::VOffsetT = 38;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -3537,6 +3539,8 @@ impl<'a> ManifestV2<'a> {
     builder.add_compactor_epoch(args.compactor_epoch);
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
+    if let Some(x) = args.segment_extractor_name { builder.add_segment_extractor_name(x); }
+    if let Some(x) = args.segments { builder.add_segments(x); }
     if let Some(x) = args.sequence_tracker { builder.add_sequence_tracker(x); }
     if let Some(x) = args.checkpoints { builder.add_checkpoints(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
@@ -3661,6 +3665,20 @@ impl<'a> ManifestV2<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(ManifestV2::VT_SEQUENCE_TRACKER, None)}
   }
+  #[inline]
+  pub fn segments(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Segment<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Segment>>>>(ManifestV2::VT_SEGMENTS, None)}
+  }
+  #[inline]
+  pub fn segment_extractor_name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(ManifestV2::VT_SEGMENT_EXTRACTOR_NAME, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for ManifestV2<'_> {
@@ -3686,6 +3704,8 @@ impl flatbuffers::Verifiable for ManifestV2<'_> {
      .visit_field::<u64>("last_l0_seq", Self::VT_LAST_L0_SEQ, false)?
      .visit_field::<u64>("recent_snapshot_min_seq", Self::VT_RECENT_SNAPSHOT_MIN_SEQ, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("sequence_tracker", Self::VT_SEQUENCE_TRACKER, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Segment>>>>("segments", Self::VT_SEGMENTS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("segment_extractor_name", Self::VT_SEGMENT_EXTRACTOR_NAME, false)?
      .finish();
     Ok(())
   }
@@ -3707,6 +3727,8 @@ pub struct ManifestV2Args<'a> {
     pub last_l0_seq: u64,
     pub recent_snapshot_min_seq: u64,
     pub sequence_tracker: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    pub segments: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Segment<'a>>>>>,
+    pub segment_extractor_name: Option<flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for ManifestV2Args<'a> {
   #[inline]
@@ -3728,6 +3750,8 @@ impl<'a> Default for ManifestV2Args<'a> {
       last_l0_seq: 0,
       recent_snapshot_min_seq: 0,
       sequence_tracker: None,
+      segments: None,
+      segment_extractor_name: None,
     }
   }
 }
@@ -3802,6 +3826,14 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV2Builder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV2::VT_SEQUENCE_TRACKER, sequence_tracker);
   }
   #[inline]
+  pub fn add_segments(&mut self, segments: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Segment<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV2::VT_SEGMENTS, segments);
+  }
+  #[inline]
+  pub fn add_segment_extractor_name(&mut self, segment_extractor_name: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV2::VT_SEGMENT_EXTRACTOR_NAME, segment_extractor_name);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV2Builder<'a, 'b, A> {
     let start = _fbb.start_table();
     ManifestV2Builder {
@@ -3839,6 +3871,159 @@ impl core::fmt::Debug for ManifestV2<'_> {
       ds.field("last_l0_seq", &self.last_l0_seq());
       ds.field("recent_snapshot_min_seq", &self.recent_snapshot_min_seq());
       ds.field("sequence_tracker", &self.sequence_tracker());
+      ds.field("segments", &self.segments());
+      ds.field("segment_extractor_name", &self.segment_extractor_name());
+      ds.finish()
+  }
+}
+pub enum SegmentOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct Segment<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Segment<'a> {
+  type Inner = Segment<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> Segment<'a> {
+  pub const VT_PREFIX: flatbuffers::VOffsetT = 4;
+  pub const VT_LAST_COMPACTED_L0_SST_VIEW_ID: flatbuffers::VOffsetT = 6;
+  pub const VT_L0: flatbuffers::VOffsetT = 8;
+  pub const VT_COMPACTED: flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    Segment { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SegmentArgs<'args>
+  ) -> flatbuffers::WIPOffset<Segment<'bldr>> {
+    let mut builder = SegmentBuilder::new(_fbb);
+    if let Some(x) = args.compacted { builder.add_compacted(x); }
+    if let Some(x) = args.l0 { builder.add_l0(x); }
+    if let Some(x) = args.last_compacted_l0_sst_view_id { builder.add_last_compacted_l0_sst_view_id(x); }
+    if let Some(x) = args.prefix { builder.add_prefix(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn prefix(&self) -> flatbuffers::Vector<'a, u8> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(Segment::VT_PREFIX, None).unwrap()}
+  }
+  #[inline]
+  pub fn last_compacted_l0_sst_view_id(&self) -> Option<Ulid<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(Segment::VT_LAST_COMPACTED_L0_SST_VIEW_ID, None)}
+  }
+  #[inline]
+  pub fn l0(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableView<'a>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableView>>>>(Segment::VT_L0, None).unwrap()}
+  }
+  #[inline]
+  pub fn compacted(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunV2<'a>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunV2>>>>(Segment::VT_COMPACTED, None).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for Segment<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("prefix", Self::VT_PREFIX, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("last_compacted_l0_sst_view_id", Self::VT_LAST_COMPACTED_L0_SST_VIEW_ID, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableView>>>>("l0", Self::VT_L0, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2>>>>("compacted", Self::VT_COMPACTED, true)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SegmentArgs<'a> {
+    pub prefix: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    pub last_compacted_l0_sst_view_id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
+    pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableView<'a>>>>>,
+    pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunV2<'a>>>>>,
+}
+impl<'a> Default for SegmentArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SegmentArgs {
+      prefix: None, // required field
+      last_compacted_l0_sst_view_id: None,
+      l0: None, // required field
+      compacted: None, // required field
+    }
+  }
+}
+
+pub struct SegmentBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SegmentBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_prefix(&mut self, prefix: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Segment::VT_PREFIX, prefix);
+  }
+  #[inline]
+  pub fn add_last_compacted_l0_sst_view_id(&mut self, last_compacted_l0_sst_view_id: flatbuffers::WIPOffset<Ulid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(Segment::VT_LAST_COMPACTED_L0_SST_VIEW_ID, last_compacted_l0_sst_view_id);
+  }
+  #[inline]
+  pub fn add_l0(&mut self, l0: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTableView<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Segment::VT_L0, l0);
+  }
+  #[inline]
+  pub fn add_compacted(&mut self, compacted: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<SortedRunV2<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Segment::VT_COMPACTED, compacted);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SegmentBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SegmentBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Segment<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, Segment::VT_PREFIX,"prefix");
+    self.fbb_.required(o, Segment::VT_L0,"l0");
+    self.fbb_.required(o, Segment::VT_COMPACTED,"compacted");
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for Segment<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("Segment");
+      ds.field("prefix", &self.prefix());
+      ds.field("last_compacted_l0_sst_view_id", &self.last_compacted_l0_sst_view_id());
+      ds.field("l0", &self.l0());
+      ds.field("compacted", &self.compacted());
       ds.finish()
   }
 }

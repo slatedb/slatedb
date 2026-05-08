@@ -661,20 +661,23 @@ pub(crate) async fn preload_cache_from_manifest(
     match preload_level {
         Some(PreloadLevel::AllSst) => {
             let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
-                core.l0.len()
+                core.tree.l0.len()
                     + core
+                        .tree
                         .compacted
                         .iter()
                         .map(|sr| sr.sst_views.len())
                         .sum::<usize>(),
             );
             all_sst_paths.extend(
-                core.l0
+                core.tree
+                    .l0
                     .iter()
                     .map(|view| path_resolver.table_path(&view.sst.id)),
             );
             all_sst_paths.extend(
-                core.compacted
+                core.tree
+                    .compacted
                     .iter()
                     .flat_map(|sr| &sr.sst_views)
                     .map(|view| path_resolver.table_path(&view.sst.id)),
@@ -690,6 +693,7 @@ pub(crate) async fn preload_cache_from_manifest(
         }
         Some(PreloadLevel::L0Sst) => {
             let l0_sst_paths: Vec<object_store::path::Path> = core
+                .tree
                 .l0
                 .iter()
                 .map(|view| path_resolver.table_path(&view.sst.id))
@@ -1091,7 +1095,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let _sst1 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
             .await
             .unwrap();
 
@@ -1106,7 +1110,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst2 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
             .await
             .unwrap();
 
@@ -1144,7 +1148,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
             .await
             .unwrap();
 

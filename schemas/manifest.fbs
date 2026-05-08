@@ -110,7 +110,8 @@ table ManifestV2 {
     // The last compacted l0
     last_compacted_l0_sst_view_id: Ulid;
 
-    // All compacted SSTs referenced by l0 and compacted (sorted runs) views.
+    // All compacted SSTs referenced by l0 and compacted (sorted runs) views,
+    // including those referenced by `segments` (RFC-0024) when set.
     ssts: [CompactedSsTableV2] (required);
 
     // A list of the L0 SSTs that are valid to read in the `compacted` folder.
@@ -136,6 +137,36 @@ table ManifestV2 {
 
     // Serialized sequence tracker data as defined in RFC-0012.
     sequence_tracker: [ubyte];
+
+    // Per-segment LSM state, one entry per named segment (RFC-0024). Each segment
+    // owns the contiguous key interval [prefix, prefix++) and is compacted as an
+    // independent logical LSM tree. Segment views reference into the top-level
+    // `ssts` table by SST id, exactly like `l0` and `compacted`.
+    segments: [Segment];
+
+    // Name of the prefix extractor used to derive segment membership from keys
+    // (RFC-0024). Persisted so the writer can detect accidental reconfiguration
+    // on startup. Absent when no extractor is configured.
+    segment_extractor_name: string;
+}
+
+// Per-segment LSM state. Structurally mirrors the top-level `l0` / `compacted` /
+// `last_compacted_l0_sst_view_id` fields, but scoped to a single segment whose
+// key interval is identified by `prefix`. Views reference into the manifest's
+// shared top-level `ssts` table by SST id.
+table Segment {
+    // The segment's key prefix. Owns the interval [prefix, prefix++).
+    prefix: [ubyte] (required);
+
+    // The last compacted L0 view id within this segment.
+    last_compacted_l0_sst_view_id: Ulid;
+
+    // L0 SST views for this segment.
+    l0: [CompactedSsTableView] (required);
+
+    // Sorted runs for this segment, ordered by descending id (list position
+    // encodes read precedence within the segment).
+    compacted: [SortedRunV2] (required);
 }
 
 table WriterCheckpoint {

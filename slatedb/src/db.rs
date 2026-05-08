@@ -22,8 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
-use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
-use crate::db_metadata::DbMetadataOps;
+use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -53,7 +52,6 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -61,11 +59,11 @@ use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, VersionedManifest};
-use crate::mem_table::WritableKVTable;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
+use crate::prefix_extractor::PrefixExtractor;
 use crate::rand::DbRand;
 use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
@@ -76,6 +74,7 @@ use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
@@ -116,6 +115,11 @@ pub(crate) struct DbInner {
     pub(crate) txn_manager: Arc<TransactionManager>,
     pub(crate) snapshot_manager: Arc<SnapshotManager>,
     pub(crate) status_manager: DbStatusManager,
+    /// Segment extractor (RFC-0024). When `Some`, the writer routes every
+    /// key through this extractor and groups flush output into per-segment
+    /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
+    /// segment encoded in the manifest's top-level tree.
+    pub(crate) segment_extractor: Option<Arc<dyn PrefixExtractor>>,
 }
 
 impl DbInner {
@@ -131,6 +135,7 @@ impl DbInner {
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
         status_manager: DbStatusManager,
+        segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -203,6 +208,7 @@ impl DbInner {
             txn_manager,
             snapshot_manager,
             status_manager,
+            segment_extractor,
         };
         Ok(db_inner)
     }
@@ -287,16 +293,8 @@ impl DbInner {
         let mut empty_wal_id = next_wal_id;
 
         loop {
-            let empty_wal = WritableKVTable::new();
-            match self
-                .flush_imm_table(
-                    &SsTableId::Wal(empty_wal_id),
-                    empty_wal.table().clone(),
-                    false,
-                )
-                .await
-            {
-                Ok(_) => {
+            match self.flush_empty_wal(empty_wal_id).await {
+                Ok(()) => {
                     return Ok(());
                 }
                 Err(SlateDBError::Fenced) => {
@@ -361,6 +359,7 @@ impl DbInner {
     #[inline]
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
+            self.check_closed()?;
             let (wal_size_bytes, imm_memtable_size_bytes) = {
                 let wal_size_bytes = self.wal_buffer.estimated_bytes()?;
                 let imm_memtable_size_bytes = {
@@ -439,10 +438,18 @@ impl DbInner {
                 };
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
+                let await_closed = async {
+                    let mut watcher = self.status_manager.result_reader();
+                    match watcher.await_value().await {
+                        Ok(()) => Err(SlateDBError::Closed),
+                        Err(e) => Err(e),
+                    }
+                };
 
                 tokio::select! {
                     result = await_memtable_uploaded => result?,
                     result = await_flush_wal => result?,
+                    result = await_closed => result?,
                     _ = timeout_fut => {
                         warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
@@ -523,12 +530,12 @@ impl DbInner {
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         };
 
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
-            min_memtable_bytes: self.settings.l0_sst_size_bytes,
-            max_memtable_bytes: usize::MAX,
+            max_memtable_bytes: self.settings.l0_sst_size_bytes,
             sst_iter_options,
             min_seq: None,
         };
@@ -707,11 +714,10 @@ impl Db {
         // Mark the database as closed before flushing.
         self.inner.status_manager.write_result(Ok(()));
 
-        if should_flush {
+        let result = if should_flush {
             // Flush memtables to L0 so that the WAL does not need to be
             // replayed on the next startup.
-            if let Err(e) = self
-                .inner
+            self.inner
                 .flush(
                     FlushOptions {
                         flush_type: FlushType::MemTable,
@@ -719,10 +725,11 @@ impl Db {
                     false,
                 )
                 .await
-            {
-                warn!("failed to flush db during close [error={:?}]", e);
-            }
-        }
+                .map_err(Into::into)
+                .inspect_err(|e| warn!("failed to flush db during close [error={:?}]", e))
+        } else {
+            Ok(())
+        };
 
         MemtableFlusher::shutdown(&self.task_executor).await;
 
@@ -751,7 +758,7 @@ impl Db {
         }
 
         info!("db closed");
-        Ok(())
+        result
     }
 
     /// Create a snapshot of the database.
@@ -1714,6 +1721,67 @@ impl DbMetadataOps for Db {
     }
 }
 
+#[async_trait::async_trait]
+impl DbWriteOps for Db {
+    type Transaction = DbTransaction;
+
+    async fn put_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::put_with_options(self, key, value, put_opts, write_opts).await
+    }
+
+    async fn delete_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::delete_with_options(self, key, options).await
+    }
+
+    async fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        Db::merge_with_options(self, key, value, merge_opts, write_opts).await
+    }
+
+    async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        Db::write_with_options(self, batch, options).await
+    }
+
+    async fn flush(&self) -> Result<(), crate::Error> {
+        Db::flush(self).await
+    }
+
+    async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        Db::flush_with_options(self, options).await
+    }
+
+    async fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
+        Db::begin(self, isolation_level).await
+    }
+}
+
 impl Db {
     /// See [`DbMetadataOps::manifest`].
     pub fn manifest(&self) -> VersionedManifest {
@@ -1758,7 +1826,7 @@ pub struct WriteHandle {
 }
 
 impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
+    pub fn new(seq: u64, create_ts: i64) -> Self {
         Self { seq, create_ts }
     }
 
@@ -1987,8 +2055,8 @@ mod tests {
 
         // estimate_size on L0 views should return non-zero
         let manifest = db.manifest();
-        assert!(!manifest.manifest.core.l0.is_empty());
-        for view in &manifest.manifest.core.l0 {
+        assert!(!manifest.manifest.core.tree.l0.is_empty());
+        for view in &manifest.manifest.core.tree.l0 {
             assert!(view.estimate_size() > 0);
         }
 
@@ -1999,7 +2067,7 @@ mod tests {
             loop {
                 {
                     let state = db_poll.inner.state.read();
-                    if !state.state().core().compacted.is_empty() {
+                    if !state.state().core().tree.compacted.is_empty() {
                         return;
                     }
                 }
@@ -2010,9 +2078,9 @@ mod tests {
         .unwrap();
 
         let manifest = db.manifest();
-        assert!(!manifest.manifest.core.compacted.is_empty());
+        assert!(!manifest.manifest.core.tree.compacted.is_empty());
 
-        for sr in &manifest.manifest.core.compacted {
+        for sr in &manifest.manifest.core.tree.compacted {
             // A range covering all keys returns results
             let covering = sr
                 .tables_covering_range(Bytes::from_static(b"k0000")..Bytes::from_static(b"k0100"));
@@ -2258,6 +2326,7 @@ mod tests {
                                 &PutOptions::default(),
                                 &WriteOptions {
                                     await_durable: false,
+                                    ..Default::default()
                                 },
                             )
                             .await
@@ -2270,6 +2339,7 @@ mod tests {
                                         durability_filter: Memory,
                                         dirty: false,
                                         cache_blocks: true,
+                                        filter_context: None,
                                     }
                                 )
                                 .await
@@ -2306,6 +2376,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2342,6 +2413,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2400,6 +2472,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2451,6 +2524,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2495,6 +2569,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2529,6 +2604,7 @@ mod tests {
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let get_memory_options = ReadOptions::new().with_durability_filter(Memory);
         let get_remote_options = ReadOptions::new().with_durability_filter(Remote);
@@ -2588,6 +2664,7 @@ mod tests {
                 },
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2614,8 +2691,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.value.core.l0.len());
-        let view = state.state.manifest.value.core.l0.front().unwrap();
+        assert_eq!(1, state.state.manifest.value.core.tree.l0.len());
+        let view = state.state.manifest.value.core.tree.l0.front().unwrap();
         let index = db
             .inner
             .table_store
@@ -2807,6 +2884,7 @@ mod tests {
             cache_stats.clone(),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
+            1000,
         ));
 
         let cached_object_store = CachedObjectStore::new(
@@ -3334,6 +3412,7 @@ mod tests {
             &[b'b'; 4],
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -3383,6 +3462,7 @@ mod tests {
                 .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         db.put_with_options(
@@ -3402,6 +3482,7 @@ mod tests {
         // at this put_with_options call.
         let write_options = WriteOptions {
             await_durable: true,
+            ..Default::default()
         };
         clock.set(10);
         db.put_with_options(
@@ -3415,13 +3496,13 @@ mod tests {
 
         let state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| !s.l0.is_empty(),
+            |s| !s.tree.l0.is_empty(),
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(state.l0.len(), 1);
+        assert_eq!(state.tree.l0.len(), 1);
 
-        let l0 = state.l0.front().unwrap();
+        let l0 = state.tree.l0.front().unwrap();
         let mut iter = SstIterator::new_borrowed_initialized(
             ..,
             l0,
@@ -3491,7 +3572,7 @@ mod tests {
         }
 
         let manifest = stored_manifest.refresh().await.unwrap();
-        let l0 = &manifest.core.l0;
+        let l0 = &manifest.core.tree.l0;
         assert_eq!(l0.len(), 3);
         let sst_iter_options = SstIteratorOptions::default();
 
@@ -3540,6 +3621,7 @@ mod tests {
 
         let write_options: WriteOptions = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
 
@@ -3560,7 +3642,7 @@ mod tests {
         {
             let guard = kv_store.inner.state.read();
             assert!(guard.state().imm_memtable.is_empty());
-            assert_eq!(guard.state().core().l0.len(), 0);
+            assert_eq!(guard.state().core().tree.l0.len(), 0);
         }
 
         // This put() triggers a freeze.
@@ -3582,7 +3664,7 @@ mod tests {
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(db_state.l0.len(), 1);
+        assert_eq!(db_state.tree.l0.len(), 1);
 
         // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
         // and see if the threshold triggers again.
@@ -3598,7 +3680,7 @@ mod tests {
         // Verify no more memtables were frozen or L0 flush happened.
         {
             let guard = kv_store.inner.state.read();
-            assert_eq!(guard.state().core().l0.len(), 1);
+            assert_eq!(guard.state().core().tree.l0.len(), 1);
         }
 
         // This put() triggers a freeze.
@@ -3616,7 +3698,7 @@ mod tests {
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(db_state.l0.len(), 2); // We should have two L0 flushes.
+        assert_eq!(db_state.tree.l0.len(), 2); // We should have two L0 flushes.
 
         kv_store.close().await.unwrap();
     }
@@ -3661,6 +3743,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3675,6 +3758,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3682,7 +3766,7 @@ mod tests {
 
         // Get initial state
         let initial_manifest = stored_manifest.refresh().await.unwrap();
-        let initial_l0_count = initial_manifest.core.l0.len();
+        let initial_l0_count = initial_manifest.core.tree.l0.len();
 
         let initial_flush_count =
             lookup_metric(&metrics_recorder, IMMUTABLE_MEMTABLE_FLUSHES).unwrap();
@@ -3698,13 +3782,13 @@ mod tests {
         // Wait for the flush to complete and manifest to be updated
         let db_state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| s.l0.len() > initial_l0_count,
+            |s| s.tree.l0.len() > initial_l0_count,
             Duration::from_secs(30),
         )
         .await;
 
         // Verify that a new SST was created in L0
-        assert_eq!(db_state.l0.len(), initial_l0_count + 1);
+        assert_eq!(db_state.tree.l0.len(), initial_l0_count + 1);
 
         // Verify that the flush metrics were updated
         let final_flush_count =
@@ -3724,7 +3808,7 @@ mod tests {
         assert_eq!(retrieved_value2.as_ref(), value2);
 
         // Verify the data exists in the newly created SST
-        let latest_sst = db_state.l0.back().unwrap();
+        let latest_sst = db_state.tree.l0.back().unwrap();
         let sst_iter_options = SstIteratorOptions::default();
         let mut iter = SstIterator::new_borrowed_initialized(
             ..,
@@ -3771,6 +3855,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3839,6 +3924,7 @@ mod tests {
                 .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         let put_options = PutOptions::default();
 
@@ -3951,6 +4037,7 @@ mod tests {
 
         let write_options = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         async fn put_with_timestamp(
@@ -4084,6 +4171,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4098,6 +4186,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4161,6 +4250,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4222,6 +4312,7 @@ mod tests {
         let metrics_recorder_clone = metrics_recorder.clone();
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
@@ -4280,6 +4371,88 @@ mod tests {
         // Shutdown the background task
         join_handle.abort();
         let _ = join_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_backpressure_waiter_exits_when_db_is_fenced() {
+        // Build a DB whose WAL will not flush on a timer and whose backpressure
+        // threshold is low enough for one write to exceed it.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024 * 1024, None);
+        options.flush_interval = None;
+        options.max_unflushed_bytes = 1;
+
+        // Use a metrics recorder so the test can observe when the spawned task
+        // has actually entered maybe_apply_backpressure().
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_backpressure_waiter_exits_when_db_is_fenced",
+            object_store,
+        )
+        .with_settings(options)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // Write enough data to leave bytes buffered in the WAL while avoiding
+        // any automatic WAL or memtable flush.
+        let large_value = vec![b'x'; 8 * 1024];
+        db.put_with_options(b"key1", &large_value, &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        // Start backpressure on a cloned inner handle. This parks the task on
+        // the same wait path used by writers before they enqueue a batch.
+        let inner = db.inner.clone();
+        let mut backpressure_task =
+            tokio::spawn(async move { inner.maybe_apply_backpressure().await });
+
+        // Wait until the task has observed the buffered WAL bytes and incremented
+        // the backpressure counter, proving it is inside the wait path.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if lookup_metric(&metrics_recorder, crate::db_stats::BACKPRESSURE_COUNT)
+                    .is_some_and(|v| v > 0)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for backpressure to be applied");
+
+        // Simulate the DB being fenced while the writer is already parked in
+        // backpressure.
+        db.inner
+            .status_manager
+            .write_result(Err(SlateDBError::Fenced));
+
+        // The lifecycle signal should wake the waiter promptly even though no
+        // WAL flush or memtable upload will notify it.
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut backpressure_task).await;
+        if result.is_err() {
+            backpressure_task.abort();
+            let _ = backpressure_task.await;
+        }
+        db.close().await.unwrap();
+
+        // Assert that the waiter exits with the terminal fenced error, not a
+        // successful write path or some unrelated task failure.
+        let backpressure_result = result
+            .expect("backpressure waiter did not exit after DB was fenced")
+            .expect("backpressure task panicked");
+        assert!(
+            matches!(backpressure_result, Err(SlateDBError::Fenced)),
+            "expected fenced error, got {:?}",
+            backpressure_result
+        );
     }
 
     #[tokio::test]
@@ -4375,6 +4548,7 @@ mod tests {
         // do all flushes manually
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         // do a few writes that will result in l0 flushes
@@ -4482,6 +4656,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -4492,6 +4667,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -4502,12 +4678,14 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
         .unwrap();
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // Disable the failpoint so the restored DB can flush normally.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
@@ -4576,7 +4754,7 @@ mod tests {
             loop {
                 {
                     let db_state = db_poll.inner.state.read();
-                    if !db_state.state().core().compacted.is_empty() {
+                    if !db_state.state().core().tree.compacted.is_empty() {
                         return;
                     }
                 }
@@ -4633,6 +4811,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4686,6 +4865,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4734,6 +4914,7 @@ mod tests {
                 "foo".as_bytes(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4797,6 +4978,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4808,6 +4990,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -4884,6 +5067,9 @@ mod tests {
             .unwrap();
         next_wal_id += 1;
 
+        // subscribe to status manager to get notified when db is closed
+        let mut rx = db.inner.status_manager.subscribe();
+
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
@@ -4938,6 +5124,16 @@ mod tests {
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        // wait for the background task to report the Fenced error
+        rx.wait_for(|status| status.close_reason.is_some())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.inner.status_manager.status().close_reason,
+            Some(crate::error::CloseReason::Fenced)
+        );
+
         db.close().await.unwrap();
         reader.close().await.unwrap();
     }
@@ -4968,7 +5164,8 @@ mod tests {
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
         // Let background flush attempts fail while WAL durability preserves recovery.
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // pause write-compacted-sst-io-error to prevent immutable tables
         // from being flushed, so we can snapshot the state when there is
@@ -4993,8 +5190,8 @@ mod tests {
         assert_eq!(db_state.state.imm_memtable.len(), 1);
 
         // verify that we have no L0 SSTs because memtables should have failed to flush
-        assert_eq!(db_state.state.core().l0.len(), 0);
-        assert_eq!(db_state.state.core().compacted.len(), 0);
+        assert_eq!(db_state.state.core().tree.l0.len(), 0);
+        assert_eq!(db_state.state.core().tree.compacted.len(), 0);
 
         // one empty wal and one wal for the first put
         assert_eq!(
@@ -5082,6 +5279,45 @@ mod tests {
         assert!(manifest.manifest.core.next_wal_sst_id > next_wal_sst_id);
     }
 
+    #[tokio::test]
+    async fn test_close_should_return_error_if_wal_flush_fails() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+
+        let mut settings = test_db_options(0, 128, None);
+        // Disable automatic flush
+        settings.flush_interval = None;
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Turn on the io error failpoint for WAL
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "return").unwrap();
+
+        // Write data without awaiting durable so it goes into the WAL buffer
+        db.put_with_options(
+            b"foo",
+            b"bar",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Close triggers the WAL flush, which should fail due to the io error
+        db.close()
+            .await
+            .expect_err("close should error out due to WAL IO error");
+    }
+
     async fn do_test_should_read_compacted_db(mut options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
@@ -5121,7 +5357,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
+                s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5129,8 +5365,8 @@ mod tests {
         let manifest = db.manifest();
         info!(
             "1 l0: {} {}",
-            manifest.manifest.core.l0.len(),
-            manifest.manifest.core.compacted.len()
+            manifest.manifest.core.tree.l0.len(),
+            manifest.manifest.core.tree.compacted.len()
         );
 
         // write more l0s and wait for compaction
@@ -5147,7 +5383,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
+                s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5155,8 +5391,8 @@ mod tests {
         let manifest = db.manifest();
         info!(
             "2 l0: {} {}",
-            manifest.manifest.core.l0.len(),
-            manifest.manifest.core.compacted.len()
+            manifest.manifest.core.tree.l0.len(),
+            manifest.manifest.core.tree.compacted.len()
         );
         // write another l0
         db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
@@ -5170,8 +5406,8 @@ mod tests {
             let manifest = db.manifest();
             info!(
                 "3 l0: {} {}",
-                manifest.manifest.core.l0.len(),
-                manifest.manifest.core.compacted.len()
+                manifest.manifest.core.tree.l0.len(),
+                manifest.manifest.core.tree.compacted.len()
             );
             let val = db.get([b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
@@ -5253,6 +5489,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: true,
+                    ..Default::default()
                 },
             )
             .await
@@ -5304,6 +5541,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5318,7 +5556,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
+                    await_durable: false, ..Default::default()
                 },
             )
             .await
@@ -5351,6 +5589,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5370,7 +5609,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
+                    await_durable: false, ..Default::default()
                 },
             )
             .await
@@ -5452,6 +5691,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -5463,14 +5703,15 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
         .expect("write batch failed");
 
-        // close the db to flush the manifest
         db.flush().await.unwrap();
-        db.close().await.unwrap();
+        // expect to fail as l0 upload is blocked
+        assert!(db.close().await.is_err());
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
@@ -5723,6 +5964,7 @@ mod tests {
             let put_option = PutOptions::default();
             let write_option = WriteOptions {
                 await_durable: false,
+                ..Default::default()
             };
             db.put_with_options(key.as_bytes(), value.clone(), &put_option, &write_option)
                 .await
@@ -5781,9 +6023,9 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 1,
             min_filter_keys,
-            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
@@ -6129,6 +6371,7 @@ mod tests {
         // do a write and flush memtable only (not wal)
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
         db.put_with_options(&b"foo", &b"bar", &PutOptions::default(), &write_opts)
             .await
@@ -6359,6 +6602,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -6462,11 +6706,11 @@ mod tests {
             .await
             .expect("failed to read latest manifest");
         assert_eq!(
-            manifest.manifest.core.l0.len(),
+            manifest.manifest.core.tree.l0.len(),
             1,
             "expected exactly one L0 SST in manifest"
         );
-        let l0_id = manifest.manifest.core.l0[0].sst.id;
+        let l0_id = manifest.manifest.core.tree.l0[0].sst.id;
         assert_eq!(
             l0_id, ssts[0].id,
             "expected SST {:?} but found SST {:?}",
@@ -6518,6 +6762,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6537,6 +6782,7 @@ mod tests {
                 &put_opts,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6551,6 +6797,7 @@ mod tests {
                 b"key1",
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6568,6 +6815,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6598,6 +6846,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6615,6 +6864,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6631,6 +6881,7 @@ mod tests {
                 batch,
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6654,6 +6905,7 @@ mod tests {
                 WriteBatch::new(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -6756,6 +7008,151 @@ mod tests {
             db.get(b"k1").await.unwrap(),
             Some(Bytes::from_static(b"v2"))
         );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_txn_conflict_commit_seq_gap_does_not_block_l0_retirement() {
+        const REPRO_SEED: u64 = 2_985_011_763_506_195_159;
+        const MAX_UNFLUSHED_BYTES: usize = 8 * 1024;
+        const LARGE_VALUE_BYTES: usize = 16 * 1024;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024, None);
+        options.flush_interval = None;
+        options.manifest_poll_interval = Duration::from_millis(10);
+        options.max_unflushed_bytes = MAX_UNFLUSHED_BYTES;
+        options.l0_max_ssts = 16;
+
+        let db = Db::builder(
+            "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
+            object_store,
+        )
+        .with_seed(REPRO_SEED)
+        .with_settings(options)
+        .build()
+        .await
+        .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // Establish and flush seq=1 so the L0 manifest writer has a known
+        // contiguous frontier before the conflict sequence gap is created.
+        db.put_with_options(b"conflict-key", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing base memtable")
+        .expect("base memtable flush should succeed");
+
+        // Start a serializable transaction at seq=1 and record a read on
+        // conflict-key. The next committed write to that key will conflict
+        // with this transaction when it tries to commit.
+        let txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        assert_eq!(
+            txn.get(b"conflict-key").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+
+        // Commit and flush seq=2 for the same key. This advances the L0
+        // manifest writer through seq=2 and creates the transaction conflict.
+        db.put_with_options(b"conflict-key", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing conflict-producing write")
+        .expect("conflict-producing write flush should succeed");
+
+        // The transaction commit must fail, but the bug is that write_batch
+        // allocates commit_seq=3 before conflict detection and never writes it
+        // into a memtable. This leaves a durable-memtable sequence hole.
+        txn.put(b"txn-write", b"will-conflict").unwrap();
+        let err = txn.commit().await.expect_err("transaction should conflict");
+        assert_eq!(err.kind(), crate::ErrorKind::Transaction);
+
+        // Write enough data to freeze an immutable memtable. Its first sequence
+        // is 4 because seq=3 was consumed by the failed transaction commit.
+        let large_value = vec![b'x'; LARGE_VALUE_BYTES];
+        let large_handle = db
+            .put_with_options(
+                b"large-after-conflict",
+                &large_value,
+                &PutOptions::default(),
+                &write_opts,
+            )
+            .await
+            .expect("large write after conflict should be accepted");
+        assert_eq!(
+            large_handle.seqnum(),
+            4,
+            "the conflicted commit should have consumed commit_seq=3"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            }),
+        )
+        .await
+        .expect("timed out flushing WAL after large write")
+        .expect("WAL flush after large write should succeed");
+
+        // Wait until the large write either reaches L0 or is visible as an
+        // immutable memtable. On the buggy path it is uploaded, but cannot be
+        // retired because the manifest writer is still waiting for seq=3.
+        let large_seq = large_handle.seqnum();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (last_l0_seq, has_immutable_memtable) = {
+                    let guard = db.inner.state.read();
+                    (
+                        guard.state().core().last_l0_seq,
+                        !guard.state().imm_memtable.is_empty(),
+                    )
+                };
+                if last_l0_seq >= large_seq || has_immutable_memtable {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("large write never froze or flushed");
+
+        // This write enters backpressure because the stuck immutable memtable
+        // remains charged against max_unflushed_bytes. The expected failure is
+        // this timeout, which proves the hang without letting the test run
+        // forever.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.put_with_options(
+                b"write-after-gap",
+                b"v",
+                &PutOptions::default(),
+                &write_opts,
+            ),
+        )
+        .await
+        .expect("timed out waiting for write after conflicted transaction consumed commit_seq=3")
+        .expect("write after conflicted commit sequence gap should succeed");
 
         db.close().await.unwrap();
     }
@@ -7041,6 +7438,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7051,6 +7449,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7112,6 +7511,7 @@ mod tests {
             }),
         );
         settings.l0_max_ssts = 10_000;
+        settings.l0_max_ssts_per_key = 10_000;
         settings.flush_interval = None;
         settings.wal_enabled = false;
 
@@ -7136,6 +7536,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7151,6 +7552,7 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -7177,6 +7579,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .l0
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7187,6 +7590,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .compacted
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7195,6 +7599,7 @@ mod tests {
                     if state
                         .state()
                         .core()
+                        .tree
                         .compacted
                         .first()
                         .is_some_and(|sr| sr.sst_views.len() > 1)
@@ -7258,6 +7663,7 @@ mod tests {
             }),
         );
         settings.l0_max_ssts = 10_000;
+        settings.l0_max_ssts_per_key = 10_000;
         settings.flush_interval = None;
         settings.wal_enabled = false;
 
@@ -7283,6 +7689,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7300,6 +7707,7 @@ mod tests {
                 &MergeOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -7326,6 +7734,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .l0
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7336,6 +7745,7 @@ mod tests {
                         state
                             .state()
                             .core()
+                            .tree
                             .compacted
                             .iter()
                             .map(|t| t.estimate_size())
@@ -7344,6 +7754,7 @@ mod tests {
                     if state
                         .state()
                         .core()
+                        .tree
                         .compacted
                         .first()
                         .is_some_and(|sr| sr.sst_views.len() > 1)
@@ -7396,6 +7807,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7428,6 +7840,7 @@ mod tests {
         };
         let write_opts = WriteOptions {
             await_durable: false,
+            ..Default::default()
         };
 
         clock.set(100);
@@ -7503,6 +7916,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7517,6 +7931,7 @@ mod tests {
             },
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7641,6 +8056,7 @@ mod tests {
             batch,
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7684,6 +8100,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7695,6 +8112,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7734,6 +8152,7 @@ mod tests {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -7783,5 +8202,145 @@ mod tests {
             l0_count
         );
         db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_replay_l0_boundary_does_not_skip_unflushed_replay_batches() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_l0_boundary_does_not_skip_unflushed_replay_batches";
+
+        // Start with a large L0/WAL size so the source writer only creates WAL
+        // files. The data stays out of L0 until recovery replays it.
+        let mut source_settings = test_db_options(0, 16 * 1024, None);
+        source_settings.flush_interval = None;
+
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(source_settings)
+            .build()
+            .await
+            .unwrap();
+
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // Write two records, each flushed into its own WAL. With the smaller
+        // replay settings below, these WALs are replayed into the first
+        // memtable, and that memtable is the only one that reaches L0 before
+        // the second simulated crash.
+        let l0_flushed_records = [
+            (b"l0-flushed-replay-batch-1".as_slice(), vec![b'a'; 128]),
+            (b"l0-flushed-replay-batch-2".as_slice(), vec![b'b'; 1024]),
+        ];
+        let mut l0_flushed_seq = 0;
+        let mut first_l0_flushed_wal_id = 0;
+        for (i, (key, value)) in l0_flushed_records.iter().enumerate() {
+            let write = source
+                .put_with_options(*key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+            source
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::Wal,
+                })
+                .await
+                .unwrap();
+            if i == 0 {
+                first_l0_flushed_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+            }
+            l0_flushed_seq = write.seqnum();
+        }
+        let l0_flushed_boundary_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(l0_flushed_boundary_wal_id > first_l0_flushed_wal_id);
+
+        // Write several smaller records, each flushed into a separate WAL. On
+        // replay, these WALs remain after the first replayed memtable's WAL
+        // boundary, so they must still be eligible for replay after the next
+        // reopen.
+        let unflushed_replay_records = [
+            (b"unflushed-replay-batch-1".as_slice(), vec![b'c'; 128]),
+            (b"unflushed-replay-batch-2".as_slice(), vec![b'd'; 128]),
+            (b"unflushed-replay-batch-3".as_slice(), vec![b'e'; 128]),
+        ];
+        for (key, value) in &unflushed_replay_records {
+            source
+                .put_with_options(*key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+            source
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::Wal,
+                })
+                .await
+                .unwrap();
+        }
+        let final_source_wal_id = source.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(final_source_wal_id >= l0_flushed_boundary_wal_id + 2);
+
+        // Recover with a much smaller replay target so WAL replay splits into
+        // multiple replayed memtables. Limit L0 to one table so only the first
+        // replayed memtable can be flushed before the next reopen.
+        let mut replay_settings = test_db_options(0, 512, None);
+        replay_settings.flush_interval = None;
+        replay_settings.l0_max_ssts = 1;
+        replay_settings.l0_max_ssts_per_key = 1;
+
+        // First recovery: replay the WAL and allow the first replayed memtable
+        // to publish to L0.
+        let _first_recovery = Db::builder(path, object_store.clone())
+            .with_settings(replay_settings.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Wait until the manifest has durably published that first replayed
+        // memtable. The manifest now has one L0 with last_l0_seq and
+        // replay_after_wal_id matching the first replayed memtable's actual
+        // sequence and WAL boundaries.
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let first_l0_manifest = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |state| !state.tree.l0.is_empty() && state.last_l0_seq >= l0_flushed_seq,
+            Duration::from_secs(60),
+        )
+        .await;
+        assert_eq!(first_l0_manifest.last_l0_seq, l0_flushed_seq);
+        assert_eq!(
+            first_l0_manifest.replay_after_wal_id,
+            l0_flushed_boundary_wal_id
+        );
+        assert!(final_source_wal_id >= first_l0_manifest.replay_after_wal_id + 2);
+        assert_eq!(first_l0_manifest.tree.l0.len(), 1);
+
+        // Second recovery: simulate crashing after only the first replayed
+        // memtable reached L0. Recovery must resume after that first
+        // memtable's actual WAL boundary, not after the later replay batch's
+        // boundary.
+        let recovered = Db::builder(path, object_store.clone())
+            .with_settings(replay_settings)
+            .build()
+            .await
+            .unwrap();
+
+        // The L0-flushed keys are present from L0. The later keys must still
+        // come from WAL replay because they were not covered by the published
+        // L0 boundary.
+        for (key, value) in &l0_flushed_records {
+            assert_eq!(
+                recovered.get(*key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+        for (key, value) in &unflushed_replay_records {
+            assert_eq!(
+                recovered.get(*key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
     }
 }

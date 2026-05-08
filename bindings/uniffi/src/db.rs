@@ -7,9 +7,10 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_transaction::DbTransaction;
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::{DbStatus, KeyRange, KeyValue, WriteHandle};
+use crate::types::{CacheTarget, DbStatus, KeyRange, KeyValue, SsTableId, WriteHandle};
 use crate::validation::{validate_key, validate_key_value};
 use crate::write_batch::WriteBatch;
+use slatedb::DbCacheManagerOps;
 
 /// A writable SlateDB handle.
 #[derive(uniffi::Object)]
@@ -238,5 +239,30 @@ impl Db {
     ) -> Result<Arc<DbTransaction>, Error> {
         let tx = self.inner.begin(isolation_level.into()).await?;
         Ok(Arc::new(DbTransaction::new(tx)))
+    }
+
+    /// Warms selected cache content for one SST.
+    ///
+    /// Returns `Err` on the first failing target. If no block cache is
+    /// configured, or if the SST is not reachable from the current manifest,
+    /// the call is a no-op that returns `Ok(())`.
+    pub async fn warm_sst(
+        &self,
+        sst_id: SsTableId,
+        targets: Vec<CacheTarget>,
+    ) -> Result<(), Error> {
+        let sst_id = sst_id.into_core()?;
+        let targets: Vec<_> = targets.into_iter().map(CacheTarget::into_core).collect();
+        self.inner.warm_sst(sst_id, &targets).await?;
+        Ok(())
+    }
+
+    /// Best-effort eviction of block-cache entries for one SST.
+    ///
+    /// If no block cache is configured, returns `Ok(())`.
+    pub async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), Error> {
+        let sst_id = sst_id.into_core()?;
+        self.inner.evict_cached_sst(sst_id).await?;
+        Ok(())
     }
 }

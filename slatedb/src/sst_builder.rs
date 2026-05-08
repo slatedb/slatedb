@@ -423,9 +423,10 @@ mod tests {
     use crate::block_iterator::{BlockIteratorLatest, BlockLike};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{SsTableId, SsTableView};
-    use crate::filter_policy::{BloomFilterPolicy, FilterQuery, PrefixExtractor};
+    use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
     use crate::format::block::Block;
     use crate::object_stores::ObjectStores;
+    use crate::prefix_extractor::PrefixExtractor;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
@@ -459,7 +460,7 @@ mod tests {
         assert!(size_with_filter > size_without_filter); // Should be larger due to filter
     }
 
-    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorLatest<Block> {
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorLatest<Arc<Block>> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;
@@ -610,7 +611,7 @@ mod tests {
                 .read_block_raw(&sst.info, &index, i, &bytes)
                 .await
                 .unwrap();
-            assert!(encoded_block.block == read_block);
+            assert!(*encoded_block.block == read_block);
         }
     }
 
@@ -657,7 +658,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(wal_id), encoded, false)
+            .write_sst(&SsTableId::Wal(wal_id), &encoded, false)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -729,7 +730,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -796,7 +797,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -935,7 +936,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -969,7 +970,7 @@ mod tests {
 
         assert!(matches!(
             format.validate_checksum(corrupted_bytes.into()),
-            Err(SlateDBError::ChecksumMismatch)
+            Err(SlateDBError::ChecksumMismatch { .. })
         ));
     }
 
@@ -1053,7 +1054,7 @@ mod tests {
 
         let sst_id = SsTableId::Wal(0);
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&sst_id, encoded, false).await?)
+            SsTableView::identity(table_store.write_sst(&sst_id, &encoded, false).await?)
                 .with_visible_range(BytesRange::from_ref("c"..="f"));
 
         let expected_entries = vec![
@@ -1176,7 +1177,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -1230,7 +1231,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -1323,7 +1324,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -1387,7 +1388,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(1), encoded, false)
+            .write_sst(&SsTableId::Wal(1), &encoded, false)
             .await
             .unwrap();
 
@@ -1484,7 +1485,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1553,7 +1554,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1595,7 +1596,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1660,7 +1661,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1699,10 +1700,10 @@ mod tests {
             fn name(&self) -> &str {
                 "fixed3"
             }
-            fn prefix_len(&self, target: &crate::filter_policy::FilterTarget) -> Option<usize> {
+            fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
                 let input = match target {
-                    crate::filter_policy::FilterTarget::Point(k) => k.as_ref(),
-                    crate::filter_policy::FilterTarget::Prefix(p) => p.as_ref(),
+                    crate::prefix_extractor::PrefixTarget::Point(k) => k.as_ref(),
+                    crate::prefix_extractor::PrefixTarget::Prefix(p) => p.as_ref(),
                 };
                 (input.len() >= 3).then_some(3)
             }
@@ -1738,7 +1739,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();

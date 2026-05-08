@@ -129,7 +129,22 @@ impl DbInner {
         #[cfg(dst)]
         // Force the current timestamp for DST operations. See #719 for details.
         let now = options.now;
-        let commit_seq = self.oracle.next_seq();
+        // If the user supplied a sequence number, validate that it's strictly greater
+        // than the current max and advance the oracle. No CAS loop is needed here because
+        // write_batch is always called from a single-writer event loop.
+        let commit_seq = if options.seqnum > 0 {
+            let current = self.oracle.last_seq();
+            if options.seqnum <= current {
+                return Err(SlateDBError::InvalidSequenceNumber {
+                    provided: options.seqnum,
+                    current,
+                });
+            }
+            self.oracle.advance_last_seq(options.seqnum);
+            options.seqnum
+        } else {
+            self.oracle.next_seq()
+        };
 
         // Check for transaction conflicts before proceeding with the write batch
         // if this batch is part of a transaction.
@@ -278,5 +293,100 @@ mod tests {
         let result = done_rx.await.unwrap();
         assert!(result.is_ok());
         assert!(!handler.is_first_write);
+    }
+
+    #[tokio::test]
+    async fn test_user_defined_seqnum() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open("/tmp/test_user_defined_seqnum", object_store)
+            .await
+            .unwrap();
+
+        let mut handler = WriteBatchEventHandler::new(db.inner.clone());
+
+        // Write with a user-defined seqnum
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        handler
+            .handle(WriteBatchMessage {
+                batch,
+                options: WriteOptions {
+                    seqnum: 42,
+                    ..Default::default()
+                },
+                done: done_tx,
+            })
+            .await
+            .unwrap();
+        let (write_handle, _) = done_rx.await.unwrap().unwrap();
+        assert_eq!(write_handle.seqnum(), 42);
+
+        // Write without a seqnum and verify auto-assigned is > 42
+        let mut batch = WriteBatch::new();
+        batch.put(b"key2", b"value2");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        handler
+            .handle(WriteBatchMessage {
+                batch,
+                options: WriteOptions::default(),
+                done: done_tx,
+            })
+            .await
+            .unwrap();
+        let (write_handle, _) = done_rx.await.unwrap().unwrap();
+        assert!(write_handle.seqnum() > 42);
+    }
+
+    #[tokio::test]
+    async fn test_user_defined_seqnum_rejects_lower_value() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open(
+            "/tmp/test_user_defined_seqnum_rejects_lower_value",
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let mut handler = WriteBatchEventHandler::new(db.inner.clone());
+
+        // First, do a normal write to advance the oracle
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        handler
+            .handle(WriteBatchMessage {
+                batch,
+                options: WriteOptions::default(),
+                done: done_tx,
+            })
+            .await
+            .unwrap();
+        let (write_handle, _) = done_rx.await.unwrap().unwrap();
+        let first_seq = write_handle.seqnum();
+
+        // Try to write with a seqnum <= the current max
+        let mut batch = WriteBatch::new();
+        batch.put(b"key2", b"value2");
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        handler
+            .handle(WriteBatchMessage {
+                batch,
+                options: WriteOptions {
+                    seqnum: 1,
+                    ..Default::default()
+                },
+                done: done_tx,
+            })
+            .await
+            .unwrap();
+        let result = done_rx.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidSequenceNumber {
+                provided: 1,
+                current,
+            }) if current == first_seq
+        ));
     }
 }

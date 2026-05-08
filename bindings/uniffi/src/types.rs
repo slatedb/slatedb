@@ -12,8 +12,10 @@ use slatedb::manifest::{
     SsTableId as CoreSsTableId, SsTableInfo as CoreSsTableInfo, SsTableView as CoreSsTableView,
     VersionedManifest as CoreVersionedManifest,
 };
+use slatedb::CacheTarget as CoreCacheTarget;
 use slatedb::ValueDeletable;
 use slatedb::{Checkpoint as CoreCheckpoint, VersionedCompactions as CoreVersionedCompactions};
+use ulid::Ulid;
 
 use crate::error::{CloseReason, SlateDbError};
 
@@ -69,7 +71,14 @@ impl KeyRange {
             }
         }
 
-        Ok((
+        Ok(self.into_bounds_unchecked())
+    }
+
+    /// Converts to bounds without scan-style non-empty validation. Intended for
+    /// cache-warming paths where the core layer treats empty or reversed ranges
+    /// as a no-op.
+    pub(crate) fn into_bounds_unchecked(self) -> KeyBounds {
+        (
             match self.start {
                 Some(start) if self.start_inclusive => Bound::Included(start),
                 Some(start) => Bound::Excluded(start),
@@ -80,7 +89,7 @@ impl KeyRange {
                 Some(end) => Bound::Excluded(end),
                 None => Bound::Unbounded,
             },
-        ))
+        )
     }
 }
 
@@ -456,6 +465,57 @@ impl From<&CoreSsTableId> for SsTableId {
         match value {
             CoreSsTableId::Wal(id) => Self::Wal(*id),
             CoreSsTableId::Compacted(id) => Self::Compacted(id.to_string()),
+        }
+    }
+}
+
+impl SsTableId {
+    pub(crate) fn into_core(self) -> Result<CoreSsTableId, SlateDbError> {
+        Ok(match self {
+            SsTableId::Wal(id) => CoreSsTableId::Wal(id),
+            SsTableId::Compacted(id) => {
+                let ulid = Ulid::from_string(&id)
+                    .map_err(|source| SlateDbError::InvalidSsTableId { source })?;
+                CoreSsTableId::Compacted(ulid)
+            }
+        })
+    }
+}
+
+/// Cache content that [`crate::Db::warm_sst`] should populate.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CacheTarget {
+    /// Warm all filters on the SST, if any exist.
+    Filters,
+    /// Warm the SST index.
+    Index,
+    /// Warm the SST stats block, if one exists.
+    Stats,
+    /// Warm the SST data blocks that overlap `range`. Also warms the index,
+    /// since block planning depends on it.
+    Data { range: KeyRange },
+}
+
+impl CacheTarget {
+    pub(crate) fn into_core(self) -> CoreCacheTarget {
+        match self {
+            CacheTarget::Filters => CoreCacheTarget::Filters,
+            CacheTarget::Index => CoreCacheTarget::Index,
+            CacheTarget::Stats => CoreCacheTarget::Stats,
+            CacheTarget::Data { range } => {
+                let (start, end) = range.into_bounds_unchecked();
+                let start = match start {
+                    Bound::Included(v) => Bound::Included(Bytes::from(v)),
+                    Bound::Excluded(v) => Bound::Excluded(Bytes::from(v)),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                let end = match end {
+                    Bound::Included(v) => Bound::Included(Bytes::from(v)),
+                    Bound::Excluded(v) => Bound::Excluded(Bytes::from(v)),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                CoreCacheTarget::Data((start, end))
+            }
         }
     }
 }

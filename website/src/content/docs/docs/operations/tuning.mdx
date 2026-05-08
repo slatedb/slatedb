@@ -50,8 +50,8 @@ SlateDB provides several configuration options to tune performance. See [slatedb
 
 ### Read Performance
 
-* **`min_filter_keys`**: SlateDB only builds bloom filters for SSTs with at least this many keys. Raising it avoids filter overhead on small SSTs.
-* **`filter_bits_per_key`**: Controls bloom filter density. Higher values reduce false positives but increase filter size.
+* **`min_filter_keys`**: SlateDB only builds filters for SSTs with at least this many keys. Raising it avoids filter overhead on small SSTs.
+* **`DbBuilder::with_filter_policies(...)`**: Configures the filter policies used for SST construction and evaluation. Defaults to a single bloom filter with 10 bits per key. Pass `BloomFilterPolicy::new(bits_per_key)` to tune bloom filter density (higher values reduce false positives but increase filter size), or supply a custom `FilterPolicy` (e.g., prefix bloom). See the `with_filter_policies` docs on `DbBuilder`, `CompactorBuilder`, and `DbReaderBuilder`.
 * **`object_store_cache_options.root_folder`**: Enables the local disk cache for object-store data when set.
 * **`object_store_cache_options.part_size_bytes`** and **`object_store_cache_options.preload_disk_cache_on_startup`**: Tune how the disk cache is chunked and optionally warmed on startup.
 * **`DbBuilder::with_sst_block_size(...)`**: Sets SST block size. Smaller blocks can help point lookups; larger blocks usually favor scans and compression.

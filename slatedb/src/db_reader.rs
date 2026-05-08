@@ -2,9 +2,7 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
-use crate::db_cache_manager::{self, CacheTarget, DbCacheManagerOps};
-use crate::db_metadata::DbMetadataOps;
-use crate::db_read::DbReadOps;
+use crate::db_cache_manager::{self, CacheTarget};
 use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
@@ -26,6 +24,7 @@ use crate::types::KeyValue;
 use crate::utils::IdGenerator;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
+use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -248,9 +247,10 @@ impl DbReaderInner {
     fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
-        latest.last_compacted_l0_sst_view_id != current_state.last_compacted_l0_sst_view_id
+        latest.tree.last_compacted_l0_sst_view_id
+            != current_state.tree.last_compacted_l0_sst_view_id
             || latest.last_l0_seq > current_state.last_l0_seq
-            || latest.compacted != current_state.compacted
+            || latest.tree.compacted != current_state.tree.compacted
     }
 
     async fn replace_checkpoint(
@@ -459,6 +459,7 @@ impl DbReaderInner {
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         };
 
         let (mut replay_after_wal_id, mut last_committed_seq) =
@@ -479,7 +480,6 @@ impl DbReaderInner {
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
             max_memtable_bytes: reader_options.max_memtable_bytes as usize,
-            min_memtable_bytes: usize::MAX,
             sst_iter_options,
             // Skip entries that we already have in `imm_memtable` (that might be above last_l0_seq).
             min_seq: Some(last_committed_seq),
@@ -1669,7 +1669,7 @@ mod tests {
         write_wal_sst(
             Arc::clone(&table_store),
             2,
-            vec![wal_2_row_1.clone(), wal_2_row_2],
+            vec![wal_2_row_1.clone(), wal_2_row_2.clone()],
         )
         .await
         .unwrap();
@@ -1694,14 +1694,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(last_wal_id, 2);
-        assert_eq!(last_committed_seq, 2);
+        assert_eq!(last_committed_seq, 3);
         assert_eq!(into_tables.len(), 1);
 
         let replayed = into_tables.front().unwrap();
         assert_eq!(replayed.recent_flushed_wal_id(), 2);
 
         let mut replayed_iter = replayed.table().iter();
-        test_utils::assert_iterator(&mut replayed_iter, vec![wal_1_row, wal_2_row_1]).await;
+        test_utils::assert_iterator(
+            &mut replayed_iter,
+            vec![wal_1_row, wal_2_row_1, wal_2_row_2],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2493,6 +2497,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2503,6 +2508,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2545,6 +2551,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2555,6 +2562,7 @@ mod tests {
             &MergeOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -2574,7 +2582,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         loop {
             let manifest = stored_manifest.refresh().await.unwrap();
-            if manifest.core.l0.len() == 1 {
+            if manifest.core.tree.l0.len() == 1 {
                 break;
             }
             assert!(
@@ -2587,7 +2595,7 @@ mod tests {
         let timeout = Duration::from_secs(30);
         let start = tokio::time::Instant::now();
         loop {
-            if reader.inner.state.read().manifest.core.l0.len() == 1 {
+            if reader.inner.state.read().manifest.core.tree.l0.len() == 1 {
                 break;
             }
             // The reader poller may observe the pre-flush manifest on one tick and

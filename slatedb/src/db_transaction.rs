@@ -16,7 +16,7 @@ use crate::iter::IterationOrder;
 use crate::reader::ScanContext;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
-use crate::DbReadOps;
+use crate::{DbReadOps, DbTransactionOps};
 
 /// A database transaction that provides atomic read-write operations with
 /// configurable isolation levels. This is the main interface for transactional
@@ -650,6 +650,80 @@ impl DbReadOps for DbTransaction {
     }
 }
 
+#[async_trait::async_trait]
+impl DbTransactionOps for DbTransaction {
+    fn put_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        options: &PutOptions,
+    ) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        DbTransaction::put_with_options(self, key, value, options)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
+        DbTransaction::delete(self, key)
+    }
+
+    fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        options: &MergeOptions,
+    ) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        DbTransaction::merge_with_options(self, key, value, options)
+    }
+
+    fn mark_read<K, I>(&self, keys: I) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        DbTransaction::mark_read(self, keys)
+    }
+
+    fn unmark_write<K, I>(&self, keys: I) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        DbTransaction::unmark_write(self, keys)
+    }
+
+    fn seqnum(&self) -> u64 {
+        DbTransaction::seqnum(self)
+    }
+
+    fn id(&self) -> Uuid {
+        DbTransaction::id(self)
+    }
+
+    async fn commit_with_options(
+        self,
+        options: &WriteOptions,
+    ) -> Result<Option<WriteHandle>, crate::Error>
+    where
+        Self: Sized + Send,
+    {
+        DbTransaction::commit_with_options(self, options).await
+    }
+
+    fn rollback(self)
+    where
+        Self: Sized,
+    {
+        DbTransaction::rollback(self)
+    }
+}
+
 /// Unregister from transaction manager when dropped.
 /// If the transaction hasn't been committed, it's considered rolled back.
 impl Drop for DbTransaction {
@@ -896,6 +970,7 @@ mod tests {
         // Commit without waiting for durability
         txn.commit_with_options(&WriteOptions {
             await_durable: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1743,9 +1818,9 @@ mod tests {
             manifest_update_timeout: std::time::Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 1,
             min_filter_keys,
-            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
@@ -1777,6 +1852,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1794,6 +1870,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1808,6 +1885,7 @@ mod tests {
         let handle = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -1827,6 +1905,7 @@ mod tests {
         let result = txn
             .commit_with_options(&WriteOptions {
                 await_durable: false,
+                ..Default::default()
             })
             .await
             .unwrap();

@@ -26,6 +26,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
+                    ..Default::default()
                 },
             )
             .await

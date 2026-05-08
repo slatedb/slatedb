@@ -13,11 +13,12 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterQuery, FilterTarget, NamedFilter};
+use crate::filter_policy::{FilterContext, FilterQuery, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
+use crate::prefix_extractor::PrefixTarget;
 use crate::{
-    iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
+    iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
     tablestore::TableStore,
     types::RowEntry,
@@ -36,6 +37,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) eager_spawn: bool,
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
+    pub(crate) filter_context: Option<FilterContext>,
 }
 
 impl Default for SstIteratorOptions {
@@ -47,6 +49,7 @@ impl Default for SstIteratorOptions {
             eager_spawn: false,
             order: IterationOrder::Ascending,
             prefix: None,
+            filter_context: None,
         }
     }
 }
@@ -163,9 +166,9 @@ struct FilterEvaluator {
 }
 
 impl FilterEvaluator {
-    fn new_point(key: Bytes, db_stats: Option<DbStats>) -> Self {
+    fn new_point(key: Bytes, context: Option<FilterContext>, db_stats: Option<DbStats>) -> Self {
         Self {
-            query: FilterQuery::point(key),
+            query: FilterQuery::point(key).with_context(context),
             db_stats,
             state: FilterState::NotChecked,
             found_key: false,
@@ -173,9 +176,13 @@ impl FilterEvaluator {
         }
     }
 
-    fn new_prefix(prefix: Bytes, db_stats: Option<DbStats>) -> Self {
+    fn new_prefix(
+        prefix: Bytes,
+        context: Option<FilterContext>,
+        db_stats: Option<DbStats>,
+    ) -> Self {
         Self {
-            query: FilterQuery::prefix(prefix),
+            query: FilterQuery::prefix(prefix).with_context(context),
             db_stats,
             state: FilterState::NotChecked,
             found_key: false,
@@ -218,22 +225,22 @@ impl FilterEvaluator {
 
     fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            FilterTarget::Point(_) => &stats.sst_filter_point_positives,
-            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+            PrefixTarget::Point(_) => &stats.sst_filter_point_positives,
+            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
         }
     }
 
     fn negatives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            FilterTarget::Point(_) => &stats.sst_filter_point_negatives,
-            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+            PrefixTarget::Point(_) => &stats.sst_filter_point_negatives,
+            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
         }
     }
 
     fn false_positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            FilterTarget::Point(_) => &stats.sst_filter_point_false_positives,
-            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
+            PrefixTarget::Point(_) => &stats.sst_filter_point_false_positives,
+            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
         }
     }
 
@@ -243,8 +250,8 @@ impl FilterEvaluator {
 
     fn notify_key_found(&mut self, key: &[u8]) {
         match &self.query.target {
-            FilterTarget::Point(k) if key == k.as_ref() => self.found_key = true,
-            FilterTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            PrefixTarget::Point(k) if key == k.as_ref() => self.found_key = true,
+            PrefixTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
             _ => {}
         }
     }
@@ -328,16 +335,6 @@ impl<'a> InternalSstIterator<'a> {
         Self::new(view, table_store, options).map(Some)
     }
 
-    async fn new_owned_initialized<T: RangeBounds<Bytes>>(
-        range: T,
-        table: SsTableView,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::new_owned(range, table, table_store, options)?;
-        init_optional_iterator(iter).await
-    }
-
     fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableView,
@@ -349,16 +346,6 @@ impl<'a> InternalSstIterator<'a> {
         };
         let view = SstView::Borrowed(table, view_range);
         Self::new(view, table_store, options).map(Some)
-    }
-
-    async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
-        range: T,
-        table: &'a SsTableView,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::new_borrowed(range, table, table_store, options)?;
-        init_optional_iterator(iter).await
     }
 
     fn for_key(
@@ -373,16 +360,6 @@ impl<'a> InternalSstIterator<'a> {
             table_store,
             options,
         )
-    }
-
-    async fn for_key_initialized(
-        table: &'a SsTableView,
-        key: &'a [u8],
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::for_key(table, key, table_store, options)?;
-        init_optional_iterator(iter).await
     }
 
     /// Spawns fetch tasks for blocks based on iteration order.
@@ -877,9 +854,12 @@ impl<'a> SstIterator<'a> {
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
         let prefix = internal.options.prefix.clone();
-        let filter_evaluator = point_key
-            .map(|key| FilterEvaluator::new_point(key, db_stats.clone()))
-            .or_else(|| prefix.map(|p| FilterEvaluator::new_prefix(p, db_stats)));
+        let filter_context = internal.options.filter_context.clone();
+        let filter_evaluator = match (point_key, prefix) {
+            (Some(key), _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
+            (None, Some(p)) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
+            (None, None) => None,
+        };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
             None => SstIteratorDelegate::Direct(internal),
@@ -934,15 +914,22 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal =
-            InternalSstIterator::new_owned_initialized(range, table, table_store, options).await?;
+        // Construct the inner iterator without initializing it. The filter
+        // is evaluated first so that an SST whose filter rules out the query
+        // never pays for an index or data block read.
+        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
-                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
-                    inner.init().await?;
-                    if inner.is_filtered_out() {
-                        return Ok(None);
+                match &mut iterator.delegate {
+                    SstIteratorDelegate::Filter(filter_iter) => {
+                        filter_iter.init().await?;
+                        if filter_iter.is_filtered_out() {
+                            return Ok(None);
+                        }
+                    }
+                    SstIteratorDelegate::Direct(inner_iter) => {
+                        inner_iter.init().await?;
                     }
                 }
                 Ok(Some(iterator))
@@ -979,16 +966,19 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal =
-            InternalSstIterator::new_borrowed_initialized(range, table, table_store, options)
-                .await?;
+        let internal = InternalSstIterator::new_borrowed(range, table, table_store, options)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
-                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
-                    inner.init().await?;
-                    if inner.is_filtered_out() {
-                        return Ok(None);
+                match &mut iterator.delegate {
+                    SstIteratorDelegate::Filter(filter_iter) => {
+                        filter_iter.init().await?;
+                        if filter_iter.is_filtered_out() {
+                            return Ok(None);
+                        }
+                    }
+                    SstIteratorDelegate::Direct(inner_iter) => {
+                        inner_iter.init().await?;
                     }
                 }
                 Ok(Some(iterator))
@@ -1017,15 +1007,19 @@ impl<'a> SstIterator<'a> {
         options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal =
-            InternalSstIterator::for_key_initialized(table, key, table_store, options).await?;
+        let internal = InternalSstIterator::for_key(table, key, table_store, options)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, db_stats);
-                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
-                    inner.init().await?;
-                    if inner.is_filtered_out() {
-                        return Ok(None);
+                match &mut iterator.delegate {
+                    SstIteratorDelegate::Filter(filter_iter) => {
+                        filter_iter.init().await?;
+                        if filter_iter.is_filtered_out() {
+                            return Ok(None);
+                        }
+                    }
+                    SstIteratorDelegate::Direct(inner_iter) => {
+                        inner_iter.init().await?;
                     }
                 }
                 Ok(Some(iterator))
@@ -1126,7 +1120,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1368,7 +1362,7 @@ mod tests {
         let sst = writer
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
-                builder.build().await.unwrap(),
+                &builder.build().await.unwrap(),
                 false,
             )
             .await
@@ -1460,7 +1454,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -1498,7 +1492,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1717,7 +1711,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // Initialize iterator in descending order with full range
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -1787,6 +1781,7 @@ mod tests {
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
+                filter_context: None,
             },
         )
         .await
@@ -1804,6 +1799,7 @@ mod tests {
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
+                filter_context: None,
             },
         )
         .await
@@ -1895,7 +1891,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
@@ -1974,7 +1970,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -2109,7 +2105,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
@@ -2171,7 +2167,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle = table_store.write_sst(&id, &encoded, false).await.unwrap();
 
         // Verify we have multiple blocks
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2239,7 +2235,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: searching for a non-existent key (odd number)
         let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -2291,7 +2287,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: seeking past the last key
         let iter = SstIterator::new_borrowed_initialized(
@@ -2350,7 +2346,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2376,6 +2372,7 @@ mod tests {
             eager_spawn: false,
             order,
             prefix: None,
+            filter_context: None,
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2485,7 +2482,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2661,6 +2658,7 @@ mod tests {
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
+                filter_context: None,
             },
         )
         .await

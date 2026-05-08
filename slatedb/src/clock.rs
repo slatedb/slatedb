@@ -55,6 +55,7 @@ impl MonotonicClock {
         self.last_durable_tick.fetch_max(tick, Ordering::SeqCst)
     }
 
+    #[cfg_attr(dst, allow(dead_code))]
     pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
         let tick = self.delegate.now().timestamp_millis();
         match self.enforce_monotonic(tick) {

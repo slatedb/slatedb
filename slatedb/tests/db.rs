@@ -58,6 +58,7 @@ async fn test_replay_wal_then_write() {
             &PutOptions::default(),
             &WriteOptions {
                 await_durable: false,
+                ..Default::default()
             },
         )
         .await
@@ -70,7 +71,8 @@ async fn test_replay_wal_then_write() {
     .await
     .expect("failed to flush WAL");
 
-    db.close().await.expect("failed to close db");
+    // expect to fail as l0 upload is blocked
+    assert!(db.close().await.is_err());
 
     // Reopen with L0 flush paused so replayed immutable memtables stay queued.
     fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "pause").unwrap();
@@ -89,6 +91,7 @@ async fn test_replay_wal_then_write() {
         &PutOptions::default(),
         &WriteOptions {
             await_durable: false,
+            ..Default::default()
         },
     )
     .await
@@ -242,6 +245,7 @@ async fn test_concurrent_writers_and_readers() {
                         &PutOptions::default(),
                         &WriteOptions {
                             await_durable: false,
+                            ..Default::default()
                         },
                     )
                     .await

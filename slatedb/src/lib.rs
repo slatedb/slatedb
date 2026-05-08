@@ -45,25 +45,25 @@ pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
-pub use db_cache_manager::{CacheTarget, DbCacheManagerOps};
+pub use db_cache_manager::CacheTarget;
 pub use db_iter::DbIterator;
-pub use db_metadata::DbMetadataOps;
-pub use db_read::DbReadOps;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
 pub use filter_policy::{
-    BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery, FilterTarget,
-    PrefixExtractor,
+    BloomFilterPolicy, Filter, FilterBuilder, FilterContext, FilterPolicy, FilterQuery,
 };
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
+pub use instrumented_object_store::stats as instrumented_object_store_stats;
 pub use iter::IterationOrder;
 pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
+pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
 pub use rand::DbRand;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
@@ -85,6 +85,7 @@ pub mod config;
 pub mod db_cache;
 pub mod db_stats;
 pub mod manifest;
+pub mod prefix_extractor;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
 
@@ -93,6 +94,8 @@ mod batch_write;
 mod blob;
 mod block_iterator;
 mod block_iterator_v2;
+#[cfg(feature = "bench-internal")]
+pub use block_iterator_v2::benches as block_iterator_v2_benches;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;
@@ -112,8 +115,6 @@ mod db;
 mod db_cache_manager;
 mod db_common;
 mod db_iter;
-mod db_metadata;
-mod db_read;
 mod db_reader;
 mod db_snapshot;
 mod db_state;
@@ -135,6 +136,7 @@ mod memtable_flusher;
 mod merge_iterator;
 mod merge_operator;
 mod object_stores;
+mod ops;
 mod oracle;
 mod partitioned_keyspace;
 mod paths;
@@ -145,6 +147,8 @@ mod rand;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;
+mod segment_iterator;
+mod single_flight;
 mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;

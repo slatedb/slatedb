@@ -57,19 +57,6 @@ pub(crate) trait TrackedRowEntryIterator: RowEntryIterator {
     fn bytes_processed(&self) -> u64;
 }
 
-/// Initializes the iterator contained in the option, propagating `None` unchanged.
-pub(crate) async fn init_optional_iterator<T: RowEntryIterator>(
-    iter: Option<T>,
-) -> Result<Option<T>, SlateDBError> {
-    match iter {
-        Some(mut it) => {
-            it.init().await?;
-            Ok(Some(it))
-        }
-        None => Ok(None),
-    }
-}
-
 #[async_trait]
 impl<'a> RowEntryIterator for Box<dyn RowEntryIterator + 'a> {
     async fn init(&mut self) -> Result<(), SlateDBError> {

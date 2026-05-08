@@ -3,8 +3,10 @@ use std::sync::Arc;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::{DbStatus, KeyRange};
+use crate::types::{CacheTarget, DbStatus, KeyRange, SsTableId};
 use crate::validation::validate_key;
+use crate::KeyValue;
+use slatedb::DbCacheManagerOps;
 
 /// Read-only database handle opened by [`crate::DbReaderBuilder`].
 #[derive(uniffi::Object)]
@@ -47,6 +49,27 @@ impl DbReader {
             .get_with_options(key, &options)
             .await?
             .map(|value| value.to_vec()))
+    }
+
+    /// Reads the current row version for `key`, including metadata.
+    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
+        Ok(self.inner.get_key_value(key).await?.map(KeyValue::from))
+    }
+
+    /// Reads the current row version for `key` using custom read options.
+    pub async fn get_key_value_with_options(
+        &self,
+        key: Vec<u8>,
+        options: ReadOptions,
+    ) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
+        let options = options.into();
+        Ok(self
+            .inner
+            .get_key_value_with_options(key, &options)
+            .await?
+            .map(KeyValue::from))
     }
 
     /// Scans rows inside `range`.
@@ -96,5 +119,30 @@ impl DbReader {
     #[uniffi::method(name = "shutdown")]
     pub async fn close(&self) -> Result<(), Error> {
         self.inner.close().await.map_err(Into::into)
+    }
+
+    /// Warms selected cache content for one SST.
+    ///
+    /// Returns `Err` on the first failing target. If no block cache is
+    /// configured, or if the SST is not reachable from the current manifest,
+    /// the call is a no-op that returns `Ok(())`.
+    pub async fn warm_sst(
+        &self,
+        sst_id: SsTableId,
+        targets: Vec<CacheTarget>,
+    ) -> Result<(), Error> {
+        let sst_id = sst_id.into_core()?;
+        let targets: Vec<_> = targets.into_iter().map(CacheTarget::into_core).collect();
+        self.inner.warm_sst(sst_id, &targets).await?;
+        Ok(())
+    }
+
+    /// Best-effort eviction of block-cache entries for one SST.
+    ///
+    /// If no block cache is configured, returns `Ok(())`.
+    pub async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), Error> {
+        let sst_id = sst_id.into_core()?;
+        self.inner.evict_cached_sst(sst_id).await?;
+        Ok(())
     }
 }
