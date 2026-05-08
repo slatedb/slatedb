@@ -412,7 +412,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode,
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
         PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
     };
     use std::collections::Bound::{Excluded, Included, Unbounded};
@@ -528,168 +528,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct CountingStore {
-        inner: InMemory,
-        if_none_match_gets: AtomicUsize,
-    }
-
-    impl CountingStore {
-        fn new(inner: InMemory) -> Self {
-            Self {
-                inner,
-                if_none_match_gets: AtomicUsize::new(0),
-            }
-        }
-
-        fn if_none_match_gets(&self) -> usize {
-            self.if_none_match_gets.load(Ordering::SeqCst)
-        }
-    }
-
-    impl fmt::Display for CountingStore {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "CountingStore")
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for CountingStore {
-        async fn put_opts(
-            &self,
-            location: &Path,
-            payload: PutPayload,
-            opts: PutOptions,
-        ) -> ObjectStoreResult<PutResult> {
-            self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &Path,
-            opts: PutMultipartOptions,
-        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(location, opts).await
-        }
-
-        async fn get_opts(
-            &self,
-            location: &Path,
-            options: GetOptions,
-        ) -> ObjectStoreResult<GetResult> {
-            if options.if_none_match.is_some() {
-                self.if_none_match_gets.fetch_add(1, Ordering::SeqCst);
-            }
-            self.inner.get_opts(location, options).await
-        }
-
-        async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
-            self.inner.delete(location).await
-        }
-
-        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&Path>,
-        ) -> ObjectStoreResult<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy_if_not_exists(from, to).await
-        }
-    }
-
-    #[derive(Debug)]
-    struct RacingUpdateStore {
-        inner: InMemory,
-        update_races: AtomicUsize,
-    }
-
-    impl RacingUpdateStore {
-        fn new(inner: InMemory) -> Self {
-            Self {
-                inner,
-                update_races: AtomicUsize::new(0),
-            }
-        }
-
-        fn update_races(&self) -> usize {
-            self.update_races.load(Ordering::SeqCst)
-        }
-    }
-
-    impl fmt::Display for RacingUpdateStore {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "RacingUpdateStore")
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for RacingUpdateStore {
-        async fn put_opts(
-            &self,
-            location: &Path,
-            payload: PutPayload,
-            opts: PutOptions,
-        ) -> ObjectStoreResult<PutResult> {
-            if matches!(&opts.mode, PutMode::Update(_))
-                && self.update_races.fetch_add(1, Ordering::SeqCst) == 0
-            {
-                self.inner
-                    .put(location, PutPayload::from_bytes(Bytes::from_static(b"2")))
-                    .await?;
-            }
-            self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &Path,
-            opts: PutMultipartOptions,
-        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(location, opts).await
-        }
-
-        async fn get_opts(
-            &self,
-            location: &Path,
-            options: GetOptions,
-        ) -> ObjectStoreResult<GetResult> {
-            self.inner.get_opts(location, options).await
-        }
-
-        async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
-            self.inner.delete(location).await
-        }
-
-        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&Path>,
-        ) -> ObjectStoreResult<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy_if_not_exists(from, to).await
-        }
-    }
-
     #[tokio::test]
     async fn test_boundary_missing_defaults_to_zero() {
         let object_store = Arc::new(InMemory::new());
@@ -722,16 +560,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_boundary_advance_retries_after_racing_lower_update() {
-        let racing = Arc::new(RacingUpdateStore::new(InMemory::new()));
-        let object_store: Arc<dyn ObjectStore> = racing.clone();
-        let boundary =
-            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store, "manifest.boundary");
+    async fn test_boundary_advance_handles_stale_update_state() {
+        let object_store = Arc::new(InMemory::new());
+        let boundary = ObjectStoreBoundaryObject::new(
+            &Path::from("/root"),
+            object_store.clone(),
+            "manifest.boundary",
+        );
 
         boundary.advance(MonotonicId::new(1)).await.unwrap();
+        let stale = match boundary.read_boundary(None).await.unwrap() {
+            super::BoundaryRead::Found(state) => state,
+            _ => panic!("expected boundary object"),
+        };
+        object_store
+            .put(
+                &boundary.path,
+                PutPayload::from_bytes(Bytes::from_static(b"2")),
+            )
+            .await
+            .unwrap();
+
+        assert!(!boundary
+            .update_boundary(stale, MonotonicId::new(3))
+            .await
+            .unwrap());
+
         boundary.advance(MonotonicId::new(3)).await.unwrap();
 
-        assert_eq!(2, racing.update_races());
         let result = boundary.check(MonotonicId::new(3)).await;
         assert!(matches!(
             result,
@@ -741,15 +597,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_boundary_check_uses_if_none_match_when_cached() {
-        let counting = Arc::new(CountingStore::new(InMemory::new()));
-        let object_store: Arc<dyn ObjectStore> = counting.clone();
-        let boundary =
-            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store, "manifest.boundary");
+        let object_store = Arc::new(InMemory::new());
+        let boundary = ObjectStoreBoundaryObject::new(
+            &Path::from("/root"),
+            object_store.clone(),
+            "manifest.boundary",
+        );
+        let put_result = object_store
+            .put(
+                &boundary.path,
+                PutPayload::from_bytes(Bytes::from_static(b"1")),
+            )
+            .await
+            .unwrap();
+        *boundary.cache.lock() = Some(super::BoundaryState {
+            value: MonotonicId::new(7),
+            e_tag: put_result.e_tag,
+            version: put_result.version,
+        });
 
-        boundary.advance(MonotonicId::new(1)).await.unwrap();
-        boundary.check(MonotonicId::new(2)).await.unwrap();
-
-        assert_eq!(1, counting.if_none_match_gets());
+        let result = boundary.check(MonotonicId::new(6)).await;
+        assert!(matches!(
+            result,
+            Err(TransactionalObjectError::ObjectVersionBehindBoundary { id: 6, boundary: 7 })
+        ));
     }
 
     #[tokio::test]
