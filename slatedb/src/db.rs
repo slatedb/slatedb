@@ -1164,10 +1164,14 @@ impl Db {
     /// willing to interpret raw entries.
     ///
     /// Sources are walked in this order: active memtable, immutable
-    /// memtables, L0 SSTs newest-first, sorted runs newest-first. Each
-    /// source is fully drained before moving to the next. Sources are
-    /// lazily initialized: the filter check, index load, and first data
-    /// block fetch only happen when the recency walk reaches that source.
+    /// memtables, then for each segment matching the prefix range, that
+    /// segment's L0 SSTs newest-first followed by its sorted runs
+    /// newest-first. Within a segment the walk is recency-ordered; across
+    /// segments the order follows `select_segments`, so "newest-first" is
+    /// per-segment, not global. Each source is fully drained before moving
+    /// to the next. Sources are lazily initialized: the filter check, index
+    /// load, and first data block fetch only happen when the recency walk
+    /// reaches that source.
     /// A prefix read whose data lives in the active memtable therefore
     /// performs zero I/O. When the walk does have to descend to SST
     /// sources, configuring prefix bloom filters lets the scan skip
