@@ -21,6 +21,9 @@
 //!   increasing IDs. This  is useful if it's important to observe earlier versions of the object.
 //! - `ObjectStoreSequencedStorageProtocol<T>`: Implements SequencedStorageProtocol<T> on
 //!   Object Stores.
+//! - `BoundaryObject`: A durable high-watermark used to fence stale sequenced writes after GC.
+//! - `BoundedSequencedStorage<T>`: Wraps a `SequencedStorageProtocol<T>` and checks the boundary
+//!   after each successful write.
 //! - `MonotonicId`: A monotonically increasing version ID.
 //! - `TransactionalObject`: An in-memory register that is backed by durable storage and can be
 //!   transactionally updated. Supports:
@@ -568,6 +571,75 @@ pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, Monotonic
     ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError>;
 
     async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
+}
+
+/// A durable inclusive high-watermark for a sequenced object namespace.
+///
+/// A boundary value `B` means that object IDs `<= B` have been durably fenced. Writers must call
+/// [`BoundaryObject::check`] after creating an object and treat `ObjectVersionExists` as a failed
+/// write if the just-created ID is at or below the current boundary.
+#[async_trait]
+pub trait BoundaryObject: Send + Sync {
+    /// Verify that `id` is greater than the durable boundary.
+    async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
+
+    /// Advance the boundary to at least `boundary`.
+    ///
+    /// Returns `Ok(true)` if the caller can rely on the durable boundary being greater than or
+    /// equal to `boundary` after this call. Returns `Ok(false)` if the update raced with another
+    /// boundary writer and the caller should skip the operation that depended on the advance.
+    async fn advance(&self, boundary: MonotonicId) -> Result<bool, TransactionalObjectError>;
+}
+
+/// A `SequencedStorageProtocol` wrapper that fences stale writes using a [`BoundaryObject`].
+pub struct BoundedSequencedStorage<T> {
+    delegate: Arc<dyn SequencedStorageProtocol<T>>,
+    boundary: Arc<dyn BoundaryObject>,
+}
+
+impl<T> BoundedSequencedStorage<T> {
+    pub fn new(
+        delegate: Arc<dyn SequencedStorageProtocol<T>>,
+        boundary: Arc<dyn BoundaryObject>,
+    ) -> Self {
+        Self { delegate, boundary }
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId> for BoundedSequencedStorage<T> {
+    async fn write(
+        &self,
+        current_id: Option<MonotonicId>,
+        new_value: &T,
+    ) -> Result<MonotonicId, TransactionalObjectError> {
+        let id = self.delegate.write(current_id, new_value).await?;
+        self.boundary.check(id).await?;
+        Ok(id)
+    }
+
+    async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
+        self.delegate.try_read_latest().await
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync> SequencedStorageProtocol<T> for BoundedSequencedStorage<T> {
+    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError> {
+        self.delegate.try_read(id).await
+    }
+
+    async fn list(
+        &self,
+        from: Bound<MonotonicId>,
+        to: Bound<MonotonicId>,
+    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
+        self.delegate.list(from, to).await
+    }
+
+    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+        self.delegate.delete(id).await
+    }
 }
 
 #[cfg(feature = "test-util")]

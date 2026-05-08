@@ -12,10 +12,13 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::object_store::{
+    ObjectStoreBoundaryObject, ObjectStoreSequencedStorageProtocol,
+};
 use slatedb_txn_obj::{
-    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    BoundaryObject, BoundedSequencedStorage, DirtyObject, FenceableTransactionalObject,
+    MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+    TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
@@ -459,18 +462,32 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<dyn SequencedStorageProtocol<Manifest>>,
+    boundary: Arc<dyn BoundaryObject>,
 }
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
+        let sequenced_storage: Arc<dyn SequencedStorageProtocol<Manifest>> =
+            Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
+                root_path,
+                object_store.clone(),
+                "manifest",
+                "manifest",
+                Box::new(FlatBufferManifestCodec {}),
+            ));
+        let boundary: Arc<dyn BoundaryObject> = Arc::new(ObjectStoreBoundaryObject::new(
             root_path,
             object_store,
-            "manifest",
-            "manifest",
-            Box::new(FlatBufferManifestCodec {}),
+            "manifest.boundary",
         ));
-        Self { inner }
+        let inner: Arc<dyn SequencedStorageProtocol<Manifest>> = Arc::new(
+            BoundedSequencedStorage::new(sequenced_storage, boundary.clone()),
+        );
+        Self { inner, boundary }
+    }
+
+    pub(crate) async fn advance_boundary(&self, boundary: u64) -> Result<bool, SlateDBError> {
+        Ok(self.boundary.advance(MonotonicId::new(boundary)).await?)
     }
 
     /// Delete a manifest from the object store.

@@ -416,6 +416,17 @@ mod tests {
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].id, 2);
+
+        let stale_create = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await;
+        assert!(matches!(
+            stale_create,
+            Err(SlateDBError::TransactionalObjectVersionExists)
+        ));
     }
 
     #[tokio::test]
@@ -512,6 +523,12 @@ mod tests {
         let compactions = compactions_store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 1);
         assert_eq!(compactions[0].id, 3);
+
+        let stale_create = StoredCompactions::create(compactions_store.clone(), 0).await;
+        assert!(matches!(
+            stale_create,
+            Err(SlateDBError::TransactionalObjectVersionExists)
+        ));
     }
 
     #[tokio::test]

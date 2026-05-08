@@ -46,6 +46,19 @@ impl GcTask for ManifestGcTask {
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
         let min_age = self.manifest_min_age();
         let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
+        let boundary = manifest_metadata_list
+            .iter()
+            .filter(|manifest_metadata| {
+                utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+            })
+            .map(|manifest_metadata| manifest_metadata.id)
+            .max();
+
+        if let Some(boundary) = boundary {
+            if !self.manifest_store.advance_boundary(boundary).await? {
+                return Ok(());
+            }
+        }
 
         // Remove the last element so we never delete the latest manifest
         let latest_manifest = if let Some(manifest_metadata) = manifest_metadata_list.pop() {

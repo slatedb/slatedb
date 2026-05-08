@@ -8,10 +8,13 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::object_store::{
+    ObjectStoreBoundaryObject, ObjectStoreSequencedStorageProtocol,
+};
 use slatedb_txn_obj::{
-    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    BoundaryObject, BoundedSequencedStorage, DirtyObject, FenceableTransactionalObject,
+    MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+    TransactionalStorageProtocol,
 };
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -197,18 +200,32 @@ where
 
 pub(crate) struct CompactionsStore {
     inner: Arc<dyn SequencedStorageProtocol<Compactions>>,
+    boundary: Arc<dyn BoundaryObject>,
 }
 
 impl CompactionsStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Compactions>::new(
+        let sequenced_storage: Arc<dyn SequencedStorageProtocol<Compactions>> =
+            Arc::new(ObjectStoreSequencedStorageProtocol::<Compactions>::new(
+                root_path,
+                object_store.clone(),
+                "compactions",
+                "compactions",
+                Box::new(FlatBufferCompactionsCodec {}),
+            ));
+        let boundary: Arc<dyn BoundaryObject> = Arc::new(ObjectStoreBoundaryObject::new(
             root_path,
             object_store,
-            "compactions",
-            "compactions",
-            Box::new(FlatBufferCompactionsCodec {}),
+            "compactions.boundary",
         ));
-        Self { inner }
+        let inner: Arc<dyn SequencedStorageProtocol<Compactions>> = Arc::new(
+            BoundedSequencedStorage::new(sequenced_storage, boundary.clone()),
+        );
+        Self { inner, boundary }
+    }
+
+    pub(crate) async fn advance_boundary(&self, boundary: u64) -> Result<bool, SlateDBError> {
+        Ok(self.boundary.advance(MonotonicId::new(boundary)).await?)
     }
 
     /// Delete a compactions file from the object store.
