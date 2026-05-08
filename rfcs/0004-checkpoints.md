@@ -88,7 +88,14 @@ table ExternalDb {
     // Path to root of the external database
     path: string (required);
 
-    // Externally owned Checkpoint ID we've used to create an initial state of cloned database.
+    // Checkpoint ID on the external database used to create the initial state of this clone.
+    // For an entry added for the immediate parent, this is the user-supplied (or ephemeral)
+    // checkpoint passed to the clone operation. For entries carried over from the parent's
+    // own `external_dbs` (i.e. nested clones), this is set to the parent's
+    // `final_checkpoint_id` for that grandparent — a slatedb-generated, slatedb-owned id —
+    // rather than the original user-supplied checkpoint. This breaks the chain back to a
+    // user-supplied checkpoint that the user could delete at any time, which would otherwise
+    // invalidate every future clone in the chain.
     source_checkpoint_id: Uuid (required);
 
     // Checkpoint ID this database has placed on the external database that prevents referenced
@@ -529,7 +536,15 @@ To support this, we add the `Db::open_from_checkpoint` method, which accepts a `
 8. Write a new clone manifest `M_c'`. If CAS fails, go to step 1. `M_c'` fields are set to:
   - external_dbs:
     - initial list copied from `M_p'` (this list is non-empty for nested clones)
-      - for each `entry` in the list: set `entry.final_checkpoint_id` to `final_checkpoint_id`
+      - for each `entry` in the list:
+        - set `entry.source_checkpoint_id` to `entry.final_checkpoint_id` (the parent's pinned
+          final checkpoint on that grandparent). This breaks the chain back to the original
+          user-supplied checkpoint on the grandparent: that checkpoint can be deleted by the
+          user at any time, and if a later clone tried to re-pin it the operation would fail.
+          The parent's `final_checkpoint_id` is slatedb-generated and pinned by the parent, so
+          it is safe to depend on for future clones.
+        - assign a fresh `entry.final_checkpoint_id` (a new random v4 UUID) for this clone to
+          own.
     - add an `entry` for `parent_path` with:
       - `entry.path` set to `parent_path`
       - `entry.source_checkpoint_id` set to `source_checkpoint_id`
@@ -739,7 +754,12 @@ The union process works as follows:
      same external_db entry via projection, so their `sst_ids` lists are merged (unioned). Entries with different keys 
      for the same path represent distinct checkpoints and must be kept separate. Without this deduplication, repeated
      cycles of projection and union cause exponential growth of duplicated entries: projecting into N parts
-     and unioning back multiplies the entry count by N each cycle. New `final_checkpoint_id` values are
+     and unioning back multiplies the entry count by N each cycle. Note that for entries carried
+     over from a clone's parents, `source_checkpoint_id` is the parent's `final_checkpoint_id`
+     on that grandparent (a slatedb-owned, pinned id — see [Clones](#clones)), not the original
+     user-supplied checkpoint; this is what makes the dedup key stable across the union, since
+     all sibling projections share the same slatedb-owned id and the user cannot invalidate it
+     by deleting their own checkpoint. New `final_checkpoint_id` values are
      generated for all entries — the old ones belong to the source databases' clone relationships and are
      not valid for the new database.
    - SSTs with the same ID but __originating__ from different source databases are deduplicated by assigning a new ID
