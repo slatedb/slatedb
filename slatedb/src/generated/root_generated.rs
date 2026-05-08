@@ -2598,11 +2598,11 @@ impl<'a> TieredCompactionSpec<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(TieredCompactionSpec::VT_L0_VIEW_IDS, None)}
   }
   #[inline]
-  pub fn segment(&self) -> flatbuffers::Vector<'a, u8> {
+  pub fn segment(&self) -> Option<flatbuffers::Vector<'a, u8>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(TieredCompactionSpec::VT_SEGMENT, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(TieredCompactionSpec::VT_SEGMENT, None)}
   }
 }
 
@@ -2616,7 +2616,7 @@ impl flatbuffers::Verifiable for TieredCompactionSpec<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("ssts", Self::VT_SSTS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u32>>>("sorted_runs", Self::VT_SORTED_RUNS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("l0_view_ids", Self::VT_L0_VIEW_IDS, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("segment", Self::VT_SEGMENT, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("segment", Self::VT_SEGMENT, false)?
      .finish();
     Ok(())
   }
@@ -2634,7 +2634,7 @@ impl<'a> Default for TieredCompactionSpecArgs<'a> {
       ssts: None,
       sorted_runs: None,
       l0_view_ids: None,
-      segment: None, // required field
+      segment: None,
     }
   }
 }
@@ -2671,7 +2671,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> TieredCompactionSpecBuilder<'a,
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<TieredCompactionSpec<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, TieredCompactionSpec::VT_SEGMENT,"segment");
     flatbuffers::WIPOffset::new(o.value())
   }
 }

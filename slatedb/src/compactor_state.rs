@@ -653,13 +653,13 @@ impl CompactorState {
     ///   destination overwrite rules.
     pub(crate) fn add_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let spec = compaction.spec();
-        if self
-            .compactions
-            .value
-            .iter_active()
-            .map(|c| c.spec())
-            .any(|c| c.destination() == spec.destination())
-        {
+        // SR ids are scoped per segment, so the active-conflict check must
+        // match on both segment and destination — two segments can each
+        // legitimately have an in-flight compaction targeting the same
+        // destination id.
+        if self.compactions.value.iter_active().any(|c| {
+            c.spec().segment() == spec.segment() && c.spec().destination() == spec.destination()
+        }) {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
         }
@@ -737,6 +737,12 @@ impl CompactorState {
                     "finish_compaction: target segment missing [segment={:?}, compaction_id={}]",
                     segment, compaction_id
                 );
+                // Segment was dropped between submission and finish; the
+                // output is discarded. Mark the compaction terminal so it
+                // doesn't linger as Active.
+                self.update_compaction(&compaction_id, |c| {
+                    c.set_status(CompactionStatus::Failed);
+                });
                 return;
             };
 
@@ -1618,6 +1624,155 @@ mod tests {
 
         // The root tree is unchanged — no leakage from the segment compaction.
         assert_eq!(state.db_state().tree.compacted, root_compacted_before);
+    }
+
+    /// `add_compaction` rejects a spec whose target segment is not present in
+    /// the manifest. The empty-prefix segment (root tree) always exists, so
+    /// only non-empty prefixes can fail this lookup.
+    #[test]
+    fn test_add_compaction_rejects_unknown_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix = Bytes::from_static(b"missing/");
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(0)], 0);
+
+        let result = state.add_compaction(Compaction::new(compaction_id, spec));
+
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    /// The destination-overwrite check in `add_compaction` is scoped to the
+    /// spec's target segment. A segment-targeted spec must not be rejected
+    /// because an SR with the same destination id happens to live in the
+    /// root tree (a different segment).
+    #[test]
+    fn test_add_compaction_destination_overwrite_check_is_per_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Place SR(7) in the root tree. The segment-targeted spec below uses
+        // 7 as its destination but does not list it among its sources, which
+        // would be rejected if the check were not scoped per segment.
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        }];
+
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
+
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("segment-targeted spec must not be blocked by an SR in the root tree");
+    }
+
+    /// SR ids are scoped per segment, so an in-flight compaction targeting
+    /// SR(7) in the root tree must not block a new compaction targeting
+    /// SR(7) in a different segment.
+    #[test]
+    fn test_add_compaction_active_conflict_check_is_per_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let root_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let root_spec = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
+        state
+            .add_compaction(Compaction::new(root_id, root_spec))
+            .expect("root-tree compaction must register");
+
+        let seg_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let seg_spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(7)], 7);
+        state
+            .add_compaction(Compaction::new(seg_id, seg_spec))
+            .expect("segment-targeted spec must not conflict with an active root-tree compaction");
+    }
+
+    /// Two in-flight compactions in the same segment cannot share a
+    /// destination — the active-conflict check still rejects intra-segment
+    /// collisions.
+    #[test]
+    fn test_add_compaction_active_conflict_rejects_same_segment_same_destination() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let first_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let first = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
+        state
+            .add_compaction(Compaction::new(first_id, first))
+            .expect("first compaction must register");
+
+        let second_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let second = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
+        let err = state
+            .add_compaction(Compaction::new(second_id, second))
+            .expect_err("same-segment same-destination must be rejected");
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// If the target segment is dropped between submission and finish, the
+    /// compaction must be marked terminal so it doesn't linger as Active.
+    #[test]
+    fn test_finish_compaction_marks_failed_when_segment_missing() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix.clone(), vec![SourceId::SortedRun(7)], 7);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("submission must register");
+
+        // Segment dropped after submission, before finish.
+        state.manifest.value.core.segments = Vec::new();
+
+        let output = SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        };
+        state.finish_compaction(compaction_id, output);
+
+        let compaction = state
+            .compactions
+            .value
+            .get(&compaction_id)
+            .expect("compaction should still be tracked");
+        assert_eq!(compaction.status(), CompactionStatus::Failed);
+        assert_eq!(state.compactions.value.iter_active().count(), 0);
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
