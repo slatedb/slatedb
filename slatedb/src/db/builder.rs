@@ -467,14 +467,15 @@ impl<P: Into<Path>> DbBuilder<P> {
             None => retrying_main_object_store.clone(),
         };
 
-        // Setup the manifest store and load latest manifest
+        // Manifest and compactions stores own mutable GC boundary files, so keep
+        // them on the uncached store. The cached store is for table reads below.
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
-            maybe_cached_main_object_store.clone(),
+            retrying_main_object_store.clone(),
         ));
         let compactions_store = Arc::new(CompactionsStore::new(
             &path,
-            maybe_cached_main_object_store.clone(),
+            retrying_main_object_store.clone(),
         ));
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
@@ -1391,11 +1392,11 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
         let object_store: Arc<dyn ObjectStore> = match &maybe_cached {
             Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
-            None => retrying_object_store,
+            None => retrying_object_store.clone(),
         };
 
         // Validate WAL object store configuration.
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store.clone()));
         let latest_manifest =
             StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
         if let Some(latest_manifest) = &latest_manifest {
@@ -1407,6 +1408,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
             object_store,
+            manifest_object_store: retrying_object_store,
             wal_object_store: retrying_wal_object_store,
             block_cache: self.db_cache.clone(),
             block_transformer: self.block_transformer.clone(),
