@@ -558,10 +558,14 @@ impl From<SlateDBError> for Error {
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
-            SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
+            SlateDBError::InvalidSequenceOrder { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidSequenceNumber { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
+            SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
+            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
+            SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
+            SlateDBError::InvalidUnion(_) => Error::invalid(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),
@@ -608,10 +612,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
-            SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
-            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
-            SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
-            SlateDBError::InvalidUnion(_) => Error::invalid(msg),
         }
     }
 }
