@@ -666,8 +666,17 @@ impl CompactorState {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
         }
-        if self.db_state().tree_for_segment(spec.segment()).is_none() {
+        let Some(tree) = self.db_state().tree_for_segment(spec.segment()) else {
             // spec targets a named segment that does not exist
+            return Err(SlateDBError::InvalidCompaction);
+        };
+        // RFC-0024: a compaction operates within a single segment. Every
+        // source must belong to the target segment's tree — sources from
+        // another tree make the spec ill-defined.
+        if !spec.sources().iter().all(|src| match src {
+            SourceId::SortedRun(id) => tree.compacted.iter().any(|sr| sr.id == *id),
+            SourceId::SstView(view_id) => tree.l0.iter().any(|v| v.id == *view_id),
+        }) {
             return Err(SlateDBError::InvalidCompaction);
         }
         // SR ids are globally unique across all segment trees (RFC-0024), so
@@ -1668,6 +1677,8 @@ mod tests {
             sst_views: Vec::new(),
         }];
 
+        // Seed SR(99) into the segment so the source-isolation check passes
+        // and destination-overwrite is the rejection reason.
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
@@ -1675,7 +1686,10 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
-                compacted: Vec::new(),
+                compacted: vec![SortedRun {
+                    id: 99,
+                    sst_views: Vec::new(),
+                }],
             },
         }];
 
@@ -1688,14 +1702,19 @@ mod tests {
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
-    /// SR ids are globally unique across all trees (RFC-0024), so the
-    /// active-conflict check rejects a duplicate destination regardless of
-    /// which segment each spec targets.
+    /// RFC-0024: a compaction must operate within a single segment. A spec
+    /// whose sources reference a sorted run that lives in a different tree
+    /// is rejected.
     #[test]
-    fn test_add_compaction_active_conflict_check_is_global() {
+    fn test_add_compaction_rejects_sources_from_other_segment() {
         let rt = build_runtime();
         let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
 
+        // SR(99) lives in the root tree; the segment "seg/" is empty.
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 99,
+            sst_views: Vec::new(),
+        }];
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
@@ -1707,14 +1726,52 @@ mod tests {
             },
         }];
 
+        // Segment-targeted spec lists SR(99) as a source — but SR(99) lives
+        // in the root tree, not in "seg/". Must be rejected.
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 0);
+        let err = state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect_err("spec must be rejected when sources are from another segment");
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// SR ids are globally unique across all trees (RFC-0024), so the
+    /// active-conflict check rejects a duplicate destination regardless of
+    /// which segment each spec targets.
+    #[test]
+    fn test_add_compaction_active_conflict_check_is_global() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Seed real sources so the source-isolation check passes for both
+        // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 99,
+            sst_views: Vec::new(),
+        }];
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 100,
+                    sst_views: Vec::new(),
+                }],
+            },
+        }];
+
         let root_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let root_spec = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
+        let root_spec = CompactionSpec::new(vec![SourceId::SortedRun(99)], 7);
         state
             .add_compaction(Compaction::new(root_id, root_spec))
             .expect("root-tree compaction must register");
 
         let seg_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let seg_spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(7)], 7);
+        let seg_spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(100)], 7);
         let err = state
             .add_compaction(Compaction::new(seg_id, seg_spec))
             .expect_err(
@@ -1730,6 +1787,8 @@ mod tests {
         let rt = build_runtime();
         let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
 
+        // Seed SR(7) in the segment so the spec's source SR(7) passes
+        // source-isolation; the spec rewrites that SR (destination=7).
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
@@ -1737,7 +1796,10 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
-                compacted: Vec::new(),
+                compacted: vec![SortedRun {
+                    id: 7,
+                    sst_views: Vec::new(),
+                }],
             },
         }];
 
