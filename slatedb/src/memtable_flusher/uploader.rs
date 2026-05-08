@@ -32,9 +32,7 @@ use tokio::runtime::Handle;
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
 
 /// One immutable-memtable upload request submitted to the uploader. The
-/// worker allocates SST ids for each segment internally — there's no upstream
-/// pre-allocation, since the number of output SSTs is only known after the
-/// memtable is iterated through the segment extractor.
+/// worker allocates SST ids for each segment internally.
 pub(crate) struct UploadJob {
     /// Immutable memtable to build into one or more SSTs.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
@@ -693,6 +691,16 @@ mod tests {
             ] {
                 guard.memtable().put(RowEntry::new_value(key, value, seq));
             }
+            // The production write path stamps these inline; this
+            // test bypasses that, so record explicitly.
+            guard
+                .memtable()
+                .table()
+                .record_touched_segments(std::collections::BTreeSet::from([
+                    Bytes::from_static(b"aaa"),
+                    Bytes::from_static(b"bbb"),
+                    Bytes::from_static(b"ccc"),
+                ]));
             guard.freeze_memtable(0);
         }
         let imm_memtable = db

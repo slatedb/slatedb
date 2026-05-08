@@ -9,10 +9,11 @@ use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
+use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
 use uuid::Uuid;
@@ -324,15 +325,25 @@ impl WriteBatch {
         self.ops.keys().map(|key| key.user_key.clone()).collect()
     }
 
-    /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set,
-    /// applying the merge operator to any mergeable entries.
+    /// Converts a WriteBatch into a vector of RowEntry objects with
+    /// seq and timestamp set, applying the merge operator to any
+    /// mergeable entries.
+    ///
+    /// When `extractor` is `Some`, the same iteration also derives
+    /// each entry's segment prefix (RFC-0024) and accumulates the
+    /// distinct prefixes into a `BTreeSet`. Returns
+    /// `EmptySegmentPrefix` if the extractor produces a zero-length
+    /// or absent prefix for any key.
+    ///
+    /// When `extractor` is `None`, the returned prefix set is empty.
     pub(crate) async fn extract_entries(
         &self,
         seq: u64,
         now: i64,
         default_ttl: Option<u64>,
         merger: Option<MergeOperatorType>,
-    ) -> Result<Vec<RowEntry>, SlateDBError> {
+        extractor: Option<&dyn PrefixExtractor>,
+    ) -> Result<(Vec<RowEntry>, BTreeSet<Bytes>), SlateDBError> {
         if merger.is_none() && self.has_merge_ops() {
             return Err(SlateDBError::MergeOperatorMissing);
         }
@@ -355,10 +366,23 @@ impl WriteBatch {
         }
 
         let mut entries = Vec::new();
+        let mut touched_segments: BTreeSet<Bytes> = BTreeSet::new();
         while let Some(entry) = it.next().await? {
+            if let Some(ext) = extractor {
+                match ext.prefix_len(&PrefixTarget::Point(entry.key.clone())) {
+                    Some(0) | None => {
+                        return Err(SlateDBError::EmptySegmentPrefix {
+                            key: entry.key.clone(),
+                        });
+                    }
+                    Some(n) => {
+                        touched_segments.insert(entry.key.slice(0..n));
+                    }
+                }
+            }
             entries.push(entry);
         }
-        Ok(entries)
+        Ok((entries, touched_segments))
     }
 }
 
@@ -1271,7 +1295,10 @@ mod tests {
         batch.delete(b"key3");
 
         // When: extracting entries
-        let result = batch.extract_entries(100, 1000, None, None).await.unwrap();
+        let (result, _) = batch
+            .extract_entries(100, 1000, None, None, None)
+            .await
+            .unwrap();
 
         // Then: should return entries for all operations without merging
         let mut entries = result.into_iter().collect::<Vec<_>>();
@@ -1299,7 +1326,7 @@ mod tests {
         batch.merge(b"key2", b"merge1");
 
         let err = batch
-            .extract_entries(100, 1000, None, None)
+            .extract_entries(100, 1000, None, None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, SlateDBError::MergeOperatorMissing));
@@ -1316,8 +1343,8 @@ mod tests {
         // When: extracting entries with a merge operator
         let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
             as crate::merge_operator::MergeOperatorType);
-        let result = batch
-            .extract_entries(100, 1000, None, merge_operator)
+        let (result, _) = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
             .await
             .unwrap();
 
@@ -1341,8 +1368,8 @@ mod tests {
         // When: extracting entries with a merge operator
         let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
             as crate::merge_operator::MergeOperatorType);
-        let result = batch
-            .extract_entries(100, 1000, None, merge_operator)
+        let (result, _) = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
             .await
             .unwrap();
 
@@ -1367,8 +1394,8 @@ mod tests {
         // When: extracting entries with a merge operator
         let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
             as crate::merge_operator::MergeOperatorType);
-        let result = batch
-            .extract_entries(100, 1000, None, merge_operator)
+        let (result, _) = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
             .await
             .unwrap();
 

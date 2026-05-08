@@ -214,12 +214,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
     }
 
-    /// Set the segment extractor (RFC-0024). Internal-only for now —
-    /// public API surface lands once the read/write paths are wired up.
-    // TODO(rfc-24): remove allow(dead_code) and lift to public API once
-    // the full segment write/read path is integrated.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn with_segment_extractor(
+    /// Set the segment extractor (RFC-0024). When configured, every
+    /// write is routed through the extractor and the database tracks
+    /// per-segment LSM state. The extractor must be configured at
+    /// database creation time and cannot be changed thereafter.
+    pub fn with_segment_extractor(
         mut self,
         extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
     ) -> Self {
@@ -501,6 +500,17 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         }
 
+        // RFC-0024: when the database already exists, the configured
+        // extractor must match what is persisted in the manifest, and
+        // the persisted segment prefixes must still be claimed by the
+        // current extractor. For a fresh database the extractor name
+        // (if any) is stamped onto the new manifest below.
+        if let Some(latest_manifest) = &latest_manifest {
+            latest_manifest
+                .db_state()
+                .validate_extractor_configuration(self.segment_extractor.as_deref())?;
+        }
+
         // Extract external SSTs from manifest if available
         let external_ssts = match &latest_manifest {
             Some(latest_stored_manifest) => latest_stored_manifest.manifest().external_ssts(),
@@ -537,7 +547,15 @@ impl<P: Into<Path>> DbBuilder<P> {
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
             None => {
-                let state = ManifestCore::new_with_wal_object_store(wal_object_store_uri);
+                let mut state = ManifestCore::new_with_wal_object_store(wal_object_store_uri);
+                // RFC-0024 lazy V2 bump: when the user configures an
+                // extractor at creation time, persist its name on the
+                // initial manifest so reopens can detect any later
+                // reconfiguration. Databases without an extractor keep
+                // writing V1 manifests.
+                if let Some(extractor) = &self.segment_extractor {
+                    state.segment_extractor_name = Some(extractor.name().to_string());
+                }
                 StoredManifest::create_new_db(manifest_store.clone(), state, system_clock.clone())
                     .await?
             }
