@@ -149,9 +149,10 @@ GC advances the boundary before deleting old metadata files from a namespace.
 For a namespace, GC computes the desired boundary as:
 
 1. List the namespace's metadata files.
-2. Keep files whose object-store `last_modified` timestamp is older than
+2. Remove the most recent metadata file, which must always be kept.
+3. Keep files whose object-store `last_modified` timestamp is older than
    `min_age`.
-3. Choose the maximum file ID from that filtered list.
+4. Choose the maximum file ID from that filtered list.
 
 If no files are old enough, GC skips the boundary update for that namespace.
 
