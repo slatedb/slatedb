@@ -2474,8 +2474,7 @@ mod tests {
     #[tokio::test]
     async fn test_scan_prefix_by_recency_returns_matching_keys_from_memtable() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_memtable", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2501,8 +2500,7 @@ mod tests {
     #[tokio::test]
     async fn test_scan_prefix_by_recency_no_match_returns_none() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_no_match", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2522,8 +2520,7 @@ mod tests {
         // No dedup: a key present in both memtable (newer) and L0 (older)
         // appears twice, newer first.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_no_dedup", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2556,8 +2553,7 @@ mod tests {
         // Tombstones are surfaced as raw entries; the caller decides what
         // they mean.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_tombstones", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2596,8 +2592,7 @@ mod tests {
     #[tokio::test]
     async fn test_scan_prefix_by_recency_walks_memtable_then_l0() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_multi_source", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2643,8 +2638,7 @@ mod tests {
         // store (it shouldn't even open an L0/SR iterator).
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_no_main_gets", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .with_metrics_recorder(metrics_recorder.clone())
             .build()
@@ -2692,8 +2686,7 @@ mod tests {
         // durability, only L0/SR-resident entries should be visible. The
         // not-yet-flushed memtable write is filtered out by max_seq.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_remote_durability", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2739,12 +2732,11 @@ mod tests {
     #[tokio::test]
     async fn test_scan_prefix_by_recency_walks_memtable_then_compacted_run() {
         // Walks memtable -> L0 -> compacted sorted run, verifying that the
-        // sorted-run lazy source is constructed and drained correctly when
-        // the recency walk reaches it. Same-key versions surface from each
+        // sorted-run path is constructed and drained correctly when the
+        // recency walk reaches it. Same-key versions surface from each
         // source in newest-first order with no dedup.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().to_str().unwrap();
+        let path = "/tmp/test_recency_compacted";
         let should_compact = Arc::new(AtomicBool::new(false));
         let should_compact_clone = should_compact.clone();
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
@@ -2824,8 +2816,7 @@ mod tests {
         use std::collections::VecDeque;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+        let db = Db::builder("/tmp/test_recency_multi_segment", object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
