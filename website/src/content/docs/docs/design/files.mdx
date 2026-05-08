@@ -2,7 +2,7 @@
 title: Files
 ---
 
-A SlateDB object store bucket contains four main directories:
+A SlateDB object store bucket contains five main directories:
 
 ```
 path/to/db/
@@ -18,9 +18,13 @@ path/to/db/
 │  ├─ 00000000000000000001.compactions
 │  ├─ 00000000000000000002.compactions
 │  └─ ...
-└─ compacted/
-   ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst
-   ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
+├─ compacted/
+│  ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst
+│  ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
+│  └─ ...
+└─ gc/
+   ├─ manifest.boundary
+   ├─ compactions.boundary
    └─ ...
 ```
 
@@ -58,3 +62,14 @@ See [RFC-0013](/rfcs/0013-compaction-state-persistence) for details on the compa
 `.sst` files in the `wal` and `compacted` directory share the same file format. Files in the `wal` directory are named `<wal_id>.sst`. `<wal_id>` is a zero-padded, 20 digit unsigned integer. Files in the `compacted` directory are named `<ulid>.sst`, where `<ulid>` is a [ULID](https://github.com/ulid/spec).
 
 The `compacted` directory contains both L0 (non-partitioned) SSTables and SRs (partitioned SSTables). As the compactor runs, it will drop compacted SSTables from the manifest. Such files will be left in the `compacted` directory until the [garbage collector](/docs/design/gc) runs.
+
+## Boundary
+
+The `gc` directory contains boundary files that act as durable high-watermarks to fence stale writes after garbage collection runs. Boundary files are named `<prefix>.boundary` and store ASCII-encoded monotonic IDs:
+
+- `manifest.boundary` - Tracks the GC boundary for manifest files
+- `compactions.boundary` - Tracks the GC boundary for compactions files
+
+Each boundary file contains a single integer value representing the highest ID that has been durably fenced. When the garbage collector runs, it updates the boundary based on the `min_age` setting. Any attempt to write a sequenced file (manifest or compactions) with an ID at or below the boundary will be rejected, preventing data loss from stale writes.
+
+Boundary files use conditional PUT operations with ETags to safely handle concurrent updates. After each successful write to manifest or compactions storage, the corresponding boundary is checked to ensure the new ID is greater than the current boundary value.
