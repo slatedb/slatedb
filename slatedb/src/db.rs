@@ -1164,20 +1164,25 @@ impl Db {
     /// willing to interpret raw entries.
     ///
     /// Sources are walked in this order: active memtable, immutable
-    /// memtables, then for each segment matching the prefix range, that
-    /// segment's L0 SSTs newest-first followed by its sorted runs
-    /// newest-first. Within a segment the walk is recency-ordered; across
-    /// segments the order follows `select_segments`, so "newest-first" is
-    /// per-segment, not global. Each source is fully drained before moving
-    /// to the next. Sources are lazily initialized: the filter check, index
-    /// load, and first data block fetch only happen when the recency walk
-    /// reaches that source.
+    /// memtables, then within the single matching segment that segment's
+    /// L0 SSTs newest-first followed by its sorted runs newest-first. Each
+    /// source is fully drained before moving to the next. Sources are
+    /// lazily initialized: the filter check, index load, and first data
+    /// block fetch only happen when the recency walk reaches that source.
     /// A prefix read whose data lives in the active memtable therefore
     /// performs zero I/O. When the walk does have to descend to SST
     /// sources, configuring prefix bloom filters lets the scan skip
     /// non-matching SSTs without a data-block fetch, which keeps I/O
     /// proportional to how recent the data is rather than to the size of
     /// the LSM.
+    ///
+    /// **Multi-segment prefixes are rejected.** If the prefix overlaps
+    /// more than one segment, this returns an error with
+    /// [`crate::ErrorKind::Invalid`]. The recency guarantee is only
+    /// well-defined within a single segment: walking one segment's oldest
+    /// data before touching another segment's newest data would violate
+    /// freshest-first ordering. Callers that need cross-segment scans
+    /// should use [`Self::scan_prefix`] instead.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan

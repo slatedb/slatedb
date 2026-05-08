@@ -82,6 +82,9 @@ pub(crate) enum SlateDBError {
     #[error("segment prefix {prefix:?} would nest with existing segment {conflict:?}")]
     InvalidSegmentPrefix { prefix: Bytes, conflict: Bytes },
 
+    #[error("recency scan prefix spans multiple segments, which is unsupported")]
+    RecencyScanPrefixSpansMultipleSegments,
+
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
 
@@ -549,6 +552,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
             SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
+            SlateDBError::RecencyScanPrefixSpansMultipleSegments => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),

@@ -323,14 +323,14 @@ impl Reader {
     /// Builds a flat chain of per-source iterators newest-first so the
     /// outer [`RecencyIterator`] can drain them in order, lazily
     /// initializing each source only when the recency walk reaches it.
-    /// Order: active memtable, immutable memtables, then for each
-    /// segment selected by the prefix range (in range order, per the
-    /// segment antichain invariant) the segment's L0 SSTs newest-first
-    /// followed by its sorted runs newest-first. Within a segment this
-    /// gives the usual newest-first guarantee; across segments the
-    /// chain is range-ordered, but since segments partition the
-    /// keyspace each key only lives in one segment, so the per-key
-    /// "freshest version" guarantee still holds.
+    /// Order: active memtable, immutable memtables, then within the single
+    /// matching segment the segment's L0 SSTs newest-first followed by its
+    /// sorted runs newest-first. Each source is fully drained before moving
+    /// to the next.
+    ///
+    /// Returns [`SlateDBError::RecencyScanPrefixSpansMultipleSegments`] if
+    /// the prefix overlaps more than one segment, since the recency
+    /// guarantee is only well-defined within a single segment.
     pub(crate) async fn scan_prefix_by_recency(
         &self,
         prefix: Bytes,
@@ -355,6 +355,17 @@ impl Reader {
             filter_context: options.filter_context.clone(),
         };
 
+        // Cross-segment recency is not well-defined: walking segment A's
+        // oldest sorted run before touching segment B's freshest data
+        // breaks the freshest-first contract callers expect.
+        // `select_segments` always returns at least one entry (the default
+        // unsegmented tree when no segments are configured).
+        let mut segments = db_state.core().select_segments(&range);
+        if segments.len() > 1 {
+            return Err(SlateDBError::RecencyScanPrefixSpansMultipleSegments);
+        }
+        let segment = segments.pop();
+
         let mut all_iters: Vec<Box<dyn RowEntryIterator + 'static>> = Vec::new();
 
         // Memtables drain first (newest data, always in memory).
@@ -371,11 +382,11 @@ impl Reader {
             ));
         }
 
-        // Per-segment lazy chain: L0 newest-first, then sorted runs newest-first.
+        // Single-segment chain: L0 newest-first, then sorted runs newest-first.
         // SST and SortedRun iterators are constructed without `init`, so the
         // filter check / index load / first-block fetch only happens when the
         // recency walk reaches the source.
-        for segment in db_state.core().select_segments(&range) {
+        if let Some(segment) = segment {
             for sst in segment.tree.l0.iter().cloned() {
                 let iter = SstIterator::new_owned_with_stats(
                     range.clone(),
