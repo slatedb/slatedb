@@ -1,10 +1,10 @@
 use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
-use crate::config::{DurabilityLevel, ReadOptions, RecencyScanOptions, ScanOptions};
+use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_iter::{apply_filters, RecencyIterator};
 use crate::db_stats::DbStats;
-use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::iter::RowEntryIterator;
 use crate::manifest::ManifestCore;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
@@ -323,10 +323,11 @@ impl Reader {
     /// Builds a flat chain of per-source iterators newest-first so the
     /// outer [`RecencyIterator`] can drain them in order, lazily
     /// initializing each source only when the recency walk reaches it.
-    /// Order: active memtable, immutable memtables, then within the single
-    /// matching segment the segment's L0 SSTs newest-first followed by its
-    /// sorted runs newest-first. Each source is fully drained before moving
-    /// to the next.
+    /// Cross-source order is always newest-first (active memtable, immutable
+    /// memtables, then within the single matching segment that segment's L0
+    /// SSTs newest-first followed by its sorted runs newest-first).
+    /// `options.order` controls iteration order *within* each source. Each
+    /// source is fully drained before moving to the next.
     ///
     /// Returns [`SlateDBError::RecencyScanPrefixSpansMultipleSegments`] if
     /// the prefix overlaps more than one segment, since the recency
@@ -334,7 +335,7 @@ impl Reader {
     pub(crate) async fn scan_prefix_by_recency(
         &self,
         prefix: Bytes,
-        options: &RecencyScanOptions,
+        options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
     ) -> Result<RecencyIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
@@ -350,7 +351,7 @@ impl Reader {
             // proactively fetch blocks for sources the caller may never reach,
             // defeating the early-stop savings.
             eager_spawn: false,
-            order: IterationOrder::Ascending,
+            order: options.order,
             prefix: Some(prefix),
             filter_context: options.filter_context.clone(),
         };

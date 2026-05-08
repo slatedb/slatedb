@@ -22,7 +22,7 @@ use object_store::memory::InMemory;
 use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{
-    DurabilityLevel, FlushOptions, FlushType, PutOptions, RecencyScanOptions, ScanOptions,
+    DurabilityLevel, FlushOptions, FlushType, PutOptions, ScanOptions,
     Settings, WriteOptions,
 };
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
@@ -128,11 +128,11 @@ fn scan_options() -> ScanOptions {
     }
 }
 
-fn recency_scan_options() -> RecencyScanOptions {
-    RecencyScanOptions {
+fn recency_scan_options() -> ScanOptions {
+    ScanOptions {
         cache_blocks: false,
         durability_filter: DurabilityLevel::Remote,
-        ..RecencyScanOptions::default()
+        ..ScanOptions::default()
     }
 }
 

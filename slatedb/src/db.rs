@@ -48,8 +48,8 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
-    FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, RecencyScanOptions,
-    ScanOptions, Settings, WriteOptions,
+    FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
+    WriteOptions,
 };
 use crate::db_iter::{DbIterator, RecencyIterator};
 use crate::db_snapshot::DbSnapshot;
@@ -285,7 +285,7 @@ impl DbInner {
     pub(crate) async fn scan_prefix_by_recency(
         &self,
         prefix: Bytes,
-        options: &RecencyScanOptions,
+        options: &ScanOptions,
     ) -> Result<RecencyIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
@@ -1196,10 +1196,15 @@ impl Db {
     ///
     /// ## Examples
     ///
-    /// Pull just the freshest write for a prefix and stop. Because
-    /// sources are walked newest-first and lazily initialized, an
-    /// early-return like this only touches the source that actually
-    /// holds the latest entry.
+    /// Pull entries from the freshest source under the prefix and stop.
+    /// Because sources are walked newest-first and lazily initialized, an
+    /// early-return like this only touches the source that holds the
+    /// freshest data. Note that *within* a source the order is set by
+    /// `options.order` (ascending by default), so the first yielded entry
+    /// is the smallest key in the freshest source, not necessarily the
+    /// most recently written key. Across sources the same key may appear
+    /// more than once, so callers that want only the freshest value per
+    /// key should dedupe.
     ///
     /// ```
     /// use slatedb::{Db, Error};
@@ -1217,9 +1222,11 @@ impl Db {
     ///
     ///     let mut iter = db.scan_prefix_by_recency(b"user:").await?;
     ///     let entry = iter.next_entry().await?.unwrap();
-    ///     // The most-recently-written entry under the prefix is yielded first.
-    ///     // Note that across sources the same key may appear more than once,
-    ///     // so callers that want only the freshest value per key should dedupe.
+    ///     // All three writes live in the active memtable (the freshest
+    ///     // source). With ascending within-source order, "user:42" comes
+    ///     // out first because it sorts before "user:99". Its value is
+    ///     // the latest write to that key ("alice2"), since the memtable
+    ///     // collapses multiple writes to the same key.
     ///     assert_eq!(entry.key.as_ref(), b"user:42");
     ///     match entry.value {
     ///         ValueDeletable::Value(v) => assert_eq!(v.as_ref(), b"alice2"),
@@ -1235,7 +1242,7 @@ impl Db {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_prefix_by_recency_with_options(prefix, &RecencyScanOptions::default())
+        self.scan_prefix_by_recency_with_options(prefix, &ScanOptions::default())
             .await
     }
 
@@ -1243,11 +1250,7 @@ impl Db {
     ///
     /// Same contract as [`Self::scan_prefix_by_recency`] (raw entries
     /// emitted newest-source-first; caller handles dedupe, tombstones, and
-    /// merge operands). The `options` argument lets you tune the scan, for
-    /// example disabling block-cache pollution for one-shot scans or
-    /// passing a `filter_context` that participates in prefix bloom-filter
-    /// evaluation so the recency walk skips SSTs whose filters reject the
-    /// prefix.
+    /// merge operands).
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
@@ -1260,14 +1263,15 @@ impl Db {
     /// ## Examples
     ///
     /// Use `cache_blocks: false` to scan recent data without polluting
-    /// the block cache, and stop after the first match. Combined with the
-    /// recency ordering this is a cheap way to ask "is there a recent
-    /// entry under this prefix?" without warming the cache for cold
-    /// blocks the answer doesn't depend on.
+    /// the block cache, and stop after pulling enough entries from the
+    /// freshest source. Combined with the recency walk's early-stop, this
+    /// is a cheap way to ask "is there a recent entry under this prefix?"
+    /// without warming the cache for cold blocks the answer doesn't depend
+    /// on.
     ///
     /// ```
     /// use slatedb::{Db, Error};
-    /// use slatedb::config::RecencyScanOptions;
+    /// use slatedb::config::ScanOptions;
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1275,26 +1279,29 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"event:001", b"old").await?;
-    ///     db.put(b"event:002", b"new").await?;
+    ///     db.put(b"event:001", b"a").await?;
+    ///     db.put(b"event:002", b"b").await?;
     ///
-    ///     let options = RecencyScanOptions {
+    ///     let options = ScanOptions {
     ///         cache_blocks: false,
-    ///         ..RecencyScanOptions::default()
+    ///         ..ScanOptions::default()
     ///     };
     ///     let mut iter = db
     ///         .scan_prefix_by_recency_with_options(b"event:", &options)
     ///         .await?;
     ///     let first = iter.next_entry().await?.unwrap();
-    ///     assert!(first.key.starts_with(b"event:"));
-    ///     // Stop here: we only needed the freshest match.
+    ///     // Within-source order is ascending by default, so "event:001"
+    ///     // is yielded before "event:002" even though both live in the
+    ///     // same (freshest) source. Stop here: we only needed to see
+    ///     // that something fresh exists under the prefix.
+    ///     assert_eq!(first.key.as_ref(), b"event:001");
     ///     Ok(())
     /// }
     /// ```
     pub async fn scan_prefix_by_recency_with_options<P>(
         &self,
         prefix: P,
-        options: &RecencyScanOptions,
+        options: &ScanOptions,
     ) -> Result<RecencyIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
@@ -2021,8 +2028,8 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
-        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, RecencyScanOptions, Settings,
-        Ttl, WriteOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, Ttl,
+        WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
@@ -2704,9 +2711,9 @@ mod tests {
         .await
         .unwrap();
 
-        let opts = RecencyScanOptions {
+        let opts = ScanOptions {
             durability_filter: Remote,
-            ..RecencyScanOptions::default()
+            ..ScanOptions::default()
         };
         let mut iter = db
             .scan_prefix_by_recency_with_options(b"px:", &opts)
