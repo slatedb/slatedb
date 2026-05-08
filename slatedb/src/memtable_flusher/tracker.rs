@@ -256,23 +256,27 @@ impl FlushTracker {
 
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         loop {
-            // Peek the next pending imm without changing its state, so
-            // we can run the per-segment dispatch check before
-            // committing. If it can't dispatch, leave it pending.
-            let Some(imm) = self
+            // Find the next pending imm whose touched segments all
+            // have room. Skip blocked imms rather than stalling — the
+            // manifest writer commits in seqno order regardless of
+            // upload dispatch order, so an unrelated later imm can
+            // make progress while an older one waits on its
+            // saturated segment.
+            let next_idx = self
                 .frontier
-                .peek_next_pending()
-                .map(|t| Arc::clone(&t.imm_memtable))
-            else {
+                .tracked
+                .iter()
+                .enumerate()
+                .find(|(_, t)| {
+                    matches!(t.state, TrackedImmState::PendingDispatch)
+                        && self.can_dispatch(&t.imm_memtable)
+                })
+                .map(|(idx, _)| idx);
+            let Some(idx) = next_idx else {
                 return Ok(());
             };
-            if !self.can_dispatch(&imm) {
-                return Ok(());
-            }
-            let tracked = self
-                .frontier
-                .prepare_next_upload()
-                .expect("just peeked a pending entry");
+            self.frontier.tracked[idx].state = TrackedImmState::Uploading;
+            let tracked = &self.frontier.tracked[idx];
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
             let last_seq = tracked.last_seq;
             debug!(
@@ -405,16 +409,8 @@ impl TrackedImmFrontier {
             .count()
     }
 
-    /// Peek the next `PendingDispatch` entry without changing its
-    /// state. Used to drive the per-segment dispatch check before
-    /// committing the imm to the `Uploading` transition.
-    fn peek_next_pending(&self) -> Option<&TrackedImm> {
-        self.tracked
-            .iter()
-            .find(|t| matches!(t.state, TrackedImmState::PendingDispatch))
-    }
-
     /// Transition the next `PendingDispatch` entry to `Uploading` and return it.
+    #[cfg(test)]
     fn prepare_next_upload(&mut self) -> Option<&TrackedImm> {
         let index = self
             .tracked

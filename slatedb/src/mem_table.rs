@@ -334,6 +334,12 @@ impl ImmutableMemtable {
                 new_table.put(entry);
             }
         }
+        // Preserve the touched-segment set on the filtered table:
+        // filtering by seq can remove rows but never changes which
+        // segment prefixes the imm's surviving keys could route to,
+        // and the build path requires `KVTable` non-empty ⇒
+        // `touched_segments` populated.
+        new_table.record_touched_segments(self.table.touched_segments());
         Self::new(new_table, self.recent_flushed_wal_id)
     }
 }
