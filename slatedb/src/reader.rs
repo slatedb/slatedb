@@ -362,7 +362,9 @@ impl Reader {
         ));
         for memtable in db_state.imm_memtable() {
             all_iters.push(Box::new(
-                memtable.table().range(range.clone(), sst_iter_options.order),
+                memtable
+                    .table()
+                    .range(range.clone(), sst_iter_options.order),
             ));
         }
 
