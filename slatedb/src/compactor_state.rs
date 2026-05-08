@@ -2,6 +2,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
+use bytes::Bytes;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -67,10 +68,18 @@ impl SourceId {
     }
 }
 
-/// Immutable spec that describes a compaction. Currently, this only holds the
-/// input sources and destination SR id for a compaction.
+/// Immutable spec that describes a compaction. Holds the target segment, the
+/// input sources, and the destination SR id for a compaction.
+///
+/// Every spec names exactly one segment (see RFC 24): an empty `segment`
+/// targets the compatibility-encoded `prefix=""` segment (i.e. the root tree),
+/// and a non-empty `segment` targets the named segment with that prefix. All
+/// `sources` for a single spec must come from the named segment's tree;
+/// mixing trees is invalid.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompactionSpec {
+    /// Target segment prefix. Empty `Bytes` targets the `prefix=""` segment.
+    segment: Bytes,
     /// Input sources for the compaction.
     sources: Vec<SourceId>,
     /// Destination sorted run id for the compaction.
@@ -78,16 +87,37 @@ pub struct CompactionSpec {
 }
 
 impl CompactionSpec {
-    /// Creates a new compaction spec describing which sources to compact and the destination SR id.
+    /// Creates a new compaction spec targeting the compatibility-encoded
+    /// `prefix=""` segment (the root tree). For specs that target a named
+    /// segment, use [`CompactionSpec::for_segment`].
     ///
     /// ## Arguments
     /// - `sources`: Ordered list of sources (L0 SST ULIDs and/or existing SR ids).
     /// - `destination`: Sorted Run id for the compaction output.
     pub fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+        Self::for_segment(Bytes::new(), sources, destination)
+    }
+
+    /// Creates a new compaction spec targeting the named segment with the
+    /// given prefix. An empty `segment` is equivalent to [`CompactionSpec::new`]
+    /// and targets the compatibility-encoded `prefix=""` segment.
+    ///
+    /// ## Arguments
+    /// - `segment`: Target segment prefix.
+    /// - `sources`: Ordered list of sources (L0 SST ULIDs and/or existing SR ids).
+    /// - `destination`: Sorted Run id for the compaction output.
+    pub fn for_segment(segment: Bytes, sources: Vec<SourceId>, destination: u32) -> Self {
         Self {
+            segment,
             sources,
             destination,
         }
+    }
+
+    /// The target segment prefix. Empty bytes mean the compatibility-encoded
+    /// `prefix=""` segment (the root tree).
+    pub fn segment(&self) -> &Bytes {
+        &self.segment
     }
 
     /// The sources (input SSTs and sorted runs) for this compaction.
@@ -119,7 +149,17 @@ impl Display for CompactionSpec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let displayed_sources: Vec<String> =
             self.sources().iter().map(|s| format!("{}", s)).collect();
-        write!(f, "{:?} -> SR({})", displayed_sources, self.destination())
+        if self.segment.is_empty() {
+            write!(f, "{:?} -> SR({})", displayed_sources, self.destination())
+        } else {
+            write!(
+                f,
+                "[seg={}] {:?} -> SR({})",
+                String::from_utf8_lossy(&self.segment),
+                displayed_sources,
+                self.destination()
+            )
+        }
     }
 }
 
@@ -200,17 +240,18 @@ impl Compaction {
         self
     }
 
-    /// Returns all sorted run sources for this compaction.
+    /// Returns all sorted run sources for this compaction. Sources are looked
+    /// up from the spec's target segment tree (root tree for an empty
+    /// segment).
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_sorted_runs(&self, db_state: &ManifestCore) -> Vec<SortedRun> {
-        let srs_by_id: HashMap<u32, &SortedRun> = db_state
-            .tree
-            .compacted
-            .iter()
-            .map(|sr| (sr.id, sr))
-            .collect();
+        let Some(tree) = db_state.tree_for_segment(self.spec.segment()) else {
+            return Vec::new();
+        };
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            tree.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
         self.spec
             .sources()
@@ -220,17 +261,18 @@ impl Compaction {
             .collect()
     }
 
-    /// Returns all L0 SSTable sources for this compaction.
+    /// Returns all L0 SSTable sources for this compaction. Sources are looked
+    /// up from the spec's target segment tree (root tree for an empty
+    /// segment).
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_l0_sst_views(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
-        let sst_views_by_id: HashMap<Ulid, &SsTableView> = db_state
-            .tree
-            .l0
-            .iter()
-            .map(|view| (view.id, view))
-            .collect();
+        let Some(tree) = db_state.tree_for_segment(self.spec.segment()) else {
+            return Vec::new();
+        };
+        let sst_views_by_id: HashMap<Ulid, &SsTableView> =
+            tree.l0.iter().map(|view| (view.id, view)).collect();
 
         self.spec
             .sources()
@@ -606,10 +648,14 @@ impl CompactorState {
     /// Validates and registers a newly submitted compaction with this compactor.
     ///
     /// ## Returns
-    /// - `Ok(())` if accepted, or [`SlateDBError::InvalidCompaction`] if the compaction conflicts
-    ///   with an existing destination or violates destination overwrite rules.
+    /// - `Ok(())` if accepted, or [`SlateDBError::InvalidCompaction`] if the compaction targets a
+    ///   segment that does not exist, conflicts with an existing destination, or violates
+    ///   destination overwrite rules.
     pub(crate) fn add_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let spec = compaction.spec();
+        // SR ids are globally unique across all segment trees (RFC-0024), so
+        // collisions are checked across every active compaction regardless of
+        // target segment.
         if self
             .compactions
             .value
@@ -620,11 +666,26 @@ impl CompactorState {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
         }
+        let Some(tree) = self.db_state().tree_for_segment(spec.segment()) else {
+            // spec targets a named segment that does not exist
+            return Err(SlateDBError::InvalidCompaction);
+        };
+        // RFC-0024: a compaction operates within a single segment. Every
+        // source must belong to the target segment's tree — sources from
+        // another tree make the spec ill-defined.
+        if !spec.sources().iter().all(|src| match src {
+            SourceId::SortedRun(id) => tree.compacted.iter().any(|sr| sr.id == *id),
+            SourceId::SstView(view_id) => tree.l0.iter().any(|v| v.id == *view_id),
+        }) {
+            return Err(SlateDBError::InvalidCompaction);
+        }
+        // SR ids are globally unique across all segment trees (RFC-0024), so
+        // an existing SR with the same id anywhere in the manifest blocks the
+        // spec unless that SR is among its sources.
         if self
             .db_state()
-            .tree
-            .compacted
-            .iter()
+            .trees()
+            .flat_map(|t| t.compacted.iter())
             .any(|sr| sr.id == spec.destination())
             && !spec.sources().iter().any(|src| match src {
                 SourceId::SortedRun(sr) => *sr == spec.destination(),
@@ -663,14 +724,16 @@ impl CompactorState {
 
     /// Applies the effects of a finished compaction to the in-memory manifest.
     ///
-    /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
-    /// order, updates `l0_last_compacted`, and marks the compaction finished (retaining the most
+    /// This removes compacted L0 SSTs and source SRs from the spec's target segment tree
+    /// (root tree for an empty segment), inserts the output SR in id-descending order,
+    /// updates `last_compacted_l0_*`, and marks the compaction finished (retaining the most
     /// recent finished compaction for GC; see #1044).
     pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
         let mut db_state = self.db_state().clone();
         if let Some(compaction) = self.compactions.value.get_mut(&compaction_id) {
             let spec = compaction.spec();
             info!("finished compaction [spec={}]", spec);
+            let segment = spec.segment().clone();
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = spec
                 .sources()
@@ -683,8 +746,26 @@ impl CompactorState {
                 .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
-            let new_l0: VecDeque<SsTableView> = db_state
-                .tree
+            let first_source = *spec
+                .sources()
+                .first()
+                .expect("illegal: empty compaction spec");
+
+            let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
+                error!(
+                    "finish_compaction: target segment missing [segment={:?}, compaction_id={}]",
+                    segment, compaction_id
+                );
+                // Segment was dropped between submission and finish; the
+                // output is discarded. Mark the compaction terminal so it
+                // doesn't linger as Active.
+                self.update_compaction(&compaction_id, |c| {
+                    c.set_status(CompactionStatus::Failed);
+                });
+                return;
+            };
+
+            let new_l0: VecDeque<SsTableView> = tree
                 .l0
                 .iter()
                 .filter(|l0| !compaction_l0s.contains(&l0.id))
@@ -692,7 +773,7 @@ impl CompactorState {
                 .collect();
             let mut new_compacted = Vec::new();
             let mut inserted = false;
-            for compacted in db_state.tree.compacted.iter() {
+            for compacted in tree.compacted.iter() {
                 if !inserted && output_sr.id >= compacted.id {
                     new_compacted.push(output_sr.clone());
                     inserted = true;
@@ -705,24 +786,19 @@ impl CompactorState {
                 new_compacted.push(output_sr);
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            let first_source = spec
-                .sources()
-                .first()
-                .expect("illegal: empty compaction spec");
             if let Some(view_id) = first_source.maybe_unwrap_sst_view() {
                 // if there are l0s, the newest must be the first entry in sources.
                 // TODO: validate that this is the case
-                db_state.tree.last_compacted_l0_sst_view_id = Some(view_id);
+                tree.last_compacted_l0_sst_view_id = Some(view_id);
                 // Resolve the SST ID from the view before it's removed from l0.
-                db_state.tree.last_compacted_l0_sst_id = db_state
-                    .tree
+                tree.last_compacted_l0_sst_id = tree
                     .l0
                     .iter()
                     .find(|v| v.id == view_id)
                     .map(|v| v.sst.id.unwrap_compacted_id());
             }
-            db_state.tree.l0 = new_l0;
-            db_state.tree.compacted = new_compacted;
+            tree.l0 = new_l0;
+            tree.compacted = new_compacted;
             self.manifest.value.core = db_state;
             self.manifest.value.prune_external_sst_ids();
             self.update_compaction(&compaction_id, |c| {
@@ -1502,6 +1578,253 @@ mod tests {
     fn build_l0_compaction(ssts: &VecDeque<SsTableView>, dst: u32) -> CompactionSpec {
         let sources = ssts.iter().map(|h| SourceId::SstView(h.id)).collect();
         CompactionSpec::new(sources, dst)
+    }
+
+    /// Verifies that `finish_compaction` applies its effects to the spec's
+    /// target segment (RFC-0024) and not the root tree. Constructs a manifest
+    /// with a single named segment whose `compacted` list holds two SRs,
+    /// commits a compaction that merges them into a new SR within that
+    /// segment, and asserts the segment's tree is updated while the root
+    /// tree is untouched.
+    #[test]
+    fn test_finish_compaction_routes_to_target_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Add a named segment with two compacted SRs (ids 5 and 3, list-position
+        // ordered newest-first as per ManifestCore conventions).
+        let prefix = Bytes::from_static(b"hour=12/");
+        let sr5 = SortedRun {
+            id: 5,
+            sst_views: Vec::new(),
+        };
+        let sr3 = SortedRun {
+            id: 3,
+            sst_views: Vec::new(),
+        };
+        let segment = Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![sr5.clone(), sr3.clone()],
+            },
+        };
+        state.manifest.value.core.segments = vec![segment];
+        let root_compacted_before = state.db_state().tree.compacted.clone();
+
+        // Submit a compaction that targets the segment, merging SR(5) and SR(3)
+        // into SR(7).
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(
+            prefix.clone(),
+            vec![SourceId::SortedRun(5), SourceId::SortedRun(3)],
+            7,
+        );
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // Finish the compaction with a fresh output SR.
+        let output = SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        };
+        state.finish_compaction(compaction_id, output);
+
+        // The segment's compacted list now holds only the new SR(7).
+        let seg = state
+            .db_state()
+            .tree_for_segment(&prefix)
+            .expect("segment missing");
+        assert_eq!(seg.compacted.len(), 1);
+        assert_eq!(seg.compacted[0].id, 7);
+
+        // The root tree is unchanged — no leakage from the segment compaction.
+        assert_eq!(state.db_state().tree.compacted, root_compacted_before);
+    }
+
+    /// `add_compaction` rejects a spec whose target segment is not present in
+    /// the manifest. The empty-prefix segment (root tree) always exists, so
+    /// only non-empty prefixes can fail this lookup.
+    #[test]
+    fn test_add_compaction_rejects_unknown_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let prefix = Bytes::from_static(b"missing/");
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(0)], 0);
+
+        let result = state.add_compaction(Compaction::new(compaction_id, spec));
+
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    /// SR ids are globally unique across all trees (RFC-0024), so a
+    /// segment-targeted spec must be rejected if its destination already
+    /// exists as an SR anywhere in the manifest — including the root tree.
+    #[test]
+    fn test_add_compaction_destination_overwrite_check_is_global() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Place SR(7) in the root tree. The segment-targeted spec below uses
+        // 7 as its destination but does not list it among its sources.
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        }];
+
+        // Seed SR(99) into the segment so the source-isolation check passes
+        // and destination-overwrite is the rejection reason.
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 99,
+                    sst_views: Vec::new(),
+                }],
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
+
+        let err = state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect_err("segment spec must be rejected when destination collides in another tree");
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// RFC-0024: a compaction must operate within a single segment. A spec
+    /// whose sources reference a sorted run that lives in a different tree
+    /// is rejected.
+    #[test]
+    fn test_add_compaction_rejects_sources_from_other_segment() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // SR(99) lives in the root tree; the segment "seg/" is empty.
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 99,
+            sst_views: Vec::new(),
+        }];
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: Vec::new(),
+            },
+        }];
+
+        // Segment-targeted spec lists SR(99) as a source — but SR(99) lives
+        // in the root tree, not in "seg/". Must be rejected.
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 0);
+        let err = state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect_err("spec must be rejected when sources are from another segment");
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// SR ids are globally unique across all trees (RFC-0024), so the
+    /// active-conflict check rejects a duplicate destination regardless of
+    /// which segment each spec targets.
+    #[test]
+    fn test_add_compaction_active_conflict_check_is_global() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Seed real sources so the source-isolation check passes for both
+        // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
+        state.manifest.value.core.tree.compacted = vec![SortedRun {
+            id: 99,
+            sst_views: Vec::new(),
+        }];
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 100,
+                    sst_views: Vec::new(),
+                }],
+            },
+        }];
+
+        let root_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let root_spec = CompactionSpec::new(vec![SourceId::SortedRun(99)], 7);
+        state
+            .add_compaction(Compaction::new(root_id, root_spec))
+            .expect("root-tree compaction must register");
+
+        let seg_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let seg_spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(100)], 7);
+        let err = state
+            .add_compaction(Compaction::new(seg_id, seg_spec))
+            .expect_err(
+                "segment spec must be rejected when an active root-tree compaction shares the destination",
+            );
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// If the target segment is dropped between submission and finish, the
+    /// compaction must be marked terminal so it doesn't linger as Active.
+    #[test]
+    fn test_finish_compaction_marks_failed_when_segment_missing() {
+        let rt = build_runtime();
+        let (_os, _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        // Seed SR(7) in the segment so the spec's source SR(7) passes
+        // source-isolation; the spec rewrites that SR (destination=7).
+        let prefix = Bytes::from_static(b"seg/");
+        state.manifest.value.core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 7,
+                    sst_views: Vec::new(),
+                }],
+            },
+        }];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::for_segment(prefix.clone(), vec![SourceId::SortedRun(7)], 7);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("submission must register");
+
+        // Segment dropped after submission, before finish.
+        state.manifest.value.core.segments = Vec::new();
+
+        let output = SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        };
+        state.finish_compaction(compaction_id, output);
+
+        let compaction = state
+            .compactions
+            .value
+            .get(&compaction_id)
+            .expect("compaction should still be tracked");
+        assert_eq!(compaction.status(), CompactionStatus::Failed);
+        assert_eq!(state.compactions.value.iter_active().count(), 0);
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
