@@ -12,10 +12,11 @@ use object_store::Error::AlreadyExists;
 use object_store::{
     Error, GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
+use parking_lot::Mutex;
 use std::collections::Bound;
 use std::collections::Bound::Unbounded;
 use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Implements `SequencedStorageProtocol<T>` on object storage.
 ///
@@ -78,23 +79,6 @@ struct BoundaryState {
     version: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct BoundaryCache {
-    seen: bool,
-    value: MonotonicId,
-    e_tag: Option<String>,
-}
-
-impl Default for BoundaryCache {
-    fn default() -> Self {
-        Self {
-            seen: false,
-            value: MonotonicId::new(0),
-            e_tag: None,
-        }
-    }
-}
-
 enum BoundaryRead {
     Found(BoundaryState),
     Missing,
@@ -108,7 +92,7 @@ enum BoundaryRead {
 pub struct ObjectStoreBoundaryObject {
     object_store: Arc<dyn ObjectStore>,
     path: Path,
-    cache: Mutex<BoundaryCache>,
+    cache: Mutex<Option<BoundaryState>>,
 }
 
 impl ObjectStoreBoundaryObject {
@@ -120,7 +104,7 @@ impl ObjectStoreBoundaryObject {
         Self {
             object_store,
             path: root_path.child("gc").child(boundary_file_name),
-            cache: Mutex::new(BoundaryCache::default()),
+            cache: Mutex::new(None),
         }
     }
 
@@ -140,35 +124,25 @@ impl ObjectStoreBoundaryObject {
     fn cached_if_none_match(&self) -> Option<String> {
         self.cache
             .lock()
-            .expect("boundary cache mutex poisoned")
-            .e_tag
-            .clone()
+            .as_ref()
+            .and_then(|state| state.e_tag.clone())
     }
 
     fn cached_value(&self) -> Result<MonotonicId, TransactionalObjectError> {
-        let cache = self.cache.lock().expect("boundary cache mutex poisoned");
-        if cache.seen {
-            Ok(cache.value)
-        } else {
-            Err(TransactionalObjectError::InvalidObjectState)
-        }
+        self.cache
+            .lock()
+            .as_ref()
+            .map(|state| state.value)
+            .ok_or_else(|| TransactionalObjectError::InvalidObjectState)
     }
 
-    fn update_cache(&self, state: &BoundaryState) {
-        let mut cache = self.cache.lock().expect("boundary cache mutex poisoned");
-        cache.seen = true;
-        cache.value = state.value;
-        cache.e_tag.clone_from(&state.e_tag);
+    fn update_cache(&self, state: BoundaryState) {
+        *self.cache.lock() = Some(state);
     }
 
     #[allow(clippy::panic)]
     fn handle_missing(&self) {
-        if self
-            .cache
-            .lock()
-            .expect("boundary cache mutex poisoned")
-            .seen
-        {
+        if self.cache.lock().is_some() {
             panic!("boundary object disappeared after it was observed");
         }
     }
@@ -213,7 +187,7 @@ impl ObjectStoreBoundaryObject {
             .await
         {
             Ok(result) => {
-                self.update_cache(&BoundaryState {
+                self.update_cache(BoundaryState {
                     value: boundary,
                     e_tag: result.e_tag,
                     version: result.version,
@@ -245,7 +219,7 @@ impl ObjectStoreBoundaryObject {
             .await
         {
             Ok(result) => {
-                self.update_cache(&BoundaryState {
+                self.update_cache(BoundaryState {
                     value: boundary,
                     e_tag: result.e_tag,
                     version: result.version,
@@ -264,7 +238,7 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
         let boundary = match self.read_boundary(self.cached_if_none_match()).await? {
             BoundaryRead::Found(state) => {
                 let value = state.value;
-                self.update_cache(&state);
+                self.update_cache(state);
                 value
             }
             BoundaryRead::Missing => MonotonicId::new(0),
@@ -281,7 +255,7 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
     async fn advance(&self, boundary: MonotonicId) -> Result<bool, TransactionalObjectError> {
         match self.read_boundary(None).await? {
             BoundaryRead::Found(current) => {
-                self.update_cache(&current);
+                self.update_cache(current.clone());
                 if boundary <= current.value {
                     Ok(true)
                 } else {
