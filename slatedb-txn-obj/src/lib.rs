@@ -585,10 +585,9 @@ pub trait BoundaryObject: Send + Sync {
 
     /// Advance the boundary to at least `boundary`.
     ///
-    /// Returns `Ok(true)` if the caller can rely on the durable boundary being greater than or
-    /// equal to `boundary` after this call. Returns `Ok(false)` if the update raced with another
-    /// boundary writer and the caller should skip the operation that depended on the advance.
-    async fn advance(&self, boundary: MonotonicId) -> Result<bool, TransactionalObjectError>;
+    /// Returns `Ok(())` only once the durable boundary is greater than or equal to `boundary`.
+    /// Implementations should retry conditional update races until this is true.
+    async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
 /// A `SequencedStorageProtocol` wrapper that fences stale writes using a [`BoundaryObject`].

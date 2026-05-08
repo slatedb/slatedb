@@ -76,9 +76,7 @@ impl GcTask for CompactionsGcTask {
             .max();
 
         if let Some(boundary) = boundary {
-            if !self.compactions_store.advance_boundary(boundary).await? {
-                return Ok(());
-            }
+            self.compactions_store.advance_boundary(boundary).await?;
         }
 
         // Remove the last element so we never delete the latest compactions file

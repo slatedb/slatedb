@@ -224,7 +224,7 @@ impl CompactionsStore {
         Self { inner, boundary }
     }
 
-    pub(crate) async fn advance_boundary(&self, boundary: u64) -> Result<bool, SlateDBError> {
+    pub(crate) async fn advance_boundary(&self, boundary: u64) -> Result<(), SlateDBError> {
         Ok(self.boundary.advance(MonotonicId::new(boundary)).await?)
     }
 

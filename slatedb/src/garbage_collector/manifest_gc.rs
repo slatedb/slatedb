@@ -55,9 +55,7 @@ impl GcTask for ManifestGcTask {
             .max();
 
         if let Some(boundary) = boundary {
-            if !self.manifest_store.advance_boundary(boundary).await? {
-                return Ok(());
-            }
+            self.manifest_store.advance_boundary(boundary).await?;
         }
 
         // Remove the last element so we never delete the latest manifest

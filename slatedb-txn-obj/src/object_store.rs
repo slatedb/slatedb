@@ -252,24 +252,24 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
         }
     }
 
-    async fn advance(&self, boundary: MonotonicId) -> Result<bool, TransactionalObjectError> {
-        match self.read_boundary(None).await? {
-            BoundaryRead::Found(current) => {
-                self.update_cache(current.clone());
-                if boundary <= current.value {
-                    Ok(true)
-                } else {
-                    self.update_boundary(current, boundary).await
+    async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
+        loop {
+            match self.read_boundary(None).await? {
+                BoundaryRead::Found(current) => {
+                    self.update_cache(current.clone());
+                    if boundary <= current.value || self.update_boundary(current, boundary).await? {
+                        return Ok(());
+                    }
+                }
+                BoundaryRead::Missing => {
+                    if boundary == 0 || self.create_boundary(boundary).await? {
+                        return Ok(());
+                    }
+                }
+                BoundaryRead::NotModified => {
+                    return Err(TransactionalObjectError::InvalidObjectState)
                 }
             }
-            BoundaryRead::Missing => {
-                if boundary == 0 {
-                    Ok(true)
-                } else {
-                    self.create_boundary(boundary).await
-                }
-            }
-            BoundaryRead::NotModified => Err(TransactionalObjectError::InvalidObjectState),
         }
     }
 }
@@ -402,13 +402,14 @@ mod tests {
         SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
         TransactionalObjectError, TransactionalStorageProtocol,
     };
+    use bytes::Bytes;
     use chrono::Utc;
     use futures::stream::{self, BoxStream};
     use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode,
         PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
     };
     use std::collections::Bound::{Excluded, Included, Unbounded};
@@ -603,6 +604,89 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RacingUpdateStore {
+        inner: InMemory,
+        update_races: AtomicUsize,
+    }
+
+    impl RacingUpdateStore {
+        fn new(inner: InMemory) -> Self {
+            Self {
+                inner,
+                update_races: AtomicUsize::new(0),
+            }
+        }
+
+        fn update_races(&self) -> usize {
+            self.update_races.load(Ordering::SeqCst)
+        }
+    }
+
+    impl fmt::Display for RacingUpdateStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "RacingUpdateStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for RacingUpdateStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> ObjectStoreResult<PutResult> {
+            if matches!(&opts.mode, PutMode::Update(_))
+                && self.update_races.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                self.inner
+                    .put(location, PutPayload::from_bytes(Bytes::from_static(b"2")))
+                    .await?;
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> ObjectStoreResult<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> ObjectStoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
     #[tokio::test]
     async fn test_boundary_missing_defaults_to_zero() {
         let object_store = Arc::new(InMemory::new());
@@ -624,7 +708,7 @@ mod tests {
         let boundary =
             ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store, "manifest.boundary");
 
-        assert!(boundary.advance(MonotonicId::new(2)).await.unwrap());
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
 
         let result = boundary.check(MonotonicId::new(2)).await;
         assert!(matches!(
@@ -632,6 +716,24 @@ mod tests {
             Err(TransactionalObjectError::ObjectVersionExists)
         ));
         boundary.check(MonotonicId::new(3)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_boundary_advance_retries_after_racing_lower_update() {
+        let racing = Arc::new(RacingUpdateStore::new(InMemory::new()));
+        let object_store: Arc<dyn ObjectStore> = racing.clone();
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store, "manifest.boundary");
+
+        boundary.advance(MonotonicId::new(1)).await.unwrap();
+        boundary.advance(MonotonicId::new(3)).await.unwrap();
+
+        assert_eq!(2, racing.update_races());
+        let result = boundary.check(MonotonicId::new(3)).await;
+        assert!(matches!(
+            result,
+            Err(TransactionalObjectError::ObjectVersionExists)
+        ));
     }
 
     #[tokio::test]
