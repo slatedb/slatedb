@@ -22,8 +22,7 @@ use object_store::memory::InMemory;
 use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{
-    DurabilityLevel, FlushOptions, FlushType, PutOptions, ScanOptions,
-    Settings, WriteOptions,
+    DurabilityLevel, FlushOptions, FlushType, PutOptions, ScanOptions, Settings, WriteOptions,
 };
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::SplitCache;
