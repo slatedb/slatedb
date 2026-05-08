@@ -421,6 +421,24 @@ impl ManifestCore {
         })
     }
 
+    /// Compare a configured WAL-store URI against the manifest's
+    /// persisted value. `ManifestV2` drops `wal_object_store_uri`
+    /// entirely (commit 52cead43, PR #1473) and always decodes it as
+    /// `None`, so the check is a no-op for V2 manifests; on `ManifestV1`
+    /// it enforces that the user did not silently swap a separate WAL
+    /// store on or off across opens.
+    pub(crate) fn validate_wal_object_store_uri(
+        &self,
+        configured: Option<&str>,
+    ) -> Result<(), SlateDBError> {
+        if let Some(persisted) = self.wal_object_store_uri.as_deref() {
+            if Some(persisted) != configured {
+                return Err(SlateDBError::WalStoreReconfigurationError);
+            }
+        }
+        Ok(())
+    }
+
     /// RFC-0024 open-time reconciliation. Compares the configured
     /// extractor against the manifest's persisted state and rejects any
     /// reconfiguration that could route data inconsistently.

@@ -493,11 +493,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
-        // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
-            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
-                return Err(SlateDBError::WalStoreReconfigurationError.into());
-            }
+            latest_manifest
+                .db_state()
+                .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
         }
 
         // RFC-0024: when the database already exists, the configured
@@ -1428,14 +1427,13 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             None => retrying_object_store,
         };
 
-        // Validate WAL object store configuration.
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let latest_manifest =
             StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
         if let Some(latest_manifest) = &latest_manifest {
-            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
-                return Err(SlateDBError::WalStoreReconfigurationError.into());
-            }
+            latest_manifest
+                .db_state()
+                .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
         }
 
         let store_provider = DefaultStoreProvider {

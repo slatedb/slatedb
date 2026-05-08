@@ -8753,6 +8753,36 @@ mod tests {
             .collect()
     }
 
+    /// RFC-0024: a DB created with both an extractor and a separate
+    /// WAL object store writes a V2 manifest, which intentionally
+    /// drops `wal_object_store_uri` (commit 52cead43). The reopen
+    /// path must skip the WAL-store reconfiguration check when the
+    /// persisted URI is absent, so a matching configuration on
+    /// reopen still succeeds.
+    #[tokio::test]
+    async fn test_open_with_extractor_and_wal_store_round_trips() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_open_extractor_with_wal_store";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_segment_extractor(extractor.clone())
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .with_wal_object_store(wal_object_store)
+            .build()
+            .await
+            .unwrap();
+        reopened.close().await.unwrap();
+    }
+
     /// End-to-end: write to multiple segments, flush, close, reopen,
     /// read every key back. The manifest carries one segment per
     /// touched prefix and survives the encode/decode cycle.
