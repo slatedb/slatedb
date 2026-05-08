@@ -254,6 +254,38 @@ Polls do not emit heartbeats. Liveness is driven entirely by compaction progress
 
 ### Manifest Commit Protocol
 
+**Existing protocol (single-process compaction)**
+
+Today the executor runs in-process and the compactor receives a `CompactionJobFinished` event on completion. The existing state transitions are:
+
+```
+Submitted <-> Running --> Completed
+    |             |
+    |             v
+    +----------> Failed
+```
+
+The compactor transitions the job to `Completed` after updating the manifest in memory, then flushes both in a single `write_state_safely()` call (`.manifest` first, then `.compactions`). If a crash occurs between the two writes, the job remains `Running` in `.compactions` on restart. Recovery resets it to `Submitted`; the next attempt fails `validate_compaction()` because the sources were already removed from the manifest, so the job is marked `Failed`. This is safe.
+
+**Why this breaks for remote workers**
+
+When the executor is a separate process, the coordinator never receives an in-process `CompactionJobFinished` signal. The worker must signal completion by writing to `.compactions`. The naive approach of having the worker write `Completed` directly, breaks the recovery invariant. On restart the coordinator cannot distinguish "completed before manifest write" from "completed after manifest write" without retrying the manifest write for every `Completed` entry, not just `Running` ones.
+
+**The `Compacted` state**
+
+This RFC introduces `Compacted` as an intermediate state with a precise semantic: *the worker finished execution and wrote its final output SSTs; the manifest may or may not have been updated yet.* It is the distributed equivalent of the in-process `CompactionJobFinished` signal.
+
+```
+Submitted <-> Running --> Compacted --> Completed
+    |             |           |
+    |             v           |
+    +----------> Failed <-----+
+```
+
+The coordinator is soley responsible for transitions from `Compacted → Completed` (or `Compacted → Failed`), and transitions the state only after attempting the manifest write. This preserves the single-writer invariant and gives recovery a clean, unambiguous signal: `Compacted` entries always need a manifest write retry; `Running` entries always need to be reset to `Submitted`.
+
+**New Protocol (distributed compaction)**
+
 Only the coordinator commits manifest updates (preserves single-writer invariant):
 
 1. Observe a `Compacted` entry in `.compactions` (written by the worker on job completion).
