@@ -282,7 +282,7 @@ Submitted <-> Running --> Compacted --> Completed
     +----------> Failed <-----+
 ```
 
-The coordinator is soley responsible for transitions from `Compacted → Completed` (or `Compacted → Failed`), and transitions the state only after attempting the manifest write. This preserves the single-writer invariant and gives recovery a clean, unambiguous signal: `Compacted` entries always need a manifest write retry; `Running` entries always need to be reset to `Submitted`.
+The coordinator is solely responsible for transitions from `Compacted → Completed` (or `Compacted → Failed`), and transitions the state only after attempting the manifest write. This preserves the single-writer invariant and gives recovery a clean, unambiguous signal: `Compacted` entries always need a manifest write retry; `Running` entries always need to be reset to `Submitted`.
 
 **New Protocol (distributed compaction)**
 
