@@ -2474,7 +2474,8 @@ mod tests {
     #[tokio::test]
     async fn test_scan_prefix_by_recency_returns_matching_keys_from_memtable() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_recency_memtable", object_store)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2500,7 +2501,8 @@ mod tests {
     #[tokio::test]
     async fn test_scan_prefix_by_recency_no_match_returns_none() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_recency_no_match", object_store)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2520,7 +2522,8 @@ mod tests {
         // No dedup: a key present in both memtable (newer) and L0 (older)
         // appears twice, newer first.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_recency_no_dedup", object_store)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2553,7 +2556,8 @@ mod tests {
         // Tombstones are surfaced as raw entries; the caller decides what
         // they mean.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_recency_tombstones", object_store)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2581,6 +2585,9 @@ mod tests {
         let e3 = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(e3.key.as_ref(), b"px:b");
         assert_value(&e3, b"vb");
+        // Tombstone is from the freshest source so its seq dominates the
+        // earlier put of px:a.
+        assert!(e1.seq > e2.seq);
         assert!(iter.next_entry().await.unwrap().is_none());
 
         db.close().await.unwrap();
@@ -2589,7 +2596,8 @@ mod tests {
     #[tokio::test]
     async fn test_scan_prefix_by_recency_walks_memtable_then_l0() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_recency_multi_source", object_store)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2635,8 +2643,8 @@ mod tests {
         // store (it shouldn't even open an L0/SR iterator).
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_recency_no_main_gets";
-        let db = Db::builder(path, object_store)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .with_metrics_recorder(metrics_recorder.clone())
             .build()
@@ -2684,7 +2692,8 @@ mod tests {
         // durability, only L0/SR-resident entries should be visible. The
         // not-yet-flushed memtable write is filtered out by max_seq.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_recency_remote_durability", object_store)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
             .with_settings(test_db_options(0, 64 * 1024, None))
             .build()
             .await
@@ -2725,6 +2734,88 @@ mod tests {
         assert!(iter.next_entry().await.unwrap().is_none());
 
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_walks_memtable_then_compacted_run() {
+        // Walks memtable -> L0 -> compacted sorted run, verifying that the
+        // sorted-run lazy source is constructed and drained correctly when
+        // the recency walk reaches it. Same-key versions surface from each
+        // source in newest-first order with no dedup.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap();
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let should_compact_clone = should_compact.clone();
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| should_compact_clone.swap(false, Ordering::SeqCst),
+        )));
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(scheduler),
+            )
+            .build()
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+
+        // Oldest write goes to a sorted run after compaction.
+        db.put(b"px:a", b"v_oldest").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Trigger compaction and wait for it to land.
+        should_compact.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                {
+                    let state = db_poll.inner.state.read();
+                    if !state.state().core().tree.compacted.is_empty() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // L0 layer (newer than the sorted run, older than the memtable).
+        db.put(b"px:a", b"v_l0").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Active memtable (freshest).
+        db.put(b"px:a", b"v_memtable").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_value(&e1, b"v_memtable");
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"v_l0");
+        assert_eq!(e3.key.as_ref(), b"px:a");
+        assert_value(&e3, b"v_oldest");
+        assert!(e1.seq > e2.seq);
+        assert!(e2.seq > e3.seq);
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        Arc::into_inner(db)
+            .expect("db Arc should be uniquely held")
+            .close()
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
