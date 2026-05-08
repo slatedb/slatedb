@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError::{
-    LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
+    LatestTransactionalObjectVersionMissing, TransactionalObjectVersionBehindBoundary,
+    TransactionalObjectVersionExists,
 };
 use crate::merge_operator::MergeOperatorError;
 use slatedb_txn_obj::TransactionalObjectError;
@@ -50,6 +51,11 @@ pub(crate) enum SlateDBError {
 
     #[error("transactional object (e.g. manifest) version already exists")]
     TransactionalObjectVersionExists,
+
+    #[error(
+        "transactional object (e.g. manifest) version is behind boundary. id=`{id}`, boundary=`{boundary}`"
+    )]
+    TransactionalObjectVersionBehindBoundary { id: u64, boundary: u64 },
 
     #[error("failed to find latest transactional object (e.g. manifest) version")]
     LatestTransactionalObjectVersionMissing,
@@ -275,6 +281,9 @@ impl From<TransactionalObjectError> for SlateDBError {
                 LatestTransactionalObjectVersionMissing
             }
             TransactionalObjectError::ObjectVersionExists => TransactionalObjectVersionExists,
+            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary } => {
+                TransactionalObjectVersionBehindBoundary { id, boundary }
+            }
             TransactionalObjectError::Fenced => SlateDBError::Fenced,
             TransactionalObjectError::CallbackError(err) => match err.downcast::<SlateDBError>() {
                 Err(err) => SlateDBError::TransactionalObjectError(Arc::new(
@@ -573,6 +582,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::ManifestMissing(_) => Error::data(msg),
             SlateDBError::LatestTransactionalObjectVersionMissing => Error::data(msg),
             SlateDBError::TransactionalObjectVersionExists => Error::data(msg),
+            SlateDBError::TransactionalObjectVersionBehindBoundary { .. } => Error::data(msg),
             SlateDBError::InvalidTransactionalObjectState => Error::data(msg),
             SlateDBError::EmptyManifest => Error::data(msg),
             SlateDBError::EmptyBlock => Error::data(msg),

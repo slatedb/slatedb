@@ -425,7 +425,7 @@ mod tests {
         .await;
         assert!(matches!(
             stale_create,
-            Err(SlateDBError::TransactionalObjectVersionExists)
+            Err(SlateDBError::TransactionalObjectVersionBehindBoundary { .. })
         ));
     }
 
@@ -527,7 +527,7 @@ mod tests {
         let stale_create = StoredCompactions::create(compactions_store.clone(), 0).await;
         assert!(matches!(
             stale_create,
-            Err(SlateDBError::TransactionalObjectVersionExists)
+            Err(SlateDBError::TransactionalObjectVersionBehindBoundary { .. })
         ));
     }
 

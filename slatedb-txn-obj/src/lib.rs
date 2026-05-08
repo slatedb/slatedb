@@ -43,6 +43,8 @@
 //! ## Error semantics
 //! - `ObjectVersionExists` is returned when a CAS write fails because a concurrent writer
 //!   created the target id first. Callers typically handle this by `refresh()` and retrying.
+//! - `ObjectVersionBehindBoundary` is returned when a sequenced write created an id that is at or
+//!   below the durable GC boundary. Callers should treat the write as fenced by GC.
 //! - `InvalidState` may be returned when an expected record is missing or file names are
 //!   malformed.
 //!
@@ -102,6 +104,9 @@ pub enum TransactionalObjectError {
 
     #[error("object version exists")]
     ObjectVersionExists,
+
+    #[error("object version {id} is behind boundary {boundary}")]
+    ObjectVersionBehindBoundary { id: u64, boundary: u64 },
 
     #[error("detected newer client")]
     Fenced,
@@ -576,8 +581,8 @@ pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, Monotonic
 /// A durable inclusive high-watermark for a sequenced object namespace.
 ///
 /// A boundary value `B` means that object IDs `<= B` have been durably fenced. Writers must call
-/// [`BoundaryObject::check`] after creating an object and treat `ObjectVersionExists` as a failed
-/// write if the just-created ID is at or below the current boundary.
+/// [`BoundaryObject::check`] after creating an object and treat `ObjectVersionBehindBoundary` as a
+/// failed write if the just-created ID is at or below the current boundary.
 #[async_trait]
 pub trait BoundaryObject: Send + Sync {
     /// Verify that `id` is greater than the durable boundary.

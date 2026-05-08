@@ -246,7 +246,10 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
         };
 
         if id <= boundary {
-            Err(TransactionalObjectError::ObjectVersionExists)
+            Err(TransactionalObjectError::ObjectVersionBehindBoundary {
+                id: id.id(),
+                boundary: boundary.id(),
+            })
         } else {
             Ok(())
         }
@@ -698,7 +701,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(TransactionalObjectError::ObjectVersionExists)
+            Err(TransactionalObjectError::ObjectVersionBehindBoundary { id: 0, boundary: 0 })
         ));
     }
 
@@ -713,7 +716,7 @@ mod tests {
         let result = boundary.check(MonotonicId::new(2)).await;
         assert!(matches!(
             result,
-            Err(TransactionalObjectError::ObjectVersionExists)
+            Err(TransactionalObjectError::ObjectVersionBehindBoundary { id: 2, boundary: 2 })
         ));
         boundary.check(MonotonicId::new(3)).await.unwrap();
     }
@@ -732,7 +735,7 @@ mod tests {
         let result = boundary.check(MonotonicId::new(3)).await;
         assert!(matches!(
             result,
-            Err(TransactionalObjectError::ObjectVersionExists)
+            Err(TransactionalObjectError::ObjectVersionBehindBoundary { id: 3, boundary: 3 })
         ));
     }
 
@@ -797,7 +800,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(TransactionalObjectError::ObjectVersionExists)
+            Err(TransactionalObjectError::ObjectVersionBehindBoundary { id: 1, boundary: 1 })
         ));
     }
 
