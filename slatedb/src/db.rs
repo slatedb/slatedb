@@ -2819,6 +2819,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scan_prefix_by_recency_errors_on_multi_segment_prefix() {
+        use crate::manifest::{LsmTreeState, Segment};
+        use std::collections::VecDeque;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Db::builder(temp_dir.path().to_str().unwrap(), object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Inject two non-nesting segments. Both prefixes share "hour=1"
+        // but neither is a prefix of the other, so the antichain holds.
+        // A scan with prefix b"hour=" overlaps both segments' intervals,
+        // which is the case we want to reject.
+        db.inner.state.write().modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![
+                Segment {
+                    prefix: Bytes::from_static(b"hour=12/"),
+                    tree: LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::new(),
+                        compacted: vec![],
+                    },
+                },
+                Segment {
+                    prefix: Bytes::from_static(b"hour=13/"),
+                    tree: LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::new(),
+                        compacted: vec![],
+                    },
+                },
+            ];
+        });
+
+        match db.scan_prefix_by_recency(b"hour=").await {
+            Err(e) => assert_eq!(e.kind(), crate::ErrorKind::Invalid),
+            Ok(_) => panic!("expected multi-segment error"),
+        }
+
+        // Single-segment prefixes still work.
+        let mut iter = db.scan_prefix_by_recency(b"hour=12/").await.unwrap();
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_resolve_object_store_local_prefix_store_writes_to_path() {
         let temp_dir = tempfile::tempdir().unwrap();
         let prefix_path = temp_dir.path().join("prefix-store");
