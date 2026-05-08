@@ -46,6 +46,16 @@ impl GcTask for ManifestGcTask {
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
         let min_age = self.manifest_min_age();
         let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
+
+        // Remove the last element so we never delete or fence the latest manifest.
+        let latest_manifest = if let Some(manifest_metadata) = manifest_metadata_list.pop() {
+            self.manifest_store
+                .read_manifest(manifest_metadata.id)
+                .await?
+        } else {
+            return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
+        };
+
         let boundary = manifest_metadata_list
             .iter()
             .filter(|manifest_metadata| {
@@ -57,15 +67,6 @@ impl GcTask for ManifestGcTask {
         if let Some(boundary) = boundary {
             self.manifest_store.advance_boundary(boundary).await?;
         }
-
-        // Remove the last element so we never delete the latest manifest
-        let latest_manifest = if let Some(manifest_metadata) = manifest_metadata_list.pop() {
-            self.manifest_store
-                .read_manifest(manifest_metadata.id)
-                .await?
-        } else {
-            return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
-        };
 
         // Do not delete manifests which are still referenced by active checkpoints
         let active_manifest_ids: HashSet<_> = latest_manifest

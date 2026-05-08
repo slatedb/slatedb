@@ -67,6 +67,10 @@ impl GcTask for CompactionsGcTask {
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
         let min_age = self.compactions_min_age();
         let mut compactions_metadata_list = self.compactions_store.list_compactions(..).await?;
+
+        // Remove the last element so we never delete or fence the latest compactions file.
+        compactions_metadata_list.pop();
+
         let boundary = compactions_metadata_list
             .iter()
             .filter(|compactions_metadata| {
@@ -78,9 +82,6 @@ impl GcTask for CompactionsGcTask {
         if let Some(boundary) = boundary {
             self.compactions_store.advance_boundary(boundary).await?;
         }
-
-        // Remove the last element so we never delete the latest compactions file
-        compactions_metadata_list.pop();
 
         for compactions_metadata in compactions_metadata_list {
             if utc_now.signed_duration_since(compactions_metadata.last_modified) > min_age {
