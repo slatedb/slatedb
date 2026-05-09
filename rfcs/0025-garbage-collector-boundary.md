@@ -345,7 +345,7 @@ Formal methods:
 
 ## Rollout
 
-Rollout can happen in a single release because it older clients will simply
+Rollout can happen in a single release because older clients will simply
 ignore the new boundary files. Newer clients with no boundary file will treat
 the boundary as `0`, which replicates the old behavior until GC creates or
 advances the boundary.
