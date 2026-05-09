@@ -196,8 +196,7 @@ can reuse the cached boundary value. If it returns a new value, the writer
 updates the cache and checks the created ID against that value.
 
 The boundary read must not be served from a stale object cache. Manifest and
-compactions stores should use an object-store path that preserves freshness for
-boundary checks.
+compactions stores must not use `CachedObjectStore`.
 
 ### Garbage Collection
 
@@ -210,13 +209,7 @@ rules:
 - `.compactions`: delete files at or behind the boundary when they are older
   than `min_age` and are not the latest compactions file.
 
-The boundary is a fencing precondition for deletion, not a replacement for
-namespace-specific retention rules.
-
 ## Implementation
-
-The implementation should follow the shape introduced by
-[slatedb/slatedb#1646][pr-1646]:
 
 - Add `BoundaryObject` to the transactional object crate with:
   - `check(id)`: verify that `id` is greater than the durable boundary.
@@ -352,12 +345,10 @@ Formal methods:
 
 ## Rollout
 
-1. Add the boundary objects and writer-side checks.
-2. Ensure manifest and compactions stores use fresh object-store reads for
-   boundary checks.
-3. Enable GC boundary advancement for `.manifest` and `.compactions`.
-4. Roll out to all writers before relying on the new GC fencing behavior.
-5. Add operational documentation for the `/gc` directory and boundary files.
+Rollout can happen in a single release because it older clients will simply
+ignore the new boundary files. Newer clients with no boundary file will treat
+the boundary as `0`, which replicates the old behavior until GC creates or
+advances the boundary.
 
 ## Alternatives
 
@@ -373,31 +364,15 @@ Increase `min_age`:
 - Rejected because it does not eliminate the failure mode and increases
   metadata retention.
 
-Check the boundary only before writing:
-
-- Avoids the post-write read latency.
-- Rejected because GC can advance the boundary between the check and the create.
-
-Track every deleted metadata ID:
-
-- Store a durable tombstone per deleted sequenced metadata object.
-- Rejected because an inclusive high-watermark is sufficient for monotonically
-  increasing IDs and is much cheaper to maintain.
-
-## Open Questions
-
-- Should boundary errors be exposed as a distinct public error, or should
-  callers see the existing sequenced write conflict error?
-- Should clients ever retry a boundary error automatically after refreshing
-  state?
-- Which object-store implementations need compatibility work for conditional
-  boundary updates?
-
 ## References
 
 - [slatedb/slatedb#1646: Add `BoundaryObject` GC watermarks to prevent data
   loss in slatedb-txn-obj][pr-1646]
 - [slatedb/slatedb#1622: pathological data-loss configuration][issue-1622]
+- [OSWALD](https://nvartolomei.com/oswald/): a WAL implementation with a
+  similar boundary concept. OSWALD's "snapshot" is our `.manifest` (or
+  `.compactions`), and its "manifest" is our boundary file. This is a rough
+  analogy, not a direct mapping, but the manifest serves a similar purpose.
 
 [pr-1646]: https://github.com/slatedb/slatedb/pull/1646
 [issue-1622]: https://github.com/slatedb/slatedb/issues/1622
