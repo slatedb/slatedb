@@ -227,6 +227,7 @@ impl ObjectStore for InstrumentedObjectStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.stats.list.increment(1);
         self.inner.list(prefix)
     }
 
@@ -235,11 +236,17 @@ impl ObjectStore for InstrumentedObjectStore {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.stats.list_with_offset.increment(1);
         self.inner.list_with_offset(prefix, offset)
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-        self.inner.list_with_delimiter(prefix).await
+        let start = Instant::now();
+        let result = self.inner.list_with_delimiter(prefix).await;
+        self.stats
+            .list_with_delimiter
+            .record(start.elapsed(), result.is_ok());
+        result
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
@@ -279,6 +286,7 @@ pub mod stats {
     pub const REQUEST_COUNT: &str = object_store_stat_name!("request_count");
     pub const ERROR_COUNT: &str = object_store_stat_name!("error_count");
     pub const REQUEST_DURATION_SECONDS: &str = object_store_stat_name!("request_duration_seconds");
+    const REQUEST_COUNT_DESCRIPTION: &str = "Object store API requests";
 
     /// Pre-registered [`RequestMetrics`] for every object store API that
     /// SlateDB calls.
@@ -292,6 +300,9 @@ pub mod stats {
         pub(crate) get_range: RequestMetrics,
         pub(crate) get_ranges: RequestMetrics,
         pub(crate) head: RequestMetrics,
+        pub(crate) list: Arc<dyn CounterFn>,
+        pub(crate) list_with_offset: Arc<dyn CounterFn>,
+        pub(crate) list_with_delimiter: RequestMetrics,
         pub(crate) put: RequestMetrics,
         pub(crate) multipart_init: RequestMetrics,
         pub(crate) multipart_part: RequestMetrics,
@@ -316,6 +327,28 @@ pub mod stats {
                     "get_ranges",
                 ),
                 head: RequestMetrics::new(recorder, component, store_type, "get", "head"),
+                list: recorder
+                    .counter(REQUEST_COUNT)
+                    .description(REQUEST_COUNT_DESCRIPTION)
+                    .labels(&get_labels(component, store_type, "get", "list"))
+                    .register(),
+                list_with_offset: recorder
+                    .counter(REQUEST_COUNT)
+                    .description(REQUEST_COUNT_DESCRIPTION)
+                    .labels(&get_labels(
+                        component,
+                        store_type,
+                        "get",
+                        "list_with_offset",
+                    ))
+                    .register(),
+                list_with_delimiter: RequestMetrics::new(
+                    recorder,
+                    component,
+                    store_type,
+                    "get",
+                    "list_with_delimiter",
+                ),
                 put: RequestMetrics::new(recorder, component, store_type, "put", "put"),
                 multipart_init: RequestMetrics::new(
                     recorder,
@@ -343,6 +376,20 @@ pub mod stats {
         }
     }
 
+    pub(crate) fn get_labels(
+        component: ObjectStoreComponent,
+        store_type: ObjectStoreType,
+        op: &'static str,
+        api: &'static str,
+    ) -> [(&'static str, &'static str); 4] {
+        [
+            ("component", component.as_str()),
+            ("store_type", store_type.as_str()),
+            ("op", op),
+            ("api", api),
+        ]
+    }
+
     /// Metrics for a single object store API (e.g. `get` or `put`).
     ///
     /// Each instance holds three pre-registered metric handles that
@@ -367,17 +414,12 @@ pub mod stats {
             op: &'static str,
             api: &'static str,
         ) -> Self {
-            let labels = [
-                ("component", component.as_str()),
-                ("store_type", store_type.as_str()),
-                ("op", op),
-                ("api", api),
-            ];
+            let labels = get_labels(component, store_type, op, api);
 
             Self {
                 request_count: recorder
                     .counter(REQUEST_COUNT)
-                    .description("Object store API requests")
+                    .description(REQUEST_COUNT_DESCRIPTION)
                     .labels(&labels)
                     .register(),
                 error_count: recorder
@@ -416,27 +458,13 @@ mod tests {
     use slatedb_common::metrics::{lookup_metric_with_labels, test_recorder_helper, MetricValue};
 
     use crate::instrumented_object_store::stats::{
-        ERROR_COUNT, REQUEST_COUNT, REQUEST_DURATION_SECONDS,
+        get_labels, ERROR_COUNT, REQUEST_COUNT, REQUEST_DURATION_SECONDS,
     };
     use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
     use crate::object_stores::ObjectStoreType;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
-
-    fn labels(
-        component: &'static str,
-        store_type: &'static str,
-        op: &'static str,
-        api: &'static str,
-    ) -> [(&'static str, &'static str); 4] {
-        [
-            ("component", component),
-            ("store_type", store_type),
-            ("op", op),
-            ("api", api),
-        ]
-    }
 
     fn histogram_count(
         recorder: &slatedb_common::metrics::DefaultMetricsRecorder,
@@ -468,13 +496,19 @@ mod tests {
         store.put(&path, "hello".into()).await.unwrap();
         let _ = store.get(&path).await.unwrap().bytes().await.unwrap();
         store.delete(&path).await.unwrap();
+        let _ = store.list(None);
 
         // then:
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "put", "put")
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "put"
+                )
             ),
             Some(1)
         );
@@ -482,7 +516,12 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "get", "get")
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "get",
+                    "list"
+                )
             ),
             Some(1)
         );
@@ -490,20 +529,62 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "delete", "delete"),
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "get",
+                    "get"
+                )
             ),
             Some(1)
         );
         assert_eq!(
-            histogram_count(&recorder, &labels("db", "main", "put", "put")),
+            lookup_metric_with_labels(
+                &recorder,
+                REQUEST_COUNT,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "delete",
+                    "delete"
+                ),
+            ),
             Some(1)
         );
         assert_eq!(
-            histogram_count(&recorder, &labels("db", "main", "get", "get")),
+            histogram_count(
+                &recorder,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "put"
+                )
+            ),
             Some(1)
         );
         assert_eq!(
-            histogram_count(&recorder, &labels("db", "main", "delete", "delete")),
+            histogram_count(
+                &recorder,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "get",
+                    "get"
+                )
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            histogram_count(
+                &recorder,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "delete",
+                    "delete"
+                )
+            ),
             Some(1)
         );
     }
@@ -530,12 +611,26 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "get", "head")
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "get",
+                    "head"
+                )
             ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric_with_labels(&recorder, ERROR_COUNT, &labels("db", "main", "get", "head")),
+            lookup_metric_with_labels(
+                &recorder,
+                ERROR_COUNT,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "get",
+                    "head"
+                )
+            ),
             Some(1)
         );
     }
@@ -569,7 +664,12 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "put", "put")
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "put"
+                )
             ),
             Some(3)
         );
@@ -598,7 +698,12 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "put", "multipart_init"),
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "multipart_init"
+                ),
             ),
             Some(1)
         );
@@ -606,7 +711,12 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "put", "multipart_part"),
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "multipart_part"
+                ),
             ),
             Some(1)
         );
@@ -614,7 +724,12 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "put", "multipart_complete"),
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "multipart_complete"
+                ),
             ),
             Some(1)
         );
@@ -644,20 +759,42 @@ mod tests {
             lookup_metric_with_labels(
                 &recorder,
                 REQUEST_COUNT,
-                &labels("db", "main", "put", "put")
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "put"
+                )
             ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric_with_labels(&recorder, ERROR_COUNT, &labels("db", "main", "put", "put")),
+            lookup_metric_with_labels(
+                &recorder,
+                ERROR_COUNT,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "put",
+                    "put"
+                )
+            ),
             Some(0)
         );
         assert_eq!(
-            lookup_metric_with_labels(&recorder, REQUEST_COUNT, &labels("gc", "wal", "put", "put")),
+            lookup_metric_with_labels(
+                &recorder,
+                REQUEST_COUNT,
+                &get_labels(ObjectStoreComponent::Gc, ObjectStoreType::Wal, "put", "put")
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric_with_labels(&recorder, ERROR_COUNT, &labels("gc", "wal", "put", "put")),
+            lookup_metric_with_labels(
+                &recorder,
+                ERROR_COUNT,
+                &get_labels(ObjectStoreComponent::Gc, ObjectStoreType::Wal, "put", "put")
+            ),
             Some(1)
         );
     }

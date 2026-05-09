@@ -601,7 +601,18 @@ impl FlatBufferCompactionsCodec {
                 sources.extend(sorted_runs.iter().copied().map(SourceId::SortedRun));
                 // Destination is not explicitly encoded in the flatbuffer; derive it from SR inputs.
                 let destination = sorted_runs.iter().copied().min().unwrap_or(0);
-                Ok(CompactorCompactionSpec::new(sources, destination))
+                // Pre-segment specs serialized before this field existed have
+                // no segment; treat as the compatibility-encoded `prefix=""`
+                // segment (root tree).
+                let segment = spec
+                    .segment()
+                    .map(|s| Bytes::copy_from_slice(s.bytes()))
+                    .unwrap_or_default();
+                Ok(CompactorCompactionSpec::for_segment(
+                    segment,
+                    sources,
+                    destination,
+                ))
             }
             _ => Err(SlateDBError::InvalidCompaction),
         }
@@ -939,12 +950,14 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let l0_view_ids = (!view_ids.is_empty()).then(|| self.add_ulids(view_ids.iter()));
         let sorted_runs =
             (!sorted_runs.is_empty()).then(|| self.builder.create_vector(sorted_runs.as_slice()));
+        let segment = self.builder.create_vector(spec.segment().as_ref());
         let tiered_spec = TieredCompactionSpec::create(
             &mut self.builder,
             &TieredCompactionSpecArgs {
                 ssts: None,
                 sorted_runs,
                 l0_view_ids,
+                segment: Some(segment),
             },
         );
         (
@@ -2139,12 +2152,14 @@ mod tests {
             },
         );
         let source_ssts = fbb.create_vector(&[source_id]);
+        let segment_bytes = fbb.create_vector::<u8>(&[]);
         let spec = TieredCompactionSpec::create(
             &mut fbb,
             &TieredCompactionSpecArgs {
                 ssts: Some(source_ssts),
                 sorted_runs: None,
                 l0_view_ids: None,
+                segment: Some(segment_bytes),
             },
         );
         let compaction_ulid = ulid::Ulid::new();
@@ -2189,6 +2204,77 @@ mod tests {
             decoded_compaction.output_ssts()[0].format_version,
             super::ORIGINAL_SST_FORMAT_VERSION
         );
+    }
+
+    #[test]
+    fn test_should_decode_tiered_compaction_with_missing_segment_as_root_tree() {
+        // given: a compactions flatbuffer encoding a TieredCompactionSpec with
+        // no segment field set, simulating a spec serialized before the
+        // segment field was added to the schema.
+        use super::root_generated::{
+            Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
+            CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus,
+            CompactionsV1, CompactionsV1Args, TieredCompactionSpec, TieredCompactionSpecArgs,
+        };
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+        let source_ulid = ulid::Ulid::new();
+        let source_id = super::root_generated::Ulid::create(
+            &mut fbb,
+            &super::root_generated::UlidArgs {
+                high: (source_ulid.0 >> 64) as u64,
+                low: ((source_ulid.0 << 64) >> 64) as u64,
+            },
+        );
+        let source_ssts = fbb.create_vector(&[source_id]);
+        let spec = TieredCompactionSpec::create(
+            &mut fbb,
+            &TieredCompactionSpecArgs {
+                ssts: Some(source_ssts),
+                sorted_runs: None,
+                l0_view_ids: None,
+                segment: None,
+            },
+        );
+        let compaction_ulid = ulid::Ulid::new();
+        let compaction_id = super::root_generated::Ulid::create(
+            &mut fbb,
+            &super::root_generated::UlidArgs {
+                high: (compaction_ulid.0 >> 64) as u64,
+                low: ((compaction_ulid.0 << 64) >> 64) as u64,
+            },
+        );
+        let compaction = FbCompaction::create(
+            &mut fbb,
+            &FbCompactionArgs {
+                id: Some(compaction_id),
+                spec_type: FbCompactionSpec::TieredCompactionSpec,
+                spec: Some(spec.as_union_value()),
+                status: FbCompactionStatus::Running,
+                output_ssts: None,
+            },
+        );
+        let compactions_vec = fbb.create_vector(&[compaction]);
+        let compactions = CompactionsV1::create(
+            &mut fbb,
+            &CompactionsV1Args {
+                compactor_epoch: 1,
+                recent_compactions: Some(compactions_vec),
+            },
+        );
+        fbb.finish(compactions, None);
+        let mut bytes = BytesMut::new();
+        bytes.put_u16(COMPACTIONS_FORMAT_VERSION);
+        bytes.put_slice(fbb.finished_data());
+        let bytes = bytes.freeze();
+
+        // when:
+        let codec = FlatBufferCompactionsCodec {};
+        let decoded = codec.decode(&bytes).expect("failed to decode compactions");
+
+        // then: missing segment decodes as the compatibility-encoded `prefix=""`
+        // segment (root tree).
+        let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
+        assert_eq!(decoded_compaction.spec().segment(), &Bytes::new());
     }
 
     #[test]

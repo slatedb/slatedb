@@ -24,7 +24,6 @@ use crate::error::SlateDBError;
 use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter};
 use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
 use crate::memtable_flusher::FlushTarget;
-use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -134,7 +133,8 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
     ) -> Result<(), SlateDBError> {
         let err = result.err().unwrap_or(SlateDBError::Closed);
         self.drain_with_error(&mut messages, &err).await;
-        self.cleanup_orphaned_uploads().await;
+        // Orphan SSTs from in-flight uploads at shutdown are reaped by the
+        // background garbage collector.
         Ok(())
     }
 }
@@ -171,8 +171,14 @@ impl FlushTracker {
 
     async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
         debug!(
-            "l0 upload completed [first_seq={}, last_seq={}, sst_id={:?}]",
-            uploaded.first_seq, uploaded.last_seq, uploaded.sst_handle.id
+            "l0 upload completed [first_seq={}, last_seq={}, sst_ids={:?}]",
+            uploaded.first_seq,
+            uploaded.last_seq,
+            uploaded
+                .segments
+                .iter()
+                .map(|s| &s.sst_handle.id)
+                .collect::<Vec<_>>()
         );
         self.frontier
             .set_state(uploaded.last_seq, TrackedImmState::WritingManifest);
@@ -189,12 +195,7 @@ impl FlushTracker {
             let guard = self.inner.state.read();
             guard.state().imm_memtable.iter().rev().cloned().collect()
         };
-        let inner = &self.inner;
-        self.frontier.register(imm_memtables.into_iter(), &mut || {
-            crate::db_state::SsTableId::Compacted(
-                inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
-            )
-        });
+        self.frontier.register(imm_memtables.into_iter());
         self.dispatch_ready_memtables()
     }
 
@@ -218,15 +219,14 @@ impl FlushTracker {
             let Some(tracked) = self.frontier.prepare_next_upload() else {
                 return Ok(());
             };
-            let sst_id = tracked.sst_id;
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
             let last_seq = tracked.last_seq;
             debug!(
-                "dispatching l0 upload [first_seq={}, last_seq={}, sst_id={:?}]",
-                tracked.first_seq, last_seq, sst_id
+                "dispatching l0 upload [first_seq={}, last_seq={}]",
+                tracked.first_seq, last_seq
             );
 
-            self.uploader.submit(UploadJob::new(imm_memtable, sst_id))?;
+            self.uploader.submit(UploadJob::new(imm_memtable))?;
         }
         Ok(())
     }
@@ -256,30 +256,11 @@ impl FlushTracker {
             }
         }
     }
-
-    /// Delete orphaned SSTs that were uploaded but never passed to the
-    /// manifest writer. Tables already in `WritingManifest` state are left
-    /// for GC since we cannot know whether the manifest write succeeded.
-    async fn cleanup_orphaned_uploads(&mut self) {
-        for tracked in self.frontier.iter() {
-            if matches!(tracked.state, TrackedImmState::Uploading) {
-                if let Err(delete_err) = self.inner.table_store.delete_sst(&tracked.sst_id).await {
-                    log::warn!(
-                        "failed to delete orphaned SST [last_seq={}, id={:?}, error={:?}]",
-                        tracked.last_seq,
-                        tracked.sst_id,
-                        delete_err
-                    );
-                }
-            }
-        }
-    }
 }
 
 struct TrackedImm {
     first_seq: u64,
     last_seq: u64,
-    sst_id: crate::db_state::SsTableId,
     imm_memtable: Arc<crate::mem_table::ImmutableMemtable>,
     state: TrackedImmState,
 }
@@ -302,7 +283,6 @@ impl TrackedImmFrontier {
     fn register(
         &mut self,
         imm_memtables: impl Iterator<Item = Arc<crate::mem_table::ImmutableMemtable>>,
-        gen_sst_id: &mut impl FnMut() -> crate::db_state::SsTableId,
     ) {
         for imm_memtable in imm_memtables {
             let first_seq = imm_memtable
@@ -319,7 +299,6 @@ impl TrackedImmFrontier {
             self.tracked.push_back(TrackedImm {
                 first_seq,
                 last_seq,
-                sst_id: gen_sst_id(),
                 imm_memtable,
                 state: TrackedImmState::PendingDispatch,
             });
@@ -376,11 +355,6 @@ impl TrackedImmFrontier {
         {
             self.tracked.pop_front().expect("checked above");
         }
-    }
-
-    /// Iterate over tracked entries (for orphan cleanup).
-    fn iter(&self) -> impl Iterator<Item = &TrackedImm> {
-        self.tracked.iter()
     }
 }
 
@@ -473,6 +447,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
+                None,
             )
             .await
             .unwrap(),
@@ -1051,7 +1026,6 @@ mod tests {
     }
 
     mod frontier_tests {
-        use crate::db_state::SsTableId;
         use crate::mem_table::{ImmutableMemtable, WritableKVTable};
         use crate::memtable_flusher::tracker::{TrackedImmFrontier, TrackedImmState};
         use crate::memtable_flusher::FlushTarget;
@@ -1068,23 +1042,19 @@ mod tests {
             Arc::new(ImmutableMemtable::new(table, 0))
         }
 
-        fn next_sst_id() -> SsTableId {
-            SsTableId::Compacted(ulid::Ulid::new())
-        }
-
         #[test]
         fn register_deduplicates_by_last_seq() {
             let mut frontier = TrackedImmFrontier::new();
             let imm = make_imm(1);
-            frontier.register(std::iter::once(Arc::clone(&imm)), &mut next_sst_id);
-            frontier.register(std::iter::once(imm), &mut next_sst_id);
+            frontier.register(std::iter::once(Arc::clone(&imm)));
+            frontier.register(std::iter::once(imm));
             assert_eq!(frontier.tracked.len(), 1);
         }
 
         #[test]
         fn register_assigns_sequential_sequences() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
+            frontier.register([make_imm(1), make_imm(2)].into_iter());
             assert_eq!(frontier.tracked[0].first_seq, 1);
             assert_eq!(frontier.tracked[0].last_seq, 1);
             assert_eq!(frontier.tracked[1].first_seq, 2);
@@ -1095,21 +1065,21 @@ mod tests {
         fn resolve_target_all_returns_last_seq() {
             let mut frontier = TrackedImmFrontier::new();
             assert_eq!(frontier.resolve_target(FlushTarget::All), None);
-            frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
+            frontier.register([make_imm(1), make_imm(2)].into_iter());
             assert_eq!(frontier.resolve_target(FlushTarget::All), Some(2));
         }
 
         #[test]
         fn resolve_target_current_durable_returns_none() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            frontier.register(std::iter::once(make_imm(1)));
             assert_eq!(frontier.resolve_target(FlushTarget::CurrentDurable), None);
         }
 
         #[test]
         fn prepare_next_upload_transitions_to_uploading() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            frontier.register(std::iter::once(make_imm(1)));
             let tracked = frontier.prepare_next_upload().unwrap();
             assert_eq!(tracked.last_seq, 1);
             assert!(matches!(tracked.state, TrackedImmState::Uploading));
@@ -1120,7 +1090,7 @@ mod tests {
         #[test]
         fn set_state_updates_tracked_entry() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            frontier.register(std::iter::once(make_imm(1)));
             frontier.set_state(1, TrackedImmState::WritingManifest);
             assert!(matches!(
                 frontier.tracked[0].state,
@@ -1138,10 +1108,7 @@ mod tests {
         #[test]
         fn retire_through_removes_entries() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(
-                [make_imm(1), make_imm(2), make_imm(3)].into_iter(),
-                &mut next_sst_id,
-            );
+            frontier.register([make_imm(1), make_imm(2), make_imm(3)].into_iter());
             frontier.retire_through(2);
             assert_eq!(frontier.tracked.len(), 1);
             assert_eq!(frontier.tracked[0].last_seq, 3);
@@ -1150,10 +1117,7 @@ mod tests {
         #[test]
         fn reserved_l0_slots_counts_in_flight() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.register(
-                [make_imm(1), make_imm(2), make_imm(3)].into_iter(),
-                &mut next_sst_id,
-            );
+            frontier.register([make_imm(1), make_imm(2), make_imm(3)].into_iter());
             assert_eq!(frontier.reserved_l0_slots(), 0);
             frontier.prepare_next_upload(); // seq 1 -> Uploading
             assert_eq!(frontier.reserved_l0_slots(), 1);
