@@ -421,6 +421,8 @@ impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
 #[derive(Debug)]
 pub(crate) struct FlakyObjectStore {
     inner: Arc<dyn ObjectStore>,
+    // Get options: total number of `get_opts` invocations
+    get_opts_attempts: AtomicUsize,
     // Put options: transient failures on first N attempts
     fail_first_put_opts: AtomicUsize,
     put_opts_attempts: AtomicUsize,
@@ -454,6 +456,7 @@ impl FlakyObjectStore {
     pub(crate) fn new(inner: Arc<dyn ObjectStore>, fail_first_put_opts: usize) -> Self {
         Self {
             inner,
+            get_opts_attempts: AtomicUsize::new(0),
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
             put_opts_attempt_notify: Notify::new(),
@@ -510,6 +513,10 @@ impl FlakyObjectStore {
 
     pub(crate) fn put_attempts(&self) -> usize {
         self.put_opts_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn get_opts_attempts(&self) -> usize {
+        self.get_opts_attempts.load(Ordering::SeqCst)
     }
 
     pub(crate) async fn wait_for_put_attempts(&self, expected: usize) {
@@ -581,6 +588,7 @@ impl ObjectStore for FlakyObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
+        self.get_opts_attempts.fetch_add(1, Ordering::SeqCst);
         self.inner.get_opts(location, options).await
     }
 
