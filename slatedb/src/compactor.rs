@@ -414,7 +414,7 @@ impl Compactor {
             dirty.value.insert(compaction.clone());
             match stored_compactions.update(dirty).await {
                 Ok(()) => return Ok(compaction_id),
-                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                Err(err) if err.is_retryable_transactional_object_write_race() => {
                     stored_compactions.refresh().await?;
                 }
                 Err(err) => return Err(crate::Error::from(err)),

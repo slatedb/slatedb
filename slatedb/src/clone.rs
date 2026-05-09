@@ -18,6 +18,7 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::TransactionalObject;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,9 +65,16 @@ pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
             }
         }
 
-        let mut dirty = clone_manifest.prepare_dirty()?;
-        dirty.value.core.initialized = true;
-        clone_manifest.update(dirty).await?;
+        clone_manifest
+            .maybe_apply_update(|manifest| {
+                if manifest.object().core.initialized {
+                    return Ok(None);
+                }
+                let mut dirty = manifest.prepare_dirty()?;
+                dirty.value.core.initialized = true;
+                Ok(Some(dirty))
+            })
+            .await?;
     }
 
     Ok(())

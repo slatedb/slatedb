@@ -248,6 +248,7 @@ impl StoredManifest {
         self.inner.object()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Manifest>, SlateDBError> {
         Ok(self.inner.prepare_dirty()?)
     }
@@ -417,6 +418,7 @@ impl StoredManifest {
         Ok(checkpoint)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn update(
         &mut self,
         dirty: DirtyObject<Manifest>,

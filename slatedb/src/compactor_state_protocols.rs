@@ -143,18 +143,9 @@ impl CompactorStateWriter {
         )
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
-        let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Move running compactions back to submitted so we can resume them after restart.
-        // Submitted compactions are left intact for future scheduling.
-        // Keep only the most recent finished compaction for GC safety (#1044).
-        dirty_compactions.value.iter_mut().for_each(|c| {
-            if matches!(c.status(), CompactionStatus::Running) {
-                c.set_status(CompactionStatus::Submitted);
-            }
-        });
-        dirty_compactions.value.retain_active_and_last_finished();
-        // Persist recovery state before any refresh() can overwrite it.
-        compactions.update(dirty_compactions.clone()).await?;
+        // Persist recovery state before starting new work.
+        Self::write_compactions_recovery_state(&mut compactions).await?;
+        let dirty_compactions = compactions.prepare_dirty()?;
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -192,6 +183,27 @@ impl CompactorStateWriter {
         )
         .await?;
         Ok((fenceable_manifest, fenceable_compactions))
+    }
+
+    async fn write_compactions_recovery_state(
+        compactions: &mut FenceableCompactions,
+    ) -> Result<(), SlateDBError> {
+        loop {
+            let mut dirty = compactions.prepare_dirty()?;
+            dirty.value.iter_mut().for_each(|c| {
+                if matches!(c.status(), CompactionStatus::Running) {
+                    c.set_status(CompactionStatus::Submitted);
+                }
+            });
+            dirty.value.retain_active_and_last_finished();
+            match compactions.update(dirty).await {
+                Ok(()) => return Ok(()),
+                Err(err) if err.is_retryable_transactional_object_write_race() => {
+                    compactions.refresh().await?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// Refreshes the manifest and updates the local compactor state with any remote
@@ -269,7 +281,7 @@ impl CompactorStateWriter {
             self.load_manifest().await?;
             match self.write_manifest().await {
                 Ok(_) => return Ok(()),
-                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                Err(err) if err.is_retryable_transactional_object_write_race() => {
                     debug!("conflicting manifest version. updating and retrying write again.");
                 }
                 Err(err) => return Err(err),
@@ -284,22 +296,22 @@ impl CompactorStateWriter {
     /// - `Ok(())` when compactions are successfully written.
     /// - `SlateDBError` if an unrecoverable error occurs.
     pub(crate) async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
-        let mut desired_value = self.state.compactions().value.clone();
-        desired_value.retain_active_and_last_finished();
         loop {
+            let mut desired_value = self.state.compactions().value.clone();
+            desired_value.retain_active_and_last_finished();
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
-            dirty_compactions.value = desired_value.clone();
+            dirty_compactions.value = desired_value;
             match self.compactions.update(dirty_compactions).await {
                 Ok(()) => {
                     let refreshed = self.compactions.prepare_dirty()?;
                     self.state.set_compactions(refreshed);
                     return Ok(());
                 }
-                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                Err(err) if err.is_retryable_transactional_object_write_race() => {
                     // Retry with a refreshed view. Refresh will surface fencing if the epoch advanced.
                     // If another process modified the compactions file legally (such as an external
                     // compaction request triggered from the CLI), this will pick up those changes.
-                    self.compactions.refresh().await?;
+                    self.load_compactions().await?;
                 }
                 Err(err) => return Err(err),
             }
@@ -747,13 +759,15 @@ mod tests {
             .id;
 
         // Simulate an external writer racing and creating the next version.
+        let remote_id = Ulid::from_parts(11, 0);
         let mut external = StoredCompactions::load(compactions_store.clone())
             .await
             .unwrap();
-        external
-            .update(external.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty
+            .value
+            .insert(Compaction::new(remote_id, CompactionSpec::new(vec![], 0)));
+        external.update(dirty).await.unwrap();
 
         let conflicting_id = compactions_store
             .read_latest_compactions()
@@ -771,6 +785,77 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(final_id, start_id + 2);
+        let latest = compactions_store.read_latest_compactions().await.unwrap();
+        assert!(latest.compactions.contains(&remote_id));
+    }
+
+    #[tokio::test]
+    async fn test_write_compactions_safely_retries_on_boundary_conflict() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        let mut writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store.clone(),
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        let start_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+
+        let remote_id = Ulid::from_parts(12, 0);
+        let mut external = StoredCompactions::load(compactions_store.clone())
+            .await
+            .unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty
+            .value
+            .insert(Compaction::new(remote_id, CompactionSpec::new(vec![], 0)));
+        external.update(dirty).await.unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        compactions_store
+            .advance_boundary(start_id + 1)
+            .await
+            .unwrap();
+        compactions_store
+            .delete_compactions(start_id + 1)
+            .await
+            .unwrap();
+
+        writer.write_compactions_safely().await.unwrap();
+
+        let latest = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(latest.id, start_id + 3);
+        assert!(latest.compactions.contains(&remote_id));
     }
 
     #[tokio::test]

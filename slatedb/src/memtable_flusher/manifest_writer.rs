@@ -535,7 +535,11 @@ impl ManifestWriterHandler {
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
         loop {
             let result = self.write_manifest_update(checkpoint_options).await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(SlateDBError::is_retryable_transactional_object_write_race)
+            {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -563,7 +567,11 @@ impl ManifestWriterHandler {
     async fn write_current_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_current_manifest().await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(SlateDBError::is_retryable_transactional_object_write_race)
+            {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -802,7 +810,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, TrackerMessage};
+    use super::{ManifestWriter, ManifestWriterHandler, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -1150,6 +1158,53 @@ mod tests {
         assert_eq!(through_seq, 2);
 
         started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_retry_manifest_write_after_boundary_conflict() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_boundary_retry",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let closed_result = WatchableOnceCell::new();
+        let (tracker_tx, _) =
+            crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
+        let mut handler = ManifestWriterHandler::new(
+            Arc::clone(&harness.inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+            tracker_tx,
+        );
+        handler.load_manifest().await.unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            Arc::clone(&harness.object_store),
+        ));
+        let synced_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        let mut external =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        manifest_store
+            .advance_boundary(synced_id + 1)
+            .await
+            .unwrap();
+        manifest_store.delete_manifest(synced_id + 1).await.unwrap();
+
+        handler.write_current_manifest_safely().await.unwrap();
+
+        let latest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(synced_id + 3, latest.id);
     }
 
     #[tokio::test]

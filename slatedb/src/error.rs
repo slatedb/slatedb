@@ -274,6 +274,14 @@ impl SlateDBError {
             other => other,
         }
     }
+
+    pub(crate) fn is_retryable_transactional_object_write_race(&self) -> bool {
+        matches!(
+            self,
+            SlateDBError::TransactionalObjectVersionExists
+                | SlateDBError::TransactionalObjectVersionBehindBoundary { .. }
+        )
+    }
 }
 
 impl From<TransactionalObjectError> for SlateDBError {

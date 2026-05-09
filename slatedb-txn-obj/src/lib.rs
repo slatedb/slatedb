@@ -44,7 +44,8 @@
 //! - `ObjectVersionExists` is returned when a CAS write fails because a concurrent writer
 //!   created the target id first. Callers typically handle this by `refresh()` and retrying.
 //! - `ObjectVersionBehindBoundary` is returned when a sequenced write created an id that is at or
-//!   below the durable GC boundary. Callers should treat the write as fenced by GC.
+//!   below the durable GC boundary. Callers that can refresh and rebase may retry it like
+//!   `ObjectVersionExists`; direct writes should still treat it as failed.
 //! - `InvalidState` may be returned when an expected record is missing or file names are
 //!   malformed.
 //!
@@ -181,6 +182,16 @@ impl From<MonotonicId> for u64 {
     }
 }
 
+impl TransactionalObjectError {
+    fn is_retryable_write_race(&self) -> bool {
+        matches!(
+            self,
+            TransactionalObjectError::ObjectVersionExists
+                | TransactionalObjectError::ObjectVersionBehindBoundary { .. }
+        )
+    }
+}
+
 /// Generic file metadata for versioned objects
 #[derive(Debug)]
 pub struct GenericObjectMetadata<Id: Copy = MonotonicId> {
@@ -225,7 +236,7 @@ pub trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
     async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), TransactionalObjectError>;
 
     /// Transactionally update the object using the supplied mutator, if the mutator returns
-    /// `Some`. This fn will indefinitely retry the mutation on a version conflict by refreshing
+    /// `Some`. This fn will indefinitely retry the mutation on retryable write races by refreshing
     /// and re-applying the mutation.
     async fn maybe_apply_update<F, Err>(
         &mut self,
@@ -240,7 +251,7 @@ pub trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
                 return Ok(());
             };
             match self.update(dirty).await {
-                Err(TransactionalObjectError::ObjectVersionExists) => {
+                Err(err) if err.is_retryable_write_race() => {
                     self.refresh().await?;
                     continue;
                 }
@@ -308,7 +319,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     let mut dirty = delegate.prepare_dirty()?;
                     dirty.value = new_val;
                     match delegate.update(dirty).await {
-                        Err(TransactionalObjectError::ObjectVersionExists) => {
+                        Err(err) if err.is_retryable_write_race() => {
                             delegate.refresh().await?;
                             continue;
                         }
@@ -375,7 +386,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     let mut dirty = delegate.prepare_dirty()?;
                     set_epoch(&mut dirty.value, epoch);
                     match delegate.update(dirty).await {
-                        Err(TransactionalObjectError::ObjectVersionExists) => {
+                        Err(err) if err.is_retryable_write_race() => {
                             delegate.refresh().await?;
                             continue;
                         }
@@ -660,11 +671,12 @@ pub mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use crate::object_store::ObjectStoreSequencedStorageProtocol;
+    use crate::object_store::{ObjectStoreBoundaryObject, ObjectStoreSequencedStorageProtocol};
     use crate::TransactionalObjectError;
     use crate::{
-        FenceableTransactionalObject, MonotonicId, ObjectCodec, SimpleTransactionalObject,
-        TransactionalObject, TransactionalStorageProtocol,
+        BoundaryObject, BoundedSequencedStorage, FenceableTransactionalObject, MonotonicId,
+        ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+        TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -708,6 +720,30 @@ mod tests {
             "val",
             Box::new(TestValCodec),
         ))
+    }
+
+    fn new_bounded_store() -> (
+        Arc<ObjectStoreSequencedStorageProtocol<TestVal>>,
+        Arc<ObjectStoreBoundaryObject>,
+        Arc<BoundedSequencedStorage<TestVal>>,
+    ) {
+        let os = Arc::new(InMemory::new());
+        let root = Path::from("/root");
+        let delegate = Arc::new(ObjectStoreSequencedStorageProtocol::new(
+            &root,
+            os.clone(),
+            "test",
+            "val",
+            Box::new(TestValCodec),
+        ));
+        let boundary = Arc::new(ObjectStoreBoundaryObject::new(&root, os, "test.boundary"));
+        let delegate_protocol: Arc<dyn SequencedStorageProtocol<TestVal>> = delegate.clone();
+        let boundary_protocol: Arc<dyn BoundaryObject> = boundary.clone();
+        let bounded = Arc::new(BoundedSequencedStorage::new(
+            delegate_protocol,
+            boundary_protocol,
+        ));
+        (delegate, boundary, bounded)
     }
 
     #[tokio::test]
@@ -807,6 +843,140 @@ mod tests {
             },
             latest.1
         );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_apply_update_retries_boundary_conflict() {
+        let (delegate, boundary, bounded) = new_bounded_store();
+        let store =
+            Arc::clone(&bounded) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>;
+        let mut stale = SimpleTransactionalObject::<TestVal>::init(
+            store.clone(),
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let mut current = SimpleTransactionalObject::<TestVal>::load(store)
+            .await
+            .unwrap();
+
+        let mut dirty = current.prepare_dirty().unwrap();
+        dirty.value.payload = 2;
+        current.update(dirty).await.unwrap();
+        let mut dirty = current.prepare_dirty().unwrap();
+        dirty.value.payload = 3;
+        current.update(dirty).await.unwrap();
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+        delegate.delete(MonotonicId::new(2)).await.unwrap();
+
+        stale
+            .maybe_apply_update(|sr| {
+                let mut dirty = sr.prepare_dirty().unwrap();
+                dirty.value.payload = 9;
+                Ok::<_, TransactionalObjectError>(Some(dirty))
+            })
+            .await
+            .unwrap();
+
+        let latest = delegate.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(MonotonicId::new(4), latest.0);
+        assert_eq!(
+            TestVal {
+                epoch: 0,
+                payload: 9
+            },
+            latest.1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fenceable_init_retries_boundary_conflict() {
+        let (delegate, boundary, bounded) = new_bounded_store();
+        let store =
+            Arc::clone(&bounded) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>;
+        let stale = SimpleTransactionalObject::<TestVal>::init(
+            store.clone(),
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let mut current = SimpleTransactionalObject::<TestVal>::load(store)
+            .await
+            .unwrap();
+
+        let mut dirty = current.prepare_dirty().unwrap();
+        dirty.value.payload = 2;
+        current.update(dirty).await.unwrap();
+        let mut dirty = current.prepare_dirty().unwrap();
+        dirty.value.payload = 3;
+        current.update(dirty).await.unwrap();
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+        delegate.delete(MonotonicId::new(2)).await.unwrap();
+
+        let fenced = FenceableTransactionalObject::init(
+            stale,
+            TokioDuration::from_secs(5),
+            Arc::new(DefaultSystemClock::new()),
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await
+        .unwrap();
+
+        let latest = delegate.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(MonotonicId::new(4), latest.0);
+        assert_eq!(1, latest.1.epoch);
+        assert_eq!(1, fenced.local_epoch());
+    }
+
+    #[tokio::test]
+    async fn test_fenceable_init_with_epoch_retries_boundary_conflict() {
+        let (delegate, boundary, bounded) = new_bounded_store();
+        let store =
+            Arc::clone(&bounded) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>;
+        let stale = SimpleTransactionalObject::<TestVal>::init(
+            store.clone(),
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let mut current = SimpleTransactionalObject::<TestVal>::load(store)
+            .await
+            .unwrap();
+
+        let mut dirty = current.prepare_dirty().unwrap();
+        dirty.value.payload = 2;
+        current.update(dirty).await.unwrap();
+        let mut dirty = current.prepare_dirty().unwrap();
+        dirty.value.payload = 3;
+        current.update(dirty).await.unwrap();
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+        delegate.delete(MonotonicId::new(2)).await.unwrap();
+
+        let fenced = FenceableTransactionalObject::init_with_epoch(
+            stale,
+            TokioDuration::from_secs(5),
+            Arc::new(DefaultSystemClock::new()),
+            7,
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await
+        .unwrap();
+
+        let latest = delegate.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(MonotonicId::new(4), latest.0);
+        assert_eq!(7, latest.1.epoch);
+        assert_eq!(7, fenced.local_epoch());
     }
 
     #[tokio::test]
