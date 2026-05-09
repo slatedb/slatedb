@@ -59,11 +59,11 @@ use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, VersionedManifest};
-use crate::mem_table::WritableKVTable;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
+use crate::prefix_extractor::PrefixExtractor;
 use crate::rand::DbRand;
 use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
@@ -115,6 +115,11 @@ pub(crate) struct DbInner {
     pub(crate) txn_manager: Arc<TransactionManager>,
     pub(crate) snapshot_manager: Arc<SnapshotManager>,
     pub(crate) status_manager: DbStatusManager,
+    /// Segment extractor (RFC-0024). When `Some`, the writer routes every
+    /// key through this extractor and groups flush output into per-segment
+    /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
+    /// segment encoded in the manifest's top-level tree.
+    pub(crate) segment_extractor: Option<Arc<dyn PrefixExtractor>>,
 }
 
 impl DbInner {
@@ -130,6 +135,7 @@ impl DbInner {
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
         status_manager: DbStatusManager,
+        segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -202,6 +208,7 @@ impl DbInner {
             txn_manager,
             snapshot_manager,
             status_manager,
+            segment_extractor,
         };
         Ok(db_inner)
     }
@@ -286,16 +293,8 @@ impl DbInner {
         let mut empty_wal_id = next_wal_id;
 
         loop {
-            let empty_wal = WritableKVTable::new();
-            match self
-                .flush_imm_table(
-                    &SsTableId::Wal(empty_wal_id),
-                    empty_wal.table().clone(),
-                    false,
-                )
-                .await
-            {
-                Ok(_) => {
+            match self.flush_empty_wal(empty_wal_id).await {
+                Ok(()) => {
                     return Ok(());
                 }
                 Err(SlateDBError::Fenced) => {

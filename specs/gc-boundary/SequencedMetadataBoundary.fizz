@@ -1,0 +1,206 @@
+---
+deadlock_detection: false
+options:
+    max_actions: 40
+    crash_on_yield: false
+action_options:
+    Writer.Plan:
+        max_actions: 1
+    Writer.Create:
+        max_actions: 1
+    Writer.CheckBoundary:
+        max_actions: 1
+    GarbageCollector.MarkOld:
+        max_actions: 4
+    GarbageCollector.AdvanceBoundary:
+        max_actions: 4
+    GarbageCollector.Delete:
+        max_actions: 4
+
+---
+
+# This spec models RFC-0025's sequenced metadata boundary protocol for the
+# `.manifest` and `.compactions` namespaces.
+#
+# A writer may stall after choosing a sequenced ID. Another writer can create
+# the same ID, GC can fence and delete it, and the stalled writer can later
+# recreate the ID. The protocol is safe only if the stalled writer checks the
+# durable boundary after create-if-absent succeeds and refuses to return
+# success for IDs at or behind the boundary.
+
+NAMESPACES = ["manifest", "compactions"]
+IDS = [1, 2, 3]
+
+def metadata_key(ns, id):
+    return (ns, id)
+
+
+def fenced_keys(ns, boundary):
+    keys = set()
+    for id in IDS:
+        if id <= boundary:
+            keys.add(metadata_key(ns, id))
+    return keys
+
+
+role Writer:
+    action Init:
+        self.status = "Idle"
+        self.ns = ""
+        self.target = 0
+        self.checked_boundary = -1
+        self.created_after_delete = False
+
+    atomic action Plan:
+        require (self.status == "Idle")
+        ns = oneof NAMESPACES
+        target = oneof IDS
+        self.ns = ns
+        self.target = target
+        self.status = "Planned"
+
+    atomic action Create:
+        require (self.status == "Planned")
+        key = metadata_key(self.ns, self.target)
+        if key in objects:
+            self.status = "CreateConflict"
+        else:
+            objects.add(key)
+            created_ids.add(key)
+            if key in deleted_ids:
+                self.created_after_delete = True
+            self.status = "Created"
+
+    atomic action CheckBoundary:
+        require (self.status == "Created")
+        key = metadata_key(self.ns, self.target)
+        self.checked_boundary = boundaries[self.ns]
+        if self.target <= boundaries[self.ns]:
+            self.status = "Fenced"
+        else:
+            self.status = "Succeeded"
+            successful_returns.add(key)
+            if key in deleted_ids:
+                bad_success_after_delete.add(key)
+
+
+role GarbageCollector:
+    action Init:
+        self.steps = 0
+
+    atomic action MarkOld:
+        candidates = [key for key in objects if key not in old_ids]
+        key = oneof candidates
+        old_ids.add(key)
+        self.steps = self.steps + 1
+
+    atomic action AdvanceBoundary:
+        ns = oneof NAMESPACES
+        candidates = [
+            key[1]
+            for key in old_ids
+            if key[0] == ns and key[1] > boundaries[ns]
+        ]
+        boundary = oneof candidates
+        boundaries[ns] = boundary
+        for key in fenced_keys(ns, boundary):
+            fenced_ids.add(key)
+        self.steps = self.steps + 1
+
+    atomic action Delete:
+        candidates = [
+            key
+            for key in objects
+            if key in old_ids and key[1] <= boundaries[key[0]]
+        ]
+        key = oneof candidates
+        objects.remove(key)
+        deleted_ids.add(key)
+        self.steps = self.steps + 1
+
+
+action Init:
+    boundaries = {
+        "manifest": 0,
+        "compactions": 0,
+    }
+
+    # Objects that currently exist in the object store.
+    objects = set()
+
+    # Objects observed as old enough for metadata GC.
+    old_ids = set()
+
+    # IDs that have been successfully created at least once.
+    created_ids = set()
+
+    # IDs that GC has deleted at least once.
+    deleted_ids = set()
+
+    # IDs that have returned success to a writer.
+    successful_returns = set()
+
+    # IDs at or behind the durable boundary.
+    fenced_ids = set()
+
+    # This set must remain empty. It records the stale success bug.
+    bad_success_after_delete = set()
+
+    writer_a = Writer()
+    writer_b = Writer()
+    gc = GarbageCollector()
+
+
+transition assertion BoundaryNeverMovesBackward(before, after):
+    for ns in NAMESPACES:
+        if after.boundaries[ns] < before.boundaries[ns]:
+            return False
+    return True
+
+
+always assertion DeletedIdsRemainBehindBoundary:
+    for key in deleted_ids:
+        if key[1] > boundaries[key[0]]:
+            return False
+    return True
+
+
+always assertion FencedIdsMatchBoundaries:
+    expected = set()
+    for ns in NAMESPACES:
+        for key in fenced_keys(ns, boundaries[ns]):
+            expected.add(key)
+    return fenced_ids == expected
+
+
+always assertion SuccessfulWriterObservedBoundaryBelowId:
+    for writer in [writer_a, writer_b]:
+        if writer.status == "Succeeded":
+            if writer.checked_boundary >= writer.target:
+                return False
+    return True
+
+
+always assertion NoSuccessfulReturnAfterDelete:
+    return len(bad_success_after_delete) == 0
+
+
+always assertion NoWriterSucceedsAfterRecreatingDeletedId:
+    for writer in [writer_a, writer_b]:
+        if writer.status == "Succeeded" and writer.created_after_delete:
+            return False
+    return True
+
+
+exists assertion NormalWriteCanSucceed:
+    return (
+        writer_a.status == "Succeeded"
+        or writer_b.status == "Succeeded"
+    )
+
+
+exists assertion StaleRecreateIsRejected:
+    for writer in [writer_a, writer_b]:
+        if writer.status == "Fenced" and writer.created_after_delete:
+            return True
+    return False

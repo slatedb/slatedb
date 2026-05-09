@@ -3512,6 +3512,10 @@ mod tests {
     async fn test_maybe_schedule_compactions_only_submits() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0().await;
+        // Refresh so add_compaction sees the just-flushed L0; the source-
+        // isolation check needs the spec's source view to be present in the
+        // compactor's local tree.
+        fixture.handler.state_writer.refresh().await.unwrap();
         let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction);
 

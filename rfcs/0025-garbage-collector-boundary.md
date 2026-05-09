@@ -1,10 +1,27 @@
-# Garbage Collector Boundary Files
-
-<!-- Replace "RFC Title" with your RFC's short, descriptive title. -->
+# Garbage Collector Boundary Files for Sequenced Metadata
 
 Table of Contents:
 
 <!-- TOC start (generate with https://bitdowntoc.derlin.ch) -->
+
+- [Summary](#summary)
+- [Background](#background)
+- [Motivation](#motivation)
+- [Goals](#goals)
+- [Non-Goals](#non-goals)
+- [Design](#design)
+   - [Boundary Files](#boundary-files)
+   - [Advancing Boundaries](#advancing-boundaries)
+   - [Checking Boundaries After Writes](#checking-boundaries-after-writes)
+   - [Garbage Collection](#garbage-collection)
+- [Implementation](#implementation)
+- [Impact Analysis](#impact-analysis)
+- [Operations](#operations)
+- [Testing](#testing)
+- [Rollout](#rollout)
+- [Alternatives](#alternatives)
+- [Open Questions](#open-questions)
+- [References](#references)
 
 <!-- TOC end -->
 
@@ -16,285 +33,212 @@ Authors:
 
 ## Summary
 
-SlateDB currently relies on a combination of heuristics and time boundaries to:
+SlateDB stores `.manifest` and `.compactions` state in sequenced
+object-store files. The filename is the commit point: a writer creates the next
+file with a create-if-absent operation, and success means the sequenced update
+won.
 
-1. Prevent the garbage collector (GC) from deleting files it shouldn't, and
-2. Properly detect that a client has been fenced.
+This protocol is unsafe when a writer stalls longer than the garbage
+collector's `min_age` setting. A stalled writer can prepare file `N+1`, another
+writer can create and supersede `N+1`, GC can later delete `N+1`, and the
+stalled writer can then resume and successfully create the same filename. The
+stale writer observes success even though the original create-if-absent fencing
+point should have rejected it.
 
-If a client exceeds time boundaries, these two guarantees do not hold. In most cases, this is not an issue. A properly configured client should never be stalled for longer than the time boundaries. Still, in [pathological configurations](https://github.com/slatedb/slatedb/issues/1622), it can cause data loss.
-
-This RFC introduces a boundary file to remove timing dependencies from the GC safety and fencing protocols.
+This RFC adds durable boundary files for the `.manifest` and `.compactions`
+namespaces. Before GC deletes old sequenced metadata files, it advances the
+namespace boundary. After a writer creates a sequenced metadata file, it checks
+the boundary before returning success. If the created ID is at or behind the
+boundary, the write is treated as fenced.
 
 ## Background
 
-We currently GC four file types:
+SlateDB has two sequenced metadata namespaces:
 
-- `.manifest` (sequential flatbuffer, e.g. 00000000000000000012.manifest)
-- `.compactions` (sequential flatbuffer, e.g. 00000000000000000013.compactions)
-- WAL files (sequential SSTs, e.g. 00000000000000008495.sst)
-- compacted SSTs (ULID-based SSTs, e.g. 01KQWJPHB2GE3KJE07JV5NXGJA.sst)
+- `.manifest` files, named like `00000000000000000012.manifest`
+- `.compactions` files, named like `00000000000000000013.compactions`
 
-The files fall into three categories:
+Both namespaces use the same object-store sequencing pattern:
 
-1. Sequenced storage protocol files (`.manifest` and `.compactions`)
-2. Sequenced SST files (WAL files)
-3. ULID-based SST files (compacted SSTs)
+1. Read the latest object ID.
+2. Compute the next object ID.
+3. Write the next object with create-if-absent.
+4. Treat create success as the committed update.
 
-These categories follow two write patterns:
+GC currently deletes old metadata files using the existing retention rules:
 
-1. Sequenced write protocol (00000000000000000012, 00000000000000000013, 00000000000000000014, and so on)
-2. ULID-based write protocol (01KQWJPHB2GE3KJE07JV5NXGJA, 01KQWTMTRPZJWAF6M19YZEHJT4, and so on)
+- `.manifest`: delete files older than `min_age` when they are not the latest
+  manifest and are not referenced by an active checkpoint.
+- `.compactions`: delete files older than `min_age` when they are not the
+  latest compactions file.
 
-The files are written by three writer types:
-
-- The writer, which owns `writer_epoch`
-- The compactor, which owns `compactor_epoch`
-- External writers such as `admin.rs`, `DbReader`, and `Compactor` (when `Compactor` writes to `.manifest`).
-
-All write patterns currently depend on time windows to protect recent writes against concurrent GC operations:
-
-- `.manifest`: GC deletes all manifest files that are...
-    - older than `min_age`, and
-    - not the current manifest file, and
-    - not referenced by any checkpoint manifest in the current manifest file
-- `.compactions`: GC deletes all compactions files that are...
-    - older than `min_age` and
-    - not the current compactions file
-- `/wal`: GC deletes all WAL files that are...
-    - older than `min_age`, and
-    - older than `manifest.replay_after_wal_id`, and
-    - not referenced by an active checkpoint manifest (not between its `replay_after_wal_id` and `next_wal_sst_id`)
-- `/compacted`: GC deletes all compacted SST files that are...
-    - older than `min_age`, and
-    - not referenced by the active manifest, and
-    - not referenced by any active checkpoint manifest, and
-    - older than the oldest compaction job's `compaction.id.timestamp()` in the current compactions file, and
-        - else older than Unix epoch 0 if there has never been any compaction job, and
-    - older than the most recent L0 in the latest manifest
-        - else older than `l0_last_compacted` if there are no current L0s
-        - else older than Unix epoch 0 if there has never been any L0 (fresh DB)
-
-NOTE: `min_age` evaluates against the object store's metadata timestamp for `.manifest`, `.compactions`, and WAL files. For compacted SST files, `min_age` evaluates against the ULID timestamp, which is based on wall-clock time of the writer machine at the time of SST file creation.
+These rules assume that a writer will not pause between computing the next
+object ID and creating that object for longer than `min_age`.
 
 ## Motivation
 
-Each of the `min_age` time windows creates a vulnerability for stalled writers:
+The unsafe sequence is the same for both metadata namespaces:
 
-- `.manifest` / `.compactions` GC:
-    - t0: writer A reads manifest N and prepares update N -> N+1.
-    - t1: writer A stalls before put(Create, N+1).
-    - t2: writer B writes N+1; later writers advance to N+2, N+3, ...
-    - t3: N+1.manifest is older than `min_age`, not current, and not checkpoint-referenced, so GC deletes it.
-    - t4: writer A resumes and put(Create, N+1.manifest) succeeds because N+1 no longer exists.
-    - t5: writer A treats its stale manifest update as committed, even though the normal create-if-absent CAS path should have rejected it.
-- `/wal`:
-    - t0: writer A prepares to write N.sst.
-    - t1: writer A stalls before put(Create, N.sst).
-    - t2: writer B writes N.sst; later writers advance WALs to N+1, N+2, and writes a new manifest that advances `replay_after_wal_id` to N+1.
-    - t3: N.sst is older than `min_age`, older than `manifest.replay_after_wal_id`, and outside any active checkpoint WAL range, so GC deletes it.
-    - t4: writer A resumes and put(Create, N.sst) succeeds because N.sst no longer exists.
-    - t5: writer A treats its stale WAL write as committed, even though the normal create-if-absent fencing path should have rejected it.
-- `/compacted`:
-    - t0: writer A uploads ULID SST X.sst to /compacted.
-    - t1: writer A stalls before publishing the manifest update that references X.
-    - t2: writer B flushes and publishes a newer L0 SST Y.sst whose ULID timestamp is greater than X's timestamp, so the latest manifest's most-recent-L0 cutoff moves past X.
-    - t3: the compactor publishes a newer compaction job J whose `compaction.id.timestamp()` is greater than X's timestamp, and any older compaction jobs complete, so the current `.compactions` file's oldest-job cutoff also moves past X.
-    - t4: X.sst is older than `min_age`, unreferenced by active/checkpoint manifests, and older than both compacted-SST cutoffs, so GC deletes X.
-    - t5: writer A resumes and successfully publishes a manifest update referencing X.
-    - t6: the latest manifest now points at a missing SST.
+1. Writer A reads metadata file `N` and prepares an update to file `N+1`.
+2. Writer A stalls before creating `N+1`.
+3. Writer B creates `N+1`; later writers advance the namespace to `N+2`,
+   `N+3`, and so on.
+4. GC deletes `N+1` after it becomes old enough and is no longer retained by
+   the namespace's normal retention rules.
+5. Writer A resumes and creates `N+1` successfully because the object no
+   longer exists.
+6. Writer A treats the stale update as committed.
+
+The root problem is that object-store create-if-absent only protects against
+objects that currently exist. Once GC deletes a sequenced metadata object,
+create-if-absent no longer remembers that the ID was already used.
 
 ## Goals
 
-- Prevent the garbage collector from deleting files that might subsequently be added to a `.manifest` or `.compactions` file by a stalled writer.
-- Prevent stalled writers from returning success for writes when they have already been fenced.
+- Prevent stale `.manifest` and `.compactions` writes from returning success
+  after GC has made their target IDs unsafe to reuse.
+- Preserve the existing sequenced metadata write protocol and normal GC
+  retention rules.
+- Make boundary checks efficient enough for normal metadata writes.
+- Make boundary implementation flexible enough to be used for WAL boundaries,
+  should we want to add those in the future.
 
 ## Non-Goals
 
-- Move garbage collection logic in-process (e.g. have `Db`/`Compactor` delete `.manifest`/`.compactions`/`.sst` files).
-- Significantly modify the existing protocols.
+- Redesign metadata storage or replace sequenced object filenames as the commit
+  point.
+- Move metadata deletion into the writer or compactor processes.
+- Cover storage namespaces other than `.manifest` and `.compactions`.
 
 ## Design
 
-In this RFC, we will fix these unsafe write windows by:
+### Boundary Files
 
-1. Introducing `.boundary` files for files whose names are the create-if-absent commit point
-2. Updating each `.boundary` file prior to garbage collection
-3. Preventing any boundary-tracked write from returning success if it precedes the current `.boundary` value
-4. Enforcing GC cutoff rules when adding compacted SST references to `.manifest` and `.compactions` files
-
-### Boundary files
-
-We will add a `.boundary` file for each storage file type whose filename is the commit point:
+Add one boundary file per sequenced metadata namespace:
 
 - `/gc/manifest.boundary`
 - `/gc/compactions.boundary`
-- `/gc/wal.boundary`
 
-Each boundary file contains a single ASCII-encoded `u64` integer:
+Each file contains a single ASCII-encoded `u64`:
 
-- `/gc/manifest.boundary`: 12
-- `/gc/compactions.boundary`: 13
-- `/gc/wal.boundary`: 8495
+```text
+12
+```
 
-These values are inclusive numeric high-watermarks over the file IDs in each namespace. A boundary value `B` means that GC has durably fenced every boundary-tracked file ID `i <= B`. No boundary-tracked write may be treated as successful unless it observes `B < i` after the write occurred.
+The value is an inclusive high-watermark. A boundary value `B` means that
+metadata IDs `<= B` in that namespace have been durably fenced. Writers must
+not treat a newly created sequenced metadata file with ID `i <= B` as
+successful.
 
-The boundary protocol has two invariants:
+The protocol has two invariants:
 
-1. Before GC may delete boundary-tracked file ID `i`, the durable boundary for that namespace must be `>= i`.
-2. Before a writer may return success for boundary-tracked file ID `i`, it must observe the durable boundary for that namespace as `< i` after the write occurred.
+1. Before GC may delete sequenced metadata file ID `i`, the durable boundary
+   for that namespace must be `>= i`.
+2. Before a writer may return success for sequenced metadata file ID `i`, it
+   must observe the durable boundary for that namespace as `< i` after the file
+   create succeeds.
 
-There is intentionally no separate boundary file for compacted SSTs. Compacted SST writes are tentative data-file writes. They only become visible when a later `.manifest` or `.compactions` file references them; those metadata files are protected by their own boundary files. Compacted SST safety therefore comes from the GC cutoff validation rules defined in _GC cutoff rule enforcement_, below.
+If a boundary file has never existed, readers use boundary value `0`. If a
+process has observed a boundary file and later finds it missing, it panics
+because GC must never delete boundary files.
 
-Boundary files will always live in the `main` object store (even if a `wal` object store is used for WAL files).
+### Advancing Boundaries
 
-_TODO: Do we want to colocate /gc/wa.boundary in the WAL store? If a WAL object store is used specifically to reduce latency, it would make sense to colocate the boundary file there to keep latency low when doing WAL boundary checks._
+GC advances the boundary before deleting old metadata files from a namespace.
 
-#### Boundary file updates
+For a namespace, GC computes the desired boundary as:
 
-The garbage collector updates the boundary files prior to each GC run.
+1. List the namespace's metadata files.
+2. Remove the most recent metadata file, which must always be kept.
+3. Keep files whose object-store `last_modified` timestamp is older than
+   `min_age`.
+4. Choose the maximum file ID from that filtered list.
 
-1. GC calculates the new boundary value (see _Garbage collector changes_, below), which must be numerically greater than the current value.
-2. GC reads the current boundary value and ETag.
-3. GC verifies the new boundary value is numerically greater than the current boundary value.
-    a. If not, the GC is skipped since the current boundary is already greater than or equal to the new boundary.
-4. GC updates the boundary file using `PUT If-Match` with the ETag from (2).
-    a. If the update succeeds, the new boundary value is in effect.
-    b. If the update fails with a precondition error, the GC is skipped since another GC has updated the boundary file.
+If no files are old enough, GC skips the boundary update for that namespace.
 
-After the boundary file is updated successfully, the GC may proceed with its deletion process (see _Garbage collector changes_).
+Boundary updates are monotonic:
 
-Multiple GC processes may run concurrently. If they contend on the boundary file update, one will succeed and the others will skip since they observe the updated boundary.
+1. Read the current boundary value and object version metadata.
+2. If the desired boundary is less than or equal to the current value, the
+   boundary is already advanced.
+3. If the boundary file is missing, create it with create-if-absent.
+4. Otherwise, update it with a conditional object-store update using the
+   version metadata from step 1.
+5. If a concurrent GC wins the conditional update race, retry until the durable
+   boundary is greater than or equal to the desired value.
 
-#### Boundary file checks
+The boundary file must never move backward.
 
-Each boundary-tracked writer must follow this protocol:
+### Checking Boundaries After Writes
 
-1. Write the file with a create-if-absent operation.
-    a. If the write fails because the file already exists, return a `ObjectVersionExists` error.
-2. Read the boundary file.
-    a. If the boundary file does not exist, and has never been seen, use a boundary value of 0.
-    b. If the boundary file does not exist, but has been seen before, panic since the GC should never delete a boundary file.
-3. Verify the just-written file ID is numerically greater than the boundary value read in (2).
-    a. If not, return a `ObjectVersionExists` error.
-4. Return success.
+Every sequenced metadata write must check the corresponding boundary after the
+create-if-absent operation succeeds:
 
-This protocol can be optimized to:
+1. Create the next metadata file with create-if-absent.
+2. If create-if-absent fails because the object already exists, return the
+   existing sequenced write conflict error.
+3. Read the namespace boundary.
+4. If the just-created ID is less than or equal to the boundary, return a
+   boundary error and do not report the write as committed.
+5. Otherwise, return success.
 
-1. cache the previously read boundary value and ETag in memory, and
-2. `GET If-None-Match` the boundary file after each write.
-    a. If it's 304, the boundary is unchanged and the cached value is used.
-    b. If it's 200
-        - If the new value is >= the just-written file ID, return an `ObjectVersionExists` error.
-        - Else, update the in-memory boundary value and ETag, and treat the write as successful.
+The check must happen after the file create. A pre-create check would still
+allow this race:
 
-We can further optimize this protocol to poll the boundary file in the background and keep the value updated in memory. Polling is left as future work if the added latency of a boundary file read on each write proves to be a problem in practice.
+1. Writer observes `boundary < N`.
+2. GC advances the boundary to `N`.
+3. Writer creates `N`.
+4. Writer incorrectly returns success.
 
-### GC cutoff rule enforcement
+Boundary reads can be optimized with an in-memory cache and conditional GETs
+using `If-None-Match`. If the object store returns "not modified", the writer
+can reuse the cached boundary value. If it returns a new value, the writer
+updates the cache and checks the created ID against that value.
 
-We must enforce GC cutoff rules when adding compacted SST references to `.manifest` and `.compactions` files. This prevents writers from adding references to SSTs that are already past the GC cutoff and thus vulnerable to deletion.
+The boundary read must not be served from a stale object cache. Manifest and
+compactions stores must not use `CachedObjectStore`.
 
-We will enforce the following rules:
+### Garbage Collection
 
-- Newly added L0 SSTs in `.manifest` must have an SST ULID timestamp greater than both `last_compacted_l0_sst_view_id.id().timestamp()` and `max(l0.id().timestamp())` across all tree segments (including the root).
-- Newly added SR SSTs in `.manifest` or `.compactions` must have an SST ULID timestamp greater than the compaction job's ID timestamp.
-- Newly added compaction jobs in `.compactions` must have an ID timestamp greater than the most recent compaction job's ID timestamp in the file.
+After advancing a namespace boundary, GC continues to apply the normal deletion
+rules:
 
-_TODO: With a large amount of segments and/or L0's, this could iterate quite a few SSTs. It might burn CPU._
-
-These rules guarantee:
-
-- Untracked L0s are greater than every tree segment's `last_compacted_l0_sst_view_id` (including the root).
-- Untracked SR SSTs are > the oldest compaction job ID in the current `.compactions` file.
-
-Together with `manifest.boundary` and `compactions.boundary`, these rules make a separate compacted SST boundary file unnecessary. If an unreferenced compacted SST has become eligible for deletion, then a later attempt to publish it must either fail the `.manifest`/`.compactions` boundary check or fail cutoff validation.
+- `.manifest`: delete files at or behind the boundary when they are older than
+  `min_age`, are not the latest manifest, and are not referenced by an active
+  checkpoint.
+- `.compactions`: delete files at or behind the boundary when they are older
+  than `min_age` and are not the latest compactions file.
 
 ## Implementation
 
-### Writer changes
-
-The following write paths must be updated to follow the boundary file check protocol described above:
-
-- `ObjectStoreSequencedStorageProtocol::write` (covers `.manifest` and `.compactions` files) must check and return `ObjectVersionExists` if the boundary value has advanced to or past the just-written file ID.
-- `TableStore::write_sst` (covers `wal.boundary`) must check and return `Fenced` if the boundary value has advanced to or past the just-written WAL ID.
-
-`TableStore::write_sst` and `TableStore::table_writer(...).close()` do not perform boundary checks for `SsTableId::Compacted`. Compacted `.sst` files are managed using the rules described in _GC cutoff rule enforcement_. Enforcement for the `.manifest`/`.compactions` GC cutoff rules is achieved by adding `TransactionalObject::validate()`. Dirty manifests and compactions can then compare against the current value to enforce the rules defined in _GC cutoff rule enforcement_.
-
-_TODO: sketch out how to plumb the manifest/compactions validation rules in `TransactionalObject::validate()`._
-
-`.manifest` and `.compactions` update validation for newly added SSTs should return `InvalidClockTick` when the SST timestamp violates the GC cutoff rules. We will need to update the `MemTable` flusher code to retry `InvalidClockTick` errors with a new L0 SST ULID. We will also need to update the compactor code to fail a compaction job if it receives an `InvalidClockTick` for an SR SST or compaction job.
-
-_TODO: sketch out how to have the MemTable flusher handle `InvalidClockTick` errors._
-
-### Garbage collector changes
-
-The GC must be updated to compute the new boundary values for each boundary-tracked file type and update the boundary files prior to deleting any boundary-tracked files. It must also compute the compacted SST GC cutoff prior to deleting compacted SSTs.
-
-#### Computing `manifest.boundary` and `compactions.boundary`
-
-The GC computes the boundary as follows:
-
-1. let `file_list` = `ManifestStore::list_manifests()/CompactionsStore::list_compactions()`
-2. let `eligible_by_age` = `file_list.filter(|file| file.timestamp() <= now - min_age)`
-3. let `boundary` = `eligible_by_age.map(|file| file.id).max()`
-
-If no files are eligible by age, the `.boundary` update and GC process are skipped.
-
-_NOTE: `timestamp()` represents the timestamp of the object in the object store._
-
-#### Computing `wal.boundary`
-
-The GC computes `wal.boundary` as follows:
-
-1. let `manifest` = `ManifestStore::read_latest_manifest()`
-2. let `wal_list` = `TableStore::list_wal_ssts()`
-3. let `age_boundary` = `wal_list.filter(|wal| wal.timestamp() <= now - min_age).map(|wal| wal.id).max()`
-4. let `replay_boundary` = `manifest.replay_after_wal_id.saturating_sub(1)`
-5. let `boundary` = min(`age_boundary`, `replay_boundary`)
-
-If no WAL files are eligible by age, or `manifest.replay_after_wal_id == 0`, the `.boundary` update and GC process are skipped.
-
-_NOTE: `timestamp()` represents the timestamp of the object in the object store._
-
-#### Computing the compacted SST GC cutoff
-
-The GC computes the compacted SST GC cutoff as follows:
-
-1. let `compactor_state` = `CompactorStateReader::read_view()`
-2. let `compacted_list` = `TableStore::list_compacted_ssts()`
-3. let `min_age_cutoff` = `compacted_list.filter(|sst| sst.id().timestamp() > min_age).min()`
-4. let `writer_cutoff` = `manifest.trees.max(last_compacted_l0_sst_view_id.timestamp())`
-5. let `compactor_cutoff` = `compactor_state.recent_compactions().map(|compaction| compaction.id.timestamp()).min()`
-6. let `cutoff` = min(`min_age_cutoff`, `writer_cutoff`, `compactor_cutoff`)
-
-If no `last_compacted_l0_sst_view_id` exists, the compacted SST GC process is skipped.
-
-We intentionally drop the `manifest.l0` check in (4) that we used to perform, and instead only check `last_compacted_l0_sst_view_id` for all segments. This is a more conservative approach that leaves L0s around for longer. This is done to simplify the protocol.
-
-_NOTE: `timestamp()` represents the 48-bit timestamp component of the SST's ULID._
-
-#### Deletion process
-
-For boundary-tracked files, the GC may delete:
-
-- `.manifest` files with IDs less than or equal to `manifest.boundary` if they are not the latest manifest and are not referenced by any active checkpoint.
-- `.compactions` files with IDs less than or equal to `compactions.boundary` if they are not the latest compactions file.
-- WAL SST files with IDs less than or equal to `wal.boundary` if they are not referenced by any active manifest. A WAL SST is active when its ID is between `manifest.replay_after_wal_id` and `manifest.next_wal_sst_id`.
-
-For compacted SST files, the GC may delete any SST that:
-
-1. Has an SST ULID timestamp less than the compacted SST GC cutoff, and
-2. Is not referenced by any active `.manifest` or the latest `.compactions` file.
+- Add `BoundaryObject` to the transactional object crate with:
+  - `check(id)`: verify that `id` is greater than the durable boundary.
+  - `advance(boundary)`: durably advance the boundary to at least `boundary`.
+- Add `BoundedSequencedStorage<T>`, a `SequencedStorageProtocol<T>` wrapper
+  that delegates the write and then calls `BoundaryObject::check` before
+  returning success.
+- Add `ObjectStoreBoundaryObject`, stored under `<root>/gc/<name>.boundary`,
+  using ASCII `u64` encoding.
+- Add `ObjectVersionBehindBoundary { id, boundary }` to represent a write that
+  created an ID at or behind the durable boundary.
+- Wrap `ManifestStore` with `manifest.boundary`.
+- Wrap `CompactionsStore` with `compactions.boundary`.
+- Add `advance_boundary` methods to the manifest and compactions stores for GC.
+- Update manifest and compactions GC tasks to compute the maximum old-enough ID
+  and advance the boundary before deleting files.
+- Ensure manifest and compactions stores do not use stale object-cache reads for
+  boundary objects.
 
 ## Impact Analysis
 
-SlateDB features and components that this RFC interacts with. Check all that apply.
+SlateDB features and components that this RFC interacts with:
 
 ### Core API & Query Semantics
 
 - [ ] Basic KV API (`get`/`put`/`delete`)
 - [ ] Range queries, iterators, seek semantics
 - [ ] Range deletions
-- [ ] Error model, API errors
+- [x] Error model, API errors
 
 ### Consistency, Isolation, and Multi-Versioning
 
@@ -312,7 +256,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ### Metadata, Coordination, and Lifecycles
 
 - [ ] Manifest format
-- [ ] Checkpoints
+- [x] Checkpoints
 - [ ] Clones
 - [x] Garbage collection
 - [ ] Database splitting and merging
@@ -328,9 +272,8 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Storage Engine Internals
 
-- [x] Write-ahead log (WAL)
 - [ ] Block cache
-- [ ] Object store cache
+- [x] Object store cache
 - [ ] Indexing (bloom filters, metadata)
 - [ ] SST format or block format
 
@@ -342,91 +285,94 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ## Operations
 
-### Performance & Cost
+Performance and cost:
 
-- Latency (reads/writes/compactions)
-    - This will add latency to all object store writes, which is managed in two ways:
-        1. Keeping user-facing operations mostly non-blocking.
-            a. Users generally write with `await_durable` set to `false`.
-            b. By default, `.manifest` writes (L0 updates, and so on) occur in the background using the memtable flusher.
-            c. By default, WAL writes occur in the background using the WAL buffer.
-            d. Users that call `flush()` will still need to wait, which will incur the added latency.
-        2. Reduce the boundary check latency.
-            a. Writers can refresh boundary files in the background periodically and save the value and ETag
-            b. Writers call `GET If-None-Match` on the boundary file after writes. If it's 304, they can use their in-memory value. The [maximum p999 latency across Azure, GCS, S3, S3E1Z, GCS Rapid, and Tigris is 68ms](https://x.com/Sirupsen/status/2050895383866249618) (max p99=30ms, and max p50=14ms).
-        (2a) is left as future work if it's actually needed.
-- Throughput (reads/writes/compactions)
-    - No major considerations other than latency impact described above.
-- Object-store request (GET/LIST/PUT) and cost profile
-    - `.manifest`, `.compactions`, and WAL `.sst` writes now require an additional `GET` to read the boundary file after the write.
-    - A continuous `flush_interval=100ms` results in 10 flushes/sec * 60 sec/min * 60 min/hr * 24 hr/day * 30 day/month = 25,920,000 GET requests/month. 25,920,000 * $0.0004 / 1000 requests = $10.37/month in added GET costs for WAL writes.
-- Space, read, and write amplification
-    - Minor increase in space amplification from the addition of boundary files, which are small (a few bytes each).
-    - Minor increase in space amplification from being more conservative with L0 SST GC.
+- Each successful `.manifest` and `.compactions` write performs a boundary
+  check before returning success.
+- Boundary checks can use cached ETags and `GET If-None-Match` to reduce
+  payload transfer.
+- Each GC run may perform one conditional boundary update per metadata namespace
+  when old-enough files exist.
+- The request cost is tied to metadata update frequency, not data-file write
+  frequency.
 
-### Observability
+Compatibility:
 
-<!-- Describe any operational changes required to support this change. -->
+- Existing databases start with no boundary files. Missing boundary files are
+  interpreted as boundary `0` until GC creates or advances them.
+- Boundary files are new objects under `/gc`; existing `.manifest` and
+  `.compactions` file formats do not change.
+- Mixed-version deployments are unsafe if older writers can create sequenced
+  metadata files without checking boundaries while newer GC processes advance
+  boundaries.
+- Object-store implementations must support the conditional operations required
+  for safe boundary advancement.
 
-- Configuration changes
-- New components/services
-- Metrics
-- Logging
+Operational behavior:
 
-### Compatibility
-
-<!-- Describe compatibility considerations with existing versions of SlateDB. -->
-
-- Existing data on object storage / on-disk formats
-- Existing public APIs (including bindings)
-- Rolling upgrades / mixed-version behavior (if applicable)
+- Boundary files must not be manually deleted.
+- Boundary values are monotonic and should never be edited downward.
+- A boundary error means the process created an ID that GC has already fenced.
+  Operators should treat this as a stale-writer signal and review `min_age`,
+  process stalls, and object-store behavior.
 
 ## Testing
 
-<!-- Describe the testing plan for this change. -->
+Unit tests:
 
-- Unit tests:
-- Integration tests:
-- Fault-injection/chaos tests:
-- Deterministic simulation tests:
-- Formal methods verification:
-- Performance tests:
+- Missing boundary defaults to `0`.
+- Advancing a boundary fences IDs at or below the boundary.
+- Concurrent or stale conditional updates retry until the durable boundary is
+  advanced.
+- Boundary checks use `GET If-None-Match` when a cached ETag exists.
+- A previously observed boundary file disappearing panics.
+- `BoundedSequencedStorage` checks the boundary after a successful delegated
+  write.
+
+Integration tests:
+
+- Manifest GC advances `manifest.boundary` before deleting old manifests.
+- A stale manifest create at or behind the boundary fails with
+  `ObjectVersionBehindBoundary`.
+- Compactions GC advances `compactions.boundary` before deleting old
+  compactions files.
+- A stale compactions create at or behind the boundary fails with
+  `ObjectVersionBehindBoundary`.
+
+Formal methods:
+
+- Model check `specs/gc-boundary/SequencedMetadataBoundary.fizz`.
 
 ## Rollout
 
-<!-- Describe the plan for rolling out this change to production. -->
-
-- Milestones / phases:
-- Feature flags / opt-in:
-- Docs updates:
+Rollout can happen in a single release because it older clients will simply
+ignore the new boundary files. Newer clients with no boundary file will treat
+the boundary as `0`, which replicates the old behavior until GC creates or
+advances the boundary.
 
 ## Alternatives
 
-List the serious alternatives and why they were rejected (including “status quo”). Include trade-offs and risks.
+Status quo:
 
-## Open Questions
+- Keep relying on `min_age` as a writer-stall bound.
+- Rejected because pathological stalls can still allow stale sequenced metadata
+  writes to commit.
 
-- Question 1
-- Question 2
+Increase `min_age`:
+
+- Reduces the probability of the bug.
+- Rejected because it does not eliminate the failure mode and increases
+  metadata retention.
 
 ## References
 
-<!-- Bullet list of related issues, PRs, RFCs, papers, docs, discord discussions, etc. -->
+- [slatedb/slatedb#1646: Add `BoundaryObject` GC watermarks to prevent data
+  loss in slatedb-txn-obj][pr-1646]
+- [slatedb/slatedb#1622: pathological data-loss configuration][issue-1622]
+- [OSWALD](https://nvartolomei.com/oswald/): a WAL implementation with a
+  similar boundary concept. OSWALD's "snapshot" is our `.manifest` (or
+  `.compactions`), and its "manifest" is our boundary file. This is a rough
+  analogy, not a direct mapping, but the manifest serves a similar purpose.
 
-- https://nvartolomei.com/oswald
-- https://github.com/slatedb/slatedb/issues/1622
-
-## Updates
-
-Log major changes to this RFC over time (optional).
-
-## TODO
-
-- Add [OSWALD](https://nvartolomei.com/oswald/) reference and explain why it doesn't work (multiple writers editing single file e.g. .manifest)
-- Explain why we don't use timing approaches discussed in #352.
-- Add periodic boundary file refresher as an optional performance improvement.
-- Non-goals: move garbage collection deletion in-process (have `Db` delete .manifest/.compactions/(wal).sst and `Compactor` delete (compacted).ssts), move boundary calculation in-process (have `Db` calculate manifest/compactions/wal boundary and `Compactor` calculate compacted boundary).
-- Add rollout plan
-- Include FizzBee proof in design.
-- Do we care about CDC honoring boundary files?
-- How is Db split/merge affected (if at all)?
+[pr-1646]: https://github.com/slatedb/slatedb/pull/1646
+[issue-1622]: https://github.com/slatedb/slatedb/issues/1622
