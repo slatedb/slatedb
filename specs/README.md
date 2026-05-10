@@ -20,7 +20,7 @@ fizz specs/gc-boundary/SequencedMetadataBoundary.fizz
 
 - `kvstore/KeyValueStore.fizz`: basic write, flush, and read behavior.
 - `gc-boundary/SequencedMetadataBoundary.fizz`: proof model for the
-  `.manifest` and `.compactions` sequenced metadata GC boundary protocol.
+  bounded sequenced storage GC boundary protocol.
 
 ## FizzBee Agent Instructions
 
