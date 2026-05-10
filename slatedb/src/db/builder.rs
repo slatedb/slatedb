@@ -128,9 +128,9 @@ use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
-use crate::config::CompactorOptions;
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
+use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
@@ -1185,6 +1185,45 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         )
         .await?;
         Ok((handler, rx))
+    }
+}
+
+/// Builder for creating new CompactionWorker instances.
+///
+/// This provides a fluent API for configuring a CompactionWorker object.
+pub struct CompactionWorkerBuilder<P: Into<Path>> {
+    path: P,
+    main_object_store: Arc<dyn ObjectStore>,
+    options: CompactionWorkerOptions,
+}
+
+#[allow(unused)]
+impl<P: Into<Path>> CompactionWorkerBuilder<P> {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            path,
+            main_object_store,
+            options: CompactionWorkerOptions::default(),
+        }
+    }
+
+    pub fn into_path_builder(self) -> CompactionWorkerBuilder<Path> {
+        CompactionWorkerBuilder {
+            path: self.path.into(),
+            main_object_store: self.main_object_store,
+            options: self.options,
+        }
+    }
+
+    /// Sets the options to use for the compaction worker.
+    pub fn with_options(mut self, options: CompactionWorkerOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Builds and returns a Compactor instance.
+    pub fn build(self) -> Compactor {
+        unimplemented!()
     }
 }
 

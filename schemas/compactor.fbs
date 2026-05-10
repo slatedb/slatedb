@@ -34,6 +34,13 @@ table TieredCompactionSpec {
     segment: [ubyte];
 }
 
+table WorkerSpec {
+    // worker_id of worker that owns compaction
+    worker_id: string;
+    // wall-clock ms of last progress write
+    last_heartbeat_ms: uint64;
+}
+
 table Compaction {
     // ID of compaction
     id: Ulid (required);
@@ -46,6 +53,9 @@ table Compaction {
 
     // Output SSTs already produced by this compaction.
     output_ssts: [CompactedSsTable];
+
+    // Spec of the worker that has claimed this compaction. null = unclaimed
+    worker: WorkerSpec;
 }
 
 table CompactionsV1 {

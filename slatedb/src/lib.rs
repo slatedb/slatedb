@@ -40,6 +40,7 @@ pub use compaction_filter::{
     CompactionFilter, CompactionFilterDecision, CompactionFilterError, CompactionFilterSupplier,
     CompactionJobContext,
 };
+pub use compactor::CompactionWorkerBuilder;
 pub use compactor::CompactorBuilder;
 pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
@@ -80,6 +81,7 @@ pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+pub mod compaction_worker;
 pub mod compactor;
 pub mod config;
 pub mod db_cache;
