@@ -27,9 +27,8 @@ options:
 # - `objects` is the current object-store contents. The key is the sequenced
 #   object ID and the value is the writer epoch stored in that object's payload.
 #   For the manifest namespace, this payload is the manifest's `writer_epoch`.
-# - `boundary` is the durable GC boundary file. IDs <= boundary are fenced:
-#   writers may create them after GC deletes an object, but they must not report
-#   those writes as successful after checking the boundary.
+# - `boundary` is the durable GC boundary file. Writers may create IDs <=
+#   boundary, but they must not report them as successful.
 # - each `Writer` reads the latest object payload to claim the next epoch, writes
 #   the next sequence ID with create-if-absent, and then checks the boundary in a
 #   separate action. Splitting create from boundary check preserves the important
@@ -65,6 +64,10 @@ options:
 # - an ID can be reported successful only if both the pre-state and post-state
 #   boundary are below that ID.
 
+# Per-writer bound on successful object creations attempted in this model. This
+# is not a SlateDB protocol limit; it keeps the state space finite while still
+# allowing each writer to create multiple sequenced metadata objects and exercise
+# GC races between creates and boundary checks.
 MAX_WRITES_PER_WRITER = 3
 
 
