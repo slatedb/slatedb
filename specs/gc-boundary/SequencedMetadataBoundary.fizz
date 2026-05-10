@@ -60,7 +60,7 @@ role Writer:
             # Reset epoch/sequence and try again.
             self.status = "Init"
 
-    atomic action CheckBoundary:
+    action CheckBoundary:
         require self.status == "CheckBoundary"
         if self.next_id <= boundary:
             # Object was written before the boundary.
