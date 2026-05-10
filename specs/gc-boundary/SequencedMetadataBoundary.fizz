@@ -26,8 +26,6 @@ role Writer:
         self.next_id = 0
         # Counts writes (before boundary check)
         self.writes = 0
-        # Last successfully verified sequence ID (after boundary check)
-        self.verified = 0
         self.status = "Start"
 
     atomic action Start:
@@ -67,7 +65,6 @@ role Writer:
             self.status = "Expired"
         else:
             # Write was a success! Advance to the next slot.
-            self.verified = self.next_id
             self.next_id = self.next_id + 1
             self.status = "WriteNext"
 
