@@ -8,21 +8,34 @@ options:
 MAX_WRITES_PER_WRITER = 3
 
 atomic func latest_sequence_id():
-    max(objects.keys())
+    if len(objects) == 0:
+        return 0
+    return max(objects.keys())
 
 atomic func latest_epoch():
-    objects[head()]
+    if len(objects) == 0:
+        return 0
+    sid = latest_sequence_id()
+    return objects[sid]
 
 role Writer:
     atomic action Init:
         # Epoch owned by this writer
-        self.epoch = latest_epoch() + 1
+        self.epoch = 0
         # Next sequence file ID to write to
-        self.next_id = latest_sequence_id() + 1
+        self.next_id = 0
         # Counts writes (before boundary check)
         self.writes = 0
         # Last successfully verified sequence ID (after boundary check)
         self.verified = 0
+        self.status = "Start"
+
+    atomic action Start:
+        require self.status == "Start"
+        e = latest_epoch()
+        self.epoch = e + 1
+        sid = latest_sequence_id()
+        self.next_id = sid + 1
         self.status = "WriteNext"
 
     action WriteNext:
@@ -30,11 +43,13 @@ role Writer:
             self.status == "WriteNext"
             and self.writes < MAX_WRITES_PER_WRITER
         )
-        if self.write():
+        success = self.write()
+        if success:
             self.status = "CheckBoundary"
-        else if self.writes > 0:
+        elif self.writes > 0:
             # Writes > 0 means this writer has already written its fence entry.
-            if self.epoch < latest_epoch():
+            latest_epoch = latest_epoch()
+            if self.epoch < latest_epoch:
                 self.status = "Fenced"
             else:
                 # Another writer wrote an epoch <= this writer's epoch.
@@ -67,7 +82,8 @@ role Writer:
 
 role GarbageCollector:
     atomic action AdvanceBoundary:
-        boundary = max(boundary, oneof objects.keys())
+        key = oneof objects.keys()
+        boundary = max(boundary, key)
 
     atomic action Delete:
         candidates = [
@@ -76,12 +92,12 @@ role GarbageCollector:
             if id <= boundary
         ]
         id = oneof candidates
-        objects.remove(id)
+        objects.pop(id)
 
 
 action Init:
     # Objects that currently exist in the object store.
-    # Contains a `id -> epoch`.
+    # Contains `id -> epoch`.
     objects = {}
 
     # Garbage collector boundary. Files <= this boundary
