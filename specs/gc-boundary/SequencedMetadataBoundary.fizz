@@ -5,6 +5,66 @@ options:
     crash_on_yield: false
 ---
 
+# This spec models the GC boundary protocol for SlateDB's sequenced metadata
+# objects, as described by rfcs/0001-manifest.md and
+# rfcs/0025-garbage-collector-boundary.md.
+#
+# The real system stores metadata as immutable, monotonically numbered object
+# files such as:
+#
+#   manifest/00000000000000000012.manifest
+#   compactions/00000000000000000013.compactions
+#
+# Creating the next object with create-if-absent is the commit point for a
+# sequenced metadata update. The stale-writer bug covered by RFC 0025 happens
+# when a writer prepares ID N, stalls, another writer creates and supersedes N,
+# GC deletes N, and the stalled writer later creates N again. Plain
+# create-if-absent cannot remember that a deleted ID was already used.
+#
+# This model abstracts one sequenced metadata namespace. It is not specific to
+# manifests or compactions:
+#
+# - `objects` is the current object-store contents. The key is the sequenced
+#   object ID and the value is the writer epoch stored in that object's payload.
+#   For the manifest namespace, this payload is the manifest's `writer_epoch`.
+# - `boundary` is the durable GC boundary file. IDs <= boundary are fenced:
+#   writers may create them after GC deletes an object, but they must not report
+#   those writes as successful after checking the boundary.
+# - each `Writer` reads the latest object payload to claim the next epoch, writes
+#   the next sequence ID with create-if-absent, and then checks the boundary in a
+#   separate action. Splitting create from boundary check preserves the important
+#   race where GC can advance the boundary after create but before the writer
+#   returns success.
+# - each `GarbageCollector` first advances the boundary to a non-latest object
+#   ID, then may delete objects at or behind that boundary. Keeping the boundary
+#   below the latest object models the RFC rule that the latest metadata file is
+#   always retained.
+#
+# `WriteNext` and `CheckBoundary` are atomic actions because they model single
+# local protocol steps. If they were serial actions, FizzBee could yield between
+# internal statements and re-enter the same writer action, producing artifacts
+# such as a writer colliding with its own just-created object or recording the
+# same successful boundary check twice. The create and boundary check are still
+# separate actions, so the key GC interleaving remains modeled.
+#
+# The `_committed` and `_commit_counts` maps are ghost state: they are not part
+# of SlateDB's runtime protocol. They record IDs that passed the post-create
+# boundary check and were reported as successful, so assertions can distinguish
+# "object exists" from "writer returned success". Those can differ because a
+# writer may create an object and pause before checking the boundary.
+#
+# The assertions prove the protocol properties we care about:
+#
+# - no writer reaches the "same epoch" illegal state;
+# - no sequenced ID is reported successful more than once;
+# - live, unfenced object IDs remain contiguous above the boundary;
+# - acknowledged epochs are nondecreasing by sequence ID;
+# - the boundary is monotonic and never covers the latest retained object;
+# - deletes only remove IDs already covered by the boundary;
+# - the latest object is never deleted; and
+# - an ID can be reported successful only if both the pre-state and post-state
+#   boundary are below that ID.
+
 MAX_WRITES_PER_WRITER = 3
 
 atomic func latest_sequence_id():
@@ -21,6 +81,7 @@ atomic func latest_epoch():
 atomic func record_commit(id, epoch):
     _committed[id] = epoch
     _commit_counts[id] = _commit_counts.get(id, 0) + 1
+
 
 role Writer:
     atomic action Init:
