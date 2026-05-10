@@ -67,6 +67,27 @@ options:
 
 MAX_WRITES_PER_WRITER = 3
 
+
+action Init:
+    # Objects that currently exist in the object store.
+    # Contains `id -> epoch`.
+    objects = {}
+
+    # Garbage collector boundary. Files <= this boundary
+    # are eligible for deletion.
+    boundary = 0
+
+    # Ghost state: sequenced IDs that have passed the post-create boundary
+    # check and have been reported as successful.
+    _committed = {}
+    _commit_counts = {}
+
+    writer_a = Writer()
+    writer_b = Writer()
+    writer_c = Writer()
+    gc_a = GarbageCollector()
+    gc_b = GarbageCollector()
+
 atomic func latest_sequence_id():
     if len(objects) == 0:
         return 0
@@ -166,27 +187,6 @@ role GarbageCollector:
         ]
         id = oneof candidates
         objects.pop(id)
-
-
-action Init:
-    # Objects that currently exist in the object store.
-    # Contains `id -> epoch`.
-    objects = {}
-
-    # Garbage collector boundary. Files <= this boundary
-    # are eligible for deletion.
-    boundary = 0
-
-    # Ghost state: sequenced IDs that have passed the post-create boundary
-    # check and have been reported as successful.
-    _committed = {}
-    _commit_counts = {}
-
-    writer_a = Writer()
-    writer_b = Writer()
-    writer_c = Writer()
-    gc_a = GarbageCollector()
-    gc_b = GarbageCollector()
 
 
 always assertion NoUnexpectedEpoch:
