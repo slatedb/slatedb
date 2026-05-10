@@ -69,7 +69,7 @@ role Writer:
             self.status = "WriteNext"
 
     atomic func write():
-        # If next_id is already in `objects`, this write does not succeed
+        # If next_id is already in `objects`, this write does not succeed.
         success = self.next_id not in objects.keys()
         if success:
             objects[self.next_id] = self.epoch
