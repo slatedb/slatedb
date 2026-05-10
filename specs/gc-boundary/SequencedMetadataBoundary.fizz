@@ -18,6 +18,10 @@ atomic func latest_epoch():
     sid = latest_sequence_id()
     return objects[sid]
 
+atomic func record_commit(id, epoch):
+    _committed[id] = epoch
+    _commit_counts[id] = _commit_counts.get(id, 0) + 1
+
 role Writer:
     atomic action Init:
         # Epoch owned by this writer
@@ -36,7 +40,7 @@ role Writer:
         self.next_id = sid + 1
         self.status = "WriteNext"
 
-    action WriteNext:
+    atomic action WriteNext:
         require (
             self.status == "WriteNext"
             and self.writes < MAX_WRITES_PER_WRITER
@@ -49,22 +53,26 @@ role Writer:
             latest_epoch = latest_epoch()
             if self.epoch < latest_epoch:
                 self.status = "Fenced"
-            else:
+            elif self.epoch == latest_epoch:
                 # Another writer wrote an epoch <= this writer's epoch.
                 # This should never happen.
                 self.status = "UnexpectedEpoch"
+            else:
+                # An older writer won this slot. Try the next one.
+                self.next_id = self.next_id + 1
         else:
             # Write failed, but writer hasn't yet claimed an epoch.
             # Reset epoch/sequence and try again.
-            self.status = "Init"
+            self.status = "Start"
 
-    action CheckBoundary:
+    atomic action CheckBoundary:
         require self.status == "CheckBoundary"
         if self.next_id <= boundary:
             # Object was written before the boundary.
             self.status = "Expired"
         else:
             # Write was a success! Advance to the next slot.
+            record_commit(self.next_id, self.epoch)
             self.next_id = self.next_id + 1
             self.status = "WriteNext"
 
@@ -79,7 +87,14 @@ role Writer:
 
 role GarbageCollector:
     atomic action AdvanceBoundary:
-        key = oneof objects.keys()
+        # Keep boundary < latest sequence ID
+        latest = latest_sequence_id()
+        candidates = [
+            id
+            for id in objects
+            if id < latest
+        ]
+        key = oneof candidates
         boundary = max(boundary, key)
 
     atomic action Delete:
@@ -101,6 +116,82 @@ action Init:
     # are eligible for deletion.
     boundary = 0
 
+    # Ghost state: sequenced IDs that have passed the post-create boundary
+    # check and have been reported as successful.
+    _committed = {}
+    _commit_counts = {}
+
     writer_a = Writer()
     writer_b = Writer()
     gc = GarbageCollector()
+
+
+always assertion NoUnexpectedEpoch:
+    return (
+        writer_a.status != "UnexpectedEpoch"
+        and writer_b.status != "UnexpectedEpoch"
+    )
+
+always assertion NoDuplicateCommit:
+    for id in _commit_counts:
+        if _commit_counts[id] != 1:
+            return False
+    return True
+
+always assertion UnfencedLiveHistoryIsContiguous:
+    if len(objects) == 0:
+        return True
+    latest = max(objects.keys())
+    for id in range(boundary + 1, latest + 1):
+        if id not in objects.keys():
+            return False
+    return True
+
+always assertion CommittedEpochsAreNonDecreasing:
+    if len(_committed) == 0:
+        return True
+    latest = max(_committed.keys())
+    prev_epoch = 0
+    for id in range(1, latest + 1):
+        if id in _committed.keys():
+            epoch = _committed[id]
+            if epoch < prev_epoch:
+                return False
+            prev_epoch = epoch
+    return True
+
+always assertion LatestObjectIsNotBehindBoundary:
+    if len(objects) == 0:
+        return True
+    return max(objects.keys()) > boundary
+
+transition assertion BoundaryIsMonotonic(before, after):
+    return after.boundary >= before.boundary
+
+transition assertion DeletesOnlyBehindBoundary(before, after):
+    for id in before.objects:
+        if id not in after.objects.keys() and before.boundary < id:
+            return False
+    return True
+
+transition assertion LatestObjectIsNeverDeleted(before, after):
+    if len(before.objects) == 0:
+        return True
+    latest = max(before.objects.keys())
+    return latest in after.objects.keys()
+
+transition assertion CommitsOnlyAboveBoundary(before, after):
+    for id in after._commit_counts:
+        before_count = before._commit_counts.get(id, 0)
+        if after._commit_counts[id] > before_count:
+            if before.boundary >= id or after.boundary >= id:
+                return False
+    return True
+
+transition assertion CommittedHistoryIsDurable(before, after):
+    for id in before._committed:
+        if id not in after._committed.keys():
+            return False
+        if after._committed[id] != before._committed[id]:
+            return False
+    return True
