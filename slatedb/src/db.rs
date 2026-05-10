@@ -8964,4 +8964,62 @@ mod tests {
         }
         reopened.close().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_db_reader_cache_scoping() {
+        use crate::db_cache::{DbCache, SplitCache};
+
+        // Create two separate databases
+        let object_store_a: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store_b: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // Write different data to each database
+        let db_a = Db::builder("/tmp/test_reader_cache_a", object_store_a.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        db_a.put(b"key1", b"value_from_db_a").await.unwrap();
+        db_a.flush().await.unwrap();
+        db_a.close().await.unwrap();
+
+        let db_b = Db::builder("/tmp/test_reader_cache_b", object_store_b.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        db_b.put(b"key1", b"value_from_db_b").await.unwrap();
+        db_b.flush().await.unwrap();
+        db_b.close().await.unwrap();
+
+        // Create a shared cache
+        let shared_cache: Arc<dyn DbCache> = Arc::new(SplitCache::new().build());
+
+        // Open both databases as readers with the shared cache
+        let reader_a = DbReaderBuilder::new("/tmp/test_reader_cache_a", object_store_a)
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let reader_b = DbReaderBuilder::new("/tmp/test_reader_cache_b", object_store_b)
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Verify each reader returns its own data, not the other's
+        let value_a = reader_a.get(b"key1").await.unwrap();
+        assert_eq!(value_a, Some(Bytes::from("value_from_db_a")));
+
+        let value_b = reader_b.get(b"key1").await.unwrap();
+        assert_eq!(value_b, Some(Bytes::from("value_from_db_b")));
+
+        // Read again to exercise cached paths
+        let value_a_cached = reader_a.get(b"key1").await.unwrap();
+        assert_eq!(value_a_cached, Some(Bytes::from("value_from_db_a")));
+
+        let value_b_cached = reader_b.get(b"key1").await.unwrap();
+        assert_eq!(value_b_cached, Some(Bytes::from("value_from_db_b")));
+    }
 }
