@@ -104,6 +104,30 @@ atomic func record_commit(id, epoch):
     _commit_counts[id] = _commit_counts.get(id, 0) + 1
 
 
+# A `Writer` models one process attempting to append new sequenced metadata
+# objects to the shared object-store namespace. In SlateDB terms, this is the
+# role that creates files such as the next manifest or compaction metadata file.
+# The writer is intentionally stateful because the real protocol is not one
+# indivisible operation: it first chooses an epoch and sequence ID, then creates
+# the object, then checks whether GC advanced the boundary before it can report
+# success.
+#
+# Writer state transitions:
+#
+#   +-------+       +-----------+       +---------------+
+#   | Start |------>| WriteNext |------>| CheckBoundary |
+#   +-------+       +-----------+       +---------------+
+#       ^             |   |   ^            |       |
+#       |             |   |   |            |       v
+#       +-------------+   |   +------------+  +---------+
+#                         |                   | Expired |
+#                         |                   +---------+
+#               +---------+---------+
+#               |                   |
+#               v                   v
+#          +--------+       +-----------------+
+#          | Fenced |       | UnexpectedEpoch |
+#          +--------+       +-----------------+
 role Writer:
     atomic action Init:
         # Epoch owned by this writer
@@ -167,6 +191,12 @@ role Writer:
         return success
 
 
+# A `GarbageCollector` models a process that makes old sequenced metadata
+# objects eligible for removal and then deletes them from object storage. The
+# protocol is two-phase: first persist a durable `boundary`, then remove objects
+# whose IDs are at or behind that boundary. Splitting these steps lets the model
+# explore races where writers observe the boundary after creating an object but
+# before returning success.
 role GarbageCollector:
     atomic action AdvanceBoundary:
         # Keep boundary < latest sequence ID
@@ -188,6 +218,10 @@ role GarbageCollector:
         id = oneof candidates
         objects.pop(id)
 
+
+# -----------------------------------------------------------------------------
+# Assertions
+# -----------------------------------------------------------------------------
 
 always assertion NoUnexpectedEpoch:
     return (
