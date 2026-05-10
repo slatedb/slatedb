@@ -77,7 +77,7 @@ The design in this RFC sidesteps this complexity by separating coordination (sch
 ## Non-Goals
 
 - **Changing the compaction scheduling strategy.** The scheduler logic is unchanged; only execution is distributed.
-- **Multi-coordinator support.** The single-coordinator invariant is preserved; leader election across coordinators or purely distributed coordination is a future concern.
+- **Multi-coordinator support.** The single-coordinator invariant is preserved; leader election across coordinators or purely distributed coordination is a future concern. This includes split-brain handling (e.g. a zombie coordinator that resumes writing after a new coordinator has taken over): deployments are responsible for ensuring at most one coordinator is active at a time to avoid fencing the DB.
 - **Changes to the public read/write API.** Distributed compaction is transparent to DB clients.
 
 ## Design
@@ -238,7 +238,7 @@ Polls do not emit heartbeats. Liveness is driven entirely by compaction progress
 **Failure Detection Protocol** (coordinator):
 
 1. On each coordinator poll tick, read latest `.compactions`.
-2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
+2. For each `Running` compaction where `now() - max(last_heartbeat_ms, coordinator_start_time_ms) > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`. The `coordinator_start_time_ms` floor (captured in memory when the coordinator boots, not persisted) gives surviving workers one full timeout window after a coordinator restart to emit a heartbeat, preventing spurious reclaim due to clock skew or boot delay. After every worker has heartbeated at least once post-restart, the `max` is a no-op. This avoids destroying in-flight work on healthy workers that survived the coordinator restart.
 3. If any compactions were reclaimed in step 2, write updated state via `write_compactions_safely()`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator`.
 4. On `AlreadyExists`: re-read latest and retry from step 1.
 
@@ -282,7 +282,7 @@ Submitted <-> Running --> Compacted --> Completed
     +----------> Failed <-----+
 ```
 
-The coordinator is solely responsible for transitions from `Compacted → Completed` (or `Compacted → Failed`), and transitions the state only after attempting the manifest write. This preserves the single-writer invariant and gives recovery a clean, unambiguous signal: `Compacted` entries always need a manifest write retry; `Running` entries always need to be reset to `Submitted`.
+The coordinator is solely responsible for transitions from `Compacted → Completed` (or `Compacted → Failed`), and transitions the state only after attempting the manifest write. This preserves the single-writer invariant and gives recovery a clean, unambiguous signal for `Compacted` entries: they always need a manifest write retry.
 
 **New Protocol (distributed compaction)**
 
@@ -294,7 +294,7 @@ Only the coordinator commits manifest updates (preserves single-writer invariant
 
 On coordinator restart, the recovery logic is:
 
-1. Transition any `Running` jobs → `Submitted` so they can be reclaimed by a worker.
+1. Leave `Running` jobs alone. If the owning worker survived the coordinator restart it continues executing and emitting heartbeats; if it died, the failure detection protocol reclaims it once `worker_heartbeat_timeout_ms` elapses past `coordinator_start_time_ms` (see step 2 of the failure detection protocol).
 2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the job is marked `Failed` in `.compactions`. This is safe: the manifest was already updated, the output SSTs are already referenced and protected from GC, and the scheduler has no dependency on whether the entry reads `Completed` or `Failed`.
 3. Retain active (`Submitted`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
 
