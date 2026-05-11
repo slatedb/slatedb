@@ -129,20 +129,20 @@ atomic func record_commit(id, epoch):
 #
 # Writer state transitions:
 #
-#   +-------+       +-----------+       +---------------+
-#   | Start |------>| WriteNext |------>| CheckBoundary |
-#   +-------+       +-----------+       +---------------+
-#       ^             |   |   ^            |       |
-#       |             |   |   |            |       v
-#       +-------------+   |   +------------+  +---------+
-#                         |                   | Expired |
-#                         |                   +---------+
-#               +---------+---------+
-#               |                   |
-#               v                   v
-#          +--------+       +-----------------+
-#          | Fenced |       | UnexpectedEpoch |
-#          +--------+       +-----------------+
+#   +-------------+       +------------+       +-----------+       +---------------+
+#   | ClaimNextId |------>| ClaimEpoch |------>| WriteNext |------>| CheckBoundary |
+#   +-------------+       +------------+       +-----------+       +---------------+
+#        ^                                      |   |   ^            |       |
+#        |                                      |   |   |            |       v
+#        +--------------------------------------+   |   +------------+  +---------+
+#                                                   |                   | Expired |
+#                                                   |                   +---------+
+#                                         +---------+---------+
+#                                         |                   |
+#                                         v                   v
+#                                    +--------+       +-----------------+
+#                                    | Fenced |       | UnexpectedEpoch |
+#                                    +--------+       +-----------------+
 role Writer:
     atomic action Init:
         # Epoch owned by this writer
@@ -151,14 +151,18 @@ role Writer:
         self.next_id = 0
         # Counts writes (before boundary check)
         self.writes = 0
-        self.status = "Start"
+        self.status = "ClaimNextId"
 
-    atomic action Start:
-        require self.status == "Start"
-        e = latest_epoch()
-        self.epoch = e + 1
+    atomic action ClaimNextId:
+        require self.status == "ClaimNextId"
         sid = latest_sequence_id()
         self.next_id = sid + 1
+        self.status = "ClaimEpoch"
+
+    atomic action ClaimEpoch:
+        require self.status == "ClaimEpoch"
+        e = latest_epoch()
+        self.epoch = e + 1
         self.status = "WriteNext"
 
     atomic action WriteNext:
@@ -184,7 +188,7 @@ role Writer:
         else:
             # Write failed, but writer hasn't yet claimed an epoch.
             # Reset epoch/sequence and try again.
-            self.status = "Start"
+            self.status = "ClaimNextId"
 
     atomic action CheckBoundary:
         require self.status == "CheckBoundary"
