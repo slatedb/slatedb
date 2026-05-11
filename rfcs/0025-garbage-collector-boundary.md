@@ -277,73 +277,71 @@ SlateDB features and components that this RFC interacts with:
 
 ## Operations
 
-Performance and cost:
-
-- Each successful `.manifest` and `.compactions` write performs a boundary
-  check before returning success.
-- Boundary checks can use cached ETags and `GET If-None-Match` to reduce
-  payload transfer.
-- Each GC run may perform one conditional boundary update per metadata namespace
-  when old-enough files exist.
-- The request cost is tied to metadata update frequency, not data-file write
-  frequency.
-
-Compatibility:
-
 ### Performance & Cost
 
 <!-- Describe performance and cost implications of this change. -->
 
-- Latency (reads/writes/compactions)
-- Throughput (reads/writes/compactions)
-- Object-store request (GET/LIST/PUT) and cost profile
-- Space, read, and write amplification
+- Latency (reads/writes/compactions): metadata writes add one boundary check
+  after each write.
+- Throughput (reads/writes/compactions): metadata write throughput may drop with
+  the extra object-store round trip.
+- Object-store request (GET/LIST/PUT) and cost profile: checks can use cached
+  ETags but must still GET; GC may add one conditional boundary update per
+  namespace.
+- Space, read, and write amplification: adds two small boundary files and no
+  data-file amplification.
 
 ### Observability
 
 <!-- Describe any operational changes required to support this change. -->
 
-- Configuration changes
-- New components/services
-- Metrics
-- Logging
+- Configuration changes: none.
+- New components/services: none.
+- Metrics: track boundary check latency, advance attempts, and rejected stale
+  writes.
+- Logging: warn on boundary advance failures and stale write rejections.
 
 ### Compatibility
 
 <!-- Describe compatibility considerations with existing versions of SlateDB. -->
 
-- Existing data on object storage / on-disk formats
-- Existing public APIs (including bindings)
-- Rolling upgrades / mixed-version behavior (if applicable)
+- Existing data on object storage / on-disk formats: missing boundary files
+  read as boundary `0`; new files are additive.
+- Existing public APIs (including bindings): no API changes.
+- Rolling upgrades / mixed-version behavior (if applicable): mixed versions
+  retain the existing stale-writer risk until all writers check boundaries.
 
 ## Testing
 
 <!-- Describe the testing plan for this change. -->
 
-- Unit tests:
-- Integration tests:
-- Fault-injection/chaos tests:
-- Deterministic simulation tests:
-- Formal methods verification:
-- Performance tests:
+- Unit tests: standard unit tests for new code paths.
+- Integration tests: None.
+- Fault-injection/chaos tests: None.
+- Deterministic simulation tests: DST covers this pattern. Draft PR triggered
+  expected failures.
+- Formal methods verification: SequencedMetadataBoundary.fizz is included in
+  the formal verification suite.
+- Performance tests: None.
 
 ## Rollout
 
 <!-- Describe the plan for rolling out this change to production. -->
 
-- Milestones / phases:
-- Feature flags / opt-in:
-- Docs updates:
+- Milestones / phases: None.
+- Feature flags / opt-in: None.
+- Docs updates: files.mdx and gc.mdx will be updated to explain boundary files
+  and their role in GC safety.
 
 ## Alternatives
 
-Status quo:
+### Status quo
 
 - Keep relying on `min_age` as a writer-stall bound.
 - Rejected because pathological stalls can still allow stale sequenced metadata
   writes to commit.
 
-Increase `min_age`:
+### Increase `min_age`
 
 - Reduces the probability of the bug.
 - Rejected because it does not eliminate the failure mode and increases
