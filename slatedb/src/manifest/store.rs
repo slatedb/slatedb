@@ -12,10 +12,13 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::object_store::{
+    ObjectStoreBoundaryObject, ObjectStoreSequencedStorageProtocol,
+};
 use slatedb_txn_obj::{
-    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    BoundaryObject, BoundedSequencedStorage, DirtyObject, FenceableTransactionalObject,
+    MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+    TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
@@ -463,13 +466,21 @@ pub(crate) struct ManifestStore {
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
+        let sequenced: Arc<dyn SequencedStorageProtocol<Manifest>> =
+            Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
+                root_path,
+                object_store.clone(),
+                "manifest",
+                "manifest",
+                Box::new(FlatBufferManifestCodec {}),
+            ));
+        let boundary: Arc<dyn BoundaryObject> = Arc::new(ObjectStoreBoundaryObject::new(
             root_path,
             object_store,
             "manifest",
-            "manifest",
-            Box::new(FlatBufferManifestCodec {}),
         ));
+        let inner: Arc<dyn SequencedStorageProtocol<Manifest>> =
+            Arc::new(BoundedSequencedStorage::new(sequenced, boundary));
         Self { inner }
     }
 
@@ -600,7 +611,10 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_txn_obj::TransactionalObject;
+    use slatedb_txn_obj::object_store::ObjectStoreBoundaryObject;
+    use slatedb_txn_obj::{
+        BoundaryObject, MonotonicId, TransactionalObject, TransactionalObjectError,
+    };
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -646,6 +660,25 @@ mod tests {
         let version = ms.read_latest_manifest().await.unwrap().id;
 
         assert_eq!(version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_write_at_or_behind_boundary() {
+        let object_store = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), object_store.clone()));
+        let mut sm = StoredManifest::create_new_db(
+            ms.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let boundary = ObjectStoreBoundaryObject::new(&Path::from(ROOT), object_store, "manifest");
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+
+        let result = sm.update(sm.prepare_dirty().unwrap()).await;
+
+        assert_object_version_behind_boundary(result, 2, 2);
     }
 
     #[tokio::test]
@@ -1026,6 +1059,22 @@ mod tests {
     fn new_memory_manifest_store() -> Arc<ManifestStore> {
         let os = Arc::new(InMemory::new());
         Arc::new(ManifestStore::new(&Path::from(ROOT), os))
+    }
+
+    fn assert_object_version_behind_boundary<T>(
+        result: Result<T, SlateDBError>,
+        expected_id: u64,
+        expected_boundary: u64,
+    ) {
+        match result {
+            Err(SlateDBError::TransactionalObjectError(err)) => assert!(matches!(
+                err.as_ref(),
+                TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
+                    if *id == expected_id && *boundary == expected_boundary
+            )),
+            Err(err) => panic!("expected boundary error, got {err:?}"),
+            Ok(_) => panic!("expected boundary error, got success"),
+        }
     }
 
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {
