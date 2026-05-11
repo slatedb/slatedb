@@ -174,21 +174,26 @@ role Writer:
         if success:
             self.status = "CheckBoundary"
         elif self.writes > 0:
-            # Writes > 0 means this writer has already written its fence entry.
-            latest_epoch = latest_epoch()
-            if self.epoch < latest_epoch:
-                self.status = "Fenced"
-            elif self.epoch == latest_epoch:
-                # Another writer wrote an epoch <= this writer's epoch.
-                # This should never happen.
-                self.status = "UnexpectedEpoch"
-            else:
-                # An older writer won this slot. Try the next one.
-                self.next_id = self.next_id + 1
+            self.status = "WriteFailed"
         else:
             # Write failed, but writer hasn't yet claimed an epoch.
             # Reset epoch/sequence and try again.
             self.status = "ClaimNextId"
+
+    atomic action WriteFailed:
+        require self.status == "WriteFailed"
+        # Writes > 0 means this writer has already written its fence entry.
+        latest_epoch = latest_epoch()
+        if self.epoch < latest_epoch:
+            self.status = "Fenced"
+        elif self.epoch == latest_epoch:
+            # Another writer wrote an epoch <= this writer's epoch.
+            # This should never happen.
+            self.status = "UnexpectedEpoch"
+        else:
+            # An older writer won this slot. Try the next one.
+            self.next_id = self.next_id + 1
+            self.status = "WriteNext"
 
     atomic action CheckBoundary:
         require self.status == "CheckBoundary"
