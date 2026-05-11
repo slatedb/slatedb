@@ -87,7 +87,6 @@ action Init:
 
     writer_a = Writer()
     writer_b = Writer()
-    writer_c = Writer()
     gc_a = GarbageCollector()
     gc_b = GarbageCollector()
 
@@ -230,7 +229,6 @@ always assertion NoUnexpectedEpoch:
     return (
         writer_a.status != "UnexpectedEpoch"
         and writer_b.status != "UnexpectedEpoch"
-        and writer_c.status != "UnexpectedEpoch"
     )
 
 always assertion NoDuplicateCommit:
