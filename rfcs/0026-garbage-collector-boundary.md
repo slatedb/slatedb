@@ -211,8 +211,8 @@ rules:
   returning success.
 - Add `ObjectStoreBoundaryObject`, stored under `<root>/gc/<name>.boundary`,
   using ASCII `u64` encoding.
-- Add `ObjectVersionBehindBoundary { id, boundary }` to represent a write that
-  created an ID at or behind the durable boundary.
+- Add `ObjectVersionBehindBoundary { id, boundary }` error type to represent a
+  write that created an ID at or behind the durable boundary.
 - Wrap `ManifestStore` with `manifest.boundary`.
 - Wrap `CompactionsStore` with `compactions.boundary`.
 - Add `advance_boundary` methods to the manifest and compactions stores for GC.
