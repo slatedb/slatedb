@@ -139,6 +139,13 @@ impl WriteOp {
             ),
         }
     }
+
+    pub(crate) fn size_bytes(&self) -> usize {
+        match self {
+            WriteOp::Put(key, value, _) | WriteOp::Merge(key, value, _) => key.len() + value.len(),
+            WriteOp::Delete(key) => key.len(),
+        }
+    }
 }
 
 impl WriteBatch {
@@ -322,6 +329,10 @@ impl WriteBatch {
 
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
         self.ops.keys().map(|key| key.user_key.clone()).collect()
+    }
+
+    pub(crate) fn size_bytes(&self) -> usize {
+        self.ops.values().map(WriteOp::size_bytes).sum()
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set,

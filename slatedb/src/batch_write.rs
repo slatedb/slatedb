@@ -89,7 +89,14 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
             options,
             done,
         } = message;
+        let batch_size_bytes = batch.size_bytes() as u64;
         let result = self.db_inner.write_batch(batch, &options).await;
+        if result.is_ok() {
+            self.db_inner
+                .db_stats
+                .user_write_bytes
+                .increment(batch_size_bytes);
+        }
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
