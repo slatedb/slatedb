@@ -103,7 +103,6 @@ action Init:
     writer_a = Writer()
     writer_b = Writer()
     reader_a = Reader()
-    reader_b = Reader()
     gc_a = GarbageCollector()
     gc_b = GarbageCollector()
 
@@ -271,6 +270,24 @@ role GarbageCollector:
         id = oneof candidates
         objects.pop(id)
 
+# A `Reader` models a non-epoch owning process attempting to read the latest
+# sequenced metadata object from the shared object-store namespace and
+# verifying it was at least a valid object at the time of the read.
+#
+# Objects can still time out and get garbage collected after the read is
+# validated against the boundary. The post-read boundary check only verifies
+# that the object was valid at the time of the read. This still protects the
+# reader from the following race:
+# - w1 prepares manifest N, stalls
+# - r1 attempts to read manifest N
+# - w2 writes manifest N+1
+# - min_age passes
+# - gc marks boundary as N+1 and deletes N/N+1
+# - w1 write manifest N
+# - r1 successfully reads N
+# - w1 boundary conflict, error
+# - r1 serves invalid reads
+#
 # Reader state transitions:
 #
 #  ┌───────────────────┐
