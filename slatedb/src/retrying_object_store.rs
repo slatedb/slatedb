@@ -1,11 +1,8 @@
 use std::borrow::Cow;
 use std::future::Future;
-use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-
-use bytes::Bytes;
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable, Sleeper};
@@ -14,8 +11,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
-    Attribute, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    Attribute, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    RenameOptions,
 };
 
 use crate::rand::DbRand;
@@ -96,7 +94,7 @@ impl RetryingObjectStore {
                 | object_store::Error::Precondition { .. }
                 | object_store::Error::NotModified { .. }
                 | object_store::Error::NotFound { .. }
-                | object_store::Error::NotImplemented
+                | object_store::Error::NotImplemented { .. }
                 | object_store::Error::NotSupported { .. }
         );
         if !retry {
@@ -230,37 +228,6 @@ impl ObjectStore for RetryingObjectStore {
         .await
     }
 
-    async fn get_range(&self, location: &Path, range: Range<u64>) -> object_store::Result<Bytes> {
-        (|| async { self.inner.get_range(location, range.clone()).await })
-            .retry(Self::retry_builder())
-            .sleep(self.sleeper())
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-    }
-
-    async fn get_ranges(
-        &self,
-        location: &Path,
-        ranges: &[Range<u64>],
-    ) -> object_store::Result<Vec<Bytes>> {
-        (|| async { self.inner.get_ranges(location, ranges).await })
-            .retry(Self::retry_builder())
-            .sleep(self.sleeper())
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-    }
-
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        (|| async { self.inner.head(location).await })
-            .retry(Self::retry_builder())
-            .sleep(self.sleeper())
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-    }
-
     async fn put_opts(
         &self,
         location: &Path,
@@ -301,7 +268,7 @@ impl ObjectStore for RetryingObjectStore {
         // If attributes aren't supported, fall back to put without ULID
         if matches!(
             &result,
-            Err(object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented)
+            Err(object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented { .. })
         ) && put_id.is_some()
         {
             return (|| async {
@@ -332,14 +299,6 @@ impl ObjectStore for RetryingObjectStore {
         }
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.put_multipart_opts(location, PutMultipartOptions::default())
-            .await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -365,14 +324,14 @@ impl ObjectStore for RetryingObjectStore {
         // If attributes aren't supported, fall back without ULID
         let inner = match result {
             Ok(inner) => inner,
-            Err(object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented) => {
-                (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
-                    .retry(Self::retry_builder())
-                    .sleep(self.sleeper())
-                    .notify(Self::notify)
-                    .when(Self::should_retry)
-                    .await?
-            }
+            Err(
+                object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented { .. },
+            ) => (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
+                .retry(Self::retry_builder())
+                .sleep(self.sleeper())
+                .notify(Self::notify)
+                .when(Self::should_retry)
+                .await?,
             Err(e) => return Err(e),
         };
 
@@ -384,13 +343,34 @@ impl ObjectStore for RetryingObjectStore {
         }))
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        (|| async { self.inner.delete(location).await })
-            .retry(Self::retry_builder())
-            .sleep(self.sleeper())
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
+    /// Retries each delete individually, mirroring the per-call retry behavior of
+    /// the pre-0.13 `ObjectStore::delete`. Items are processed sequentially via
+    /// `.then` and each one is retried independently; a transient failure on one
+    /// path does not abort the rest of the stream, but a permanent failure stops
+    /// processing of subsequent items (consistent with `try_*` stream combinators).
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let inner = Arc::clone(&self.inner);
+        let sleeper = self.sleeper();
+        let retry_builder = Self::retry_builder();
+        locations
+            .then(move |loc| {
+                let inner = Arc::clone(&inner);
+                let sleeper = sleeper.clone();
+                async move {
+                    let loc = loc?;
+                    (|| async { inner.delete(&loc).await })
+                        .retry(retry_builder)
+                        .sleep(sleeper)
+                        .notify(Self::notify)
+                        .when(Self::should_retry)
+                        .await?;
+                    Ok(loc)
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -477,8 +457,13 @@ impl ObjectStore for RetryingObjectStore {
             .await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        (|| async { self.inner.copy(from, to).await })
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        (|| async { self.inner.copy_opts(from, to, options.clone()).await })
             .retry(Self::retry_builder())
             .sleep(self.sleeper())
             .notify(Self::notify)
@@ -486,26 +471,13 @@ impl ObjectStore for RetryingObjectStore {
             .await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        (|| async { self.inner.rename(from, to).await })
-            .retry(Self::retry_builder())
-            .sleep(self.sleeper())
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        (|| async { self.inner.copy_if_not_exists(from, to).await })
-            .retry(Self::retry_builder())
-            .sleep(self.sleeper())
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        (|| async { self.inner.rename_if_not_exists(from, to).await })
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        (|| async { self.inner.rename_opts(from, to, options.clone()).await })
             .retry(Self::retry_builder())
             .sleep(self.sleeper())
             .notify(Self::notify)
@@ -523,7 +495,7 @@ mod tests {
     use futures::TryStreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload};
+    use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::MockSystemClock;
     use std::sync::Arc;

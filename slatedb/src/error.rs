@@ -657,7 +657,10 @@ mod tests {
 
     #[test]
     fn object_store_error_non_not_found_maps_to_unavailable() {
-        let err = SlateDBError::from(object_store::Error::NotImplemented);
+        let err = SlateDBError::from(object_store::Error::NotImplemented {
+            operation: "test".to_string(),
+            implementer: "test".to_string(),
+        });
         let public_err = Error::from(err);
 
         assert_eq!(public_err.kind(), ErrorKind::Unavailable);

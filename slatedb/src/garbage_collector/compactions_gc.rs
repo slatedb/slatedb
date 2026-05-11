@@ -114,7 +114,7 @@ mod tests {
     use super::*;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use chrono::TimeDelta;
-    use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use object_store::{memory::InMemory, path::Path, ObjectStoreExt};
     use slatedb_common::metrics::MetricsRecorderHelper;
     use std::time::Duration;
 

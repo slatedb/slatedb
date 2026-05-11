@@ -5,8 +5,11 @@ use crate::config::ObjectStoreCacheOptions;
 use crate::rand::DbRand;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
-use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
-use object_store::{Attributes, GetRange, GetResultPayload, PutMultipartOptions, PutResult};
+use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
+use object_store::{
+    Attributes, CopyOptions, GetRange, GetResultPayload, PutMultipartOptions, PutResult,
+    RenameOptions,
+};
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
 use slatedb_common::clock::SystemClock;
 use std::{ops::Range, sync::Arc};
@@ -694,11 +697,23 @@ impl ObjectStore for CachedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if options.head {
+            // object_store 0.13 moved head() into ObjectStoreExt, which routes
+            // through get_opts(head: true). Translate that back to cached_head
+            // so HEAD calls keep populating the cache and deduping concurrent
+            // requests like they did before the trait split. The synthesized
+            // GetResult mirrors what DeterministicLocalFilesystem returns for
+            // the same case: empty body stream and an empty range, since
+            // ObjectStoreExt::head only consumes the resulting meta.
+            let meta = self.cached_head(location).await?;
+            return Ok(GetResult {
+                payload: GetResultPayload::Stream(stream::empty().boxed()),
+                range: 0..0,
+                meta,
+                attributes: Attributes::new(),
+            });
+        }
         self.cached_get_opts(location, options).await
-    }
-
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.cached_head(location).await
     }
 
     async fn put_opts(
@@ -710,13 +725,6 @@ impl ObjectStore for CachedObjectStore {
         self.cached_put_opts(location, payload, opts).await
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.object_store.put_multipart(location).await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -725,9 +733,12 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.put_multipart_opts(location, opts).await
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
         // TODO: handle cache eviction
-        self.object_store.delete(location).await
+        self.object_store.delete_stream(locations)
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -746,20 +757,22 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.list_with_delimiter(prefix).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.copy(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.object_store.copy_opts(from, to, options).await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.rename(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.copy_if_not_exists(from, to).await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.rename_if_not_exists(from, to).await
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        self.object_store.rename_opts(from, to, options).await
     }
 }
 
@@ -796,7 +809,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
+    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
     use rand::Rng;
 
     use super::CachedObjectStore;
@@ -852,10 +865,6 @@ mod tests {
             Ok(result)
         }
 
-        async fn head(&self, location: &Path) -> object_store::Result<object_store::ObjectMeta> {
-            self.inner.head(location).await
-        }
-
         async fn put_opts(
             &self,
             location: &Path,
@@ -863,13 +872,6 @@ mod tests {
             opts: object_store::PutOptions,
         ) -> object_store::Result<object_store::PutResult> {
             self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart(
-            &self,
-            location: &Path,
-        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
-            self.inner.put_multipart(location).await
         }
 
         async fn put_multipart_opts(
@@ -880,8 +882,11 @@ mod tests {
             self.inner.put_multipart_opts(location, opts).await
         }
 
-        async fn delete(&self, location: &Path) -> object_store::Result<()> {
-            self.inner.delete(location).await
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
         }
 
         fn list(
@@ -908,20 +913,13 @@ mod tests {
             self.inner.list_with_delimiter(prefix).await
         }
 
-        async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.rename(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy_if_not_exists(from, to).await
-        }
-
-        async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.rename_if_not_exists(from, to).await
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 

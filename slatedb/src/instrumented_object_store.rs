@@ -26,11 +26,11 @@ use std::time::Instant;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -148,16 +148,14 @@ impl ObjectStore for InstrumentedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        // object_store 0.13 routes head() and get_range() through get_opts
+        // via ObjectStoreExt, so the dedicated head / get_range metrics no
+        // longer receive direct traffic. Record everything under `get` to
+        // keep the request count and latency histogram populated for any
+        // get-style call.
         let start = Instant::now();
         let result = self.inner.get_opts(location, options).await;
         self.stats.get.record(start.elapsed(), result.is_ok());
-        result
-    }
-
-    async fn get_range(&self, location: &Path, range: Range<u64>) -> object_store::Result<Bytes> {
-        let start = Instant::now();
-        let result = self.inner.get_range(location, range).await;
-        self.stats.get_range.record(start.elapsed(), result.is_ok());
         result
     }
 
@@ -174,13 +172,6 @@ impl ObjectStore for InstrumentedObjectStore {
         result
     }
 
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        let start = Instant::now();
-        let result = self.inner.head(location).await;
-        self.stats.head.record(start.elapsed(), result.is_ok());
-        result
-    }
-
     async fn put_opts(
         &self,
         location: &Path,
@@ -191,14 +182,6 @@ impl ObjectStore for InstrumentedObjectStore {
         let result = self.inner.put_opts(location, payload, opts).await;
         self.stats.put.record(start.elapsed(), result.is_ok());
         result
-    }
-
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.put_multipart_opts(location, PutMultipartOptions::default())
-            .await
     }
 
     async fn put_multipart_opts(
@@ -219,11 +202,25 @@ impl ObjectStore for InstrumentedObjectStore {
         })
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        let start = Instant::now();
-        let result = self.inner.delete(location).await;
-        self.stats.delete.record(start.elapsed(), result.is_ok());
-        result
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let stats = Arc::clone(&self.stats);
+        let inner = Arc::clone(&self.inner);
+        locations
+            .then(move |loc| {
+                let stats = Arc::clone(&stats);
+                let inner = Arc::clone(&inner);
+                async move {
+                    let loc = loc?;
+                    let start = Instant::now();
+                    let result = inner.delete(&loc).await;
+                    stats.delete.record(start.elapsed(), result.is_ok());
+                    result.map(|_| loc)
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -249,20 +246,22 @@ impl ObjectStore for InstrumentedObjectStore {
         result
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.rename(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.rename_if_not_exists(from, to).await
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        self.inner.rename_opts(from, to, options).await
     }
 }
 
@@ -297,8 +296,14 @@ pub mod stats {
     /// object store API (e.g. `get`, `put`, `delete`).
     pub(crate) struct ObjectStoreStats {
         pub(crate) get: RequestMetrics,
+        // get_range and head are still registered as metric series so
+        // dashboards referencing them keep resolving, but object_store 0.13
+        // routes both through get_opts via ObjectStoreExt, so they no longer
+        // receive direct traffic from InstrumentedObjectStore.
+        #[allow(dead_code)]
         pub(crate) get_range: RequestMetrics,
         pub(crate) get_ranges: RequestMetrics,
+        #[allow(dead_code)]
         pub(crate) head: RequestMetrics,
         pub(crate) list: Arc<dyn CounterFn>,
         pub(crate) list_with_offset: Arc<dyn CounterFn>,
@@ -453,7 +458,7 @@ mod tests {
 
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{lookup_metric_with_labels, test_recorder_helper, MetricValue};
 
@@ -607,6 +612,9 @@ mod tests {
 
         // then:
         assert!(err.is_err());
+        // object_store 0.13 routes head() through get_opts via
+        // ObjectStoreExt, so the head call is observed under the `get` api
+        // series rather than the `head` series.
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
@@ -615,7 +623,7 @@ mod tests {
                     ObjectStoreComponent::Db,
                     ObjectStoreType::Main,
                     "get",
-                    "head"
+                    "get"
                 )
             ),
             Some(1)
@@ -628,7 +636,7 @@ mod tests {
                     ObjectStoreComponent::Db,
                     ObjectStoreType::Main,
                     "get",
-                    "head"
+                    "get"
                 )
             ),
             Some(1)

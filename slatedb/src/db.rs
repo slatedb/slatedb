@@ -1892,7 +1892,7 @@ impl Db {
         let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
             Arc::from(object_store)
         } else {
-            let object_store = Arc::from(object_store);
+            let object_store: Arc<dyn ObjectStore> = Arc::from(object_store);
             Arc::new(PrefixStore::new(object_store, path))
         };
         Ok(object_store)
@@ -2118,7 +2118,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use proptest::test_runner::{TestRng, TestRunner};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
