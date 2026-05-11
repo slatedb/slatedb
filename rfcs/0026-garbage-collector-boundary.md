@@ -218,8 +218,9 @@ rules:
 - Add `advance_boundary` methods to the manifest and compactions stores for GC.
 - Update manifest and compactions GC tasks to compute the maximum old-enough ID
   and advance the boundary before deleting files.
-- Remove `CachedObjectStore` usage for ManifestStore and CompactionsStore to
-  ensure boundary checks are not served from a stale cache.
+- Remove `CachedObjectStore` usage for `ManifestStore` and `CompactionsStore`
+  to ensure boundary checks are not served from a stale cache. Enforce this by
+  asserting `PutMode::Create` and all `GET`s are unconditional.
 
 ## Impact Analysis
 
