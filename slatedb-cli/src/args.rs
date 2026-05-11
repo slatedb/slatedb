@@ -189,6 +189,40 @@ pub(crate) enum CliCommands {
         request: CompactionRequest,
     },
 
+    /// Summarize each LSM tree as JSON (RFC-0024). Lists the named segments
+    /// in prefix order if any are configured, otherwise the unsegmented tree.
+    /// Each entry carries prefix, L0/SR counts, drain-marker flag, and an
+    /// estimated on-disk size.
+    ListSegments {
+        /// Manifest id to read. Defaults to the latest manifest.
+        #[arg(short, long)]
+        manifest_id: Option<u64>,
+    },
+
+    /// Describe a single LSM tree as JSON (RFC-0024): per-L0 and per-SR SST
+    /// listings with key ranges and size estimates. Pass the prefix via
+    /// `--prefix` (UTF-8) or `--prefix-hex` (hex). Omit both to describe the
+    /// unsegmented tree (valid only when no segments are configured).
+    #[command(group(
+        ArgGroup::new("segment_prefix")
+            .args(["prefix", "prefix_hex"])
+            .multiple(false)
+            .required(false)
+    ))]
+    DescribeSegment {
+        /// Segment prefix as a UTF-8 string. Use `--prefix-hex` for binary.
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Segment prefix as a hex byte string (leading `0x` accepted).
+        #[arg(long = "prefix-hex")]
+        prefix_hex: Option<String>,
+
+        /// Manifest id to read. Defaults to the latest manifest.
+        #[arg(short, long)]
+        manifest_id: Option<u64>,
+    },
+
     /// Schedules a period garbage collection job
     #[command(group(
         ArgGroup::new("gc_config")

@@ -78,6 +78,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::SubmitCompaction { scheduler, request } => {
             exec_submit_compaction(&admin, scheduler, request).await?
         }
+        CliCommands::ListSegments { manifest_id } => {
+            exec_list_segments(&admin, manifest_id).await?
+        }
+        CliCommands::DescribeSegment {
+            prefix,
+            prefix_hex,
+            manifest_id,
+        } => exec_describe_segment(&admin, prefix, prefix_hex, manifest_id).await?,
 
         CliCommands::SeqToTs { seq, round } => {
             exec_seq_to_ts(&admin, seq, matches!(round, FindOption::RoundUp)).await?
@@ -315,6 +323,46 @@ async fn exec_seq_to_ts(admin: &Admin, seq: u64, round_up: bool) -> Result<(), B
     Ok(())
 }
 
+async fn exec_list_segments(admin: &Admin, manifest_id: Option<u64>) -> Result<(), Box<dyn Error>> {
+    match admin.list_segments(manifest_id).await? {
+        None => println!("no manifest file found"),
+        Some(summaries) => println!("{}", serde_json::to_string(&summaries)?),
+    }
+    Ok(())
+}
+
+async fn exec_describe_segment(
+    admin: &Admin,
+    prefix: Option<String>,
+    prefix_hex: Option<String>,
+    manifest_id: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+    let prefix_bytes: Vec<u8> = match (prefix, prefix_hex) {
+        (Some(p), None) => p.into_bytes(),
+        (None, Some(hex)) => {
+            decode_hex(&hex).map_err(|e| format!("invalid --prefix-hex value: {e}"))?
+        }
+        (None, None) => Vec::new(),
+        (Some(_), Some(_)) => return Err("specify at most one of --prefix or --prefix-hex".into()),
+    };
+    match admin.describe_segment(&prefix_bytes, manifest_id).await? {
+        None => println!("no manifest file found or segment not found"),
+        Some(description) => println!("{}", serde_json::to_string(&description)?),
+    }
+    Ok(())
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if !s.len().is_multiple_of(2) {
+        return Err("hex string must have an even number of digits".to_string());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
 async fn exec_ts_to_seq(admin: &Admin, ts_secs: i64, round_up: bool) -> Result<(), Box<dyn Error>> {
     let ts = Utc
         .timestamp_opt(ts_secs, 0)
@@ -325,4 +373,29 @@ async fn exec_ts_to_seq(admin: &Admin, ts_secs: i64, round_up: bool) -> Result<(
         None => println!("not found"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_hex;
+
+    #[test]
+    fn decode_hex_accepts_optional_0x_prefix() {
+        assert_eq!(
+            decode_hex("deadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        assert_eq!(
+            decode_hex("0xdeadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        assert!(decode_hex("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn decode_hex_rejects_invalid_input() {
+        assert!(decode_hex("abc").is_err()); // odd length
+        assert!(decode_hex("zz").is_err()); // non-hex characters
+        assert!(decode_hex("0xZZ").is_err()); // prefix stripped, then invalid
+    }
 }

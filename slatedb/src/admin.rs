@@ -640,6 +640,229 @@ impl Admin {
     pub fn builder<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> AdminBuilder<P> {
         AdminBuilder::new(path, object_store)
     }
+
+    /// Summarize each LSM tree in the manifest (RFC-0024): the named segments
+    /// in prefix order if any are present, otherwise the unsegmented tree.
+    /// Returns `Ok(None)` when the manifest file does not exist.
+    pub async fn list_segments(
+        &self,
+        manifest_id: Option<u64>,
+    ) -> Result<Option<Vec<SegmentSummary>>, crate::Error> {
+        let Some(manifest) = self.read_manifest(manifest_id).await? else {
+            return Ok(None);
+        };
+        let core = manifest.core();
+        let summaries = if core.segments.is_empty() {
+            vec![SegmentSummary::from_tree(&Bytes::new(), &core.tree, true)]
+        } else {
+            core.segments
+                .iter()
+                .map(|s| SegmentSummary::from_tree(&s.prefix, &s.tree, false))
+                .collect()
+        };
+        Ok(Some(summaries))
+    }
+
+    /// Describe a single LSM tree in detail (RFC-0024). When the manifest
+    /// carries named segments, `prefix` must match one of them exactly;
+    /// otherwise an empty `prefix` selects the unsegmented tree. Returns
+    /// `Ok(None)` when the manifest is missing or the prefix doesn't match.
+    pub async fn describe_segment(
+        &self,
+        prefix: &[u8],
+        manifest_id: Option<u64>,
+    ) -> Result<Option<SegmentDescription>, crate::Error> {
+        let Some(manifest) = self.read_manifest(manifest_id).await? else {
+            return Ok(None);
+        };
+        let core = manifest.core();
+        if core.segments.is_empty() {
+            return if prefix.is_empty() {
+                Ok(Some(SegmentDescription::from_tree(
+                    &Bytes::new(),
+                    &core.tree,
+                    true,
+                )))
+            } else {
+                Ok(None)
+            };
+        }
+        let Ok(idx) = core
+            .segments
+            .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
+        else {
+            return Ok(None);
+        };
+        let segment = &core.segments[idx];
+        Ok(Some(SegmentDescription::from_tree(
+            &segment.prefix,
+            &segment.tree,
+            false,
+        )))
+    }
+}
+
+/// Compact summary of a single LSM tree (RFC-0024).
+///
+/// `prefix_hex` is always the unambiguous machine form; `prefix_display`
+/// renders printable UTF-8 inline and falls back to `0x<hex>` otherwise.
+/// The same pair convention applies to keys in [`SstViewSummary`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct SegmentSummary {
+    pub prefix_display: String,
+    pub prefix_hex: String,
+    /// True for the unsegmented compatibility tree. A named segment never has
+    /// an empty prefix, so the two cases never overlap.
+    pub unsegmented: bool,
+    /// Drain marker: empty `l0` and `compacted` with the watermark set.
+    /// Persists until the writer's merge protocol prunes it.
+    pub drain_marker: bool,
+    pub l0_count: usize,
+    pub sr_count: usize,
+    pub total_ssts: usize,
+    pub estimated_size_bytes: u64,
+    pub last_compacted_l0_sst_view_id: Option<ulid::Ulid>,
+    pub last_compacted_l0_sst_id: Option<ulid::Ulid>,
+}
+
+impl SegmentSummary {
+    fn from_tree(prefix: &Bytes, tree: &crate::manifest::LsmTreeState, unsegmented: bool) -> Self {
+        let l0_estimate: u64 = tree.l0.iter().map(|v| v.estimate_size()).sum();
+        let sr_estimate: u64 = tree.compacted.iter().map(|sr| sr.estimate_size()).sum();
+        Self {
+            prefix_display: render_bytes_display(prefix),
+            prefix_hex: render_bytes_hex(prefix),
+            unsegmented,
+            drain_marker: tree.is_drained(),
+            l0_count: tree.l0.len(),
+            sr_count: tree.compacted.len(),
+            total_ssts: tree.total_ssts(),
+            estimated_size_bytes: l0_estimate + sr_estimate,
+            last_compacted_l0_sst_view_id: tree.last_compacted_l0_sst_view_id,
+            last_compacted_l0_sst_id: tree.last_compacted_l0_sst_id,
+        }
+    }
+}
+
+/// Detailed description of a single LSM tree (RFC-0024). Returned by
+/// [`Admin::describe_segment`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct SegmentDescription {
+    #[serde(flatten)]
+    pub summary: SegmentSummary,
+    pub l0: Vec<SstViewSummary>,
+    pub compacted: Vec<SortedRunSummary>,
+}
+
+impl SegmentDescription {
+    fn from_tree(prefix: &Bytes, tree: &crate::manifest::LsmTreeState, unsegmented: bool) -> Self {
+        let l0 = tree.l0.iter().map(SstViewSummary::from_view).collect();
+        let compacted = tree
+            .compacted
+            .iter()
+            .map(SortedRunSummary::from_run)
+            .collect();
+        Self {
+            summary: SegmentSummary::from_tree(prefix, tree, unsegmented),
+            l0,
+            compacted,
+        }
+    }
+}
+
+/// Summary of a single SST view. `view_id` is the manifest's stable
+/// identifier; `sst_id` is the underlying physical SST identity, rendered as
+/// `wal:<id>` for the (not expected) WAL case to keep the field shape stable.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct SstViewSummary {
+    pub view_id: ulid::Ulid,
+    pub sst_id: String,
+    pub estimated_size_bytes: u64,
+    pub first_key_display: Option<String>,
+    pub first_key_hex: Option<String>,
+    pub last_key_display: Option<String>,
+    pub last_key_hex: Option<String>,
+    pub has_visible_range: bool,
+}
+
+impl SstViewSummary {
+    fn from_view(view: &crate::db_state::SsTableView) -> Self {
+        let sst_id = match view.sst.id {
+            crate::db_state::SsTableId::Compacted(ulid) => ulid.to_string(),
+            crate::db_state::SsTableId::Wal(wal_id) => format!("wal:{}", wal_id),
+        };
+        Self {
+            view_id: view.id,
+            sst_id,
+            estimated_size_bytes: view.estimate_size(),
+            first_key_display: view
+                .sst
+                .info
+                .first_entry
+                .as_ref()
+                .map(|k| render_bytes_display(k)),
+            first_key_hex: view
+                .sst
+                .info
+                .first_entry
+                .as_ref()
+                .map(|k| render_bytes_hex(k)),
+            last_key_display: view
+                .sst
+                .info
+                .last_entry
+                .as_ref()
+                .map(|k| render_bytes_display(k)),
+            last_key_hex: view
+                .sst
+                .info
+                .last_entry
+                .as_ref()
+                .map(|k| render_bytes_hex(k)),
+            has_visible_range: view.visible_range().is_some(),
+        }
+    }
+}
+
+/// Summary of a single sorted run inside a tree.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct SortedRunSummary {
+    pub id: u32,
+    pub sst_count: usize,
+    pub estimated_size_bytes: u64,
+    pub ssts: Vec<SstViewSummary>,
+}
+
+impl SortedRunSummary {
+    fn from_run(run: &crate::db_state::SortedRun) -> Self {
+        let ssts: Vec<SstViewSummary> = run
+            .sst_views
+            .iter()
+            .map(SstViewSummary::from_view)
+            .collect();
+        Self {
+            id: run.id,
+            sst_count: ssts.len(),
+            estimated_size_bytes: ssts.iter().map(|s| s.estimated_size_bytes).sum(),
+            ssts,
+        }
+    }
+}
+
+fn render_bytes_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{:02x}", byte);
+    }
+    out
+}
+
+fn render_bytes_display(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) if !s.chars().any(|c| c.is_control()) => s.to_string(),
+        _ => format!("0x{}", render_bytes_hex(bytes)),
+    }
 }
 
 fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
@@ -1352,5 +1575,274 @@ mod tests {
             2,
             "clone should have an external database for each parent"
         );
+    }
+
+    #[test]
+    fn test_render_bytes_display_and_hex() {
+        use super::{render_bytes_display, render_bytes_hex};
+
+        assert_eq!(render_bytes_display(b""), "");
+        assert_eq!(
+            render_bytes_display(b"ts/2026-03-09/14/"),
+            "ts/2026-03-09/14/"
+        );
+        // Control byte forces hex fallback.
+        assert_eq!(render_bytes_display(&[0x00, 0xff]), "0x00ff");
+        assert_eq!(render_bytes_hex(b""), "");
+        assert_eq!(render_bytes_hex(&[0x00, 0xff]), "00ff");
+        assert_eq!(render_bytes_hex(b"ab"), "6162");
+    }
+
+    #[test]
+    fn test_segment_summary_from_empty_tree() {
+        use crate::manifest::LsmTreeState;
+        use bytes::Bytes;
+
+        let tree = LsmTreeState::default();
+        let summary = super::SegmentSummary::from_tree(&Bytes::new(), &tree, true);
+        assert!(summary.unsegmented);
+        assert!(!summary.drain_marker);
+        assert_eq!(summary.l0_count, 0);
+        assert_eq!(summary.sr_count, 0);
+        assert_eq!(summary.total_ssts, 0);
+        assert_eq!(summary.estimated_size_bytes, 0);
+        assert_eq!(summary.prefix_hex, "");
+        assert_eq!(summary.prefix_display, "");
+
+        let summary = super::SegmentSummary::from_tree(
+            &Bytes::from_static(b"ts/2026-03-09/14/"),
+            &tree,
+            false,
+        );
+        assert!(!summary.unsegmented);
+        assert_eq!(summary.prefix_display, "ts/2026-03-09/14/");
+        assert_eq!(summary.prefix_hex, "74732f323032362d30332d30392f31342f");
+    }
+
+    #[test]
+    fn test_segment_summary_drain_marker_detection() {
+        use crate::manifest::LsmTreeState;
+        use bytes::Bytes;
+
+        let tree = LsmTreeState {
+            last_compacted_l0_sst_view_id: Some(Ulid::new()),
+            ..LsmTreeState::default()
+        };
+        let summary = super::SegmentSummary::from_tree(
+            &Bytes::from_static(b"ts/2026-03-09/14/"),
+            &tree,
+            false,
+        );
+        assert!(summary.drain_marker);
+        assert_eq!(summary.l0_count, 0);
+        assert_eq!(summary.sr_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_and_describe_segments_unsegmented() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_and_describe_segments_unsegmented");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let _ = StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let summaries = admin
+            .list_segments(None)
+            .await
+            .unwrap()
+            .expect("expected manifest");
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].unsegmented);
+        assert_eq!(summaries[0].l0_count, 0);
+        assert_eq!(summaries[0].sr_count, 0);
+
+        let unsegmented = admin
+            .describe_segment(b"", None)
+            .await
+            .unwrap()
+            .expect("expected unsegmented tree");
+        assert!(unsegmented.summary.unsegmented);
+        assert!(unsegmented.l0.is_empty());
+        assert!(unsegmented.compacted.is_empty());
+
+        // An absent prefix returns None.
+        assert!(admin
+            .describe_segment(b"ts/2026-03-09/99/", None)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_segments_no_manifest_returns_none() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_segments_no_manifest_returns_none");
+        let admin = AdminBuilder::new(path, object_store).build();
+        assert!(admin.list_segments(None).await.unwrap().is_none());
+        assert!(admin.describe_segment(b"", None).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_and_describe_segments_segmented() {
+        use crate::manifest::Segment;
+        use bytes::Bytes;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_and_describe_segments_segmented");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+
+        // Populating `segments` triggers the V2 manifest encoder
+        // (`requires_v2`), which is what makes the round-trip preserve them.
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some("hour-bucket".to_string());
+        core.segments = vec![
+            Segment {
+                prefix: Bytes::from_static(b"ts/2026-03-09/14/"),
+                tree: Default::default(),
+            },
+            Segment {
+                prefix: Bytes::from_static(b"ts/2026-03-09/15/"),
+                tree: Default::default(),
+            },
+        ];
+        let _ = StoredManifest::create_new_db(
+            manifest_store,
+            core,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let summaries = admin
+            .list_segments(None)
+            .await
+            .unwrap()
+            .expect("expected manifest");
+        assert_eq!(summaries.len(), 2);
+        assert!(!summaries[0].unsegmented);
+        assert_eq!(summaries[0].prefix_display, "ts/2026-03-09/14/");
+        assert_eq!(summaries[1].prefix_display, "ts/2026-03-09/15/");
+
+        let named = admin
+            .describe_segment(b"ts/2026-03-09/14/", None)
+            .await
+            .unwrap()
+            .expect("expected named segment");
+        assert!(!named.summary.unsegmented);
+        assert_eq!(named.summary.prefix_display, "ts/2026-03-09/14/");
+
+        // Empty prefix has no meaning once segments are configured.
+        assert!(admin.describe_segment(b"", None).await.unwrap().is_none());
+        assert!(admin
+            .describe_segment(b"ts/2026-03-09/99/", None)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_admin_describe_segment_requires_exact_prefix_match() {
+        use crate::manifest::Segment;
+        use bytes::Bytes;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_describe_segment_requires_exact_prefix_match");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some("hour-bucket".to_string());
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"ts/2026-03-09/14/"),
+            tree: Default::default(),
+        }];
+        let _ = StoredManifest::create_new_db(
+            manifest_store,
+            core,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        // A shorter prefix that's a strict prefix of the segment must not match.
+        assert!(admin
+            .describe_segment(b"ts/2026-", None)
+            .await
+            .unwrap()
+            .is_none());
+        // A longer key extending the segment's prefix must not match either.
+        assert!(admin
+            .describe_segment(b"ts/2026-03-09/14/series-7", None)
+            .await
+            .unwrap()
+            .is_none());
+        // Exact match works.
+        assert!(admin
+            .describe_segment(b"ts/2026-03-09/14/", None)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_segments_surfaces_drain_marker() {
+        use crate::manifest::{LsmTreeState, Segment};
+        use bytes::Bytes;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_segments_surfaces_drain_marker");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+
+        let drained_tree = LsmTreeState {
+            last_compacted_l0_sst_view_id: Some(Ulid::new()),
+            ..LsmTreeState::default()
+        };
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some("hour-bucket".to_string());
+        core.segments = vec![
+            Segment {
+                prefix: Bytes::from_static(b"ts/2026-03-09/14/"),
+                tree: drained_tree,
+            },
+            Segment {
+                prefix: Bytes::from_static(b"ts/2026-03-09/15/"),
+                tree: Default::default(),
+            },
+        ];
+        let _ = StoredManifest::create_new_db(
+            manifest_store,
+            core,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let summaries = admin
+            .list_segments(None)
+            .await
+            .unwrap()
+            .expect("expected manifest");
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries[0].drain_marker);
+        assert!(!summaries[1].drain_marker);
+
+        let described = admin
+            .describe_segment(b"ts/2026-03-09/14/", None)
+            .await
+            .unwrap()
+            .expect("expected drained segment");
+        assert!(described.summary.drain_marker);
     }
 }
