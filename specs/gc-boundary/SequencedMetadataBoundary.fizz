@@ -13,7 +13,7 @@ options:
 #
 # This spec models the GC boundary protocol for SlateDB's sequenced metadata
 # objects, as described by rfcs/0001-manifest.md and
-# rfcs/0025-garbage-collector-boundary.md.
+# rfcs/0026-garbage-collector-boundary.md.
 #
 # The real system stores metadata as immutable, monotonically numbered object
 # files such as:
@@ -22,7 +22,7 @@ options:
 # - compactions/00000000000000000013.compactions
 #
 # Creating the next object with create-if-absent is the commit point for a
-# sequenced metadata update. The stale-writer bug covered by RFC 0025 happens
+# sequenced metadata update. The stale-writer bug covered by RFC 0026 happens
 # when a writer prepares ID N, stalls, another writer creates and supersedes N,
 # GC deletes N, and the stalled writer later creates N again. Plain
 # create-if-absent cannot remember that a deleted ID was already used.
