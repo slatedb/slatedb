@@ -96,17 +96,24 @@ action Init:
     gc_a = GarbageCollector()
     gc_b = GarbageCollector()
 
+# Returns the most recently written sequence ID, or 0 if no objects exist.
 atomic func latest_sequence_id():
     if len(objects) == 0:
         return 0
     return max(objects.keys())
 
+# Returns the epoch of the most recently written sequence ID, or 0 if no
+# objects exist.
 atomic func latest_epoch():
     if len(objects) == 0:
         return 0
     sid = latest_sequence_id()
     return objects[sid]
 
+# Records that a writer reported success for `id` at `epoch`. This is not part
+# of the real protocol; it's ghost state that lets assertions check that
+# writers only report success for IDs that passed the boundary check and were
+# not already reported by another writer.
 atomic func record_commit(id, epoch):
     _committed[id] = epoch
     _commit_counts[id] = _commit_counts.get(id, 0) + 1
