@@ -238,7 +238,7 @@ Polls do not emit heartbeats. Liveness is driven entirely by compaction progress
 **Failure Detection Protocol** (coordinator):
 
 1. On each coordinator poll tick, read latest `.compactions`.
-2. For each `Running` compaction where `now() - max(last_heartbeat_ms, coordinator_start_time_ms) > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`. The `coordinator_start_time_ms` floor (captured in memory when the coordinator boots, not persisted) gives surviving workers one full timeout window after a coordinator restart to emit a heartbeat, preventing spurious reclaim due to clock skew or boot delay. After every worker has heartbeated at least once post-restart, the `max` is a no-op. This avoids destroying in-flight work on healthy workers that survived the coordinator restart.
+2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
 3. If any compactions were reclaimed in step 2, write updated state via `write_compactions_safely()`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator`.
 4. On `AlreadyExists`: re-read latest and retry from step 1.
 
