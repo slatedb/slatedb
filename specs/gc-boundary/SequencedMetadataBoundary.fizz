@@ -44,6 +44,11 @@ options:
 #   ID, then may delete objects at or behind that boundary. Keeping the boundary
 #   below the latest object models the RFC rule that the latest metadata file is
 #   always retained.
+# - each `Reader` reads a random object ID and checks the boundary to verify
+#   whether the read was valid at the time of the read. If so, it marks the
+#   read as successful. The successful read count is ghost state that lets
+#   assertions verify that readers only successfully observe objects above the
+#   boundary.
 #
 # `WriteNext` and `CheckBoundary` are atomic actions because they model single
 # local protocol steps. If they were serial actions, FizzBee could yield between
