@@ -125,13 +125,13 @@ impl BackpressureChecker {
     }
 }
 
-/// Per-tree planning state plus the gate that approves picks for that
-/// tree: prefix, source lists, and combined conflict + backpressure
-/// checks. Built once per `propose()` call; `conflicts` is updated as
-/// picks land. Source IDs (L0 ULIDs and SR ids) are globally unique per
-/// RFC-0024 and a spec's sources must come from a single tree, so each
-/// tree only needs to track its own in-flight sources.
-struct TreeCompactionChecker {
+/// Per-tree planning state for one `propose()` call: prefix, source
+/// lists, and the conflict + backpressure checks that gate picks for
+/// this tree. `conflicts` is updated as picks land. Source IDs (L0
+/// ULIDs and SR ids) are globally unique per RFC-0024 and a spec's
+/// sources must come from a single tree, so each tree only needs to
+/// track its own in-flight sources.
+struct TreeState {
     prefix: Bytes,
     l0: Vec<CompactionSource>,
     srs: Vec<CompactionSource>,
@@ -139,7 +139,7 @@ struct TreeCompactionChecker {
     bp: BackpressureChecker,
 }
 
-impl TreeCompactionChecker {
+impl TreeState {
     fn check_compaction(
         &self,
         sources: &VecDeque<CompactionSource>,
@@ -188,8 +188,9 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         // and reuse across round-robin passes. Active in-flight compactions
         // are partitioned by their target segment; cross-segment conflicts
         // are impossible (RFC-0024). Trees are sorted by L0 length
-        // descending so the tree with the most recent writes gets first
-        // dibs; stable sort preserves root-first ordering among ties.
+        // descending so the tree closest to L0 backpressure gets first dibs
+        // — writer-side backpressure is the most pressing pressure to
+        // relieve. Stable sort preserves root-first ordering among ties.
         let mut active_by_segment: HashMap<Bytes, Vec<&CompactionSpec>> = HashMap::new();
         for compaction in &active_compactions {
             active_by_segment
@@ -197,7 +198,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
                 .or_default()
                 .push(compaction.spec());
         }
-        let mut trees: Vec<TreeCompactionChecker> = db_state
+        let mut trees: Vec<TreeState> = db_state
             .trees_with_prefix()
             .map(|(prefix, tree)| {
                 let (l0, srs) = compaction_sources(tree);
@@ -213,7 +214,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
                     self.options.max_compaction_sources,
                     &srs,
                 );
-                TreeCompactionChecker {
+                TreeState {
                     prefix,
                     l0,
                     srs,
@@ -324,7 +325,7 @@ impl SizeTieredCompactionScheduler {
 
     fn pick_next_compaction(
         &self,
-        tree: &TreeCompactionChecker,
+        tree: &TreeState,
         next_fresh_sr_id: &mut u32,
     ) -> Option<CompactionSpec> {
         // compact l0s if required
@@ -393,7 +394,7 @@ impl SizeTieredCompactionScheduler {
         size_threshold: f32,
         sources: &[CompactionSource],
         start_idx: usize,
-        checker: Option<&TreeCompactionChecker>,
+        checker: Option<&TreeState>,
     ) -> VecDeque<CompactionSource> {
         let mut compactable_runs = VecDeque::new();
         let mut maybe_min_sz = None;
