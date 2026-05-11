@@ -310,11 +310,14 @@ role GarbageCollector:
 role Reader:
     atomic action Init:
         self.status = "ClaimId"
+        # ID of the object to read.
         self.read_id = 0
+        # Successful reads count.
+        self.reads = 0
 
     atomic action ClaimId:
-        require self.status == "ClaimId" and self.read_id < MAX_READS_PER_READER
-        sid = latest_sequence_id()
+        require self.status == "ClaimId" and self.reads < MAX_READS_PER_READER
+        sid = oneof objects.keys()
         self.read_id = sid
         self.status = "ReadObject"
 
@@ -333,6 +336,7 @@ role Reader:
         else:
             # Read was a success! Advance to the next slot.
             _reads[self.read_id] = _reads.get(self.read_id, 0) + 1
+            self.reads += 1
             self.status = "ClaimId"
 
 
