@@ -411,6 +411,15 @@ impl ManifestCore {
         std::iter::once(&self.tree).chain(self.segments.iter().map(|s| &s.tree))
     }
 
+    /// Iterate every tree paired with its segment prefix: the empty-prefix
+    /// root tree (RFC-0024 compatibility encoding) first, then each named
+    /// segment in `segments` order. Use [`trees`] when only the LSM state
+    /// matters.
+    pub(crate) fn trees_with_prefix(&self) -> impl Iterator<Item = (Bytes, &LsmTreeState)> {
+        std::iter::once((Bytes::new(), &self.tree))
+            .chain(self.segments.iter().map(|s| (s.prefix.clone(), &s.tree)))
+    }
+
     /// Look up the LSM tree for a given segment prefix. An empty `prefix`
     /// returns the root tree (compatibility-encoded `prefix=""` segment);
     /// a non-empty prefix returns the named segment's tree, or `None` if no

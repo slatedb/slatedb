@@ -902,13 +902,20 @@ impl CompactorEventHandler {
         let sst_views = compaction.get_l0_sst_views(db_state);
         let sorted_runs = compaction.get_sorted_runs(db_state);
         let spec = compaction.spec();
-        // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
-        let is_dest_last_run = db_state.tree.compacted.is_empty()
-            || db_state
-                .tree
-                .compacted
-                .last()
-                .is_some_and(|sr| spec.destination() == sr.id);
+        // If there are no SRs in the target tree when we compact L0 then the
+        // resulting SR is the last sorted run. The check is scoped to the
+        // spec's target tree (RFC-0024); if the target segment is missing
+        // from the manifest, fall back to false — the commit path will no-op.
+        let is_dest_last_run = match db_state.tree_for_segment(spec.segment()) {
+            Some(tree) => {
+                tree.compacted.is_empty()
+                    || tree
+                        .compacted
+                        .last()
+                        .is_some_and(|sr| spec.destination() == sr.id)
+            }
+            None => false,
+        };
 
         let job_args = StartCompactionJobArgs {
             id: job_id,
