@@ -49,7 +49,7 @@ This RFC adds durable boundary files for the `.manifest` and `.compactions`
 namespaces. Before GC deletes old sequenced metadata files, it advances the
 namespace boundary. After a writer creates a sequenced metadata file, it checks
 the boundary before returning success. If the created ID is at or behind the
-boundary, the write is treated as fenced.
+boundary, the write is treated as failed.
 
 ## Background
 
@@ -126,9 +126,9 @@ Each file contains a single ASCII-encoded `u64`:
 ```
 
 The value is an inclusive high-watermark. A boundary value `B` means that
-metadata IDs `<= B` in that namespace have been durably fenced. Writers must
-not treat a newly created sequenced metadata file with ID `i <= B` as
-successful.
+metadata IDs `<= B` in that namespace must be treated as potentially deleted.
+Writers must not treat a newly created sequenced metadata file with ID `i <= B`
+as successful.
 
 The protocol has two invariants:
 
@@ -149,9 +149,9 @@ GC advances the boundary before deleting old metadata files from a namespace.
 For a namespace, GC computes the desired boundary as:
 
 1. List the namespace's metadata files.
-2. Remove the most recent metadata file, which must always be kept.
-3. Keep files whose object-store `last_modified` timestamp is older than
-   `min_age`.
+2. Remove the most recent metadata file from the list (it must always be kept).
+3. Keep files in the list whose object-store `last_modified` timestamp is older
+   than `min_age`.
 4. Choose the maximum file ID from that filtered list.
 
 If no files are old enough, GC skips the boundary update for that namespace.
@@ -181,14 +181,6 @@ create-if-absent operation succeeds:
 4. If the just-created ID is less than or equal to the boundary, return a
    boundary error and do not report the write as committed.
 5. Otherwise, return success.
-
-The check must happen after the file create. A pre-create check would still
-allow this race:
-
-1. Writer observes `boundary < N`.
-2. GC advances the boundary to `N`.
-3. Writer creates `N`.
-4. Writer incorrectly returns success.
 
 Boundary reads can be optimized with an in-memory cache and conditional GETs
 using `If-None-Match`. If the object store returns "not modified", the writer
@@ -226,8 +218,8 @@ rules:
 - Add `advance_boundary` methods to the manifest and compactions stores for GC.
 - Update manifest and compactions GC tasks to compute the maximum old-enough ID
   and advance the boundary before deleting files.
-- Ensure manifest and compactions stores do not use stale object-cache reads for
-  boundary objects.
+- Remove `CachedObjectStore` usage for ManifestStore and CompactionsStore to
+  ensure boundary checks are not served from a stale cache.
 
 ## Impact Analysis
 
@@ -298,57 +290,50 @@ Performance and cost:
 
 Compatibility:
 
-- Existing databases start with no boundary files. Missing boundary files are
-  interpreted as boundary `0` until GC creates or advances them.
-- Boundary files are new objects under `/gc`; existing `.manifest` and
-  `.compactions` file formats do not change.
-- Mixed-version deployments are unsafe if older writers can create sequenced
-  metadata files without checking boundaries while newer GC processes advance
-  boundaries.
-- Object-store implementations must support the conditional operations required
-  for safe boundary advancement.
+### Performance & Cost
 
-Operational behavior:
+<!-- Describe performance and cost implications of this change. -->
 
-- Boundary files must not be manually deleted.
-- Boundary values are monotonic and should never be edited downward.
-- A boundary error means the process created an ID that GC has already fenced.
-  Operators should treat this as a stale-writer signal and review `min_age`,
-  process stalls, and object-store behavior.
+- Latency (reads/writes/compactions)
+- Throughput (reads/writes/compactions)
+- Object-store request (GET/LIST/PUT) and cost profile
+- Space, read, and write amplification
+
+### Observability
+
+<!-- Describe any operational changes required to support this change. -->
+
+- Configuration changes
+- New components/services
+- Metrics
+- Logging
+
+### Compatibility
+
+<!-- Describe compatibility considerations with existing versions of SlateDB. -->
+
+- Existing data on object storage / on-disk formats
+- Existing public APIs (including bindings)
+- Rolling upgrades / mixed-version behavior (if applicable)
 
 ## Testing
 
-Unit tests:
+<!-- Describe the testing plan for this change. -->
 
-- Missing boundary defaults to `0`.
-- Advancing a boundary fences IDs at or below the boundary.
-- Concurrent or stale conditional updates retry until the durable boundary is
-  advanced.
-- Boundary checks use `GET If-None-Match` when a cached ETag exists.
-- A previously observed boundary file disappearing panics.
-- `BoundedSequencedStorage` checks the boundary after a successful delegated
-  write.
-
-Integration tests:
-
-- Manifest GC advances `manifest.boundary` before deleting old manifests.
-- A stale manifest create at or behind the boundary fails with
-  `ObjectVersionBehindBoundary`.
-- Compactions GC advances `compactions.boundary` before deleting old
-  compactions files.
-- A stale compactions create at or behind the boundary fails with
-  `ObjectVersionBehindBoundary`.
-
-Formal methods:
-
-- Model check `specs/gc-boundary/SequencedMetadataBoundary.fizz`.
+- Unit tests:
+- Integration tests:
+- Fault-injection/chaos tests:
+- Deterministic simulation tests:
+- Formal methods verification:
+- Performance tests:
 
 ## Rollout
 
-Rollout can happen in a single release because older clients will simply
-ignore the new boundary files. Newer clients with no boundary file will treat
-the boundary as `0`, which replicates the old behavior until GC creates or
-advances the boundary.
+<!-- Describe the plan for rolling out this change to production. -->
+
+- Milestones / phases:
+- Feature flags / opt-in:
+- Docs updates:
 
 ## Alternatives
 
