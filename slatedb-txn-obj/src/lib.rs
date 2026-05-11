@@ -100,6 +100,9 @@ pub enum TransactionalObjectError {
     #[error("object version exists")]
     ObjectVersionExists,
 
+    #[error("object version is behind boundary: id={id:?}, boundary={boundary:?}")]
+    ObjectVersionBehindBoundary { id: u64, boundary: u64 },
+
     #[error("detected newer client")]
     Fenced,
 
@@ -570,6 +573,75 @@ pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, Monotonic
     async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
+/// A durable inclusive high-watermark for a sequenced object namespace.
+///
+/// A boundary value `B` means that object IDs `<= B` have been durably fenced. Writers must call
+/// [`BoundaryObject::check`] after creating an object and treat
+/// [`TransactionalObjectError::ObjectVersionBehindBoundary`] as a failed write if the just-created
+/// ID is at or below the current boundary.
+#[async_trait]
+pub trait BoundaryObject: Send + Sync {
+    /// Verify that `id` is greater than the durable boundary.
+    async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
+
+    /// Advance the boundary to at least `boundary`.
+    ///
+    /// Returns `Ok(())` only once the durable boundary is greater than or equal to `boundary`.
+    /// Implementations should retry conditional update races until this is true.
+    async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError>;
+}
+
+/// A [`SequencedStorageProtocol`] wrapper that fences stale writes using a [`BoundaryObject`].
+pub struct BoundedSequencedStorage<T> {
+    delegate: Arc<dyn SequencedStorageProtocol<T>>,
+    boundary: Arc<dyn BoundaryObject>,
+}
+
+impl<T> BoundedSequencedStorage<T> {
+    pub fn new(
+        delegate: Arc<dyn SequencedStorageProtocol<T>>,
+        boundary: Arc<dyn BoundaryObject>,
+    ) -> Self {
+        Self { delegate, boundary }
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId> for BoundedSequencedStorage<T> {
+    async fn write(
+        &self,
+        current_id: Option<MonotonicId>,
+        new_value: &T,
+    ) -> Result<MonotonicId, TransactionalObjectError> {
+        let id = self.delegate.write(current_id, new_value).await?;
+        self.boundary.check(id).await?;
+        Ok(id)
+    }
+
+    async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
+        self.delegate.try_read_latest().await
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync> SequencedStorageProtocol<T> for BoundedSequencedStorage<T> {
+    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError> {
+        self.delegate.try_read(id).await
+    }
+
+    async fn list(
+        &self,
+        from: Bound<MonotonicId>,
+        to: Bound<MonotonicId>,
+    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
+        self.delegate.list(from, to).await
+    }
+
+    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+        self.delegate.delete(id).await
+    }
+}
+
 #[cfg(feature = "test-util")]
 pub mod test_utils {
     use crate::DirtyObject;
@@ -587,13 +659,15 @@ mod tests {
     use crate::object_store::ObjectStoreSequencedStorageProtocol;
     use crate::TransactionalObjectError;
     use crate::{
-        FenceableTransactionalObject, MonotonicId, ObjectCodec, SimpleTransactionalObject,
-        TransactionalObject, TransactionalStorageProtocol,
+        BoundaryObject, BoundedSequencedStorage, FenceableTransactionalObject, MonotonicId,
+        ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+        TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use slatedb_common::clock::DefaultSystemClock;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use tokio::time::Duration as TokioDuration;
 
@@ -632,6 +706,40 @@ mod tests {
             "val",
             Box::new(TestValCodec),
         ))
+    }
+
+    struct TestBoundary {
+        boundary: AtomicU64,
+        checks: AtomicU64,
+    }
+
+    impl TestBoundary {
+        fn new(boundary: u64) -> Self {
+            Self {
+                boundary: AtomicU64::new(boundary),
+                checks: AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BoundaryObject for TestBoundary {
+        async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            let boundary = MonotonicId::new(self.boundary.load(Ordering::SeqCst));
+            if id <= boundary {
+                return Err(TransactionalObjectError::ObjectVersionBehindBoundary {
+                    id: id.id(),
+                    boundary: boundary.id(),
+                });
+            }
+            Ok(())
+        }
+
+        async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
+            self.boundary.fetch_max(boundary.id(), Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -681,6 +789,107 @@ mod tests {
             },
             latest.1
         );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_sequenced_storage_checks_boundary_after_successful_write() {
+        let store = new_store();
+        let boundary = Arc::new(TestBoundary::new(0));
+        let bounded = BoundedSequencedStorage::new(
+            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
+            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
+        );
+
+        let id = bounded
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(1, id);
+        assert_eq!(1, boundary.checks.load(Ordering::SeqCst));
+        assert_eq!(
+            Some(TestVal {
+                epoch: 0,
+                payload: 1,
+            }),
+            bounded.try_read(id).await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_sequenced_storage_rejects_write_behind_boundary() {
+        let store = new_store();
+        let boundary = Arc::new(TestBoundary::new(1));
+        let bounded = BoundedSequencedStorage::new(
+            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
+            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
+        );
+
+        let err = bounded
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
+                if id == 1 && boundary == 1
+        ));
+        assert_eq!(1, boundary.checks.load(Ordering::SeqCst));
+        assert_eq!(
+            Some(TestVal {
+                epoch: 0,
+                payload: 1,
+            }),
+            store.try_read(1.into()).await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_sequenced_storage_does_not_check_boundary_on_write_conflict() {
+        let store = new_store();
+        store
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap();
+
+        let boundary = Arc::new(TestBoundary::new(1));
+        let bounded = BoundedSequencedStorage::new(
+            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
+            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
+        );
+
+        let err = bounded
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 2,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
+        assert_eq!(0, boundary.checks.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
