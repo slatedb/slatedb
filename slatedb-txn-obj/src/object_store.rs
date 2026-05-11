@@ -1,6 +1,6 @@
 use crate::TransactionalObjectError::CallbackError;
 use crate::{
-    GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
+    BoundaryObject, GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
     TransactionalObjectError, TransactionalStorageProtocol,
 };
 use async_trait::async_trait;
@@ -8,7 +8,10 @@ use futures::StreamExt;
 use log::{debug, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
-use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload};
+use object_store::{
+    Error, GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
+};
+use parking_lot::Mutex;
 use std::collections::Bound;
 use std::collections::Bound::Unbounded;
 use std::ops::RangeBounds;
@@ -64,6 +67,167 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
                 .map(MonotonicId::new)
                 .map_err(|_| TransactionalObjectError::InvalidObjectState),
             _ => Err(TransactionalObjectError::InvalidObjectState),
+        }
+    }
+}
+
+/// Implements [`BoundaryObject`] on object storage.
+///
+/// The boundary is stored as a single ASCII-encoded `u64` at
+/// `<root_path>/gc/<name>.boundary`. A missing boundary file is treated as `0`
+/// until this process has observed the boundary file at least once.
+///
+/// Successful reads cache the boundary value along with object-store version
+/// metadata. Later reads pass the cached ETag as `if-none-match`, allowing stores
+/// that support conditional GETs to return `NotModified`; in that case the cached
+/// boundary is reused without fetching the object body again.
+pub struct ObjectStoreBoundaryObject {
+    object_store: Box<dyn ObjectStore>,
+    filepath: Path,
+    /// Caches the last observed boundary and object-store version metadata for
+    /// conditional reads.
+    cache: Mutex<Option<(MonotonicId, UpdateVersion)>>,
+}
+
+impl ObjectStoreBoundaryObject {
+    pub fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>, name: &str) -> Self {
+        Self {
+            object_store: Box::new(::object_store::prefix::PrefixStore::new(
+                object_store,
+                root_path.child("gc"),
+            )),
+            filepath: Path::from(format!("{name}.boundary")),
+            cache: Mutex::new(None),
+        }
+    }
+
+    /// Updates the cached boundary and version metadata without moving the cached
+    /// boundary backward.
+    ///
+    /// ## Arguments
+    ///
+    /// * `boundary` - The boundary value read from or written to object storage.
+    /// * `version` - The object-store version metadata associated with `boundary`.
+    ///
+    /// ## Returns
+    ///
+    /// The boundary and optional version metadata that callers should use after
+    /// applying the cache's monotonicity rule.
+    fn update_cache(
+        &self,
+        boundary: MonotonicId,
+        version: UpdateVersion,
+    ) -> (MonotonicId, Option<UpdateVersion>) {
+        let mut cache = self.cache.lock();
+        if let Some((cached_id, cached_version)) = cache.as_ref() {
+            if *cached_id > boundary {
+                return (*cached_id, Some(cached_version.clone()));
+            }
+        }
+
+        *cache = Some((boundary, version.clone()));
+        (boundary, Some(version))
+    }
+
+    /// Reads the durable boundary, using a conditional GET when cached version
+    /// metadata is present.
+    async fn read_boundary(
+        &self,
+    ) -> Result<(MonotonicId, Option<UpdateVersion>), TransactionalObjectError> {
+        let cached = self.cache.lock().clone();
+        let opts = GetOptions {
+            if_none_match: cached
+                .as_ref()
+                .and_then(|(_, version)| version.e_tag.clone()),
+            ..GetOptions::default()
+        };
+
+        match self.object_store.get_opts(&self.filepath, opts).await {
+            Ok(result) => {
+                let version = UpdateVersion {
+                    e_tag: result.meta.e_tag.clone(),
+                    version: result.meta.version.clone(),
+                };
+                let bytes = result.bytes().await?;
+                let boundary = MonotonicId::new(
+                    std::str::from_utf8(&bytes)
+                        .map_err(|_| TransactionalObjectError::InvalidObjectState)?
+                        .trim()
+                        .parse()
+                        .map_err(|_| TransactionalObjectError::InvalidObjectState)?,
+                );
+                Ok(self.update_cache(boundary, version))
+            }
+            Err(Error::NotModified { .. }) => match self.cache.lock().clone() {
+                Some((boundary, version)) => Ok((boundary, Some(version))),
+                // NotModified implies we have a cache, since we need the
+                // version's ETag for the conditional GET. If cache is missing,
+                // treat as invalid state.
+                None => Err(TransactionalObjectError::InvalidObjectState),
+            },
+            Err(Error::NotFound { .. }) => match self.cache.lock().clone() {
+                // Once observed, the boundary file disappearing means durable state
+                // regressed; do not treat it as an initial zero boundary.
+                Some(_) => Err(TransactionalObjectError::InvalidObjectState),
+                // Default to zero boundary if file is missing and we've never
+                // observed it before.
+                None => Ok((MonotonicId::new(0), None)),
+            },
+            Err(e) => Err(TransactionalObjectError::from(e)),
+        }
+    }
+}
+
+#[async_trait]
+impl BoundaryObject for ObjectStoreBoundaryObject {
+    async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+        let (boundary, _) = self.read_boundary().await?;
+        if id <= boundary {
+            return Err(TransactionalObjectError::ObjectVersionBehindBoundary {
+                id: id.id(),
+                boundary: boundary.id(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
+        loop {
+            let (current_boundary, current_version) = self.read_boundary().await?;
+            if current_boundary >= boundary {
+                return Ok(());
+            }
+
+            let put_result = match current_version {
+                Some(version) => {
+                    self.object_store
+                        .put_opts(
+                            &self.filepath,
+                            PutPayload::from(boundary.id().to_string()),
+                            PutOptions::from(PutMode::Update(version)),
+                        )
+                        .await
+                }
+                None => {
+                    self.object_store
+                        .put_opts(
+                            &self.filepath,
+                            PutPayload::from(boundary.id().to_string()),
+                            PutOptions::from(PutMode::Create),
+                        )
+                        .await
+                }
+            };
+
+            match put_result {
+                Ok(result) => {
+                    self.update_cache(boundary, result.into());
+                    return Ok(());
+                }
+                // Try again if the boundary was concurrently updated by another process.
+                Err(Error::AlreadyExists { .. } | Error::Precondition { .. }) => {}
+                Err(e) => return Err(TransactionalObjectError::from(e)),
+            }
         }
     }
 }
@@ -189,11 +353,12 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
 
 #[cfg(test)]
 mod tests {
-    use super::ObjectStoreSequencedStorageProtocol;
+    use super::{ObjectStoreBoundaryObject, ObjectStoreSequencedStorageProtocol};
     use crate::tests::{new_store, TestVal, TestValCodec};
     use crate::{
-        MonotonicId, ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject,
-        TransactionalObject, TransactionalStorageProtocol,
+        BoundaryObject, MonotonicId, ObjectCodec, SequencedStorageProtocol,
+        SimpleTransactionalObject, TransactionalObject, TransactionalObjectError,
+        TransactionalStorageProtocol,
     };
     use chrono::Utc;
     use futures::stream::{self, BoxStream};
@@ -315,6 +480,206 @@ mod tests {
         async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
             self.inner.copy_if_not_exists(from, to).await
         }
+    }
+
+    #[derive(Debug)]
+    struct CountingGetStore {
+        inner: InMemory,
+        get_opts_calls: AtomicUsize,
+        if_none_match_gets: AtomicUsize,
+    }
+
+    impl CountingGetStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemory::new(),
+                get_opts_calls: AtomicUsize::new(0),
+                if_none_match_gets: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl fmt::Display for CountingGetStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "CountingGetStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingGetStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> ObjectStoreResult<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> ObjectStoreResult<GetResult> {
+            self.get_opts_calls.fetch_add(1, Ordering::SeqCst);
+            if options.if_none_match.is_some() {
+                self.if_none_match_gets.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> ObjectStoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_boundary_check_allows_missing_boundary() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store, "manifest");
+
+        boundary.check(MonotonicId::new(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_boundary_advance_creates_boundary_and_rejects_at_or_below_it() {
+        let object_store = Arc::new(InMemory::new());
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+
+        let err = boundary.check(MonotonicId::new(2)).await.unwrap_err();
+        assert!(matches!(
+            err,
+            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
+                if id == 2 && boundary == 2
+        ));
+        boundary.check(MonotonicId::new(3)).await.unwrap();
+
+        let raw_boundary = object_store
+            .get(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!("2", std::str::from_utf8(&raw_boundary).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_boundary_advance_is_monotonic() {
+        let object_store = Arc::new(InMemory::new());
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+
+        boundary.advance(MonotonicId::new(3)).await.unwrap();
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+
+        let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
+        assert!(matches!(
+            err,
+            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
+                if id == 3 && boundary == 3
+        ));
+
+        let raw_boundary = object_store
+            .get(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!("3", std::str::from_utf8(&raw_boundary).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_boundary_check_reuses_cache_on_not_modified() {
+        let counting_store = Arc::new(CountingGetStore::new());
+        let object_store: Arc<dyn ObjectStore> = counting_store.clone();
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+
+        let if_none_match_gets = counting_store.if_none_match_gets.load(Ordering::SeqCst);
+        let err = boundary.check(MonotonicId::new(2)).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
+                if id == 2 && boundary == 2
+        ));
+        assert_eq!(
+            if_none_match_gets + 1,
+            counting_store.if_none_match_gets.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_boundary_check_refreshes_cache_when_etag_changes() {
+        let counting_store = Arc::new(CountingGetStore::new());
+        let object_store: Arc<dyn ObjectStore> = counting_store.clone();
+        let first_boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+        let second_boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store, "manifest");
+
+        first_boundary.advance(MonotonicId::new(2)).await.unwrap();
+        second_boundary.advance(MonotonicId::new(4)).await.unwrap();
+
+        let err = first_boundary.check(MonotonicId::new(4)).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
+                if id == 4 && boundary == 4
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_boundary_check_returns_invalid_state_when_observed_boundary_disappears() {
+        let object_store = Arc::new(InMemory::new());
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+        object_store
+            .delete(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap();
+
+        let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
+
+        assert!(matches!(err, TransactionalObjectError::InvalidObjectState));
     }
 
     #[tokio::test]
