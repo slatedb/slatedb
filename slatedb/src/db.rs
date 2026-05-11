@@ -2591,6 +2591,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_user_write_bytes_matches_batch_payload() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_user_write_bytes_matches_batch_payload",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024 * 1024, None))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"hello", b"world!").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::USER_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len()) as i64,
+        );
+
+        db.put(b"k2", b"v2").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::USER_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len()) as i64,
+        );
+
+        // Deletes count only the key length.
+        db.delete(b"k3").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::USER_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len() + b"k3".len()) as i64,
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wal_flush_bytes_after_explicit_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db_options = {
+            let mut db_options = test_db_options(0, 1024 * 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder(
+            "/tmp/test_wal_flush_bytes_after_explicit_flush",
+            object_store,
+        )
+        .with_settings(db_options)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put_with_options(
+            b"hello",
+            b"world",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap_or(0),
+            0,
+        );
+
+        db.flush().await.unwrap();
+
+        let wal_bytes = lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap();
+        let user_bytes =
+            lookup_metric(&metrics_recorder, crate::db_stats::USER_WRITE_BYTES).unwrap();
+        // WAL SST framing/footer makes the encoded payload at least as large as
+        // the user payload.
+        assert!(
+            wal_bytes >= user_bytes,
+            "wal_bytes={wal_bytes} user_bytes={user_bytes}",
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_get_with_durability_level_when_wal_disabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
