@@ -10,6 +10,18 @@ use crate::seq_tracker::{FindOption, SequenceTracker};
 use crate::types::ValueDeletable::Tombstone;
 use crate::types::{RowEntry, ValueDeletable};
 use slatedb_common::clock::SystemClock;
+use slatedb_common::metrics::CounterFn;
+
+/// Counter for expired value entries rewritten as tombstones by [`RetentionIterator`].
+///
+/// A user-written `CompactionFilter` can't observe this rewrite — the tombstone
+/// reaches the filter with `expire_ts: None`, indistinguishable from one the
+/// user wrote — so the counter surfaces it instead. Expired `Merge` entries
+/// are skipped silently and are not counted.
+#[derive(Clone)]
+pub(crate) struct RetentionMetrics {
+    pub(crate) expired_entries: Arc<dyn CounterFn>,
+}
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -36,6 +48,9 @@ pub(crate) struct RetentionIterator<T: RowEntryIterator> {
     system_clock: Arc<dyn SystemClock>,
     /// Historical sequence metadata used to translate sequence numbers into wall-clock timestamps.
     sequence_tracker: Arc<SequenceTracker>,
+    /// Optional counters for observing expire_ts-driven decisions. Populated on
+    /// the compaction path; `None` on the flush path.
+    metrics: Option<RetentionMetrics>,
 }
 
 impl<T: RowEntryIterator> RetentionIterator<T> {
@@ -48,6 +63,7 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
         compaction_start_ts: i64,
         system_clock: Arc<dyn SystemClock>,
         sequence_tracker: Arc<SequenceTracker>,
+        metrics: Option<RetentionMetrics>,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
@@ -57,6 +73,7 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
             compaction_start_ts,
             system_clock,
             sequence_tracker,
+            metrics,
             buffer: RetentionBuffer::new(),
         })
     }
@@ -75,6 +92,7 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
         retention_min_seq: Option<u64>,
         filter_tombstone: bool,
         sequence_tracker: Arc<SequenceTracker>,
+        metrics: Option<&RetentionMetrics>,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
         let current_system_ts = system_clock.now().timestamp_millis();
@@ -94,6 +112,9 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
                     // value in the iterator because this may otherwise "revive"
                     // an older version of the KV pair that has a larger TTL in
                     // a lower level of the LSM tree
+                    if let Some(m) = metrics {
+                        m.expired_entries.increment(1);
+                    }
                     RowEntry {
                         key: entry.key,
                         value: Tombstone,
@@ -226,6 +247,7 @@ impl<T: RowEntryIterator> RowEntryIterator for RetentionIterator<T> {
                     let retention_timeout = self.retention_timeout;
                     let retention_min_seq = self.retention_min_seq;
                     let system_clock = self.system_clock.clone();
+                    let metrics = self.metrics.clone();
                     self.buffer.process_retention(|versions| {
                         Self::apply_retention_filter(
                             versions,
@@ -235,6 +257,7 @@ impl<T: RowEntryIterator> RowEntryIterator for RetentionIterator<T> {
                             retention_min_seq,
                             self.filter_tombstone,
                             self.sequence_tracker.clone(),
+                            metrics.as_ref(),
                         )
                     })?;
                 }
@@ -1012,6 +1035,7 @@ mod tests {
             test_case.retention_min_seq,
             test_case.filter_tombstone,
             Arc::new(SequenceTracker::new()),
+            None,
         );
 
         // Convert filtered versions back to expected order
@@ -1124,6 +1148,7 @@ mod tests {
             None,
             false,
             tracker,
+            None,
         );
 
         let derived_ts = sorted_points
@@ -1139,5 +1164,131 @@ mod tests {
             "{:?}[{}@{} Now({})]",
             filtered, entry_seq, derived_ts, clock_now
         );
+    }
+
+    #[cfg(feature = "test-util")]
+    mod expired_entries_metrics {
+        use super::*;
+        use crate::compactor::stats::EXPIRED_ENTRIES;
+        use crate::test_utils::TestIterator;
+        use slatedb_common::clock::MockSystemClock;
+        use slatedb_common::metrics::{lookup_metric, test_recorder_helper};
+        use std::collections::BTreeMap;
+
+        fn build_metrics() -> (
+            std::sync::Arc<slatedb_common::metrics::DefaultMetricsRecorder>,
+            RetentionMetrics,
+        ) {
+            let (recorder, helper) = test_recorder_helper();
+            let metrics = RetentionMetrics {
+                expired_entries: helper.counter(EXPIRED_ENTRIES).register(),
+            };
+            (recorder, metrics)
+        }
+
+        #[test]
+        fn apply_retention_filter_increments_for_expired_value() {
+            let (recorder, metrics) = build_metrics();
+            let entry = RowEntry::new_value(b"k", b"v", 1).with_expire_ts(500);
+            let mut versions = BTreeMap::new();
+            versions.insert(Reverse(entry.seq), entry);
+
+            let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
+                versions,
+                1_000,
+                Arc::new(MockSystemClock::with_time(1_000)),
+                None,
+                None,
+                false,
+                Arc::new(SequenceTracker::new()),
+                Some(&metrics),
+            );
+
+            assert_eq!(filtered.len(), 1);
+            let only = filtered.values().next().unwrap();
+            assert!(
+                matches!(only.value, ValueDeletable::Tombstone),
+                "expired value should become a tombstone, got {:?}",
+                only.value
+            );
+            assert!(
+                only.expire_ts.is_none(),
+                "tombstone should have expire_ts cleared"
+            );
+            assert_eq!(lookup_metric(recorder.as_ref(), EXPIRED_ENTRIES), Some(1));
+        }
+
+        #[test]
+        fn apply_retention_filter_no_increment_for_expired_merge() {
+            let (recorder, metrics) = build_metrics();
+            let entry = RowEntry::new_merge(b"k", b"v", 1).with_expire_ts(500);
+            let mut versions = BTreeMap::new();
+            versions.insert(Reverse(entry.seq), entry);
+
+            let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
+                versions,
+                1_000,
+                Arc::new(MockSystemClock::with_time(1_000)),
+                None,
+                None,
+                false,
+                Arc::new(SequenceTracker::new()),
+                Some(&metrics),
+            );
+
+            assert!(filtered.is_empty(), "expired merge entry should be dropped");
+            assert_eq!(
+                lookup_metric(recorder.as_ref(), EXPIRED_ENTRIES),
+                Some(0),
+                "merge drops must not increment the counter"
+            );
+        }
+
+        #[test]
+        fn apply_retention_filter_no_increment_when_not_expired() {
+            let (recorder, metrics) = build_metrics();
+            let entry = RowEntry::new_value(b"k", b"v", 1).with_expire_ts(2_000);
+            let mut versions = BTreeMap::new();
+            versions.insert(Reverse(entry.seq), entry);
+
+            let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
+                versions,
+                1_000,
+                Arc::new(MockSystemClock::with_time(1_000)),
+                None,
+                None,
+                false,
+                Arc::new(SequenceTracker::new()),
+                Some(&metrics),
+            );
+
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(lookup_metric(recorder.as_ref(), EXPIRED_ENTRIES), Some(0));
+        }
+
+        #[test]
+        fn apply_retention_filter_no_panic_when_metrics_none() {
+            let merge_entry = RowEntry::new_merge(b"k1", b"v", 1).with_expire_ts(500);
+            let value_entry = RowEntry::new_value(b"k2", b"v", 2).with_expire_ts(500);
+            let mut versions = BTreeMap::new();
+            versions.insert(Reverse(merge_entry.seq), merge_entry);
+            versions.insert(Reverse(value_entry.seq), value_entry);
+
+            let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
+                versions,
+                1_000,
+                Arc::new(MockSystemClock::with_time(1_000)),
+                None,
+                None,
+                false,
+                Arc::new(SequenceTracker::new()),
+                None,
+            );
+
+            // merge dropped, value kept as tombstone
+            assert_eq!(filtered.len(), 1);
+            let kept = filtered.values().next().unwrap();
+            assert!(matches!(kept.value, ValueDeletable::Tombstone));
+        }
     }
 }

@@ -1027,6 +1027,11 @@ pub mod stats {
         compactor_stat_name!("total_bytes_being_compacted");
     pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
         compactor_stat_name!("total_throughput_bytes_per_sec");
+    pub const EXPIRED_ENTRIES: &str = compactor_stat_name!("expired_entries");
+    pub const EXPIRED_ENTRIES_DESCRIPTION: &str =
+        "Count of tombstones added by the RetentionIterator when an expired value entry \
+         is rewritten as a tombstone. Does not include expired merge entries, which are \
+         skipped silently.";
 
     pub(crate) struct CompactionStats {
         pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
@@ -1036,6 +1041,7 @@ pub mod stats {
         pub(crate) total_bytes_being_compacted: Arc<dyn GaugeFn>,
         pub(crate) total_throughput: Arc<dyn GaugeFn>,
         pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
+        pub(crate) expired_entries: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1052,6 +1058,16 @@ pub mod stats {
                     .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_COMPACT_PATH)])
                     .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
                     .register(),
+                expired_entries: recorder
+                    .counter(EXPIRED_ENTRIES)
+                    .description(EXPIRED_ENTRIES_DESCRIPTION)
+                    .register(),
+            }
+        }
+
+        pub(crate) fn retention_metrics(&self) -> crate::retention_iterator::RetentionMetrics {
+            crate::retention_iterator::RetentionMetrics {
+                expired_entries: self.expired_entries.clone(),
             }
         }
     }
