@@ -133,10 +133,10 @@ atomic func record_commit(id, epoch):
 #            │       Init        │
 #            └─────────┬─────────┘
 #            ┌─────────▼─────────┐
-#            │    ClaimNextId    ◀┐
-#            └─────────┬─────────┘│
-#            ┌─────────▼─────────┐│
-#            │    ClaimEpoch     ││
+#           ┌▶    ClaimNextId    ◀┐
+#           │└─────────┬─────────┘│
+#           │┌─────────▼─────────┐│
+#           └┤    ClaimEpoch     ││
 #            └─────────┬─────────┘│
 #            ┌─────────▼─────────┐│
 # ┌──────────▶     WriteNext     ◀┼──────────┐
@@ -167,9 +167,21 @@ role Writer:
 
     atomic action ClaimEpoch:
         require self.status == "ClaimEpoch"
-        e = latest_epoch()
-        self.epoch = e + 1
-        self.status = "WriteNext"
+        if self.next_id == 1:
+            # Default to epoch 1 if we're writing the first object.
+            self.epoch = 1
+            self.status = "WriteNext"
+        else:
+            # Read the epoch from the previous object.
+            previous_id = self.next_id - 1
+            previous_epoch = objects.get(previous_id)
+            if previous_epoch == None:
+                # The object was GC'd. Retry with the next ID.
+                self.status = "ClaimNextId"
+            else:
+                # Advance the epoch +1 from the previous writer.
+                self.epoch = previous_epoch + 1
+                self.status = "WriteNext"
 
     atomic action WriteNext:
         require (
