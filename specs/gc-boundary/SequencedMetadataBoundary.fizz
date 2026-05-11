@@ -76,6 +76,11 @@ options:
 # GC races between creates and boundary checks.
 MAX_WRITES_PER_WRITER = 3
 
+# Per-reader bound on successful reads attempted in this model. This is not a
+# SlateDB protocol limit; it keeps the state space finite while still allowing
+# readers verify that they only successfully observe objects above the boundary.
+MAX_READS_PER_READER = 3
+
 
 action Init:
     # Objects that currently exist in the object store.
@@ -91,8 +96,14 @@ action Init:
     _committed = {}
     _commit_counts = {}
 
+    # Ghost state: sequenced IDs that have been successfully read and
+    # boundary-checked by a reader.
+    _reads = {}
+
     writer_a = Writer()
     writer_b = Writer()
+    reader_a = Reader()
+    reader_b = Reader()
     gc_a = GarbageCollector()
     gc_b = GarbageCollector()
 
@@ -260,6 +271,48 @@ role GarbageCollector:
         id = oneof candidates
         objects.pop(id)
 
+# Reader state transitions:
+#
+#  ┌───────────────────┐
+#  │       Init        │
+#  └─────────┬─────────┘
+#  ┌─────────▼─────────┐
+# ┌▶      ClaimId      │
+# │└─────────┬─────────┘
+# │┌─────────▼─────────┐ ┌──────────────────────────┐
+# ││    ReadObject     ├─▶  ObjectGarbageCollected  │
+# │└─────────┬─────────┘ └──────────────────────────┘
+# │┌─────────▼─────────┐ ┌───────────┐
+# └┤   CheckBoundary   ├─▶  Expired  │
+#  └───────────────────┘ └───────────┘
+role Reader:
+    atomic action Init:
+        self.status = "ClaimId"
+        self.read_id = 0
+
+    atomic action ClaimId:
+        require self.status == "ClaimId" and self.read_id < MAX_READS_PER_READER
+        sid = latest_sequence_id()
+        self.read_id = sid
+        self.status = "ReadObject"
+
+    atomic action ReadObject:
+        require self.status == "ReadObject"
+        if objects.get(self.read_id) == None:
+            self.status = "ObjectGarbageCollected"
+        else:
+            self.status = "CheckBoundary"
+
+    atomic action CheckBoundary:
+        require self.status == "CheckBoundary"
+        if self.read_id <= boundary:
+            # Object was written before the boundary.
+            self.status = "Expired"
+        else:
+            # Read was a success! Advance to the next slot.
+            _reads[self.read_id] = _reads.get(self.read_id, 0) + 1
+            self.status = "ClaimId"
+
 
 # -----------------------------------------------------------------------------
 # Assertions
@@ -333,4 +386,13 @@ transition assertion CommittedHistoryIsDurable(before, after):
             return False
         if after._committed[id] != before._committed[id]:
             return False
+    return True
+
+transition assertion ReadsOnlyAboveBoundary(before, after):
+    for id in after._reads:
+        # If a read was marked as successful during this transition
+        if after._reads[id] > before._reads.get(id, 0):
+            # Verify it was only successful for IDs above the boundary.
+            if before.boundary >= id or after.boundary >= id:
+                return False
     return True
