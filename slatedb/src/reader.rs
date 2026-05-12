@@ -2,7 +2,7 @@ use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
-use crate::db_iter::{apply_filters, RecencyIterator};
+use crate::db_iter::{apply_filters, DbRecencyIterator};
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
 use crate::manifest::ManifestCore;
@@ -332,12 +332,12 @@ impl Reader {
     /// Returns [`SlateDBError::RecencyScanPrefixSpansMultipleSegments`] if
     /// the prefix overlaps more than one segment, since the recency
     /// guarantee is only well-defined within a single segment.
-    pub(crate) async fn scan_prefix_by_recency(
+    pub(crate) async fn scan_prefix_by_recency_with_options(
         &self,
         prefix: Bytes,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-    ) -> Result<RecencyIterator, SlateDBError> {
+    ) -> Result<DbRecencyIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(None, options.durability_filter, options.dirty);
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
@@ -420,7 +420,7 @@ impl Reader {
         }
 
         let filtered = apply_filters(all_iters, max_seq);
-        Ok(RecencyIterator::new(VecDeque::from(filtered)))
+        Ok(DbRecencyIterator::new(VecDeque::from(filtered)))
     }
 }
 

@@ -51,7 +51,7 @@ use crate::config::{
     FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
     WriteOptions,
 };
-use crate::db_iter::{DbIterator, RecencyIterator};
+use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -282,15 +282,15 @@ impl DbInner {
             .await
     }
 
-    pub(crate) async fn scan_prefix_by_recency(
+    pub(crate) async fn scan_prefix_by_recency_with_options(
         &self,
         prefix: Bytes,
         options: &ScanOptions,
-    ) -> Result<RecencyIterator, SlateDBError> {
+    ) -> Result<DbRecencyIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
-            .scan_prefix_by_recency(prefix, options, &db_state)
+            .scan_prefix_by_recency_with_options(prefix, options, &db_state)
             .await
     }
 
@@ -1149,19 +1149,29 @@ impl Db {
 
     /// Scan keys that share `prefix`, walking sources newest-first.
     ///
-    /// **Warning:** this is a low-level iterator that does **not** merge,
-    /// dedupe, or interpret entries across sources the way
-    /// [`Self::scan_prefix`] does. Each source emits its matches in
-    /// ascending key order, but the next source restarts at its own
-    /// smallest matching key, so the global emit sequence is not sorted by
-    /// key, the same key can appear multiple times (newer sources first),
-    /// and tombstones and merge operands are surfaced as raw
-    /// [`crate::types::RowEntry`] values. The caller is responsible for
-    /// any dedup, delete handling, or merge resolution. Callers that need
-    /// a totally-ordered, fully-merged view should use
-    /// [`Self::scan_prefix`] instead; reach for this only when you want
-    /// freshest-first results with the option to early-stop and are
-    /// willing to interpret raw entries.
+    /// **Warning:** this is a low-level, unopinionated iterator. It does
+    /// **no** merging, **no** deduping, and **no** interpretation of
+    /// entries across sources, unlike [`Self::scan_prefix`]. The API
+    /// makes no assumptions about what duplicates, tombstones, or merge
+    /// operands should mean; every such decision is left to the caller.
+    ///
+    /// Within each source, entries are emitted in the order requested by
+    /// `options.order`: ascending (the default) or descending. Across
+    /// sources, the walk is always newest-first, independent of
+    /// `options.order`. Each source restarts its own scan at its own
+    /// first matching key for that order, so the global emit sequence is
+    /// not a single sorted key stream and the within-source key order
+    /// resets at every source boundary. The same user key can appear
+    /// multiple times, both across sources (once per source that holds
+    /// it, newest source first) and within a single source (one entry
+    /// per stored sequence number, newest seq first within the key
+    /// group): nothing collapses versions. Tombstones and merge operands
+    /// are surfaced as raw [`crate::types::RowEntry`] values. The caller
+    /// is responsible for any dedup, delete handling, or merge
+    /// resolution. Callers that need a totally ordered, fully merged
+    /// view should use [`Self::scan_prefix`] instead; use this only when
+    /// you want freshest-first results with the option to early-stop and
+    /// are willing to interpret raw entries.
     ///
     /// Sources are walked in this order: active memtable, immutable
     /// memtables, then within the single matching segment that segment's
@@ -1224,9 +1234,12 @@ impl Db {
     ///     let entry = iter.next_entry().await?.unwrap();
     ///     // All three writes live in the active memtable (the freshest
     ///     // source). With ascending within-source order, "user:42" comes
-    ///     // out first because it sorts before "user:99". Its value is
-    ///     // the latest write to that key ("alice2"), since the memtable
-    ///     // collapses multiple writes to the same key.
+    ///     // out first because it sorts before "user:99". Both writes to
+    ///     // "user:42" are stored as separate sequence-numbered entries;
+    ///     // within the "user:42" key group the newest seq is yielded
+    ///     // first, so the first entry carries the latest write
+    ///     // ("alice2"). A second pull would yield the older "user:42"
+    ///     // entry ("alice") before advancing to "user:99".
     ///     assert_eq!(entry.key.as_ref(), b"user:42");
     ///     match entry.value {
     ///         ValueDeletable::Value(v) => assert_eq!(v.as_ref(), b"alice2"),
@@ -1238,7 +1251,7 @@ impl Db {
     pub async fn scan_prefix_by_recency<P>(
         &self,
         prefix: P,
-    ) -> Result<RecencyIterator, crate::Error>
+    ) -> Result<DbRecencyIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
     {
@@ -1302,13 +1315,13 @@ impl Db {
         &self,
         prefix: P,
         options: &ScanOptions,
-    ) -> Result<RecencyIterator, crate::Error>
+    ) -> Result<DbRecencyIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         self.inner
-            .scan_prefix_by_recency(prefix, options)
+            .scan_prefix_by_recency_with_options(prefix, options)
             .await
             .map_err(Into::into)
     }
