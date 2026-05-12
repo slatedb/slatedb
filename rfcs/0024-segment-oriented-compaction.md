@@ -242,25 +242,29 @@ Together these give the active segments a natural total order by prefix, with pa
 
 The extractor's `name()` is persisted in the manifest. On a writer open, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. The extractor must be configured at database creation time or never configured — introducing an extractor on an existing non-empty database, or removing a previously-configured extractor, causes the writer open to fail. See [Migration](#migration) for the correctness rationale. A read-only client (`DbReader`) does not need an extractor for correctness — read-side routing is structural (see [Read Path](#read-path)) — and may set `segment_extractor: None` to skip the name match entirely. When no extractor is configured, the database remains the singleton empty-prefix segment case.
 
+**Validation model.** The system relies on two contracts:
+
+1. **Durable data is already validated.** Once a write has been accepted into the WAL or an L0 SST, the extractor that produced it accepted it under the antichain invariant; downstream code treats its segment assignment as sound.
+
+2. **Any logical change to the extractor must be indicated by a `name()` change.** A writer that changes `prefix_len` behavior while keeping the same `name()` is violating the contract. The system catches obvious violations at well-defined boundaries (below) but cannot detect every silent swap.
+
+Given these contracts, the structural defenses below are oriented toward failing fast when an extractor change reaches the database, not toward re-validating durable data against an adversarial swap. Correctness invariants for *new* state (antichain in the manifest, route-consistency at write) hold independent of the validation model.
+
 #### Validation
 
-The `name()` check is soft: a user can keep the name and change the logic, and new routing decisions would diverge silently. Four structural checks operate at well-defined boundaries to enforce mandatory full segmentation and to defend against extractor changes that slip past the name. None of them prove the extractor is unchanged, but each fails fast when the current extractor would produce a manifest the rest of the system could not rely on.
+The `name()` check is soft: a user can keep the name and change the logic, and new routing decisions would diverge silently. The structural checks below fail fast when the current extractor would produce a manifest the rest of the system could not rely on. They do not re-validate durable data — per the [validation model](#segment-extractor), that data was already validated under the writer's configured extractor.
 
-- **Per-segment acknowledgment on open.** For each existing segment with prefix `p`, the writer checks `prefix_len(Prefix(p)) == Some(p.len())`. If the current extractor no longer treats `p` as a valid segment prefix — it returns `None`, or a different length — the database refuses to open. Catches changes that reshape extraction length or drop an existing prefix from the extractor's domain.
+- **Per-segment acknowledgment on open.** For each existing segment with prefix `p`, the writer checks `prefix_len(Prefix(p)) == Some(p.len())`. If the current extractor no longer treats `p` as a valid segment prefix — it returns `None`, or a different length — the database refuses to open. Catches contract-violating extractor changes at the earliest well-defined boundary.
 
 - **Antichain invariant on segment prefixes.** The manifest maintains the invariant that no segment prefix is a proper prefix of another. Any manifest update that would introduce a nested prefix is rejected. Catches changes that would produce overlapping segmentation — the structural violation that would otherwise force cross-segment key-wise merging on reads.
 
 - **Route-consistency at write.** Each incoming write is evaluated by the extractor before it is appended to the WAL. The write is rejected and the caller sees an error — no WAL append, no memtable insertion — if either: (a) `prefix_len(Point(key))` returns `None`, since mandatory full segmentation requires every key to map to a segment; or (b) the resulting prefix would introduce a nested prefix (violating the antichain invariant against the current segment set). Checking before the WAL is the only way to surface errors at the call site; a check deferred to memtable flush would fail after the write has already been durably committed and acknowledged.
 
-- **Route-consistency at compaction.** When compaction reads input SSTs, each key is passed through the current extractor and checked against the target segment. If a key's extracted prefix does not match the target tree, the compaction fails and the manifest is not updated. This catches extractor drift that slipped past the write-time antichain check — for example, an extractor swap whose new behavior produces antichain-compatible prefixes for future writes but routes existing keys differently than they were originally assigned. The existing keys would survive the structural checks but misroute on read; compaction is the first point where the system has each key in hand to verify.
-
-These do not cover every kind of extractor change — an extractor swap whose routing matches the existing assignment for every stored key will still slip through. The checks above narrow the surface to changes that cannot produce an inconsistent manifest undetected.
-
 ### WAL
 
 The WAL requires no format changes to support segments. Because the extractor is deterministic and configured at database open time, segment membership can be recomputed from keys during WAL replay — there is no need to persist segment information in the WAL.
 
-Replay runs the same antichain-invariant check that the write path applies (see [Validation](#validation)). This catches the case where an old WAL, written under a different extractor, contains writes that under the current extractor would nest with existing segment prefixes. If a replayed write would violate the invariant, the database refuses to complete replay rather than silently accepting an inconsistent state.
+Replay re-extracts each entry's prefix under the current extractor to populate the replayed memtable's touched-segment set, but does not re-run the write-time antichain check. Durable WAL entries were validated when the writer accepted them, and per the [validation model](#segment-extractor) any logical change to the extractor must be signaled by a name change (caught by the open-time `name()` check). If an extractor was swapped silently, replay may route entries differently than originally intended; the system stays internally consistent and produces segments under the current extractor's routing.
 
 The extractor must be configured consistently across restarts. The persisted extractor `name()` in the manifest guards against accidental reconfiguration; see the [Segment Extractor](#segment-extractor) section for details.
 

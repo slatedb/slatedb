@@ -3,29 +3,54 @@
 This directory contains the formal specs for SlateDB protocols using the
 [FizzBee model checker](https://fizzbee.io).
 
-More about the tool and the instructions:
+## FizzBee
 
-- [Run the model checker][fizz]
-- [FizzBee Homebrew package](https://github.com/fizzbee-io/homebrew-fizzbee)
-- [FizzBee playground](https://fizzbee.io/play)
+You can try specs without installing anything in the
+[FizzBee playground](https://fizzbee.io/play).
 
-Once installed from source and set the PATH, you can run with
+For local runs on macOS:
 
 ```
-fizz specs/kvstore/KeyValueStore.fizz
-fizz specs/gc-boundary/SequencedMetadataBoundary.fizz
+brew tap fizzbee-io/fizzbee
+brew install fizzbee
+```
+
+Prebuilt binaries are also available from the
+[latest FizzBee release](https://github.com/fizzbee-io/fizzbee/releases/latest)
+for macOS and Linux. After extracting a release archive, run `./fizz` with the
+path to a spec. Build-from-source instructions are in the
+[FizzBee repository](https://github.com/fizzbee-io/fizzbee).
+
+## Running Specs
+
+With `fizz` on your `PATH`, run:
+
+```
+fizz specs/fizzbee/KeyValueStore.fizz
+fizz specs/fizzbee/SequencedMetadataBoundary.fizz
 ```
 
 ## Specs
 
-- `kvstore/KeyValueStore.fizz`: basic write, flush, and read behavior.
-- `gc-boundary/SequencedMetadataBoundary.fizz`: proof model for the
+- `fizzbee/KeyValueStore.fizz`: basic write, flush, and read behavior.
+- `fizzbee/SequencedMetadataBoundary.fizz`: proof model for the
   bounded sequenced storage GC boundary protocol.
 
 ## FizzBee Agent Instructions
 
-FizzBee agent instructions are located in
-`.github/instructions/fizzbee.instructions.md`. If you wish, you may include
-them in your IDE's instruction set as well.
+Recent FizzBee releases include Agent Skills for writing, checking, debugging,
+and model-based testing FizzBee specs. If you installed FizzBee with Homebrew,
+install the skills with:
 
-[fizz]: https://github.com/fizzbee-io/fizzbee#run-a-model-checker
+```
+fizz install-skills
+```
+
+To preview without making changes:
+
+```
+fizz install-skills --check
+```
+
+Re-run `fizz install-skills` after upgrading FizzBee to refresh the installed
+skills and reference docs.

@@ -435,10 +435,10 @@ impl Admin {
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
-        let manifest_has_wal = stored_manifest.db_state().wal_object_store_uri.is_some();
-        if self.object_stores.has_wal_object_store() != manifest_has_wal {
-            return Err(SlateDBError::WalStoreReconfigurationError.into());
-        }
+        let configured_wal_uri = self.object_stores.has_wal_object_store().then(String::new);
+        stored_manifest
+            .db_state()
+            .validate_wal_object_store_uri(configured_wal_uri.as_deref())?;
 
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest

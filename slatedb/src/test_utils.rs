@@ -1189,6 +1189,65 @@ impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor 
     }
 }
 
+/// Test extractor that deliberately violates the
+/// [`crate::prefix_extractor::PrefixExtractor`] `Point` invariant by
+/// returning different prefix lengths for keys that share a common
+/// prefix — `Some(3)` for keys starting with `"abc"` and `Some(2)`
+/// for keys starting with `"ab"` but not `"abc"`. A batch with both
+/// yields nestable prefixes `"ab"` and `"abc"`, exercising the
+/// antichain checks at write time and replay.
+#[derive(Debug)]
+pub(crate) struct NonAntichainTestPrefixExtractor;
+
+impl crate::prefix_extractor::PrefixExtractor for NonAntichainTestPrefixExtractor {
+    fn name(&self) -> &str {
+        "non-antichain-test-only"
+    }
+    fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+        let bytes: &[u8] = match target {
+            crate::prefix_extractor::PrefixTarget::Point(b)
+            | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.as_ref(),
+        };
+        if bytes.starts_with(b"abc") {
+            Some(3)
+        } else if bytes.starts_with(b"ab") {
+            Some(2)
+        } else {
+            None
+        }
+    }
+}
+
+/// Shares `name()` with [`FixedThreeBytePrefixExtractor`] but
+/// returns divergent prefix lengths: `Some(3)` for keys starting
+/// with `"abc"`, `Some(2)` for keys starting with `"ab"` but not
+/// `"abc"`, and `None` otherwise. Lets a test reopen a DB whose
+/// open-time name check passes while WAL replay encounters the
+/// swapped logic.
+#[derive(Debug)]
+pub(crate) struct AliasedFixed3PrefixExtractor;
+
+impl crate::prefix_extractor::PrefixExtractor for AliasedFixed3PrefixExtractor {
+    fn name(&self) -> &str {
+        // Match FixedThreeBytePrefixExtractor's name so the open-time
+        // reconciliation check succeeds.
+        "fixed-3"
+    }
+    fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+        let bytes: &[u8] = match target {
+            crate::prefix_extractor::PrefixTarget::Point(b)
+            | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.as_ref(),
+        };
+        if bytes.starts_with(b"abc") {
+            Some(3)
+        } else if bytes.starts_with(b"ab") {
+            Some(2)
+        } else {
+            None
+        }
+    }
+}
+
 static INIT_LOGGING: Once = Once::new();
 static INIT_DEADLOCK_DETECTOR: Once = Once::new();
 
