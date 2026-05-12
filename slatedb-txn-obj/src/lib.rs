@@ -637,7 +637,17 @@ impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId> for BoundedSeq
     }
 
     async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
-        self.delegate.try_read_latest().await
+        loop {
+            let Some((id, value)) = self.delegate.try_read_latest().await? else {
+                return Ok(None);
+            };
+
+            match self.boundary.check(id).await {
+                Ok(()) => return Ok(Some((id, value))),
+                Err(TransactionalObjectError::ObjectVersionBehindBoundary { .. }) => continue,
+                Err(err) => return Err(err),
+            }
+        }
     }
 }
 
@@ -677,14 +687,16 @@ mod tests {
     use crate::object_store::ObjectStoreSequencedStorageProtocol;
     use crate::TransactionalObjectError;
     use crate::{
-        BoundaryObject, BoundedSequencedStorage, FenceableTransactionalObject, MonotonicId,
-        ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
-        TransactionalStorageProtocol,
+        BoundaryObject, BoundedSequencedStorage, FenceableTransactionalObject,
+        GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
+        SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use parking_lot::Mutex;
     use slatedb_common::clock::DefaultSystemClock;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use tokio::time::Duration as TokioDuration;
@@ -726,6 +738,41 @@ mod tests {
         ))
     }
 
+    async fn new_store_with_stale_base_and_live_latest(
+        live_latest_value: TestVal,
+    ) -> (
+        Arc<ObjectStoreSequencedStorageProtocol<TestVal>>,
+        MonotonicId,
+    ) {
+        let store = new_store();
+        let stale_base_id = store
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let expired_slot_id = store
+            .write(
+                Some(stale_base_id),
+                &TestVal {
+                    epoch: 0,
+                    payload: 2,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .write(Some(expired_slot_id), &live_latest_value)
+            .await
+            .unwrap();
+        store.delete(expired_slot_id).await.unwrap();
+        (store, stale_base_id)
+    }
+
     struct TestBoundary {
         boundary: AtomicU64,
         checks: AtomicU64,
@@ -757,6 +804,63 @@ mod tests {
         async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
             self.boundary.fetch_max(boundary.id(), Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    struct ScriptedReadLatestStore {
+        reads: Mutex<VecDeque<Option<(MonotonicId, TestVal)>>>,
+        try_read_latest_calls: AtomicU64,
+    }
+
+    impl ScriptedReadLatestStore {
+        fn new(reads: Vec<Option<(MonotonicId, TestVal)>>) -> Self {
+            Self {
+                reads: Mutex::new(reads.into()),
+                try_read_latest_calls: AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TransactionalStorageProtocol<TestVal, MonotonicId> for ScriptedReadLatestStore {
+        async fn write(
+            &self,
+            _current_id: Option<MonotonicId>,
+            _new_value: &TestVal,
+        ) -> Result<MonotonicId, TransactionalObjectError> {
+            Err(TransactionalObjectError::InvalidObjectState)
+        }
+
+        async fn try_read_latest(
+            &self,
+        ) -> Result<Option<(MonotonicId, TestVal)>, TransactionalObjectError> {
+            self.try_read_latest_calls.fetch_add(1, Ordering::SeqCst);
+            self.reads
+                .lock()
+                .pop_front()
+                .ok_or(TransactionalObjectError::InvalidObjectState)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SequencedStorageProtocol<TestVal> for ScriptedReadLatestStore {
+        async fn try_read(
+            &self,
+            _id: MonotonicId,
+        ) -> Result<Option<TestVal>, TransactionalObjectError> {
+            Err(TransactionalObjectError::InvalidObjectState)
+        }
+
+        async fn list(
+            &self,
+            _from: std::ops::Bound<MonotonicId>,
+            _to: std::ops::Bound<MonotonicId>,
+        ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
+            Err(TransactionalObjectError::InvalidObjectState)
+        }
+
+        async fn delete(&self, _id: MonotonicId) -> Result<(), TransactionalObjectError> {
+            Err(TransactionalObjectError::InvalidObjectState)
         }
     }
 
@@ -807,6 +911,44 @@ mod tests {
             },
             latest.1
         );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_sequenced_storage_retries_read_latest_behind_boundary() {
+        let store = Arc::new(ScriptedReadLatestStore::new(vec![
+            Some((
+                MonotonicId::new(1),
+                TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )),
+            Some((
+                MonotonicId::new(3),
+                TestVal {
+                    epoch: 0,
+                    payload: 3,
+                },
+            )),
+        ]));
+        let boundary = Arc::new(TestBoundary::new(2));
+        let bounded = BoundedSequencedStorage::new(
+            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
+            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
+        );
+
+        let latest = bounded.try_read_latest().await.unwrap().unwrap();
+
+        assert_eq!(3, latest.0);
+        assert_eq!(
+            TestVal {
+                epoch: 0,
+                payload: 3,
+            },
+            latest.1
+        );
+        assert_eq!(2, store.try_read_latest_calls.load(Ordering::SeqCst));
+        assert_eq!(2, boundary.checks.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -877,17 +1019,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_maybe_apply_update_retries_write_behind_boundary() {
-        let store = new_store();
-        store
-            .write(
-                None,
-                &TestVal {
-                    epoch: 0,
-                    payload: 1,
-                },
-            )
-            .await
-            .unwrap();
+        let (store, stale_base_id) = new_store_with_stale_base_and_live_latest(TestVal {
+            epoch: 0,
+            payload: 3,
+        })
+        .await;
 
         let boundary = Arc::new(TestBoundary::new(2));
         let bounded: Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>> =
@@ -895,9 +1031,9 @@ mod tests {
                 Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
                 Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
             ));
-        let (id, object) = store.try_read_latest().await.unwrap().unwrap();
+        let object = store.try_read(stale_base_id).await.unwrap().unwrap();
         let mut txn = SimpleTransactionalObject {
-            id,
+            id: stale_base_id,
             object,
             ops: bounded,
         };
@@ -913,7 +1049,7 @@ mod tests {
         .unwrap();
 
         let latest = store.try_read_latest().await.unwrap().unwrap();
-        assert_eq!(3, latest.0);
+        assert_eq!(4, latest.0);
         assert_eq!(
             TestVal {
                 epoch: 0,
@@ -961,17 +1097,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_fenceable_init_retries_write_behind_boundary() {
-        let store = new_store();
-        store
-            .write(
-                None,
-                &TestVal {
-                    epoch: 0,
-                    payload: 1,
-                },
-            )
-            .await
-            .unwrap();
+        let (store, stale_base_id) = new_store_with_stale_base_and_live_latest(TestVal {
+            epoch: 1,
+            payload: 3,
+        })
+        .await;
 
         let boundary = Arc::new(TestBoundary::new(2));
         let bounded: Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>> =
@@ -979,9 +1109,9 @@ mod tests {
                 Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
                 Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
             ));
-        let (id, object) = store.try_read_latest().await.unwrap().unwrap();
+        let object = store.try_read(stale_base_id).await.unwrap().unwrap();
         let delegate = SimpleTransactionalObject {
-            id,
+            id: stale_base_id,
             object,
             ops: bounded,
         };
@@ -997,7 +1127,7 @@ mod tests {
         .unwrap();
 
         let latest = store.try_read_latest().await.unwrap().unwrap();
-        assert_eq!(3, latest.0);
+        assert_eq!(4, latest.0);
         assert_eq!(2, latest.1.epoch);
         assert_eq!(2, fenceable.local_epoch());
     }
