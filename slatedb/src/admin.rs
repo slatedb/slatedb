@@ -653,11 +653,11 @@ impl Admin {
         };
         let core = manifest.core();
         let summaries = if core.segments.is_empty() {
-            vec![SegmentSummary::from_tree(&Bytes::new(), &core.tree, true)]
+            vec![SegmentSummary::from_tree(&Bytes::new(), &core.tree)]
         } else {
             core.segments
                 .iter()
-                .map(|s| SegmentSummary::from_tree(&s.prefix, &s.tree, false))
+                .map(|s| SegmentSummary::from_tree(&s.prefix, &s.tree))
                 .collect()
         };
         Ok(Some(summaries))
@@ -681,7 +681,6 @@ impl Admin {
                 Ok(Some(SegmentDescription::from_tree(
                     &Bytes::new(),
                     &core.tree,
-                    true,
                 )))
             } else {
                 Ok(None)
@@ -697,7 +696,6 @@ impl Admin {
         Ok(Some(SegmentDescription::from_tree(
             &segment.prefix,
             &segment.tree,
-            false,
         )))
     }
 }
@@ -707,16 +705,13 @@ impl Admin {
 /// `prefix_hex` is always the unambiguous machine form; `prefix_display`
 /// renders printable UTF-8 inline and falls back to `0x<hex>` otherwise.
 /// The same pair convention applies to keys in [`SstViewSummary`].
+/// An empty prefix indicates the unsegmented compatibility tree; named
+/// segments are always non-empty. A drain marker is the combination
+/// `l0_count == 0 && sr_count == 0 && last_compacted_l0_sst_view_id.is_some()`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct SegmentSummary {
     pub prefix_display: String,
     pub prefix_hex: String,
-    /// True for the unsegmented compatibility tree. A named segment never has
-    /// an empty prefix, so the two cases never overlap.
-    pub unsegmented: bool,
-    /// Drain marker: empty `l0` and `compacted` with the watermark set.
-    /// Persists until the writer's merge protocol prunes it.
-    pub drain_marker: bool,
     pub l0_count: usize,
     pub sr_count: usize,
     pub total_ssts: usize,
@@ -726,14 +721,12 @@ pub struct SegmentSummary {
 }
 
 impl SegmentSummary {
-    fn from_tree(prefix: &Bytes, tree: &crate::manifest::LsmTreeState, unsegmented: bool) -> Self {
+    fn from_tree(prefix: &Bytes, tree: &crate::manifest::LsmTreeState) -> Self {
         let l0_estimate: u64 = tree.l0.iter().map(|v| v.estimate_size()).sum();
         let sr_estimate: u64 = tree.compacted.iter().map(|sr| sr.estimate_size()).sum();
         Self {
             prefix_display: render_bytes_display(prefix),
             prefix_hex: render_bytes_hex(prefix),
-            unsegmented,
-            drain_marker: tree.is_drained(),
             l0_count: tree.l0.len(),
             sr_count: tree.compacted.len(),
             total_ssts: tree.total_ssts(),
@@ -755,7 +748,7 @@ pub struct SegmentDescription {
 }
 
 impl SegmentDescription {
-    fn from_tree(prefix: &Bytes, tree: &crate::manifest::LsmTreeState, unsegmented: bool) -> Self {
+    fn from_tree(prefix: &Bytes, tree: &crate::manifest::LsmTreeState) -> Self {
         let l0 = tree.l0.iter().map(SstViewSummary::from_view).collect();
         let compacted = tree
             .compacted
@@ -763,7 +756,7 @@ impl SegmentDescription {
             .map(SortedRunSummary::from_run)
             .collect();
         Self {
-            summary: SegmentSummary::from_tree(prefix, tree, unsegmented),
+            summary: SegmentSummary::from_tree(prefix, tree),
             l0,
             compacted,
         }
@@ -1599,43 +1592,19 @@ mod tests {
         use bytes::Bytes;
 
         let tree = LsmTreeState::default();
-        let summary = super::SegmentSummary::from_tree(&Bytes::new(), &tree, true);
-        assert!(summary.unsegmented);
-        assert!(!summary.drain_marker);
+        let summary = super::SegmentSummary::from_tree(&Bytes::new(), &tree);
         assert_eq!(summary.l0_count, 0);
         assert_eq!(summary.sr_count, 0);
         assert_eq!(summary.total_ssts, 0);
         assert_eq!(summary.estimated_size_bytes, 0);
         assert_eq!(summary.prefix_hex, "");
         assert_eq!(summary.prefix_display, "");
+        assert!(summary.last_compacted_l0_sst_view_id.is_none());
 
-        let summary = super::SegmentSummary::from_tree(
-            &Bytes::from_static(b"ts/2026-03-09/14/"),
-            &tree,
-            false,
-        );
-        assert!(!summary.unsegmented);
+        let summary =
+            super::SegmentSummary::from_tree(&Bytes::from_static(b"ts/2026-03-09/14/"), &tree);
         assert_eq!(summary.prefix_display, "ts/2026-03-09/14/");
         assert_eq!(summary.prefix_hex, "74732f323032362d30332d30392f31342f");
-    }
-
-    #[test]
-    fn test_segment_summary_drain_marker_detection() {
-        use crate::manifest::LsmTreeState;
-        use bytes::Bytes;
-
-        let tree = LsmTreeState {
-            last_compacted_l0_sst_view_id: Some(Ulid::new()),
-            ..LsmTreeState::default()
-        };
-        let summary = super::SegmentSummary::from_tree(
-            &Bytes::from_static(b"ts/2026-03-09/14/"),
-            &tree,
-            false,
-        );
-        assert!(summary.drain_marker);
-        assert_eq!(summary.l0_count, 0);
-        assert_eq!(summary.sr_count, 0);
     }
 
     #[tokio::test]
@@ -1659,7 +1628,7 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(summaries.len(), 1);
-        assert!(summaries[0].unsegmented);
+        assert_eq!(summaries[0].prefix_hex, "");
         assert_eq!(summaries[0].l0_count, 0);
         assert_eq!(summaries[0].sr_count, 0);
 
@@ -1668,7 +1637,7 @@ mod tests {
             .await
             .unwrap()
             .expect("expected unsegmented tree");
-        assert!(unsegmented.summary.unsegmented);
+        assert_eq!(unsegmented.summary.prefix_hex, "");
         assert!(unsegmented.l0.is_empty());
         assert!(unsegmented.compacted.is_empty());
 
@@ -1728,7 +1697,6 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(summaries.len(), 2);
-        assert!(!summaries[0].unsegmented);
         assert_eq!(summaries[0].prefix_display, "ts/2026-03-09/14/");
         assert_eq!(summaries[1].prefix_display, "ts/2026-03-09/15/");
 
@@ -1737,7 +1705,6 @@ mod tests {
             .await
             .unwrap()
             .expect("expected named segment");
-        assert!(!named.summary.unsegmented);
         assert_eq!(named.summary.prefix_display, "ts/2026-03-09/14/");
 
         // Empty prefix has no meaning once segments are configured.
@@ -1795,16 +1762,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_admin_list_segments_surfaces_drain_marker() {
+    async fn test_admin_list_segments_round_trips_drain_marker_watermark() {
         use crate::manifest::{LsmTreeState, Segment};
         use bytes::Bytes;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_admin_list_segments_surfaces_drain_marker");
+        let path = Path::from("/tmp/test_admin_list_segments_round_trips_drain_marker_watermark");
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
 
+        let watermark = Ulid::new();
         let drained_tree = LsmTreeState {
-            last_compacted_l0_sst_view_id: Some(Ulid::new()),
+            last_compacted_l0_sst_view_id: Some(watermark),
             ..LsmTreeState::default()
         };
         let mut core = ManifestCore::new();
@@ -1835,14 +1803,12 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(summaries.len(), 2);
-        assert!(summaries[0].drain_marker);
-        assert!(!summaries[1].drain_marker);
-
-        let described = admin
-            .describe_segment(b"ts/2026-03-09/14/", None)
-            .await
-            .unwrap()
-            .expect("expected drained segment");
-        assert!(described.summary.drain_marker);
+        // The drained segment surfaces the watermark with empty L0/SR;
+        // callers derive "drain marker" from this combination.
+        assert_eq!(summaries[0].l0_count, 0);
+        assert_eq!(summaries[0].sr_count, 0);
+        assert_eq!(summaries[0].last_compacted_l0_sst_view_id, Some(watermark));
+        // The live sibling has no watermark.
+        assert!(summaries[1].last_compacted_l0_sst_view_id.is_none());
     }
 }
