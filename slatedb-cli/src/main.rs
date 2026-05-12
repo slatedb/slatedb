@@ -352,6 +352,11 @@ async fn exec_describe_segment(
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
+    // Required before `&s[i..i+2]` below: multi-byte UTF-8 chars can land on
+    // odd byte offsets where the slice would cross a char boundary and panic.
+    if !s.is_ascii() {
+        return Err("hex string must be ASCII".to_string());
+    }
     if !s.len().is_multiple_of(2) {
         return Err("hex string must have an even number of digits".to_string());
     }
@@ -395,5 +400,13 @@ mod tests {
         assert!(decode_hex("abc").is_err()); // odd length
         assert!(decode_hex("zz").is_err()); // non-hex characters
         assert!(decode_hex("0xZZ").is_err()); // prefix stripped, then invalid
+    }
+
+    #[test]
+    fn decode_hex_rejects_non_ascii_input() {
+        // `aée` is 4 bytes (a, c3, a9, e); without the ASCII check this
+        // would panic slicing across the middle of the 2-byte `é`.
+        assert!(decode_hex("aée").is_err());
+        assert!(decode_hex("0xaée").is_err());
     }
 }
