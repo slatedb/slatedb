@@ -807,15 +807,48 @@ mod tests {
         .await
         .unwrap();
 
+        // The writer starts with a stale compactions view. An external writer then creates
+        // a live newer version before GC deletes and fences the stale writer's next id.
         let start_id = compactions_store
             .read_latest_compactions()
             .await
             .unwrap()
             .id;
+
+        // The external writer wins the stale writer's intended id.
+        let mut external = StoredCompactions::load(compactions_store.clone())
+            .await
+            .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // A second external write leaves a live latest version above the future boundary,
+        // so the stale writer can make progress after refreshing.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // GC removes and fences the stale writer's next id, but preserves the live latest
+        // version at start_id + 2.
+        compactions_store
+            .delete_compactions(start_id + 1)
+            .await
+            .unwrap();
         compactions_store
             .advance_boundary(start_id + 1)
             .await
             .unwrap();
+        let latest = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(latest, start_id + 2);
 
         writer.write_compactions_safely().await.unwrap();
 
@@ -824,7 +857,7 @@ mod tests {
             .await
             .unwrap()
             .id;
-        assert_eq!(final_id, start_id + 2);
+        assert_eq!(final_id, start_id + 3);
     }
 
     #[tokio::test]

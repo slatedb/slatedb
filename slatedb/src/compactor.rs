@@ -1098,7 +1098,7 @@ mod tests {
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::test_utils::assert_iterator;
+    use crate::test_utils::{assert_iterator, GatedObjectStore};
     use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
@@ -2921,8 +2921,13 @@ mod tests {
     #[tokio::test]
     async fn test_submit_retries_on_boundary_conflict() {
         // Set up a database with an initial manifest and compactions record.
-        let os = Arc::new(InMemory::new());
-        let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
+        let raw_os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_os = Arc::new(GatedObjectStore::new(Arc::clone(&raw_os)));
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(gated_os.clone());
+        let external_compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(PATH),
+            Arc::clone(&raw_os),
+        ));
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         StoredManifest::create_new_db(
@@ -2942,28 +2947,72 @@ mod tests {
         .await
         .unwrap();
 
-        // Advance the compactions boundary past the next id to force the first submit attempt
-        // to be rejected after it creates the object.
+        // Pause submit before its first write. While it is stale, an external writer creates
+        // a live newer version, then GC deletes and fences the stale writer's next id.
         let start_id = compactions_store
             .read_latest_compactions()
             .await
             .unwrap()
             .id;
-        compactions_store
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
+        let arrivals = gated_os.put_opts_gate.arrivals();
+        gated_os.put_opts_gate.close();
+        let submit_task = tokio::spawn({
+            let spec = spec.clone();
+            let compactions_store = compactions_store.clone();
+            let system_clock = system_clock.clone();
+            async move {
+                Compactor::submit(
+                    spec,
+                    compactions_store,
+                    Arc::new(DbRand::default()),
+                    system_clock,
+                )
+                .await
+            }
+        });
+
+        gated_os.put_opts_gate.wait_for_arrivals(arrivals + 1).await;
+
+        // The external writer wins the stale writer's intended id.
+        let mut external = StoredCompactions::load(external_compactions_store.clone())
+            .await
+            .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // A second external write leaves a live latest version above the future boundary,
+        // so the stale writer can make progress after refreshing.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // GC removes and fences the stale writer's next id, but preserves the live latest
+        // version at start_id + 2.
+        external_compactions_store
+            .delete_compactions(start_id + 1)
+            .await
+            .unwrap();
+        external_compactions_store
             .advance_boundary(start_id + 1)
             .await
             .unwrap();
+        let latest = external_compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(latest, start_id + 2);
 
-        // Submit should refresh after the boundary conflict and retry at the next safe id.
-        let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
-        let compaction_id = Compactor::submit(
-            spec.clone(),
-            compactions_store.clone(),
-            Arc::new(DbRand::default()),
-            system_clock.clone(),
-        )
-        .await
-        .unwrap();
+        gated_os.put_opts_gate.release();
+
+        // Submit should refresh to the live newer version and retry at the next safe id.
+        let compaction_id = submit_task.await.unwrap().unwrap();
 
         let compactions = compactions_store.read_latest_compactions().await.unwrap();
         let stored = compactions
@@ -2971,9 +3020,7 @@ mod tests {
             .get(&compaction_id)
             .expect("missing submitted compaction");
 
-        // The successful retry lands two versions after the start and persists the requested
-        // submitted compaction.
-        assert_eq!(compactions.id, start_id + 2);
+        assert_eq!(compactions.id, start_id + 3);
         assert_eq!(stored.spec(), &spec);
         assert_eq!(stored.status(), CompactionStatus::Submitted);
     }

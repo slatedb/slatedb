@@ -1046,6 +1046,42 @@ mod tests {
         manifest.manifest.core.checkpoints.len()
     }
 
+    async fn stage_manifest_boundary_conflict(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> u64 {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut external =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let start_id = external.id();
+
+        // The external writer wins the stale handler's intended id.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // A second external write leaves a live latest version above the future boundary,
+        // so the stale handler can make progress after refreshing.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // GC removes and fences the stale handler's next id, but preserves the live latest
+        // version at start_id + 2.
+        manifest_store.delete_manifest(start_id + 1).await.unwrap();
+        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+
+        let latest = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(latest, start_id + 2);
+        start_id
+    }
+
     fn freeze_imm(
         inner: &Arc<DbInner>,
         key: &[u8],
@@ -1097,23 +1133,21 @@ mod tests {
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
+            &Path::from(path.clone()),
             Arc::clone(&object_store),
         ));
         let mut handler = new_handler_from_harness(harness);
         handler.load_manifest().await.unwrap();
 
-        // Advance the manifest boundary past the next id to force the first write attempt
-        // to fail its post-create boundary check.
-        let start_id = manifest_store.read_latest_manifest().await.unwrap().id;
-        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
 
-        // The safe write path should reload the manifest and retry at the next safe id.
+        // The safe write path should reload the live newer manifest and retry safely.
         handler.write_current_manifest_safely().await.unwrap();
 
-        // The first created version is behind the boundary, so the committed retry is +2.
         let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
-        assert_eq!(start_id + 2, final_id);
+        assert_eq!(start_id + 3, final_id);
     }
 
     #[tokio::test]
@@ -1127,24 +1161,22 @@ mod tests {
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
+            &Path::from(path.clone()),
             Arc::clone(&object_store),
         ));
         let mut handler = new_handler_from_harness(harness);
         handler.load_manifest().await.unwrap();
 
-        // Advance the manifest boundary past the next id to force the first update attempt
-        // to fail its post-create boundary check.
-        let start_id = manifest_store.read_latest_manifest().await.unwrap().id;
-        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
 
-        // The safe update path should reload the manifest and retry at the next safe id.
+        // The safe update path should reload the live newer manifest and retry safely.
         let checkpoints = handler.write_manifest_update_safely(&[]).await.unwrap();
 
-        // No checkpoints were requested, and the committed retry lands two versions later.
         let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
         assert!(checkpoints.is_empty());
-        assert_eq!(start_id + 2, final_id);
+        assert_eq!(start_id + 3, final_id);
     }
 
     #[tokio::test]
