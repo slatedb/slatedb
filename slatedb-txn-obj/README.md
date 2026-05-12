@@ -129,7 +129,7 @@ async fn fenced(
 
 ### Retrying on conflicts
 
-`maybe_apply_update` retries on version conflicts by refreshing and re-applying the mutation.
+`maybe_apply_update` retries on write conflicts by refreshing and re-applying the mutation.
 
 ```rust
 txn.maybe_apply_update(|current| {
@@ -145,6 +145,8 @@ txn.maybe_apply_update(|current| {
 ## Error Semantics
 
 - `ObjectVersionExists`: CAS failed because another writer won the race.
+- `ObjectVersionBehindBoundary`: A bounded sequenced write created an id at or behind the durable
+  boundary.
 - `LatestRecordMissing`: No object exists yet (for `load`).
 - `InvalidObjectState`: Unexpected storage layout or missing data.
 - `Fenced`: A newer epoch has been observed.

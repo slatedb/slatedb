@@ -414,7 +414,7 @@ impl Compactor {
             dirty.value.insert(compaction.clone());
             match stored_compactions.update(dirty).await {
                 Ok(()) => return Ok(compaction_id),
-                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                Err(err) if err.is_sequenced_write_conflict() => {
                     stored_compactions.refresh().await?;
                 }
                 Err(err) => return Err(crate::Error::from(err)),
@@ -2914,6 +2914,66 @@ mod tests {
             .get(&compaction_id)
             .expect("missing submitted compaction");
 
+        assert_eq!(stored.spec(), &spec);
+        assert_eq!(stored.status(), CompactionStatus::Submitted);
+    }
+
+    #[tokio::test]
+    async fn test_submit_retries_on_boundary_conflict() {
+        // Set up a database with an initial manifest and compactions record.
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let stored_manifest = StoredManifest::load(manifest_store.clone(), system_clock.clone())
+            .await
+            .unwrap();
+        StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+
+        // Advance the compactions boundary past the next id to force the first submit attempt
+        // to be rejected after it creates the object.
+        let start_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+        compactions_store
+            .advance_boundary(start_id + 1)
+            .await
+            .unwrap();
+
+        // Submit should refresh after the boundary conflict and retry at the next safe id.
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
+        let compaction_id = Compactor::submit(
+            spec.clone(),
+            compactions_store.clone(),
+            Arc::new(DbRand::default()),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
+        let stored = compactions
+            .compactions
+            .get(&compaction_id)
+            .expect("missing submitted compaction");
+
+        // The successful retry lands two versions after the start and persists the requested
+        // submitted compaction.
+        assert_eq!(compactions.id, start_id + 2);
         assert_eq!(stored.spec(), &spec);
         assert_eq!(stored.status(), CompactionStatus::Submitted);
     }

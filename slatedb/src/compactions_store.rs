@@ -305,7 +305,7 @@ mod tests {
     use object_store::path::Path;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_txn_obj::object_store::ObjectStoreBoundaryObject;
-    use slatedb_txn_obj::{BoundaryObject, MonotonicId, TransactionalObjectError};
+    use slatedb_txn_obj::{BoundaryObject, MonotonicId};
     use std::time::Duration;
     use ulid::Ulid;
 
@@ -351,7 +351,14 @@ mod tests {
 
         let result = sc.update(sc.prepare_dirty().unwrap()).await;
 
-        assert_object_version_behind_boundary(result, 2, 2);
+        match result {
+            Err(SlateDBError::SequencedObjectVersionBehindBoundary { id, boundary }) => {
+                assert_eq!(2, id);
+                assert_eq!(2, boundary);
+            }
+            Err(err) => panic!("expected boundary error, got {err:?}"),
+            Ok(_) => panic!("expected boundary error, got success"),
+        }
     }
 
     #[tokio::test]
@@ -529,22 +536,6 @@ mod tests {
             Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
         )
-    }
-
-    fn assert_object_version_behind_boundary<T>(
-        result: Result<T, SlateDBError>,
-        expected_id: u64,
-        expected_boundary: u64,
-    ) {
-        match result {
-            Err(SlateDBError::TransactionalObjectError(err)) => assert!(matches!(
-                err.as_ref(),
-                TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
-                    if *id == expected_id && *boundary == expected_boundary
-            )),
-            Err(err) => panic!("expected boundary error, got {err:?}"),
-            Ok(_) => panic!("expected boundary error, got success"),
-        }
     }
 
     async fn assert_state_not_updated(fc: &mut FenceableCompactions) {

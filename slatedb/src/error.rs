@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError::{
-    LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
+    LatestTransactionalObjectVersionMissing, SequencedObjectVersionBehindBoundary,
+    TransactionalObjectVersionExists,
 };
 use crate::merge_operator::MergeOperatorError;
 use slatedb_txn_obj::TransactionalObjectError;
@@ -51,6 +52,9 @@ pub(crate) enum SlateDBError {
 
     #[error("transactional object (e.g. manifest) version already exists")]
     TransactionalObjectVersionExists,
+
+    #[error("sequenced object version <= boundary. id=`{id}`, boundary=`{boundary}`")]
+    SequencedObjectVersionBehindBoundary { id: u64, boundary: u64 },
 
     #[error("failed to find latest transactional object (e.g. manifest) version")]
     LatestTransactionalObjectVersionMissing,
@@ -268,6 +272,14 @@ impl SlateDBError {
             other => other,
         }
     }
+
+    /// Returns true if this error means a sequenced write should refresh and retry.
+    pub(crate) fn is_sequenced_write_conflict(&self) -> bool {
+        matches!(
+            self,
+            TransactionalObjectVersionExists | SequencedObjectVersionBehindBoundary { .. }
+        )
+    }
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -279,6 +291,9 @@ impl From<TransactionalObjectError> for SlateDBError {
                 LatestTransactionalObjectVersionMissing
             }
             TransactionalObjectError::ObjectVersionExists => TransactionalObjectVersionExists,
+            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary } => {
+                SequencedObjectVersionBehindBoundary { id, boundary }
+            }
             TransactionalObjectError::Fenced => SlateDBError::Fenced,
             TransactionalObjectError::CallbackError(err) => match err.downcast::<SlateDBError>() {
                 Err(err) => SlateDBError::TransactionalObjectError(Arc::new(
@@ -578,6 +593,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::ManifestMissing(_) => Error::data(msg),
             SlateDBError::LatestTransactionalObjectVersionMissing => Error::data(msg),
             SlateDBError::TransactionalObjectVersionExists => Error::data(msg),
+            SlateDBError::SequencedObjectVersionBehindBoundary { .. } => Error::data(msg),
             SlateDBError::InvalidTransactionalObjectState => Error::data(msg),
             SlateDBError::EmptyManifest => Error::data(msg),
             SlateDBError::EmptyBlock => Error::data(msg),

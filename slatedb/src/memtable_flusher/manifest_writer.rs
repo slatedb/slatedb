@@ -535,7 +535,7 @@ impl ManifestWriterHandler {
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
         loop {
             let result = self.write_manifest_update(checkpoint_options).await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -563,7 +563,7 @@ impl ManifestWriterHandler {
     async fn write_current_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_current_manifest().await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -802,7 +802,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, TrackerMessage};
+    use super::{ManifestWriter, ManifestWriterHandler, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -928,6 +928,18 @@ mod tests {
 
     async fn setup_harness(path: &str, fp_registry: Arc<FailPointRegistry>) -> TestHarness {
         setup_harness_with_extractor(path, fp_registry, None).await
+    }
+
+    fn new_handler_from_harness(harness: TestHarness) -> ManifestWriterHandler {
+        let closed_result = WatchableOnceCell::new();
+        let (tracker_tx, _) =
+            crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
+        ManifestWriterHandler::new(
+            harness.inner,
+            harness.manifest,
+            Duration::from_secs(3600),
+            tracker_tx,
+        )
     }
 
     async fn setup_harness_with_extractor(
@@ -1072,6 +1084,67 @@ mod tests {
         let uploaded = next_uploaded_memtable_no_wal(inner, key, value).await;
         inner.oracle.advance_durable_seq(uploaded.last_seq);
         uploaded
+    }
+
+    #[tokio::test]
+    async fn write_current_manifest_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_current_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // Advance the manifest boundary past the next id to force the first write attempt
+        // to fail its post-create boundary check.
+        let start_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+
+        // The safe write path should reload the manifest and retry at the next safe id.
+        handler.write_current_manifest_safely().await.unwrap();
+
+        // The first created version is behind the boundary, so the committed retry is +2.
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(start_id + 2, final_id);
+    }
+
+    #[tokio::test]
+    async fn write_manifest_update_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_update_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // Advance the manifest boundary past the next id to force the first update attempt
+        // to fail its post-create boundary check.
+        let start_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+
+        // The safe update path should reload the manifest and retry at the next safe id.
+        let checkpoints = handler.write_manifest_update_safely(&[]).await.unwrap();
+
+        // No checkpoints were requested, and the committed retry lands two versions later.
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert!(checkpoints.is_empty());
+        assert_eq!(start_id + 2, final_id);
     }
 
     #[tokio::test]

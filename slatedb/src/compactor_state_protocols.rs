@@ -259,7 +259,7 @@ impl CompactorStateWriter {
         self.manifest.update(dirty).await
     }
 
-    /// Writes the manifest, retrying on version conflicts by reloading and retrying.
+    /// Writes the manifest, retrying on sequenced write conflicts by reloading and retrying.
     ///
     /// ## Returns
     /// - `Ok(())` when the manifest is successfully persisted.
@@ -269,7 +269,7 @@ impl CompactorStateWriter {
             self.load_manifest().await?;
             match self.write_manifest().await {
                 Ok(_) => return Ok(()),
-                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                Err(err) if err.is_sequenced_write_conflict() => {
                     debug!("conflicting manifest version. updating and retrying write again.");
                 }
                 Err(err) => return Err(err),
@@ -295,7 +295,7 @@ impl CompactorStateWriter {
                     self.state.set_compactions(refreshed);
                     return Ok(());
                 }
-                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                Err(err) if err.is_sequenced_write_conflict() => {
                     // Retry with a refreshed view. Refresh will surface fencing if the epoch advanced.
                     // If another process modified the compactions file legally (such as an external
                     // compaction request triggered from the CLI), this will pick up those changes.
@@ -763,6 +763,60 @@ mod tests {
         assert_eq!(conflicting_id, start_id + 1);
 
         // This should retry on conflict and succeed with a new version.
+        writer.write_compactions_safely().await.unwrap();
+
+        let final_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(final_id, start_id + 2);
+    }
+
+    #[tokio::test]
+    async fn test_write_compactions_safely_retries_on_boundary_conflict() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        let mut writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store.clone(),
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        let start_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+        compactions_store
+            .advance_boundary(start_id + 1)
+            .await
+            .unwrap();
+
         writer.write_compactions_safely().await.unwrap();
 
         let final_id = compactions_store
