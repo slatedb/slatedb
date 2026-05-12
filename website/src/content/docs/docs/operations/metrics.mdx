@@ -104,6 +104,7 @@ All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
 |------|------|--------|-------------|
 | `slatedb.compactor.bytes_compacted` | counter | | Total bytes compacted |
 | `slatedb.compactor.epoch` | gauge | | Current compactor epoch |
+| `slatedb.compactor.expired_entries` | counter | | Expired value entries rewritten as tombstones during compaction |
 | `slatedb.compactor.last_compaction_timestamp_sec` | gauge | | Last compaction time (epoch seconds) |
 | `slatedb.compactor.running_compactions` | up_down_counter | | Currently running compactions |
 | `slatedb.compactor.total_bytes_being_compacted` | gauge | | Bytes in active compactions |
