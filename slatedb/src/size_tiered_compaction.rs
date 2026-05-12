@@ -257,6 +257,13 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         state: &CompactorStateView,
         compaction: &CompactionSpec,
     ) -> Result<(), crate::error::Error> {
+        // Size-tiered does not propose drain specs and has no policy
+        // opinions on them. Drain invariants belong to the compactor-level
+        // validation.
+        if compaction.is_drain() {
+            return Ok(());
+        }
+
         let core = state.manifest().core();
         let Some(tree) = core.tree_for_segment(compaction.segment()) else {
             warn!(
@@ -286,20 +293,14 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             ));
         }
 
-        let has_sr = compaction
+        // Must merge into the lowest-id SR among sources.
+        let min_sr = compaction
             .sources()
             .iter()
-            .any(|s| matches!(s, SourceId::SortedRun(_)));
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .min();
 
-        if has_sr {
-            // Must merge into the lowest-id SR among sources. Only tiered
-            // specs have a destination; drain specs skip this check.
-            let min_sr = compaction
-                .sources()
-                .iter()
-                .filter_map(|s| s.maybe_unwrap_sorted_run())
-                .min()
-                .expect("at least one SR in sources");
+        if let Some(min_sr) = min_sr {
             if compaction.destination() != Some(min_sr) {
                 warn!(
                     "destination does not match lowest-id SR among sources: {:?} {:?}",
@@ -1213,5 +1214,25 @@ mod tests {
         let result = scheduler.validate(&state.into(), &spec);
 
         assert!(result.is_err());
+    }
+
+    /// `validate` accepts drain specs without running any size-tiered policy
+    /// checks. A drain spec has no destination and lists SRs to be retired,
+    /// neither of which fits the tiered "merge into the lowest-id SR" rule.
+    #[test]
+    fn test_validate_accepts_drain_spec_with_sr_sources() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let l0: Vec<SsTableView> = (0..2).map(|_| create_sst_view(1)).collect();
+        let srs = vec![create_sr2(1, 2), create_sr2(0, 2)];
+        let segment = segment_with(b"seg/", l0.iter().cloned().collect(), srs.clone());
+        let state = &create_compactor_state(create_db_state_with_segment(segment));
+
+        let mut sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
+        sources.extend(srs.iter().map(|sr| SourceId::SortedRun(sr.id)));
+        let spec = CompactionSpec::drain_segment(Bytes::from_static(b"seg/"), sources);
+
+        scheduler
+            .validate(&state.into(), &spec)
+            .expect("drain spec with SR sources must validate");
     }
 }
