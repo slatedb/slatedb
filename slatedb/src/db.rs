@@ -8492,124 +8492,73 @@ mod tests {
         );
     }
 
-    /// RFC-0024 open-time reconciliation: the extractor name configured
-    /// on a fresh DB lands on the persisted manifest and is recovered
-    /// on reopen. Reopening with the same extractor succeeds; the
-    /// validate_extractor_configuration helper sees matching names and
-    /// no segments to walk.
-    #[tokio::test]
-    async fn test_open_persists_extractor_name_and_round_trips() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_open_persists_extractor_name";
-
-        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
-        let db = Db::builder(path, object_store.clone())
-            .with_segment_extractor(extractor.clone())
-            .build()
-            .await
-            .unwrap();
-        // Verify the name is persisted in the manifest before close.
-        {
-            let guard = db.inner.state.read();
-            let cow = guard.state();
-            assert_eq!(
-                cow.core().segment_extractor_name.as_deref(),
-                Some("fixed-3"),
-                "expected fresh DB to stamp extractor name onto manifest"
-            );
-        }
-        db.close().await.unwrap();
-
-        // Reopen with the same extractor — should succeed.
-        let reopened = Db::builder(path, object_store.clone())
-            .with_segment_extractor(extractor)
-            .build()
-            .await
-            .unwrap();
-        reopened.close().await.unwrap();
+    #[derive(Clone, Copy, Debug)]
+    enum ExtractorConfig {
+        None,
+        Fixed3,
+        Other,
     }
 
-    /// Reopening with a *different* extractor name is a misconfiguration
-    /// — the manifest's persisted name no longer matches the configured
-    /// one, which would silently route data differently than before.
-    #[tokio::test]
-    async fn test_open_rejects_extractor_name_mismatch() {
-        #[derive(Debug)]
-        struct OtherExtractor;
-        impl crate::PrefixExtractor for OtherExtractor {
-            fn name(&self) -> &str {
-                "other"
+    impl ExtractorConfig {
+        fn to_extractor(self) -> Option<Arc<dyn crate::PrefixExtractor>> {
+            #[derive(Debug)]
+            struct OtherExtractor;
+            impl crate::PrefixExtractor for OtherExtractor {
+                fn name(&self) -> &str {
+                    "other"
+                }
+                fn prefix_len(&self, _target: &crate::PrefixTarget) -> Option<usize> {
+                    Some(3)
+                }
             }
-            fn prefix_len(&self, _target: &crate::PrefixTarget) -> Option<usize> {
-                Some(3)
+            match self {
+                ExtractorConfig::None => None,
+                ExtractorConfig::Fixed3 => {
+                    Some(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+                }
+                ExtractorConfig::Other => Some(Arc::new(OtherExtractor)),
             }
         }
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_open_rejects_extractor_name_mismatch";
-        let db = Db::builder(path, object_store.clone())
-            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
-            .build()
-            .await
-            .unwrap();
-        db.close().await.unwrap();
-
-        let result = Db::builder(path, object_store.clone())
-            .with_segment_extractor(Arc::new(OtherExtractor))
-            .build()
-            .await;
-        let err = match result {
-            Ok(_) => panic!("expected name-mismatch rejection, got Ok"),
-            Err(e) => e,
-        };
-        assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
-        let msg = err.to_string();
-        assert!(
-            msg.contains("fixed-3") && msg.contains("other"),
-            "expected error to name both extractors, got: {msg}"
-        );
     }
 
-    /// Reopening *without* an extractor when one is persisted is a
-    /// misconfiguration — pre-existing segments would no longer be
-    /// addressable through any routing.
+    /// RFC-0024 open-time reconciliation: the configured extractor on
+    /// reopen must agree with what was persisted at creation.
+    /// `(persisted, configured) → outcome` for every combination of
+    /// `None`, the conforming `Fixed3` extractor, and a differently-named
+    /// `Other` extractor.
+    #[rstest::rstest]
+    #[case::no_extractor_round_trip(ExtractorConfig::None, ExtractorConfig::None, true)]
+    #[case::same_extractor_round_trip(ExtractorConfig::Fixed3, ExtractorConfig::Fixed3, true)]
+    #[case::name_mismatch(ExtractorConfig::Fixed3, ExtractorConfig::Other, false)]
+    #[case::removed(ExtractorConfig::Fixed3, ExtractorConfig::None, false)]
+    #[case::added(ExtractorConfig::None, ExtractorConfig::Fixed3, false)]
     #[tokio::test]
-    async fn test_open_rejects_removing_extractor() {
+    async fn test_open_extractor_reconciliation(
+        #[case] initial: ExtractorConfig,
+        #[case] reopen: ExtractorConfig,
+        #[case] expect_ok: bool,
+    ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_open_rejects_removing_extractor";
-        let db = Db::builder(path, object_store.clone())
-            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
-            .build()
-            .await
-            .unwrap();
-        db.close().await.unwrap();
+        let path = format!("/tmp/test_open_extractor_reconciliation_{initial:?}_{reopen:?}");
 
-        let result = Db::builder(path, object_store.clone()).build().await;
-        let err = match result {
-            Ok(_) => panic!("expected removal rejection, got Ok"),
-            Err(e) => e,
-        };
-        assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
-    }
+        let mut builder = Db::builder(path.clone(), object_store.clone());
+        if let Some(extractor) = initial.to_extractor() {
+            builder = builder.with_segment_extractor(extractor);
+        }
+        builder.build().await.unwrap().close().await.unwrap();
 
-    /// Adding an extractor to a database that was created without one
-    /// is rejected — pre-existing keys live in the unsegmented tree
-    /// and would be unreachable through the new segmented routing.
-    #[tokio::test]
-    async fn test_open_rejects_adding_extractor_to_existing_db() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_open_rejects_adding_extractor";
-        let db = Db::open(path, object_store.clone()).await.unwrap();
-        db.close().await.unwrap();
-
-        let result = Db::builder(path, object_store.clone())
-            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
-            .build()
-            .await;
-        let err = match result {
-            Ok(_) => panic!("expected add-to-existing rejection, got Ok"),
-            Err(e) => e,
-        };
-        assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+        let mut builder = Db::builder(path, object_store);
+        if let Some(extractor) = reopen.to_extractor() {
+            builder = builder.with_segment_extractor(extractor);
+        }
+        match (expect_ok, builder.build().await) {
+            (true, Ok(reopened)) => reopened.close().await.unwrap(),
+            (true, Err(err)) => panic!("expected reopen to succeed, got {err:?}"),
+            (false, Ok(_)) => panic!("expected reopen to fail"),
+            (false, Err(err)) => {
+                assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+            }
+        }
     }
 
     /// RFC-0024 open-time per-segment check: every persisted segment
@@ -8652,19 +8601,6 @@ mod tests {
             err.to_string().contains("not recognized"),
             "expected error to mention recognition, got: {err}"
         );
-    }
-
-    /// A no-extractor DB that opens without an extractor is fine —
-    /// the codec stays on V1 and validate_extractor_configuration is a
-    /// no-op (both sides None).
-    #[tokio::test]
-    async fn test_open_without_extractor_round_trips() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_open_no_extractor_round_trip";
-        let db = Db::open(path, object_store.clone()).await.unwrap();
-        db.close().await.unwrap();
-        let reopened = Db::open(path, object_store).await.unwrap();
-        reopened.close().await.unwrap();
     }
 
     /// Helper: collect the segment prefix list from `db`'s in-memory
