@@ -324,10 +324,8 @@ async fn exec_seq_to_ts(admin: &Admin, seq: u64, round_up: bool) -> Result<(), B
 }
 
 async fn exec_list_segments(admin: &Admin, manifest_id: Option<u64>) -> Result<(), Box<dyn Error>> {
-    match admin.list_segments(manifest_id).await? {
-        None => println!("no manifest file found"),
-        Some(summaries) => println!("{}", serde_json::to_string(&summaries)?),
-    }
+    let summaries = admin.list_segments(manifest_id).await?;
+    println!("{}", serde_json::to_string(&summaries)?);
     Ok(())
 }
 

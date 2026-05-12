@@ -641,16 +641,17 @@ impl Admin {
         AdminBuilder::new(path, object_store)
     }
 
-    /// Summarize each LSM tree in the manifest (RFC-0024): the named segments
-    /// in prefix order if any are present, otherwise the unsegmented tree.
-    /// Returns `Ok(None)` when the manifest file does not exist.
+    /// Summarize each LSM tree in the manifest (RFC-0024). When no extractor
+    /// is configured the result is a single empty-prefix entry covering the
+    /// whole database; otherwise it lists the named segments in prefix order.
     pub async fn list_segments(
         &self,
         manifest_id: Option<u64>,
-    ) -> Result<Option<Vec<SegmentSummary>>, crate::Error> {
-        let Some(manifest) = self.read_manifest(manifest_id).await? else {
-            return Ok(None);
-        };
+    ) -> Result<Vec<SegmentSummary>, crate::Error> {
+        let manifest = self
+            .read_manifest(manifest_id)
+            .await?
+            .ok_or(SlateDBError::LatestTransactionalObjectVersionMissing)?;
         let core = manifest.core();
         let summaries = if core.segments.is_empty() {
             vec![SegmentSummary::from_tree(&Bytes::new(), &core.tree)]
@@ -660,13 +661,15 @@ impl Admin {
                 .map(|s| SegmentSummary::from_tree(&s.prefix, &s.tree))
                 .collect()
         };
-        Ok(Some(summaries))
+        Ok(summaries)
     }
 
-    /// Describe a single LSM tree in detail (RFC-0024). When the manifest
-    /// carries named segments, `prefix` must match one of them exactly;
-    /// otherwise an empty `prefix` selects the unsegmented tree. Returns
-    /// `Ok(None)` when the manifest is missing or the prefix doesn't match.
+    /// Describe a single LSM tree in detail (RFC-0024). An empty `prefix`
+    /// selects the default tree and resolves only when no named segments are
+    /// configured — once an extractor is in use, the default tree is not in
+    /// use and the empty prefix returns `None`. A non-empty `prefix` must
+    /// match a named segment exactly. Returns `Ok(None)` when the manifest
+    /// is missing or the prefix has no match.
     pub async fn describe_segment(
         &self,
         prefix: &[u8],
@@ -676,8 +679,11 @@ impl Admin {
             return Ok(None);
         };
         let core = manifest.core();
-        if core.segments.is_empty() {
-            return if prefix.is_empty() {
+        // An empty prefix asks for the default tree; it only resolves to a
+        // value when no named segments are configured. With named segments
+        // present, the default tree is not in use and the answer is None.
+        if prefix.is_empty() {
+            return if core.segments.is_empty() {
                 Ok(Some(SegmentDescription::from_tree(
                     &Bytes::new(),
                     &core.tree,
@@ -1622,11 +1628,7 @@ mod tests {
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
 
-        let summaries = admin
-            .list_segments(None)
-            .await
-            .unwrap()
-            .expect("expected manifest");
+        let summaries = admin.list_segments(None).await.unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].prefix_hex, "");
         assert_eq!(summaries[0].l0_count, 0);
@@ -1650,11 +1652,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_admin_list_segments_no_manifest_returns_none() {
+    async fn test_admin_segment_apis_missing_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_admin_list_segments_no_manifest_returns_none");
+        let path = Path::from("/tmp/test_admin_segment_apis_missing_manifest");
         let admin = AdminBuilder::new(path, object_store).build();
-        assert!(admin.list_segments(None).await.unwrap().is_none());
+        // list_segments surfaces the missing manifest as an error...
+        assert!(matches!(
+            admin.list_segments(None).await.unwrap_err().kind(),
+            ErrorKind::Data,
+        ));
+        // ...whereas describe_segment treats "no manifest" the same as
+        // "prefix not found" — both legitimate None-result states.
         assert!(admin.describe_segment(b"", None).await.unwrap().is_none());
     }
 
@@ -1691,11 +1699,7 @@ mod tests {
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
 
-        let summaries = admin
-            .list_segments(None)
-            .await
-            .unwrap()
-            .expect("expected manifest");
+        let summaries = admin.list_segments(None).await.unwrap();
         assert_eq!(summaries.len(), 2);
         assert_eq!(summaries[0].prefix_display, "ts/2026-03-09/14/");
         assert_eq!(summaries[1].prefix_display, "ts/2026-03-09/15/");
@@ -1797,11 +1801,7 @@ mod tests {
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
 
-        let summaries = admin
-            .list_segments(None)
-            .await
-            .unwrap()
-            .expect("expected manifest");
+        let summaries = admin.list_segments(None).await.unwrap();
         assert_eq!(summaries.len(), 2);
         // The drained segment surfaces the watermark with empty L0/SR;
         // callers derive "drain marker" from this combination.
