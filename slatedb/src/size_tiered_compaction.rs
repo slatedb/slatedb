@@ -1,12 +1,14 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use bytes::Bytes;
+
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{CompactionSpec, SourceId};
+use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use crate::error::Error;
-use crate::manifest::ManifestCore;
+use crate::manifest::{LsmTreeState, ManifestCore};
 use log::warn;
 
 const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
@@ -123,32 +125,28 @@ impl BackpressureChecker {
     }
 }
 
-struct CompactionChecker {
-    conflict_checker: ConflictChecker,
-    backpressure_checker: BackpressureChecker,
+/// Per-tree planning state for one `propose()` call: prefix, source
+/// lists, and the conflict + backpressure checks that gate picks for
+/// this tree. `conflicts` is updated as picks land. Source IDs (L0
+/// ULIDs and SR ids) are globally unique per RFC-0024 and a spec's
+/// sources must come from a single tree, so each tree only needs to
+/// track its own in-flight sources.
+struct TreeState {
+    prefix: Bytes,
+    l0: Vec<CompactionSource>,
+    srs: Vec<CompactionSource>,
+    conflicts: ConflictChecker,
+    bp: BackpressureChecker,
 }
 
-impl CompactionChecker {
-    fn new(conflict_checker: ConflictChecker, backpressure_checker: BackpressureChecker) -> Self {
-        Self {
-            conflict_checker,
-            backpressure_checker,
-        }
-    }
-
+impl TreeState {
     fn check_compaction(
         &self,
         sources: &VecDeque<CompactionSource>,
         dst: u32,
         next_sr: Option<&CompactionSource>,
     ) -> bool {
-        if !self.conflict_checker.check_compaction(sources, dst) {
-            return false;
-        }
-        if !self.backpressure_checker.check_compaction(sources, next_sr) {
-            return false;
-        }
-        true
+        self.conflicts.check_compaction(sources, dst) && self.bp.check_compaction(sources, next_sr)
     }
 }
 
@@ -178,27 +176,74 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         let mut compactions = Vec::new();
         let db_state = state.manifest().core();
-        let (l0, srs) = self.compaction_sources(db_state);
         let active_compactions = state
             .compactions()
             .into_iter()
             .flat_map(|c| c.core().recent_compactions())
             .filter(|c| c.active())
             .collect::<Vec<_>>();
-        let conflict_checker = ConflictChecker::new(active_compactions.iter().map(|j| j.spec()));
-        let backpressure_checker = BackpressureChecker::new(
-            self.options.include_size_threshold,
-            self.options.max_compaction_sources,
-            &srs,
-        );
-        let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
+        let mut next_fresh_sr_id = next_global_sr_id(db_state, &active_compactions);
 
-        while active_compactions.len() + compactions.len() < self.max_concurrent_compactions {
-            let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
+        // Precompute per-tree (sources, conflict checker, backpressure) once
+        // and reuse across round-robin passes. Active in-flight compactions
+        // are partitioned by their target segment; cross-segment conflicts
+        // are impossible (RFC-0024). Trees are sorted by L0 length
+        // descending so the tree closest to L0 backpressure gets first dibs
+        // — writer-side backpressure is the most pressing pressure to
+        // relieve. Stable sort preserves root-first ordering among ties.
+        let mut active_by_segment: HashMap<Bytes, Vec<&CompactionSpec>> = HashMap::new();
+        for compaction in &active_compactions {
+            active_by_segment
+                .entry(compaction.spec().segment().clone())
+                .or_default()
+                .push(compaction.spec());
+        }
+        let mut trees: Vec<TreeState> = db_state
+            .trees_with_prefix()
+            .map(|(prefix, tree)| {
+                let (l0, srs) = compaction_sources(tree);
+                let conflicts = ConflictChecker::new(
+                    active_by_segment
+                        .get(&prefix)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
+                let bp = BackpressureChecker::new(
+                    self.options.include_size_threshold,
+                    self.options.max_compaction_sources,
+                    &srs,
+                );
+                TreeState {
+                    prefix,
+                    l0,
+                    srs,
+                    conflicts,
+                    bp,
+                }
+            })
+            .collect();
+        trees.sort_by_key(|t| std::cmp::Reverse(t.l0.len()));
+
+        // Round-robin: one pick per tree per pass, looping until either the
+        // budget is exhausted or no tree produced a spec on the last pass.
+        // This guarantees every tree gets a chance before any one tree gets
+        // a second slot — see the fairness rationale in the test below.
+        loop {
+            let mut picked_any = false;
+            for tree in &mut trees {
+                if active_compactions.len() + compactions.len() >= self.max_concurrent_compactions {
+                    break;
+                }
+                if let Some(compaction) = self.pick_next_compaction(tree, &mut next_fresh_sr_id) {
+                    tree.conflicts.add_compaction(&compaction);
+                    compactions.push(compaction);
+                    picked_any = true;
+                }
+            }
+            if !picked_any {
                 break;
-            };
-            checker.conflict_checker.add_compaction(&compaction);
-            compactions.push(compaction);
+            }
         }
 
         compactions
@@ -209,26 +254,24 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         state: &CompactorStateView,
         compaction: &CompactionSpec,
     ) -> Result<(), crate::error::Error> {
-        // Logical order of sources: [L0 (newest → oldest), then SRs (highest id → 0)]
-        let sources_logical_order: Vec<SourceId> = state
-            .manifest()
-            .core()
-            .tree
+        let core = state.manifest().core();
+        let Some(tree) = core.tree_for_segment(compaction.segment()) else {
+            warn!(
+                "submitted compaction targets unknown segment: {:?}",
+                compaction.segment()
+            );
+            return Err(Error::invalid("unknown target segment".to_string()));
+        };
+        // Logical order of sources within the target tree: [L0 (newest → oldest),
+        // then SRs (highest id → 0)].
+        let sources_logical_order: Vec<SourceId> = tree
             .l0
             .iter()
             .map(|view| SourceId::SstView(view.id))
-            .chain(
-                state
-                    .manifest()
-                    .core()
-                    .tree
-                    .compacted
-                    .iter()
-                    .map(|sr| SourceId::SortedRun(sr.id)),
-            )
+            .chain(tree.compacted.iter().map(|sr| SourceId::SortedRun(sr.id)))
             .collect();
 
-        // Validate if the compaction sources are strictly consecutive elements in the db_state sources
+        // Validate if the compaction sources are strictly consecutive elements in the target tree.
         if !sources_logical_order
             .windows(compaction.sources().len())
             .any(|w| w == compaction.sources().as_slice())
@@ -282,30 +325,30 @@ impl SizeTieredCompactionScheduler {
 
     fn pick_next_compaction(
         &self,
-        l0: &[CompactionSource],
-        srs: &[CompactionSource],
-        checker: &CompactionChecker,
+        tree: &TreeState,
+        next_fresh_sr_id: &mut u32,
     ) -> Option<CompactionSpec> {
         // compact l0s if required
-        let l0_candidates: VecDeque<_> = l0.iter().copied().collect();
+        let l0_candidates: VecDeque<_> = tree.l0.iter().copied().collect();
         if let Some(mut l0_candidates) = self.clamp_min(l0_candidates) {
             l0_candidates = self.clamp_max(l0_candidates);
-            let dst = srs
-                .first()
-                .map_or(0, |sr| sr.source.unwrap_sorted_run() + 1);
-            let next_sr = srs.first();
-            if checker.check_compaction(&l0_candidates, dst, next_sr) {
-                return Some(self.create_compaction(l0_candidates, dst));
+            // SR ids are globally unique (RFC-0024), so the fresh-id counter
+            // must come from `next_global_sr_id` rather than this tree alone.
+            let dst = *next_fresh_sr_id;
+            let next_sr = tree.srs.first();
+            if tree.check_compaction(&l0_candidates, dst, next_sr) {
+                *next_fresh_sr_id = next_fresh_sr_id.saturating_add(1);
+                return Some(self.create_compaction(&tree.prefix, l0_candidates, dst));
             }
         }
 
         // try to compact the lower levels
-        for i in 0..srs.len() {
+        for i in 0..tree.srs.len() {
             let compactable_run = Self::build_compactable_run(
                 self.options.include_size_threshold,
-                srs,
+                &tree.srs,
                 i,
-                Some(checker),
+                Some(tree),
             );
             let compactable_run = self.clamp_min(compactable_run);
             if let Some(mut compactable_run) = compactable_run {
@@ -315,7 +358,7 @@ impl SizeTieredCompactionScheduler {
                     .expect("expected non-empty compactable run")
                     .source
                     .unwrap_sorted_run();
-                return Some(self.create_compaction(compactable_run, dst));
+                return Some(self.create_compaction(&tree.prefix, compactable_run, dst));
             }
         }
         None
@@ -335,9 +378,14 @@ impl SizeTieredCompactionScheduler {
         sources
     }
 
-    fn create_compaction(&self, sources: VecDeque<CompactionSource>, dst: u32) -> CompactionSpec {
+    fn create_compaction(
+        &self,
+        prefix: &Bytes,
+        sources: VecDeque<CompactionSource>,
+        dst: u32,
+    ) -> CompactionSpec {
         let sources: Vec<SourceId> = sources.iter().map(|src| src.source).collect();
-        CompactionSpec::new(sources, dst)
+        CompactionSpec::for_segment(prefix.clone(), sources, dst)
     }
 
     // looks for a series of sorted runs with similar sizes and assemble to a vecdequeue,
@@ -346,7 +394,7 @@ impl SizeTieredCompactionScheduler {
         size_threshold: f32,
         sources: &[CompactionSource],
         start_idx: usize,
-        checker: Option<&CompactionChecker>,
+        checker: Option<&TreeState>,
     ) -> VecDeque<CompactionSource> {
         let mut compactable_runs = VecDeque::new();
         let mut maybe_min_sz = None;
@@ -372,33 +420,49 @@ impl SizeTieredCompactionScheduler {
         }
         compactable_runs
     }
+}
 
-    fn compaction_sources(
-        &self,
-        db_state: &ManifestCore,
-    ) -> (Vec<CompactionSource>, Vec<CompactionSource>) {
-        let collected_l0: Vec<CompactionSource> = db_state
-            .tree
-            .l0
-            .iter()
-            .map(|l0| CompactionSource {
-                source: SourceId::SstView(l0.id),
-                size: l0.estimate_size(),
-            })
-            .collect();
+/// Collects L0 and sorted-run sources for a single tree (the empty-prefix
+/// segment or one named segment).
+fn compaction_sources(tree: &LsmTreeState) -> (Vec<CompactionSource>, Vec<CompactionSource>) {
+    let l0: Vec<CompactionSource> = tree
+        .l0
+        .iter()
+        .map(|view| CompactionSource {
+            source: SourceId::SstView(view.id),
+            size: view.estimate_size(),
+        })
+        .collect();
+    let srs: Vec<CompactionSource> = tree
+        .compacted
+        .iter()
+        .map(|sr| CompactionSource {
+            source: SourceId::SortedRun(sr.id),
+            size: sr.estimate_size(),
+        })
+        .collect();
+    (l0, srs)
+}
 
-        let collected_sr = db_state
-            .tree
-            .compacted
-            .iter()
-            .map(|sr| CompactionSource {
-                source: SourceId::SortedRun(sr.id),
-                size: sr.estimate_size(),
-            })
-            .collect();
-
-        (collected_l0, collected_sr)
-    }
+/// Computes the next sorted-run id that is safe to use as a fresh L0 → SR
+/// destination. Sorted-run ids are globally unique across every tree
+/// (RFC-0024), so the counter must skip past every committed run in every
+/// tree as well as every in-flight compaction's destination.
+fn next_global_sr_id(db_state: &ManifestCore, active_compactions: &[&Compaction]) -> u32 {
+    let max_committed = db_state
+        .trees()
+        .flat_map(|tree| tree.compacted.iter().map(|sr| sr.id))
+        .max();
+    let max_in_flight = active_compactions
+        .iter()
+        .map(|c| c.spec().destination())
+        .max();
+    [max_committed, max_in_flight]
+        .into_iter()
+        .flatten()
+        .max()
+        .map(|id| id.saturating_add(1))
+        .unwrap_or(0)
 }
 
 #[derive(Default)]
@@ -437,13 +501,14 @@ mod tests {
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
-    use crate::manifest::{LsmTreeState, ManifestCore};
+    use crate::manifest::{LsmTreeState, ManifestCore, Segment};
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::{
         SizeTieredCompactionScheduler, SizeTieredCompactionSchedulerSupplier,
     };
     use crate::utils::IdGenerator;
     use crate::DbRand;
+    use bytes::Bytes;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_txn_obj::test_utils::new_dirty_object;
     use std::sync::Arc;
@@ -944,5 +1009,203 @@ mod tests {
     fn create_sr_compaction(srs: Vec<u32>) -> CompactionSpec {
         let sources: Vec<SourceId> = srs.iter().map(|sr| SourceId::SortedRun(*sr)).collect();
         CompactionSpec::new(sources, *srs.last().unwrap())
+    }
+
+    fn segment_with(prefix: &[u8], l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> Segment {
+        Segment {
+            prefix: Bytes::copy_from_slice(prefix),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0,
+                compacted: srs,
+            },
+        }
+    }
+
+    /// A spec targeting a named segment with `dst` derived from sources, like
+    /// `create_l0_compaction` but for a non-empty prefix.
+    fn create_segment_l0_compaction(prefix: &[u8], l0: &[SsTableView], dst: u32) -> CompactionSpec {
+        let sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
+        CompactionSpec::for_segment(Bytes::copy_from_slice(prefix), sources, dst)
+    }
+
+    /// A manifest with no L0/SR in the root tree and a single named segment
+    /// holding the supplied L0/SR state.
+    fn create_db_state_with_segment(segment: Segment) -> ManifestCore {
+        let mut core = create_db_state(VecDeque::new(), Vec::new());
+        core.segments = vec![segment];
+        core
+    }
+
+    /// Per-segment proposal: a manifest with an empty root tree and a named
+    /// segment holding enough L0s should yield a spec for the segment.
+    #[test]
+    fn test_should_propose_per_segment_l0_compaction() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        let segment = segment_with(b"hour=12/", l0.iter().cloned().collect(), Vec::new());
+        let state = &create_compactor_state(create_db_state_with_segment(segment));
+
+        let requests = scheduler.propose(&state.into());
+
+        assert_eq!(requests.len(), 1);
+        let spec = &requests[0];
+        assert_eq!(spec.segment().as_ref(), b"hour=12/");
+        let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
+        assert_eq!(spec.sources(), &expected_sources);
+        assert_eq!(spec.destination(), 0);
+    }
+
+    /// Cross-tree priority: when two trees are both eligible, the tree with
+    /// the larger L0 count gets scheduled first.
+    #[test]
+    fn test_should_prioritize_tree_with_more_l0s() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let root_l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        let seg_l0: Vec<SsTableView> = (0..6).map(|_| create_sst_view(1)).collect();
+        let mut core = create_db_state(root_l0.iter().cloned().collect(), Vec::new());
+        core.segments = vec![segment_with(
+            b"hour=12/",
+            seg_l0.iter().cloned().collect(),
+            Vec::new(),
+        )];
+        let state = &create_compactor_state(core);
+
+        let requests = scheduler.propose(&state.into());
+
+        // Both trees produce an L0 → SR compaction; the segment (more L0s) is first.
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].segment().as_ref(), b"hour=12/");
+        assert!(requests[1].segment().is_empty());
+        // Globally-unique destination ids: segment gets 0, root gets 1.
+        assert_eq!(requests[0].destination(), 0);
+        assert_eq!(requests[1].destination(), 1);
+    }
+
+    /// Fresh L0 → SR destinations skip past every committed SR id in every
+    /// tree. With root holding SR(10) and a segment holding SR(20), a new
+    /// L0 → SR compaction in either tree must use id 21.
+    #[test]
+    fn test_should_allocate_globally_unique_sr_ids_across_trees() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let seg_l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        let mut core = create_db_state(VecDeque::new(), vec![create_sr2(10, 2)]);
+        core.segments = vec![segment_with(
+            b"seg/",
+            seg_l0.iter().cloned().collect(),
+            vec![create_sr2(20, 2)],
+        )];
+        let state = &create_compactor_state(core);
+
+        let requests = scheduler.propose(&state.into());
+
+        assert_eq!(requests.len(), 1);
+        let spec = &requests[0];
+        assert_eq!(spec.segment().as_ref(), b"seg/");
+        assert_eq!(spec.destination(), 21);
+    }
+
+    /// Round-robin fairness: when one tree could absorb the entire budget on
+    /// its own (L0 + multiple SR groups), the scheduler must still service
+    /// every other tree's eligible work in the same `propose()` call.
+    #[test]
+    fn test_should_distribute_picks_across_trees_round_robin() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        // Root tree has L0 + three compactable SR groups: enough work to
+        // absorb every slot in the budget on its own.
+        let root_l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        let mut core = create_db_state(
+            root_l0.iter().cloned().collect(),
+            vec![
+                create_sr2(11, 2),
+                create_sr2(10, 2),
+                create_sr2(9, 2),
+                create_sr2(8, 2),
+                create_sr4(7, 16),
+                create_sr4(6, 16),
+                create_sr4(5, 16),
+                create_sr4(4, 16),
+                create_sr4(3, 256),
+                create_sr4(2, 256),
+                create_sr4(1, 256),
+                create_sr4(0, 256),
+            ],
+        );
+        // Segment has only one L0 group, so it's only scheduled if the
+        // round-robin pass reserves a slot for it.
+        let seg_l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        core.segments = vec![segment_with(
+            b"seg/",
+            seg_l0.iter().cloned().collect(),
+            Vec::new(),
+        )];
+        let state = &create_compactor_state(core);
+
+        let requests = scheduler.propose(&state.into());
+
+        // Default max_concurrent is 4. Round-robin must reserve at least one
+        // slot for the segment even though the root tree could absorb all 4.
+        assert_eq!(requests.len(), 4);
+        let targets: Vec<_> = requests.iter().map(|s| s.segment().clone()).collect();
+        assert!(
+            targets.iter().any(|p| p.as_ref() == b"seg/"),
+            "segment must receive at least one slot, got targets {:?}",
+            targets,
+        );
+        assert!(
+            targets.iter().any(|p| p.is_empty()),
+            "root tree must still receive work too, got targets {:?}",
+            targets,
+        );
+    }
+
+    /// `validate` rejects a spec whose target segment does not exist in the
+    /// manifest.
+    #[test]
+    fn test_validate_rejects_unknown_segment() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let state = &create_compactor_state(create_db_state(VecDeque::new(), Vec::new()));
+
+        let spec = CompactionSpec::for_segment(Bytes::from_static(b"missing/"), vec![], 0);
+
+        let result = scheduler.validate(&state.into(), &spec);
+
+        assert!(result.is_err());
+    }
+
+    /// `validate` accepts a spec whose sources are consecutive entries in the
+    /// target segment's tree, even when the root tree is empty.
+    #[test]
+    fn test_validate_accepts_consecutive_segment_sources() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let l0: Vec<SsTableView> = (0..3).map(|_| create_sst_view(1)).collect();
+        let segment = segment_with(b"seg/", l0.iter().cloned().collect(), Vec::new());
+        let state = &create_compactor_state(create_db_state_with_segment(segment));
+
+        let spec = create_segment_l0_compaction(b"seg/", &l0, 0);
+
+        scheduler
+            .validate(&state.into(), &spec)
+            .expect("segment-targeted spec with consecutive sources must validate");
+    }
+
+    /// `validate` rejects a spec whose sources come from the root tree but
+    /// whose target segment is a named (non-root) prefix — the consecutive
+    /// check runs against the wrong tree and must fail.
+    #[test]
+    fn test_validate_rejects_segment_spec_with_root_sources() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let root_l0: Vec<SsTableView> = (0..3).map(|_| create_sst_view(1)).collect();
+        let mut core = create_db_state(root_l0.iter().cloned().collect(), Vec::new());
+        core.segments = vec![segment_with(b"seg/", VecDeque::new(), Vec::new())];
+        let state = &create_compactor_state(core);
+
+        // Sources reference the root L0s; the spec targets the empty segment.
+        let spec = create_segment_l0_compaction(b"seg/", &root_l0, 0);
+
+        let result = scheduler.validate(&state.into(), &spec);
+
+        assert!(result.is_err());
     }
 }
