@@ -462,6 +462,7 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<dyn SequencedStorageProtocol<Manifest>>,
+    boundary: Arc<dyn BoundaryObject>,
 }
 
 impl ManifestStore {
@@ -480,8 +481,12 @@ impl ManifestStore {
             "manifest",
         ));
         let inner: Arc<dyn SequencedStorageProtocol<Manifest>> =
-            Arc::new(BoundedSequencedStorage::new(sequenced, boundary));
-        Self { inner }
+            Arc::new(BoundedSequencedStorage::new(sequenced, boundary.clone()));
+        Self { inner, boundary }
+    }
+
+    pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
+        Ok(self.boundary.advance(MonotonicId::new(id)).await?)
     }
 
     /// Delete a manifest from the object store.

@@ -200,6 +200,7 @@ where
 
 pub(crate) struct CompactionsStore {
     inner: Arc<dyn SequencedStorageProtocol<Compactions>>,
+    boundary: Arc<dyn BoundaryObject>,
 }
 
 impl CompactionsStore {
@@ -218,8 +219,12 @@ impl CompactionsStore {
             "compactions",
         ));
         let inner: Arc<dyn SequencedStorageProtocol<Compactions>> =
-            Arc::new(BoundedSequencedStorage::new(sequenced, boundary));
-        Self { inner }
+            Arc::new(BoundedSequencedStorage::new(sequenced, boundary.clone()));
+        Self { inner, boundary }
+    }
+
+    pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
+        Ok(self.boundary.advance(MonotonicId::new(id)).await?)
     }
 
     /// Delete a compactions file from the object store.
