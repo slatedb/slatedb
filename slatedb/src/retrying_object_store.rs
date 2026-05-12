@@ -268,7 +268,8 @@ impl ObjectStore for RetryingObjectStore {
         // If attributes aren't supported, fall back to put without ULID
         if matches!(
             &result,
-            Err(object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented { .. })
+            Err(object_store::Error::NotSupported { .. }
+                | object_store::Error::NotImplemented { .. })
         ) && put_id.is_some()
         {
             return (|| async {
@@ -325,13 +326,16 @@ impl ObjectStore for RetryingObjectStore {
         let inner = match result {
             Ok(inner) => inner,
             Err(
-                object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented { .. },
-            ) => (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
-                .retry(Self::retry_builder())
-                .sleep(self.sleeper())
-                .notify(Self::notify)
-                .when(Self::should_retry)
-                .await?,
+                object_store::Error::NotSupported { .. }
+                | object_store::Error::NotImplemented { .. },
+            ) => {
+                (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
+                    .retry(Self::retry_builder())
+                    .sleep(self.sleeper())
+                    .notify(Self::notify)
+                    .when(Self::should_retry)
+                    .await?
+            }
             Err(e) => return Err(e),
         };
 
