@@ -546,11 +546,13 @@ impl DbInner {
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
-            // RFC-0024 route-consistency: an old WAL written under
-            // a different extractor may contain keys that nest with
-            // the current segment set. Validate before applying so
-            // a stale WAL fails the open rather than producing an
-            // inconsistent manifest.
+            // RFC-0024: re-extract each replayed entry's prefix to
+            // populate the memtable's touched-segment set. Per the
+            // validation model, durable WAL entries were validated when
+            // the writer accepted them, so we do not re-run the
+            // antichain check here. An empty/absent prefix under
+            // the current extractor remains a hard error — the
+            // entry can't be routed to any segment.
             if let Some(extractor) = self.segment_extractor.as_ref() {
                 let mut touched_segments: std::collections::BTreeSet<Bytes> =
                     std::collections::BTreeSet::new();
@@ -565,7 +567,6 @@ impl DbInner {
                         }
                     }
                 }
-                self.validate_segment_antichain(&touched_segments)?;
                 replayed_table
                     .table
                     .record_touched_segments(touched_segments);
@@ -8422,81 +8423,6 @@ mod tests {
             b"v2"
         );
         recovered.close().await.unwrap();
-    }
-
-    /// RFC-0024: a WAL whose entries would produce nesting segment
-    /// prefixes under the *current* extractor must be rejected during
-    /// replay rather than silently producing an inconsistent manifest.
-    ///
-    /// Open-time validation already rejects extractor reconfiguration
-    /// based on `name()`, so this test simulates the harder case: a
-    /// silent extractor *swap* — same `name()`, divergent
-    /// `prefix_len` logic — which slips past the open-time check and
-    /// must be caught at replay.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_wal_replay_rejects_nesting_segment_prefixes() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_wal_replay_rejects_nesting_segment_prefixes";
-
-        // Keep the memtable from auto-flushing so writes stay in the WAL
-        // and remain visible to replay on the next open.
-        let mut source_settings = test_db_options(0, 16 * 1024, None);
-        source_settings.flush_interval = None;
-
-        // Source uses the conforming fixed-3 extractor: every key
-        // produces a 3-byte prefix, no nesting, write-time check passes.
-        let source = Db::builder(path, object_store.clone())
-            .with_settings(source_settings)
-            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
-            .build()
-            .await
-            .unwrap();
-
-        // Two keys whose 3-byte prefixes are siblings under fixed-3 but
-        // *nest* under the swapped extractor: "abc-1" stays as "abc",
-        // "ab--1" becomes "ab" (a strict prefix of "abc").
-        let write_opts = WriteOptions {
-            await_durable: false,
-            ..Default::default()
-        };
-        for (key, value) in [(b"abc-1".as_slice(), b"v1"), (b"ab--1".as_slice(), b"v2")] {
-            source
-                .put_with_options(key, value, &PutOptions::default(), &write_opts)
-                .await
-                .unwrap();
-        }
-        // Force WAL durability without flushing the memtable to L0 —
-        // we want the entries replayed on next open, not absorbed into
-        // an L0 SST that would skip the replay path.
-        source
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-            .unwrap();
-        drop(source);
-
-        // Reopen with the aliased extractor: same `name()` ("fixed-3"),
-        // different logic. Open-time reconciliation passes, but replay
-        // recomputes prefixes under the new logic and must reject the
-        // resulting nest.
-        let result = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 16 * 1024, None))
-            .with_segment_extractor(Arc::new(test_utils::AliasedFixed3PrefixExtractor))
-            .build()
-            .await;
-        let err = match result {
-            Ok(_) => panic!("expected replay to reject nesting prefixes, got Ok"),
-            Err(e) => e,
-        };
-        assert!(
-            matches!(err.kind(), crate::error::ErrorKind::Invalid),
-            "expected Invalid error, got: {err:?}"
-        );
-        assert!(
-            err.to_string().contains("nest"),
-            "expected error to mention nesting, got: {err}"
-        );
     }
 
     /// RFC-0024: WAL replay rejects entries whose prefix under the
