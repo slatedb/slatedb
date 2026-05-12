@@ -86,6 +86,9 @@ MAX_WRITES_PER_WRITER = 3
 # readers verify that they only successfully observe objects above the boundary.
 MAX_READS_PER_READER = 3
 
+NUM_WRITERS = 2
+NUM_GCS = 2
+NUM_READERS = 1
 
 action Init:
     # Objects that currently exist in the object store.
@@ -105,11 +108,17 @@ action Init:
     # boundary-checked by a reader.
     _reads = {}
 
-    writer_a = Writer()
-    writer_b = Writer()
-    reader_a = Reader()
-    gc_a = GarbageCollector()
-    gc_b = GarbageCollector()
+    writers = bag()
+    for i in range(NUM_WRITERS):
+        writers.add(Writer())
+
+    readers = bag()
+    for i in range(NUM_READERS):
+        readers.add(Reader())
+
+    gcs = bag()
+    for i in range(NUM_GCS):
+        gcs.add(GarbageCollector())
 
 # Returns the most recently written sequence ID, or 0 if no objects exist.
 atomic func latest_sequence_id():
@@ -164,7 +173,7 @@ atomic func record_commit(id, epoch):
 #      ┌─────▼─────┐┌─────▼────┐┌─────────▼─────────┐
 #      │  Expired  ││  Fenced  ││  UnexpectedEpoch  │
 #      └───────────┘└──────────┘└───────────────────┘
-role Writer:
+symmetric role Writer:
     atomic action Init:
         # Epoch owned by this writer
         self.epoch = 0
@@ -254,7 +263,7 @@ role Writer:
 # whose IDs are at or behind that boundary. Splitting these steps lets the model
 # explore races where writers observe the boundary after creating an object but
 # before returning success.
-role GarbageCollector:
+symmetric role GarbageCollector:
     atomic action AdvanceBoundary:
         # Keep boundary < latest sequence ID
         latest = latest_sequence_id()
@@ -307,7 +316,7 @@ role GarbageCollector:
 # │┌─────────▼─────────┐ ┌───────────┐
 # └┤   CheckBoundary   ├─▶  Expired  │
 #  └───────────────────┘ └───────────┘
-role Reader:
+symmetric role Reader:
     atomic action Init:
         self.status = "ClaimId"
         # ID of the object to read.
@@ -345,10 +354,7 @@ role Reader:
 # -----------------------------------------------------------------------------
 
 always assertion NoUnexpectedEpoch:
-    return (
-        writer_a.status != "UnexpectedEpoch"
-        and writer_b.status != "UnexpectedEpoch"
-    )
+    return all([w.status != "UnexpectedEpoch" for w in writers])
 
 always assertion NoDuplicateCommit:
     for id in _commit_counts:
