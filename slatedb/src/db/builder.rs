@@ -402,6 +402,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 "invalid configuration: l0_flush_parallelism must be at least 1".into(),
             ));
         }
+        if self.settings.max_wal_flushes_before_l0_flush < 4096 {
+            return Err(crate::Error::invalid(
+                "invalid configuration: max_wal_flushes_before_l0_flush must be at least 4096"
+                    .into(),
+            ));
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -1749,6 +1755,32 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("l0_flush_parallelism must be at least 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_low_max_wal_flushes_before_l0_flush() {
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_low_max_wal_flushes_before_l0_flush",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            max_wal_flushes_before_l0_flush: 4095,
+            ..Settings::default()
+        })
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid max_wal_flushes_before_l0_flush to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        assert!(
+            err.to_string()
+                .contains("max_wal_flushes_before_l0_flush must be at least 4096"),
             "unexpected error: {err}"
         );
     }

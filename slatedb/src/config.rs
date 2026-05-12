@@ -675,7 +675,10 @@ pub struct Settings {
     /// The maximum number of WAL flushes that can occur before the active memtable is
     /// frozen and flushed to L0, regardless of memtable size.
     ///
-    /// This bounds the amount of WAL data that needs to be replayed on recovery: once
+    /// For databases with low write throughput, this can cause data to be available in
+    /// L0 SSTs sooner, making it accessible to readers.
+    ///
+    /// This also bounds the amount of WAL data that needs to be replayed on recovery: once
     /// this many WAL flushes have occurred since the last memtable freeze, the active
     /// memtable will be frozen even if it has not reached `l0_sst_size_bytes`.
     pub max_wal_flushes_before_l0_flush: u64,
