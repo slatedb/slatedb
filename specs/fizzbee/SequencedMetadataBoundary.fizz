@@ -8,7 +8,7 @@ options:
 # Run with:
 #
 # ```
-# fizz specs/gc-boundary/SequencedMetadataBoundary.fizz
+# fizz specs/fizzbee/SequencedMetadataBoundary.fizz
 # ```
 #
 # This spec models the GC boundary protocol for SlateDB's sequenced metadata

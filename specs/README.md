@@ -12,14 +12,14 @@ More about the tool and the instructions:
 Once installed from source and set the PATH, you can run with
 
 ```
-fizz specs/kvstore/KeyValueStore.fizz
-fizz specs/gc-boundary/SequencedMetadataBoundary.fizz
+fizz specs/fizzbee/KeyValueStore.fizz
+fizz specs/fizzbee/SequencedMetadataBoundary.fizz
 ```
 
 ## Specs
 
-- `kvstore/KeyValueStore.fizz`: basic write, flush, and read behavior.
-- `gc-boundary/SequencedMetadataBoundary.fizz`: proof model for the
+- `fizzbee/KeyValueStore.fizz`: basic write, flush, and read behavior.
+- `fizzbee/SequencedMetadataBoundary.fizz`: proof model for the
   bounded sequenced storage GC boundary protocol.
 
 ## FizzBee Agent Instructions
