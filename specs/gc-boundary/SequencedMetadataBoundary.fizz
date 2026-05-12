@@ -1,0 +1,424 @@
+---
+deadlock_detection: false
+options:
+    max_actions: 40
+    crash_on_yield: false
+---
+
+# Run with:
+#
+# ```
+# fizz specs/gc-boundary/SequencedMetadataBoundary.fizz
+# ```
+#
+# This spec models the GC boundary protocol for SlateDB's sequenced metadata
+# objects, as described by rfcs/0001-manifest.md and
+# rfcs/0026-garbage-collector-boundary.md.
+#
+# The real system stores metadata as immutable, monotonically numbered object
+# files such as:
+#
+# - manifest/00000000000000000012.manifest
+# - compactions/00000000000000000013.compactions
+#
+# Creating the next object with create-if-absent is the commit point for a
+# sequenced metadata update. The stale-writer bug covered by RFC 0026 happens
+# when a writer prepares ID N, stalls, another writer creates and supersedes N,
+# GC deletes N, and the stalled writer later creates N again. Plain
+# create-if-absent cannot remember that a deleted ID was already used.
+#
+# This model abstracts one sequenced metadata namespace. It is not specific to
+# manifests or compactions:
+#
+# - `objects` is the current object-store contents. The key is the sequenced
+#   object ID and the value is the writer epoch stored in that object's payload.
+#   For the manifest namespace, this payload is the manifest's `writer_epoch`.
+# - `boundary` is the durable GC boundary file. Writers may create IDs <=
+#   boundary, but they must not report them as successful.
+# - each `Writer` reads the latest object payload to claim the next epoch, writes
+#   the next sequence ID with create-if-absent, and then checks the boundary in a
+#   separate action. Splitting create from boundary check preserves the important
+#   race where GC can advance the boundary after create but before the writer
+#   returns success.
+# - each `GarbageCollector` first advances the boundary to a non-latest object
+#   ID, then may delete objects at or behind that boundary. Keeping the boundary
+#   below the latest object models the RFC rule that the latest metadata file is
+#   always retained.
+# - each `Reader` reads a random object ID and checks the boundary to verify
+#   whether the read was valid at the time of the read. If so, it marks the
+#   read as successful. The successful read count is ghost state that lets
+#   assertions verify that readers only successfully observe objects above the
+#   boundary.
+#
+# `WriteNext` and `CheckBoundary` are atomic actions because they model single
+# local protocol steps. If they were serial actions, FizzBee could yield between
+# internal statements and re-enter the same writer action, producing artifacts
+# such as a writer colliding with its own just-created object or recording the
+# same successful boundary check twice. The create and boundary check are still
+# separate actions, so the key GC interleaving remains modeled.
+#
+# The `_committed` and `_commit_counts` maps are ghost state: they are not part
+# of SlateDB's runtime protocol. They record IDs that passed the post-create
+# boundary check and were reported as successful, so assertions can distinguish
+# "object exists" from "writer returned success". Those can differ because a
+# writer may create an object and pause before checking the boundary.
+#
+# The assertions prove the protocol properties we care about:
+#
+# - no writer reaches the "same epoch" illegal state;
+# - no sequenced ID is reported successful more than once;
+# - live, unfenced object IDs remain contiguous above the boundary;
+# - acknowledged epochs are nondecreasing by sequence ID;
+# - the boundary is monotonic and never covers the latest retained object;
+# - deletes only remove IDs already covered by the boundary;
+# - the latest object is never deleted; and
+# - an ID can be reported successful only if both the pre-state and post-state
+#   boundary are below that ID.
+
+# Per-writer bound on successful object creations attempted in this model. This
+# is not a SlateDB protocol limit; it keeps the state space finite while still
+# allowing each writer to create multiple sequenced metadata objects and exercise
+# GC races between creates and boundary checks.
+MAX_WRITES_PER_WRITER = 3
+
+# Per-reader bound on successful reads attempted in this model. This is not a
+# SlateDB protocol limit; it keeps the state space finite while still allowing
+# readers verify that they only successfully observe objects above the boundary.
+MAX_READS_PER_READER = 3
+
+
+action Init:
+    # Objects that currently exist in the object store.
+    # Contains `id -> epoch`.
+    objects = {}
+
+    # Garbage collector boundary. Files <= this boundary
+    # are eligible for deletion.
+    boundary = 0
+
+    # Ghost state: sequenced IDs that have passed the post-create boundary
+    # check and have been reported as successful.
+    _committed = {}
+    _commit_counts = {}
+
+    # Ghost state: sequenced IDs that have been successfully read and
+    # boundary-checked by a reader.
+    _reads = {}
+
+    writer_a = Writer()
+    writer_b = Writer()
+    reader_a = Reader()
+    gc_a = GarbageCollector()
+    gc_b = GarbageCollector()
+
+# Returns the most recently written sequence ID, or 0 if no objects exist.
+atomic func latest_sequence_id():
+    if len(objects) == 0:
+        return 0
+    return max(objects.keys())
+
+# Returns the epoch of the most recently written sequence ID, or 0 if no
+# objects exist.
+atomic func latest_epoch():
+    if len(objects) == 0:
+        return 0
+    sid = latest_sequence_id()
+    return objects[sid]
+
+# Records that a writer reported success for `id` at `epoch`. This is not part
+# of the real protocol; it's ghost state that lets assertions check that
+# writers only report success for IDs that passed the boundary check and were
+# not already reported by another writer.
+atomic func record_commit(id, epoch):
+    _committed[id] = epoch
+    _commit_counts[id] = _commit_counts.get(id, 0) + 1
+
+
+# A `Writer` models one process attempting to append new sequenced metadata
+# objects to the shared object-store namespace. In SlateDB terms, this is the
+# role that creates files such as the next manifest or compaction metadata file.
+# The writer is intentionally stateful because the real protocol is not one
+# indivisible operation: it first chooses an epoch and sequence ID, then creates
+# the object, then checks whether GC advanced the boundary before it can report
+# success.
+#
+# Writer state transitions:
+#
+#            ┌───────────────────┐
+#            │       Init        │
+#            └─────────┬─────────┘
+#            ┌─────────▼─────────┐
+#           ┌▶    ClaimNextId    ◀┐
+#           │└─────────┬─────────┘│
+#           │┌─────────▼─────────┐│
+#           └┤    ClaimEpoch     ││
+#            └─────────┬─────────┘│
+#            ┌─────────▼─────────┐│
+# ┌──────────▶     WriteNext     ◀┼──────────┐
+# │          └─────────┬─────────┘│          │
+# │          ┌─────────┴──────────┤          │
+# │┌─────────▼─────────┐┌─────────▼─────────┐│
+# └┤   CheckBoundary   ││    WriteFailed    ├┘
+#  └─────────┬─────────┘└─────────┬─────────┘
+#            │            ┌───────┴───────┐
+#      ┌─────▼─────┐┌─────▼────┐┌─────────▼─────────┐
+#      │  Expired  ││  Fenced  ││  UnexpectedEpoch  │
+#      └───────────┘└──────────┘└───────────────────┘
+role Writer:
+    atomic action Init:
+        # Epoch owned by this writer
+        self.epoch = 0
+        # Next sequence file ID to write to
+        self.next_id = 0
+        # Counts writes (before boundary check)
+        self.writes = 0
+        self.status = "ClaimNextId"
+
+    atomic action ClaimNextId:
+        require self.status == "ClaimNextId"
+        sid = latest_sequence_id()
+        self.next_id = sid + 1
+        self.status = "ClaimEpoch"
+
+    atomic action ClaimEpoch:
+        require self.status == "ClaimEpoch"
+        if self.next_id == 1:
+            # Default to epoch 1 if we're writing the first object.
+            self.epoch = 1
+            self.status = "WriteNext"
+        else:
+            # Read the epoch from the previous object.
+            previous_id = self.next_id - 1
+            previous_epoch = objects.get(previous_id)
+            if previous_epoch == None:
+                # The object was GC'd. Retry with the next ID.
+                self.status = "ClaimNextId"
+            else:
+                # Advance the epoch +1 from the previous writer.
+                self.epoch = previous_epoch + 1
+                self.status = "WriteNext"
+
+    atomic action WriteNext:
+        require (
+            self.status == "WriteNext"
+            and self.writes < MAX_WRITES_PER_WRITER
+        )
+        success = self.write()
+        if success:
+            self.status = "CheckBoundary"
+        elif self.writes > 0:
+            self.status = "WriteFailed"
+        else:
+            # Write failed, but writer hasn't yet claimed an epoch.
+            # Reset epoch/sequence and try again.
+            self.status = "ClaimNextId"
+
+    atomic action WriteFailed:
+        require self.status == "WriteFailed"
+        # Writes > 0 means this writer has already written its fence entry.
+        latest_epoch = latest_epoch()
+        if self.epoch < latest_epoch:
+            self.status = "Fenced"
+        elif self.epoch == latest_epoch:
+            # Another writer wrote an epoch <= this writer's epoch.
+            # This should never happen.
+            self.status = "UnexpectedEpoch"
+        else:
+            # An older writer won this slot. Try the next one.
+            self.next_id = self.next_id + 1
+            self.status = "WriteNext"
+
+    atomic action CheckBoundary:
+        require self.status == "CheckBoundary"
+        if self.next_id <= boundary:
+            # Object was written before the boundary.
+            self.status = "Expired"
+        else:
+            # Write was a success! Advance to the next slot.
+            record_commit(self.next_id, self.epoch)
+            self.next_id = self.next_id + 1
+            self.status = "WriteNext"
+
+    atomic func write():
+        # If next_id is already in `objects`, this write does not succeed.
+        success = self.next_id not in objects.keys()
+        if success:
+            objects[self.next_id] = self.epoch
+            self.writes += 1
+        return success
+
+
+# A `GarbageCollector` models a process that makes old sequenced metadata
+# objects eligible for removal and then deletes them from object storage. The
+# protocol is two-phase: first persist a durable `boundary`, then remove objects
+# whose IDs are at or behind that boundary. Splitting these steps lets the model
+# explore races where writers observe the boundary after creating an object but
+# before returning success.
+role GarbageCollector:
+    atomic action AdvanceBoundary:
+        # Keep boundary < latest sequence ID
+        latest = latest_sequence_id()
+        candidates = [
+            id
+            for id in objects
+            if id < latest
+        ]
+        key = oneof candidates
+        boundary = max(boundary, key)
+
+    atomic action Delete:
+        candidates = [
+            id
+            for id in objects
+            if id <= boundary
+        ]
+        id = oneof candidates
+        objects.pop(id)
+
+# A `Reader` models a non-epoch owning process attempting to read the latest
+# sequenced metadata object from the shared object-store namespace and
+# verifying it was at least a valid object at the time of the read.
+#
+# Objects can still time out and get garbage collected after the read is
+# validated against the boundary. The post-read boundary check only verifies
+# that the object was valid at the time of the read. This still protects the
+# reader from the following race:
+# - w1 prepares manifest N, stalls
+# - r1 attempts to read manifest N
+# - w2 writes manifest N+1
+# - min_age passes
+# - gc marks boundary as N+1 and deletes N/N+1
+# - w1 write manifest N
+# - r1 successfully reads N
+# - w1 boundary conflict, error
+# - r1 serves invalid reads
+#
+# Reader state transitions:
+#
+#  ┌───────────────────┐
+#  │       Init        │
+#  └─────────┬─────────┘
+#  ┌─────────▼─────────┐
+# ┌▶      ClaimId      │
+# │└─────────┬─────────┘
+# │┌─────────▼─────────┐ ┌──────────────────────────┐
+# ││    ReadObject     ├─▶  ObjectGarbageCollected  │
+# │└─────────┬─────────┘ └──────────────────────────┘
+# │┌─────────▼─────────┐ ┌───────────┐
+# └┤   CheckBoundary   ├─▶  Expired  │
+#  └───────────────────┘ └───────────┘
+role Reader:
+    atomic action Init:
+        self.status = "ClaimId"
+        # ID of the object to read.
+        self.read_id = 0
+        # Successful reads count.
+        self.reads = 0
+
+    atomic action ClaimId:
+        require self.status == "ClaimId" and self.reads < MAX_READS_PER_READER
+        sid = oneof objects.keys()
+        self.read_id = sid
+        self.status = "ReadObject"
+
+    atomic action ReadObject:
+        require self.status == "ReadObject"
+        if objects.get(self.read_id) == None:
+            self.status = "ObjectGarbageCollected"
+        else:
+            self.status = "CheckBoundary"
+
+    atomic action CheckBoundary:
+        require self.status == "CheckBoundary"
+        if self.read_id <= boundary:
+            # Object was written before the boundary.
+            self.status = "Expired"
+        else:
+            # Read was a success! Advance to the next slot.
+            _reads[self.read_id] = _reads.get(self.read_id, 0) + 1
+            self.reads += 1
+            self.status = "ClaimId"
+
+
+# -----------------------------------------------------------------------------
+# Assertions
+# -----------------------------------------------------------------------------
+
+always assertion NoUnexpectedEpoch:
+    return (
+        writer_a.status != "UnexpectedEpoch"
+        and writer_b.status != "UnexpectedEpoch"
+    )
+
+always assertion NoDuplicateCommit:
+    for id in _commit_counts:
+        if _commit_counts[id] != 1:
+            return False
+    return True
+
+always assertion UnfencedLiveHistoryIsContiguous:
+    if len(objects) == 0:
+        return True
+    latest = max(objects.keys())
+    for id in range(boundary + 1, latest + 1):
+        if id not in objects.keys():
+            return False
+    return True
+
+always assertion CommittedEpochsAreNonDecreasing:
+    if len(_committed) == 0:
+        return True
+    latest = max(_committed.keys())
+    prev_epoch = 0
+    for id in range(1, latest + 1):
+        if id in _committed.keys():
+            epoch = _committed[id]
+            if epoch < prev_epoch:
+                return False
+            prev_epoch = epoch
+    return True
+
+always assertion LatestObjectIsNotBehindBoundary:
+    if len(objects) == 0:
+        return True
+    return max(objects.keys()) > boundary
+
+transition assertion BoundaryIsMonotonic(before, after):
+    return after.boundary >= before.boundary
+
+transition assertion DeletesOnlyBehindBoundary(before, after):
+    for id in before.objects:
+        if id not in after.objects.keys() and before.boundary < id:
+            return False
+    return True
+
+transition assertion LatestObjectIsNeverDeleted(before, after):
+    if len(before.objects) == 0:
+        return True
+    latest = max(before.objects.keys())
+    return latest in after.objects.keys()
+
+transition assertion CommitsOnlyAboveBoundary(before, after):
+    for id in after._commit_counts:
+        before_count = before._commit_counts.get(id, 0)
+        if after._commit_counts[id] > before_count:
+            if before.boundary >= id or after.boundary >= id:
+                return False
+    return True
+
+transition assertion CommittedHistoryIsDurable(before, after):
+    for id in before._committed:
+        if id not in after._committed.keys():
+            return False
+        if after._committed[id] != before._committed[id]:
+            return False
+    return True
+
+transition assertion ReadsOnlyAboveBoundary(before, after):
+    for id in after._reads:
+        # If a read was marked as successful during this transition
+        if after._reads[id] > before._reads.get(id, 0):
+            # Verify it was only successful for IDs above the boundary.
+            if before.boundary >= id or after.boundary >= id:
+                return False
+    return True
