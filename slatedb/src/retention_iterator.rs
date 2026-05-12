@@ -12,15 +12,19 @@ use crate::types::{RowEntry, ValueDeletable};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::CounterFn;
 
-/// Counter for expired value entries rewritten as tombstones by [`RetentionIterator`].
+/// Counters for expired entries purged by [`RetentionIterator`], split by
+/// `entry_type` label.
 ///
-/// A user-written `CompactionFilter` can't observe this rewrite — the tombstone
-/// reaches the filter with `expire_ts: None`, indistinguishable from one the
-/// user wrote — so the counter surfaces it instead. Expired `Merge` entries
-/// are skipped silently and are not counted.
+/// - `entry_type="value"`: expired value entries rewritten as tombstones. A
+///   user-written `CompactionFilter` can't observe the rewrite (the tombstone
+///   reaches the filter with `expire_ts: None`, indistinguishable from one the
+///   user wrote), so the counter surfaces it.
+/// - `entry_type="merge"`: expired merge entries skipped by the iterator
+///   (no tombstone is written).
 #[derive(Clone)]
 pub(crate) struct RetentionMetrics {
-    pub(crate) expired_entries: Arc<dyn CounterFn>,
+    pub(crate) expired_entries_purged_value: Arc<dyn CounterFn>,
+    pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
 }
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
@@ -106,6 +110,9 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
                     if is_merge {
                         // just skip expired merge entries rather than write a tombstone
                         // as earlier merges may still be un-expired
+                        if let Some(m) = metrics {
+                            m.expired_entries_purged_merge.increment(1);
+                        }
                         continue;
                     }
                     // for values, insert a tombstone instead of just filtering out the
@@ -113,7 +120,7 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
                     // an older version of the KV pair that has a larger TTL in
                     // a lower level of the LSM tree
                     if let Some(m) = metrics {
-                        m.expired_entries.increment(1);
+                        m.expired_entries_purged_value.increment(1);
                     }
                     RowEntry {
                         key: entry.key,
@@ -1169,21 +1176,45 @@ mod tests {
     #[cfg(feature = "test-util")]
     mod expired_entries_metrics {
         use super::*;
-        use crate::compactor::stats::EXPIRED_ENTRIES;
+        use crate::compactor::stats::{
+            ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE, ENTRY_TYPE_VALUE, EXPIRED_ENTRIES_PURGED,
+        };
         use crate::test_utils::TestIterator;
         use slatedb_common::clock::MockSystemClock;
-        use slatedb_common::metrics::{lookup_metric, test_recorder_helper};
+        use slatedb_common::metrics::{
+            lookup_metric_with_labels, test_recorder_helper, DefaultMetricsRecorder,
+        };
         use std::collections::BTreeMap;
 
-        fn build_metrics() -> (
-            std::sync::Arc<slatedb_common::metrics::DefaultMetricsRecorder>,
-            RetentionMetrics,
-        ) {
+        fn build_metrics() -> (Arc<DefaultMetricsRecorder>, RetentionMetrics) {
             let (recorder, helper) = test_recorder_helper();
             let metrics = RetentionMetrics {
-                expired_entries: helper.counter(EXPIRED_ENTRIES).register(),
+                expired_entries_purged_value: helper
+                    .counter(EXPIRED_ENTRIES_PURGED)
+                    .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_VALUE)])
+                    .register(),
+                expired_entries_purged_merge: helper
+                    .counter(EXPIRED_ENTRIES_PURGED)
+                    .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE)])
+                    .register(),
             };
             (recorder, metrics)
+        }
+
+        fn value_count(recorder: &DefaultMetricsRecorder) -> Option<i64> {
+            lookup_metric_with_labels(
+                recorder,
+                EXPIRED_ENTRIES_PURGED,
+                &[(ENTRY_TYPE_LABEL, ENTRY_TYPE_VALUE)],
+            )
+        }
+
+        fn merge_count(recorder: &DefaultMetricsRecorder) -> Option<i64> {
+            lookup_metric_with_labels(
+                recorder,
+                EXPIRED_ENTRIES_PURGED,
+                &[(ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE)],
+            )
         }
 
         #[test]
@@ -1215,11 +1246,12 @@ mod tests {
                 only.expire_ts.is_none(),
                 "tombstone should have expire_ts cleared"
             );
-            assert_eq!(lookup_metric(recorder.as_ref(), EXPIRED_ENTRIES), Some(1));
+            assert_eq!(value_count(recorder.as_ref()), Some(1));
+            assert_eq!(merge_count(recorder.as_ref()), Some(0));
         }
 
         #[test]
-        fn apply_retention_filter_no_increment_for_expired_merge() {
+        fn apply_retention_filter_increments_for_expired_merge() {
             let (recorder, metrics) = build_metrics();
             let entry = RowEntry::new_merge(b"k", b"v", 1).with_expire_ts(500);
             let mut versions = BTreeMap::new();
@@ -1237,11 +1269,8 @@ mod tests {
             );
 
             assert!(filtered.is_empty(), "expired merge entry should be dropped");
-            assert_eq!(
-                lookup_metric(recorder.as_ref(), EXPIRED_ENTRIES),
-                Some(0),
-                "merge drops must not increment the counter"
-            );
+            assert_eq!(merge_count(recorder.as_ref()), Some(1));
+            assert_eq!(value_count(recorder.as_ref()), Some(0));
         }
 
         #[test]
@@ -1263,7 +1292,8 @@ mod tests {
             );
 
             assert_eq!(filtered.len(), 1);
-            assert_eq!(lookup_metric(recorder.as_ref(), EXPIRED_ENTRIES), Some(0));
+            assert_eq!(value_count(recorder.as_ref()), Some(0));
+            assert_eq!(merge_count(recorder.as_ref()), Some(0));
         }
 
         #[test]
