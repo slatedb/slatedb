@@ -824,6 +824,12 @@ impl VersionedManifest {
         self.manifest.core.wal_object_store_uri.as_deref()
     }
 
+    /// Returns the persisted segment extractor name (RFC-0024), if any.
+    /// `None` means the database was created without a segment extractor.
+    pub fn segment_extractor_name(&self) -> Option<&str> {
+        self.manifest.core.segment_extractor_name.as_deref()
+    }
+
     pub(crate) fn core(&self) -> &ManifestCore {
         &self.manifest.core
     }
