@@ -1875,6 +1875,28 @@ mod tests {
     }
 
     #[test]
+    fn test_should_roundtrip_v2_l0_only_compaction_destination() {
+        // Regression guard for issue #1652: an L0-only tiered compaction has
+        // no SR inputs, so the pre-fix decoder inferred destination=0 and
+        // dropped any real destination N>0 across restart. With the explicit
+        // `destination` field on the v2 wire format, the destination must
+        // round-trip through encode/decode.
+        let compaction = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 7),
+        );
+        let mut compactions = Compactions::new(1);
+        compactions.insert(compaction.clone());
+
+        let codec = FlatBufferCompactionsCodec {};
+        let bytes = codec.encode(&compactions);
+        let decoded = codec.decode(&bytes).expect("failed to decode compactions");
+
+        let decoded_compaction = decoded.get(&compaction.id()).expect("missing compaction");
+        assert_eq!(decoded_compaction.spec().destination(), Some(7));
+    }
+
+    #[test]
     fn test_should_round_trip_compaction_statuses() {
         let statuses = [
             CompactionStatus::Submitted,
