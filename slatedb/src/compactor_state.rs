@@ -208,19 +208,14 @@ impl Display for CompactionSpec {
                 } else {
                     write!(
                         f,
-                        "[seg={}] {:?} -> SR({})",
-                        String::from_utf8_lossy(segment),
-                        displayed_sources,
-                        spec.destination,
+                        "[seg={:?}] {:?} -> SR({})",
+                        segment, displayed_sources, spec.destination,
                     )
                 }
             }
-            CompactionSpec::DrainSegment(_) => write!(
-                f,
-                "[seg={}] drain {:?}",
-                String::from_utf8_lossy(segment),
-                displayed_sources,
-            ),
+            CompactionSpec::DrainSegment(_) => {
+                write!(f, "[seg={:?}] drain {:?}", segment, displayed_sources)
+            }
         }
     }
 }
