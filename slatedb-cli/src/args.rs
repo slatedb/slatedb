@@ -178,9 +178,16 @@ pub(crate) enum CliCommands {
 
         /// Submit a full JSON-encoded compaction request.
         ///
+        /// The `segment` field is a byte array — an empty array `[]` targets
+        /// the compatibility-encoded root tree (the only valid segment on an
+        /// unsegmented DB); a non-empty array names a segment by prefix.
+        ///
         /// ## Examples
         /// ```json
-        /// "Full"
+        /// {"Full":{"segment":[]}}
+        /// ```
+        /// ```json
+        /// {"Full":{"segment":[104,111,117,114,61,49,50,47]}}
         /// ```
         /// ```json
         /// {"Spec":{"sources":[{"SortedRun":3},{"Sst":"01H8FQ5K6K7QK6EJ0E9HNF1J2B"}],"destination":7}}
