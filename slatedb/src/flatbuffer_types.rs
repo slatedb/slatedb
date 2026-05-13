@@ -158,7 +158,16 @@ pub(crate) struct FlatBufferManifestCodec {}
 
 impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
-        Self::create_from_manifest_v1(manifest)
+        // RFC-0024 lazy V2 bump: the V1 schema has no `segments` or
+        // `segment_extractor_name` fields, so writing segmented state
+        // through the V1 encoder would silently drop it. Pick V2 the
+        // moment any segmented state is present; databases that never
+        // configure an extractor keep writing V1.
+        if Self::requires_v2(manifest) {
+            Self::create_from_manifest(manifest)
+        } else {
+            Self::create_from_manifest_v1(manifest)
+        }
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
@@ -511,11 +520,16 @@ impl FlatBufferManifestCodec {
         db_fb_builder.create_manifest_v1(manifest)
     }
 
-    #[allow(unused)]
     pub(crate) fn create_from_manifest(manifest: &Manifest) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_manifest(manifest)
+    }
+
+    /// Whether `manifest` carries state that V1 cannot represent:
+    /// a configured segment extractor, or any named segment.
+    fn requires_v2(manifest: &Manifest) -> bool {
+        manifest.core.segment_extractor_name.is_some() || !manifest.core.segments.is_empty()
     }
 }
 

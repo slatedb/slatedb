@@ -458,6 +458,129 @@ impl ManifestCore {
         })
     }
 
+    /// Compare a configured WAL-store URI against the manifest's
+    /// persisted value. `ManifestV2` drops `wal_object_store_uri`
+    /// entirely (commit 52cead43, PR #1473) and always decodes it as
+    /// `None`, so the check is a no-op for V2 manifests; on `ManifestV1`
+    /// it enforces that the user did not silently swap a separate WAL
+    /// store on or off across opens.
+    pub(crate) fn validate_wal_object_store_uri(
+        &self,
+        configured: Option<&str>,
+    ) -> Result<(), SlateDBError> {
+        if let Some(persisted) = self.wal_object_store_uri.as_deref() {
+            if Some(persisted) != configured {
+                return Err(SlateDBError::WalStoreReconfigurationError);
+            }
+        }
+        Ok(())
+    }
+
+    /// RFC-0024 open-time reconciliation. Compares the configured
+    /// extractor against the manifest's persisted state and rejects any
+    /// reconfiguration that could route data inconsistently.
+    ///
+    /// Rules:
+    ///
+    /// - both `None` → fine.
+    /// - both `Some` and `name()` matches → fine; additionally every
+    ///   existing segment prefix must satisfy
+    ///   `prefix_len(Prefix(p)) == Some(p.len())` so the current
+    ///   extractor still claims the persisted prefixes.
+    /// - persisted `Some`, configured `None` → reject (extractor was
+    ///   removed; existing data is no longer addressable).
+    /// - persisted `None`, configured `Some` → reject (extractor was
+    ///   added to an existing database; pre-existing keys would route
+    ///   wrong). Caller is responsible for skipping this call when
+    ///   creating a fresh manifest.
+    /// - both `Some` but `name()` differs → reject.
+    pub(crate) fn validate_extractor_configuration(
+        &self,
+        configured: Option<&dyn crate::prefix_extractor::PrefixExtractor>,
+    ) -> Result<(), SlateDBError> {
+        let persisted = self.segment_extractor_name.as_deref();
+        let configured_name = configured.map(|e| e.name());
+        match (persisted, configured_name) {
+            (None, None) => Ok(()),
+            (Some(p), Some(c)) if p == c => self.validate_segment_prefixes_recognized(
+                configured.expect("configured extractor present"),
+            ),
+            _ => Err(SlateDBError::SegmentExtractorMismatch {
+                persisted: persisted.map(str::to_string),
+                configured: configured_name.map(str::to_string),
+            }),
+        }
+    }
+
+    /// For each entry in `segments`, verify that `extractor` recognizes
+    /// the prefix as a complete segment boundary
+    /// (`prefix_len(Prefix(p)) == Some(p.len())`). A failure means the
+    /// extractor's logic has shifted — the same `name()`, but it would
+    /// no longer assign `p`-keys to the segment they currently live in.
+    fn validate_segment_prefixes_recognized(
+        &self,
+        extractor: &dyn crate::prefix_extractor::PrefixExtractor,
+    ) -> Result<(), SlateDBError> {
+        for segment in &self.segments {
+            let n = extractor.prefix_len(&crate::prefix_extractor::PrefixTarget::Prefix(
+                segment.prefix.clone(),
+            ));
+            if n != Some(segment.prefix.len()) {
+                return Err(SlateDBError::SegmentPrefixNotRecognized {
+                    prefix: segment.prefix.clone(),
+                    extractor: extractor.name().to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify that `candidate` could join the segment set without violating
+    /// the antichain invariant. Returns `Ok` if `candidate` matches an
+    /// existing segment exactly or has no nesting neighbor in `segments`;
+    /// otherwise returns [`SlateDBError::InvalidSegmentPrefix`].
+    ///
+    /// Used at write time (RFC-0024 route-consistency) and from
+    /// [`Self::maybe_insert_tree`]. Cheap — one binary search plus two
+    /// `starts_with` comparisons against the sort-order neighbors.
+    pub(crate) fn check_segment_prefix_antichain(
+        &self,
+        candidate: &[u8],
+    ) -> Result<(), SlateDBError> {
+        match self
+            .segments
+            .binary_search_by(|s| s.prefix.as_ref().cmp(candidate))
+        {
+            Ok(_) => Ok(()),
+            Err(idx) => {
+                // Sort-order neighbors are the only candidates for nesting:
+                // by induction the existing list is already an antichain, so
+                // any nest with `candidate` must involve an element
+                // immediately less than or greater than it.
+                if let Some(succ) = self.segments.get(idx) {
+                    // succ.prefix > candidate; nested iff succ extends candidate.
+                    if succ.prefix.starts_with(candidate) {
+                        return Err(SlateDBError::InvalidSegmentPrefix {
+                            prefix: Bytes::copy_from_slice(candidate),
+                            conflict: succ.prefix.clone(),
+                        });
+                    }
+                }
+                if idx > 0 {
+                    let pred = &self.segments[idx - 1];
+                    // pred.prefix < candidate; nested iff candidate extends pred.
+                    if candidate.starts_with(pred.prefix.as_ref()) {
+                        return Err(SlateDBError::InvalidSegmentPrefix {
+                            prefix: Bytes::copy_from_slice(candidate),
+                            conflict: pred.prefix.clone(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Return a mutable reference to the LSM tree of the segment with the
     /// given `prefix`, inserting an empty entry at the sorted position if
     /// the segment does not yet exist. Preserves the `segments` ascending-
@@ -466,33 +589,11 @@ impl ManifestCore {
     pub(crate) fn maybe_insert_tree(
         &mut self,
         prefix: &Bytes,
-    ) -> Result<&mut LsmTreeState, crate::error::SlateDBError> {
+    ) -> Result<&mut LsmTreeState, SlateDBError> {
         match self.segments.binary_search_by(|s| s.prefix.cmp(prefix)) {
             Ok(idx) => Ok(&mut self.segments[idx].tree),
             Err(idx) => {
-                // Sort-order neighbors are the only candidates for nesting:
-                // by induction the existing list is already an antichain, so
-                // any nest with `prefix` must involve an element
-                // immediately less than or greater than it.
-                if let Some(succ) = self.segments.get(idx) {
-                    // succ.prefix > prefix; nested iff succ extends prefix.
-                    if succ.prefix.starts_with(prefix.as_ref()) {
-                        return Err(crate::error::SlateDBError::InvalidSegmentPrefix {
-                            prefix: prefix.clone(),
-                            conflict: succ.prefix.clone(),
-                        });
-                    }
-                }
-                if idx > 0 {
-                    let pred = &self.segments[idx - 1];
-                    // pred.prefix < prefix; nested iff prefix extends pred.
-                    if prefix.starts_with(pred.prefix.as_ref()) {
-                        return Err(crate::error::SlateDBError::InvalidSegmentPrefix {
-                            prefix: prefix.clone(),
-                            conflict: pred.prefix.clone(),
-                        });
-                    }
-                }
+                self.check_segment_prefix_antichain(prefix.as_ref())?;
                 self.segments.insert(
                     idx,
                     Segment {
@@ -1893,6 +1994,50 @@ mod tests {
         // Empty prefix is a strict prefix of every non-empty prefix.
         let err = core.maybe_insert_tree(&Bytes::new()).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidSegmentPrefix { .. }));
+    }
+
+    #[test]
+    fn check_segment_prefix_antichain_accepts_exact_and_disjoint() {
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"a")).unwrap();
+        core.maybe_insert_tree(&Bytes::from_static(b"c")).unwrap();
+        // Exact match: routing into an existing segment is fine.
+        core.check_segment_prefix_antichain(b"a").unwrap();
+        // Disjoint sibling between a and c.
+        core.check_segment_prefix_antichain(b"b").unwrap();
+        // Disjoint past the tail.
+        core.check_segment_prefix_antichain(b"d").unwrap();
+    }
+
+    #[test]
+    fn check_segment_prefix_antichain_rejects_descendant_and_ancestor() {
+        use crate::error::SlateDBError;
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"abc")).unwrap();
+        let err = core.check_segment_prefix_antichain(b"abcd").unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::InvalidSegmentPrefix { ref prefix, ref conflict }
+                if prefix.as_ref() == b"abcd" && conflict.as_ref() == b"abc"
+        ));
+        let err = core.check_segment_prefix_antichain(b"ab").unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::InvalidSegmentPrefix { ref prefix, ref conflict }
+                if prefix.as_ref() == b"ab" && conflict.as_ref() == b"abc"
+        ));
+    }
+
+    #[test]
+    fn check_segment_prefix_antichain_does_not_mutate_segments() {
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"a")).unwrap();
+        let before = core.segments.clone();
+        // A passing check must not alter state.
+        core.check_segment_prefix_antichain(b"b").unwrap();
+        // Neither must a failing one.
+        let _ = core.check_segment_prefix_antichain(b"abc");
+        assert_eq!(core.segments, before);
     }
 
     /// Simulator-based protocol check: drive a random interleaving of writer

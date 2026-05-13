@@ -1027,6 +1027,14 @@ pub mod stats {
         compactor_stat_name!("total_bytes_being_compacted");
     pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
         compactor_stat_name!("total_throughput_bytes_per_sec");
+    pub const EXPIRED_ENTRIES_PURGED: &str = compactor_stat_name!("expired_entries_purged");
+    pub const EXPIRED_ENTRIES_PURGED_DESCRIPTION: &str =
+        "Count of expired entries purged by the RetentionIterator. \
+         `entry_type=\"value\"` counts expired value entries rewritten as tombstones; \
+         `entry_type=\"merge\"` counts expired merge entries dropped without a tombstone.";
+    pub const ENTRY_TYPE_LABEL: &str = "entry_type";
+    pub const ENTRY_TYPE_VALUE: &str = "value";
+    pub const ENTRY_TYPE_MERGE: &str = "merge";
 
     pub(crate) struct CompactionStats {
         pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
@@ -1036,6 +1044,8 @@ pub mod stats {
         pub(crate) total_bytes_being_compacted: Arc<dyn GaugeFn>,
         pub(crate) total_throughput: Arc<dyn GaugeFn>,
         pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
+        pub(crate) expired_entries_purged_value: Arc<dyn CounterFn>,
+        pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1052,6 +1062,23 @@ pub mod stats {
                     .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_COMPACT_PATH)])
                     .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
                     .register(),
+                expired_entries_purged_value: recorder
+                    .counter(EXPIRED_ENTRIES_PURGED)
+                    .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_VALUE)])
+                    .description(EXPIRED_ENTRIES_PURGED_DESCRIPTION)
+                    .register(),
+                expired_entries_purged_merge: recorder
+                    .counter(EXPIRED_ENTRIES_PURGED)
+                    .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE)])
+                    .description(EXPIRED_ENTRIES_PURGED_DESCRIPTION)
+                    .register(),
+            }
+        }
+
+        pub(crate) fn retention_metrics(&self) -> crate::retention_iterator::RetentionMetrics {
+            crate::retention_iterator::RetentionMetrics {
+                expired_entries_purged_value: self.expired_entries_purged_value.clone(),
+                expired_entries_purged_merge: self.expired_entries_purged_merge.clone(),
             }
         }
     }

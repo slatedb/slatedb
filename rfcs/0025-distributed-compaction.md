@@ -230,15 +230,14 @@ Workers claim up to `max_concurrent_compactions` jobs at a time, limiting the nu
 
 1. On each output SST write, piggyback `last_heartbeat_ms = now()` onto the RFC-0013 progress-persistence write to `.compactions`.
 2. Additionally, after every `heartbeat_bytes` bytes processed: if `now() - last_heartbeat_ms >= heartbeat_min_interval_ms`, write updated `.compactions` with `last_heartbeat_ms = now()` for all `Running` jobs owned by this worker. This ties liveness directly to compaction throughput. A degraded machine that is alive but slow will miss the threshold and be reclaimed.
-3. On `AlreadyExists`: re-read latest and retry the write.
-4. Reset `bytes_since_last_heartbeat = 0` after a successful heartbeat write.
+3. On `AlreadyExists`: re-read latest. If the compaction is now `Submitted` or claimed by another `worker_id`, the worker has lost the assignment: discard local state for that compaction, abort execution, and return to the poll/claim loop. Otherwise retry the write.
 
 Polls do not emit heartbeats. Liveness is driven entirely by compaction progress.
 
 **Failure Detection Protocol** (coordinator):
 
 1. On each coordinator poll tick, read latest `.compactions`.
-2. For each `Running` compaction where `now() - max(last_heartbeat_ms, coordinator_start_time_ms) > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`. The `coordinator_start_time_ms` floor (captured in memory when the coordinator boots, not persisted) gives surviving workers one full timeout window after a coordinator restart to emit a heartbeat, preventing spurious reclaim due to clock skew or boot delay. After every worker has heartbeated at least once post-restart, the `max` is a no-op. This avoids destroying in-flight work on healthy workers that survived the coordinator restart.
+2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
 3. If any compactions were reclaimed in step 2, write updated state via `write_compactions_safely()`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator`.
 4. On `AlreadyExists`: re-read latest and retry from step 1.
 
@@ -543,7 +542,7 @@ Use gossip to distribute jobs directly.
 
 Routing compactions to specific workers or worker classes (e.g. L0 jobs to an embedded worker, major compactions to a beefy short-lived node). The claim protocol in this RFC is designed so that selectivity can be added entirely on the worker side without coordinator or schema changes: a worker can filter `Submitted` entries by `CompactionSpec` properties (level, input bytes, etc.) before attempting a claim. Common shapes worth exploring:
 
-- **L0 affinity:** embedded workers preferentially claim L0 jobs to keep flush-side latency low; remote workers handle larger compactions.
+- **L0 affinity:** embedded workers preferentially claim L0 jobs to keep flush-side latency low; remote workers handle larger compactions. Naively prioritizing L0 jobs interacts with `max_concurrent_compactions`: a single worker could greedily claim every available L0 job, bottlenecking them on one worker's CPU/IO rather than spreading them across the pool. In practice we expect only one or two L0 compactions outstanding at a time, so simple prioritization is likely fine; a pluggable work-scheduling trait is a natural extension if fairer policies are ever needed.
 - **Size-class pools:** small jobs go to long-lived workers; large major compactions go to a separate pool of beefy short-lived nodes that can scale to zero between jobs.
 
 ### Multi-DB workers
