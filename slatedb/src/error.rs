@@ -82,6 +82,9 @@ pub(crate) enum SlateDBError {
     #[error("segment prefix {prefix:?} would nest with existing segment {conflict:?}")]
     InvalidSegmentPrefix { prefix: Bytes, conflict: Bytes },
 
+    #[error("recency scan prefix spans multiple segments, which is unsupported")]
+    RecencyScanPrefixSpansMultipleSegments,
+
     #[error(
         "segment extractor configuration mismatch (persisted: {persisted:?}, \
          configured: {configured:?})"
@@ -566,6 +569,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
             SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
+            SlateDBError::RecencyScanPrefixSpansMultipleSegments => Error::invalid(msg),
             SlateDBError::SegmentExtractorMismatch { .. } => Error::invalid(msg),
             SlateDBError::SegmentPrefixNotRecognized { .. } => Error::invalid(msg),
             SlateDBError::EmptySegmentPrefix { .. } => Error::invalid(msg),

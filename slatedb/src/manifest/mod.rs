@@ -128,12 +128,39 @@ impl LsmTreeState {
 /// LSM tree. Segments share the manifest-level WAL state and SST identity
 /// counter with the unsegmented tree.
 #[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct Segment {
+pub struct Segment {
     /// The segment's key prefix.
-    pub prefix: Bytes,
+    pub(crate) prefix: Bytes,
 
     /// LSM state for this segment.
-    pub tree: LsmTreeState,
+    pub(crate) tree: LsmTreeState,
+}
+
+impl Segment {
+    /// The segment's key prefix.
+    pub fn prefix(&self) -> &Bytes {
+        &self.prefix
+    }
+
+    /// The L0 SST views in this segment.
+    pub fn l0(&self) -> &VecDeque<SsTableView> {
+        &self.tree.l0
+    }
+
+    /// The compacted sorted runs in this segment.
+    pub fn compacted(&self) -> &Vec<SortedRun> {
+        &self.tree.compacted
+    }
+
+    /// The last compacted L0 SST view ID, if any.
+    pub fn last_compacted_l0_sst_view_id(&self) -> Option<ulid::Ulid> {
+        self.tree.last_compacted_l0_sst_view_id
+    }
+
+    /// The last compacted L0 SST ID, if any.
+    pub fn last_compacted_l0_sst_id(&self) -> Option<ulid::Ulid> {
+        self.tree.last_compacted_l0_sst_id
+    }
 }
 
 /// Compactor-side segment merge: combine the writer's segments (`writer`)
@@ -799,6 +826,29 @@ impl VersionedManifest {
 
     pub(crate) fn core(&self) -> &ManifestCore {
         &self.manifest.core
+    }
+
+    /// The named segments configured in this manifest (RFC-0024), in prefix
+    /// order. Empty when no segment extractor is configured. The unsegmented
+    /// default tree is accessed via [`Self::l0`] / [`Self::compacted`] /
+    /// [`Self::last_compacted_l0_sst_view_id`] / [`Self::last_compacted_l0_sst_id`];
+    /// when segments are configured the default tree is empty by construction
+    /// (writes route only to segments, and the extractor cannot return an
+    /// empty prefix).
+    pub fn segments(&self) -> &[Segment] {
+        &self.manifest.core.segments
+    }
+
+    /// Look up a single named segment by exact prefix match. Returns `None`
+    /// if no segment with that prefix exists.
+    pub fn segment(&self, prefix: &[u8]) -> Option<&Segment> {
+        let idx = self
+            .manifest
+            .core
+            .segments
+            .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
+            .ok()?;
+        Some(&self.manifest.core.segments[idx])
     }
 }
 
@@ -4133,5 +4183,49 @@ mod tests {
                 .any(|db| db.sst_ids.contains(&l0_sst)),
             "external_db with segment-resident SST must be retained after projection"
         );
+    }
+
+    fn manifest_with_segments(prefixes: &[&[u8]]) -> super::VersionedManifest {
+        let mut core = ManifestCore::new();
+        if !prefixes.is_empty() {
+            core.segment_extractor_name = Some("hour-bucket".to_string());
+            core.segments = prefixes
+                .iter()
+                .map(|p| Segment {
+                    prefix: Bytes::copy_from_slice(p),
+                    tree: LsmTreeState::default(),
+                })
+                .collect();
+        }
+        super::VersionedManifest::from_manifest(1, Manifest::initial(core))
+    }
+
+    #[test]
+    fn test_versioned_manifest_segments_empty_when_unconfigured() {
+        let manifest = manifest_with_segments(&[]);
+        assert!(manifest.segments().is_empty());
+        assert!(manifest.segment(b"anything").is_none());
+    }
+
+    #[test]
+    fn test_versioned_manifest_segments_returns_in_prefix_order() {
+        let manifest = manifest_with_segments(&[b"ts/2026-03-09/14/", b"ts/2026-03-09/15/"]);
+        let segments = manifest.segments();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].prefix().as_ref(), b"ts/2026-03-09/14/");
+        assert_eq!(segments[1].prefix().as_ref(), b"ts/2026-03-09/15/");
+    }
+
+    #[test]
+    fn test_versioned_manifest_segment_lookup_requires_exact_match() {
+        let manifest = manifest_with_segments(&[b"ts/2026-03-09/14/"]);
+        // Exact match resolves.
+        assert!(manifest.segment(b"ts/2026-03-09/14/").is_some());
+        // Strict prefix of the segment must not match.
+        assert!(manifest.segment(b"ts/2026-").is_none());
+        // Key extending the segment's prefix must not match either.
+        assert!(manifest.segment(b"ts/2026-03-09/14/series-7").is_none());
+        // Empty prefix is not a wildcard.
+        assert!(manifest.segment(b"").is_none());
     }
 }

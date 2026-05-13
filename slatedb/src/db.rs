@@ -51,7 +51,7 @@ use crate::config::{
     FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
     WriteOptions,
 };
-use crate::db_iter::DbIterator;
+use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -279,6 +279,18 @@ impl DbInner {
                     prefix: Some(prefix),
                 },
             )
+            .await
+    }
+
+    pub(crate) async fn scan_prefix_by_recency_with_options(
+        &self,
+        prefix: Bytes,
+        options: &ScanOptions,
+    ) -> Result<DbRecencyIterator, SlateDBError> {
+        self.check_closed()?;
+        let db_state = self.state.read().view();
+        self.reader
+            .scan_prefix_by_recency_with_options(prefix, options, &db_state)
             .await
     }
 
@@ -1160,6 +1172,185 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Scan keys that share `prefix`, walking sources newest-first.
+    ///
+    /// **Warning:** this is a low-level, unopinionated iterator. It does
+    /// **no** merging, **no** deduping, and **no** interpretation of
+    /// entries across sources, unlike [`Self::scan_prefix`]. The API
+    /// makes no assumptions about what duplicates, tombstones, or merge
+    /// operands should mean; every such decision is left to the caller.
+    ///
+    /// Within each source, entries are emitted in the order requested by
+    /// `options.order`: ascending (the default) or descending. Across
+    /// sources, the walk is always newest-first, independent of
+    /// `options.order`. Each source restarts its own scan at its own
+    /// first matching key for that order, so the global emit sequence is
+    /// not a single sorted key stream and the within-source key order
+    /// resets at every source boundary. The same user key can appear
+    /// multiple times, both across sources (once per source that holds
+    /// it, newest source first) and within a single source (one entry
+    /// per stored sequence number, newest seq first within the key
+    /// group): nothing collapses versions. Tombstones and merge operands
+    /// are surfaced as raw [`crate::types::RowEntry`] values. The caller
+    /// is responsible for any dedup, delete handling, or merge
+    /// resolution. Callers that need a totally ordered, fully merged
+    /// view should use [`Self::scan_prefix`] instead; use this only when
+    /// you want freshest-first results with the option to early-stop and
+    /// are willing to interpret raw entries.
+    ///
+    /// Sources are walked in this order: active memtable, immutable
+    /// memtables, then within the single matching segment that segment's
+    /// L0 SSTs newest-first followed by its sorted runs newest-first. Each
+    /// source is fully drained before moving to the next. Sources are
+    /// lazily initialized: the filter check, index load, and first data
+    /// block fetch only happen when the recency walk reaches that source.
+    /// A prefix read whose data lives in the active memtable therefore
+    /// performs zero I/O. When the walk does have to descend to SST
+    /// sources, configuring prefix bloom filters lets the scan skip
+    /// non-matching SSTs without a data-block fetch, which keeps I/O
+    /// proportional to how recent the data is rather than to the size of
+    /// the LSM.
+    ///
+    /// **Multi-segment prefixes are rejected.** If the prefix overlaps
+    /// more than one segment, this returns an error with
+    /// [`crate::ErrorKind::Invalid`]. The recency guarantee is only
+    /// well-defined within a single segment: walking one segment's oldest
+    /// data before touching another segment's newest data would violate
+    /// freshest-first ordering. Callers that need cross-segment scans
+    /// should use [`Self::scan_prefix`] instead.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<RecencyIterator, Error>`: an iterator that yields raw
+    ///   `RowEntry` values newest-first. Use
+    ///   [`RecencyIterator::next_entry`] to pull the next entry, and
+    ///   inspect `entry.value` for the [`crate::types::ValueDeletable`]
+    ///   variant (`Value`, `Merge`, or `Tombstone`).
+    ///
+    /// ## Examples
+    ///
+    /// Pull entries from the freshest source under the prefix and stop.
+    /// Because sources are walked newest-first and lazily initialized, an
+    /// early-return like this only touches the source that holds the
+    /// freshest data. Note that *within* a source the order is set by
+    /// `options.order` (ascending by default), so the first yielded entry
+    /// is the smallest key in the freshest source, not necessarily the
+    /// most recently written key. Across sources the same key may appear
+    /// more than once, so callers that want only the freshest value per
+    /// key should dedupe.
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use slatedb::ValueDeletable;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"user:42", b"alice").await?;
+    ///     db.put(b"user:42", b"alice2").await?;
+    ///     db.put(b"user:99", b"bob").await?;
+    ///
+    ///     let mut iter = db.scan_prefix_by_recency(b"user:").await?;
+    ///     let entry = iter.next_entry().await?.unwrap();
+    ///     // All three writes live in the active memtable (the freshest
+    ///     // source). With ascending within-source order, "user:42" comes
+    ///     // out first because it sorts before "user:99". Both writes to
+    ///     // "user:42" are stored as separate sequence-numbered entries;
+    ///     // within the "user:42" key group the newest seq is yielded
+    ///     // first, so the first entry carries the latest write
+    ///     // ("alice2"). A second pull would yield the older "user:42"
+    ///     // entry ("alice") before advancing to "user:99".
+    ///     assert_eq!(entry.key.as_ref(), b"user:42");
+    ///     match entry.value {
+    ///         ValueDeletable::Value(v) => assert_eq!(v.as_ref(), b"alice2"),
+    ///         _ => panic!("expected a regular value"),
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix_by_recency<P>(
+        &self,
+        prefix: P,
+    ) -> Result<DbRecencyIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_by_recency_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Recency-ordered prefix scan with custom options.
+    ///
+    /// Same contract as [`Self::scan_prefix_by_recency`] (raw entries
+    /// emitted newest-source-first; caller handles dedupe, tombstones, and
+    /// merge operands).
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<RecencyIterator, Error>`: an iterator that yields raw
+    ///   `RowEntry` values newest-first.
+    ///
+    /// ## Examples
+    ///
+    /// Use `cache_blocks: false` to scan recent data without polluting
+    /// the block cache, and stop after pulling enough entries from the
+    /// freshest source. Combined with the recency walk's early-stop, this
+    /// is a cheap way to ask "is there a recent entry under this prefix?"
+    /// without warming the cache for cold blocks the answer doesn't depend
+    /// on.
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::ScanOptions;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"event:001", b"a").await?;
+    ///     db.put(b"event:002", b"b").await?;
+    ///
+    ///     let options = ScanOptions {
+    ///         cache_blocks: false,
+    ///         ..ScanOptions::default()
+    ///     };
+    ///     let mut iter = db
+    ///         .scan_prefix_by_recency_with_options(b"event:", &options)
+    ///         .await?;
+    ///     let first = iter.next_entry().await?.unwrap();
+    ///     // Within-source order is ascending by default, so "event:001"
+    ///     // is yielded before "event:002" even though both live in the
+    ///     // same (freshest) source. Stop here: we only needed to see
+    ///     // that something fresh exists under the prefix.
+    ///     assert_eq!(first.key.as_ref(), b"event:001");
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix_by_recency_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbRecencyIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        self.inner
+            .scan_prefix_by_recency_with_options(prefix, options)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Write a value into the database with default `WriteOptions`.
     ///
     /// ## Arguments
@@ -1875,7 +2066,8 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
-        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, Ttl,
+        WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -2307,6 +2499,405 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         kv_store.close().await.unwrap();
+    }
+
+    fn assert_value(entry: &crate::types::RowEntry, expected: &[u8]) {
+        match &entry.value {
+            crate::types::ValueDeletable::Value(v) => assert_eq!(v.as_ref(), expected),
+            other => panic!("expected Value({expected:?}), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_returns_matching_keys_from_memtable() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_memtable", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"v0").await.unwrap();
+        db.put(b"px:b", b"v1").await.unwrap();
+        db.put(b"px:c", b"v2").await.unwrap();
+        db.put(b"qq:x", b"vx").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_eq!(e2.key.as_ref(), b"px:b");
+        assert_eq!(e3.key.as_ref(), b"px:c");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_no_match_returns_none() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_no_match", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"aa", b"v0").await.unwrap();
+        db.put(b"ab", b"v1").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"zz").await.unwrap();
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_emits_both_versions_across_sources() {
+        // No dedup: a key present in both memtable (newer) and L0 (older)
+        // appears twice, newer first.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_no_dedup", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"old").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        db.put(b"px:a", b"new").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_value(&e1, b"new");
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"old");
+        assert!(e1.seq > e2.seq);
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_emits_tombstones() {
+        // Tombstones are surfaced as raw entries; the caller decides what
+        // they mean.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_tombstones", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"va").await.unwrap();
+        db.put(b"px:b", b"vb").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        db.delete(b"px:a").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        // Memtable first: tombstone for px:a.
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert!(e1.value.is_tombstone());
+        // L0 second: original values, ascending.
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"va");
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e3.key.as_ref(), b"px:b");
+        assert_value(&e3, b"vb");
+        // Tombstone is from the freshest source so its seq dominates the
+        // earlier put of px:a.
+        assert!(e1.seq > e2.seq);
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_walks_memtable_then_l0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_multi_source", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Older L0 SST: px:b (older value), px:c.
+        db.put(b"px:b", b"old_b").await.unwrap();
+        db.put(b"px:c", b"vc").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Active memtable: px:a, px:b (newer value).
+        db.put(b"px:a", b"va").await.unwrap();
+        db.put(b"px:b", b"new_b").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        // Memtable drained first, ascending within source.
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_value(&e1, b"va");
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e2.key.as_ref(), b"px:b");
+        assert_value(&e2, b"new_b");
+        // L0 next: px:b (older) then px:c. No dedup.
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e3.key.as_ref(), b"px:b");
+        assert_value(&e3, b"old_b");
+        let e4 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e4.key.as_ref(), b"px:c");
+        assert_value(&e4, b"vc");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_active_memtable_avoids_main_object_store_gets() {
+        // When the prefix is satisfied entirely by the active memtable, the
+        // recency scan should not issue any GETs against the main object
+        // store (it shouldn't even open an L0/SR iterator).
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_no_main_gets", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Older data in L0. Different prefix; we want them to be present
+        // but never visited.
+        db.put(b"qq:a", b"vqa").await.unwrap();
+        db.put(b"qq:b", b"vqb").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Active-memtable-only prefix.
+        db.put(b"px:a", b"va").await.unwrap();
+        db.put(b"px:b", b"vb").await.unwrap();
+
+        let gets_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_eq!(e2.key.as_ref(), b"px:b");
+        // Caller stops here without driving the iterator into older sources.
+
+        let gets_after =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+        assert_eq!(
+            gets_before, gets_after,
+            "scan_prefix_by_recency should not touch the main object store \
+             when the prefix is fully covered by the active memtable"
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_durability_remote_filters_unflushed() {
+        // With DurabilityLevel::Remote and the put issued without awaiting
+        // durability, only L0/SR-resident entries should be visible. The
+        // not-yet-flushed memtable write is filtered out by max_seq.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_remote_durability", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"va_durable").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Skip the WAL await. Without a follow-up flush, px:b lives only
+        // in the in-memory memtable.
+        db.put_with_options(
+            b"px:b",
+            b"vb_dirty",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                seqnum: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let opts = ScanOptions {
+            durability_filter: Remote,
+            ..ScanOptions::default()
+        };
+        let mut iter = db
+            .scan_prefix_by_recency_with_options(b"px:", &opts)
+            .await
+            .unwrap();
+        let e = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e.key.as_ref(), b"px:a");
+        assert_value(&e, b"va_durable");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_walks_memtable_then_compacted_run() {
+        // Walks memtable -> L0 -> compacted sorted run, verifying that the
+        // sorted-run path is constructed and drained correctly when the
+        // recency walk reaches it. Same-key versions surface from each
+        // source in newest-first order with no dedup.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_recency_compacted";
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let should_compact_clone = should_compact.clone();
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| should_compact_clone.swap(false, Ordering::SeqCst),
+        )));
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(scheduler),
+            )
+            .build()
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+
+        // Oldest write goes to a sorted run after compaction.
+        db.put(b"px:a", b"v_oldest").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Trigger compaction and wait for it to land.
+        should_compact.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                {
+                    let state = db_poll.inner.state.read();
+                    if !state.state().core().tree.compacted.is_empty() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // L0 layer (newer than the sorted run, older than the memtable).
+        db.put(b"px:a", b"v_l0").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Active memtable (freshest).
+        db.put(b"px:a", b"v_memtable").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_value(&e1, b"v_memtable");
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"v_l0");
+        assert_eq!(e3.key.as_ref(), b"px:a");
+        assert_value(&e3, b"v_oldest");
+        assert!(e1.seq > e2.seq);
+        assert!(e2.seq > e3.seq);
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        Arc::into_inner(db)
+            .expect("db Arc should be uniquely held")
+            .close()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_errors_on_multi_segment_prefix() {
+        use crate::manifest::{LsmTreeState, Segment};
+        use std::collections::VecDeque;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_multi_segment", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Inject two non-nesting segments. Both prefixes share "hour=1"
+        // but neither is a prefix of the other, so the antichain holds.
+        // A scan with prefix b"hour=" overlaps both segments' intervals,
+        // which is the case we want to reject.
+        db.inner.state.write().modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![
+                Segment {
+                    prefix: Bytes::from_static(b"hour=12/"),
+                    tree: LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::new(),
+                        compacted: vec![],
+                    },
+                },
+                Segment {
+                    prefix: Bytes::from_static(b"hour=13/"),
+                    tree: LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::new(),
+                        compacted: vec![],
+                    },
+                },
+            ];
+        });
+
+        match db.scan_prefix_by_recency(b"hour=").await {
+            Err(e) => assert_eq!(e.kind(), crate::ErrorKind::Invalid),
+            Ok(_) => panic!("expected multi-segment error"),
+        }
+
+        // Single-segment prefixes still work.
+        let mut iter = db.scan_prefix_by_recency(b"hour=12/").await.unwrap();
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
