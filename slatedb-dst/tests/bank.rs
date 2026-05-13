@@ -64,16 +64,21 @@ fn test_dst_bank_with_toxics(
         move |ctx| async move {
             let failures = ctx.failure_controller();
             for index in 0..10 {
-                let mut toxic = build_toxic(ctx.rand(), ctx.path().as_ref(), index);
-                info!("adding toxic: {toxic:?}");
-                // Cap bandwidht slowdowns at 512 KiB/s. If bandwidth is too low, reader
-                // checkpoints can expire during WAL replay. Since we only reresh checkpoint
+                let toxic = build_toxic(ctx.rand(), ctx.path().as_ref(), index);
+                // Skip bandwidth toxics for WAL paths. If bandwidth is too low, reader
+                // checkpoints can expire during WAL replay. Since we only refresh checkpoint
                 // lifetimes _after_ replay, this can cause readers to fail with checkpoint
                 // missing errors.
-                if let ToxicKind::Bandwidth { bytes_per_sec } = &mut toxic.kind {
-                    *bytes_per_sec = (*bytes_per_sec).max(512 * 1024);
+                let skip_toxic = matches!(toxic.kind, ToxicKind::Bandwidth { .. })
+                    && toxic
+                        .path_prefix
+                        .as_deref()
+                        // None applies to all paths, so skip it, too.
+                        .is_none_or(|p| p.ends_with("wal"));
+                if !skip_toxic {
+                    info!("adding toxic: {toxic:?}");
+                    failures.add_toxic(toxic);
                 }
-                failures.add_toxic(toxic);
             }
 
             let db = open_bank_db(ctx).await?;
