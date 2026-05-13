@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use log::warn;
 use object_store::path::Path;
 use std::ops::Bound;
 use std::time::Duration;
@@ -292,10 +293,14 @@ impl SlateDBError {
 
     /// Returns true if this error means a sequenced write should refresh and retry.
     pub(crate) fn is_sequenced_write_conflict(&self) -> bool {
-        matches!(
-            self,
-            TransactionalObjectVersionExists | SequencedObjectVersionBehindBoundary { .. }
-        )
+        match self {
+            Self::SequencedObjectVersionBehindBoundary { id, boundary } => {
+                warn!("sequenced write behind boundary: id={id:?}, boundary={boundary:?}");
+                true
+            }
+            Self::TransactionalObjectVersionExists => true,
+            _ => false,
+        }
     }
 }
 

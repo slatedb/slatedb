@@ -17,6 +17,7 @@ use slatedb_dst::{
         CompactorActor, CompactorActorOptions, DbFencerActor, DbFencerActorOptions, ShutdownActor,
         SuppressFenced, TransferActor, TransferMode,
     },
+    failing_object_store::ToxicKind,
     utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
     DeterministicLocalFilesystem, Harness, StartupCtx,
 };
@@ -45,19 +46,34 @@ fn test_dst_bank_with_toxics(
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
 
     let bank_options = random_bank_options(&rand);
-    info!("dst bank options: {bank_options:?}");
     let audit_interval = Duration::from_millis(1000);
     let reader_options = build_reader_options(&rand);
     let fencer_restart_interval = Duration::from_secs(120);
     let compactor_options = build_settings_compactor(&mut *rand.rng());
     let merge_operator = Arc::new(BankMergeOperator::new(&bank_options)?);
 
+    info!("dst bank options: {bank_options:?}");
+    info!("dst bank reader options: {reader_options:?}");
+    info!("dst bank compactor options: {compactor_options:?}");
+    info!("dst bank audit interval: {audit_interval:?}");
+    info!("dst bank fencer restart interval: {fencer_restart_interval:?}");
+    info!("dst bank shutdown at: {shutdown_at_ms}ms");
+
     let harness = Harness::new("bank", seed, {
         let bank_options = bank_options.clone();
         move |ctx| async move {
             let failures = ctx.failure_controller();
             for index in 0..10 {
-                failures.add_toxic(build_toxic(ctx.rand(), ctx.path().as_ref(), index));
+                let mut toxic = build_toxic(ctx.rand(), ctx.path().as_ref(), index);
+                info!("adding toxic: {toxic:?}");
+                // Cap bandwidht slowdowns at 512 KiB/s. If bandwidth is too low, reader
+                // checkpoints can expire during WAL replay. Since we only reresh checkpoint
+                // lifetimes _after_ replay, this can cause readers to fail with checkpoint
+                // missing errors.
+                if let ToxicKind::Bandwidth { bytes_per_sec } = &mut toxic.kind {
+                    *bytes_per_sec = (*bytes_per_sec).max(512 * 1024);
+                }
+                failures.add_toxic(toxic);
             }
 
             let db = open_bank_db(ctx).await?;

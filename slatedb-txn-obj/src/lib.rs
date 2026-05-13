@@ -79,6 +79,7 @@ use ::object_store::path::Path;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
+use log::warn;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::utils;
 use std::ops::Bound;
@@ -121,11 +122,14 @@ impl TransactionalObjectError {
     /// Returns true if this error means a a conflict occurred and the caller
     /// should refresh and retry.
     pub fn is_sequenced_write_conflict(&self) -> bool {
-        matches!(
-            self,
-            TransactionalObjectError::ObjectVersionExists
-                | TransactionalObjectError::ObjectVersionBehindBoundary { .. }
-        )
+        match self {
+            Self::ObjectVersionBehindBoundary { id, boundary } => {
+                warn!("sequenced write behind boundary: id={id:?}, boundary={boundary:?}");
+                true
+            }
+            Self::ObjectVersionExists => true,
+            _ => false,
+        }
     }
 }
 
@@ -644,7 +648,10 @@ impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId> for BoundedSeq
 
             match self.boundary.check(id).await {
                 Ok(()) => return Ok(Some((id, value))),
-                Err(TransactionalObjectError::ObjectVersionBehindBoundary { .. }) => continue,
+                Err(TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }) => {
+                    warn!("sequenced read behind boundary: id={id:?}, boundary={boundary:?}");
+                    continue;
+                }
                 Err(err) => return Err(err),
             }
         }
