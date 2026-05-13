@@ -3675,7 +3675,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
+        test_utils::assert_ranged_db_scan(table, range, IterationOrder::Ascending, &mut iter).await;
     }
 
     #[test]
@@ -3823,7 +3823,13 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;
+            test_utils::assert_ranged_db_scan(
+                table,
+                seek_range,
+                IterationOrder::Ascending,
+                &mut iter,
+            )
+            .await;
         }
     }
 
@@ -9592,6 +9598,7 @@ mod tests {
         test_utils::assert_ranged_db_scan(
             table,
             Bytes::from_static(b"bbb")..Bytes::from_static(b"bbc"),
+            IterationOrder::Ascending,
             &mut prefix_iter,
         )
         .await;
@@ -9603,6 +9610,7 @@ mod tests {
         test_utils::assert_ranged_db_scan(
             table,
             Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"),
+            IterationOrder::Ascending,
             &mut asc_iter,
         )
         .await;
@@ -9612,31 +9620,13 @@ mod tests {
             .scan_with_options::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec(), &desc_options)
             .await
             .unwrap();
-        let mut expected = table
-            .range(Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"))
-            .rev();
-        loop {
-            let expected_next = expected.next();
-            let actual_next = desc_iter.next().await.unwrap();
-            if expected_next.is_none() && actual_next.is_none() {
-                break;
-            }
-            match (expected_next, actual_next) {
-                (Some((expected_key, expected_value)), Some(actual)) => {
-                    assert_eq!(expected_key, &actual.key);
-                    assert_eq!(expected_value, &actual.value);
-                }
-                (Some(expected_record), None) => {
-                    panic!(
-                        "Expected record {expected_record:?} missing from descending scan result"
-                    )
-                }
-                (None, Some(actual)) => {
-                    panic!("Unexpected record {actual:?} in descending scan result")
-                }
-                (None, None) => unreachable!("handled above"),
-            }
-        }
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"),
+            IterationOrder::Descending,
+            &mut desc_iter,
+        )
+        .await;
 
         let mut gap_iter = reader
             .scan::<Vec<u8>, _>(b"bbc".to_vec()..=b"ddd-002".to_vec())
@@ -9645,6 +9635,7 @@ mod tests {
         test_utils::assert_ranged_db_scan(
             table,
             Bytes::from_static(b"bbc")..=Bytes::from_static(b"ddd-002"),
+            IterationOrder::Ascending,
             &mut gap_iter,
         )
         .await;

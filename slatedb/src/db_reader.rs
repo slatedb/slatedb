@@ -1199,6 +1199,7 @@ mod tests {
     use crate::db_stats::DbStats;
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
+    use crate::iter::IterationOrder;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
@@ -1407,7 +1408,8 @@ mod tests {
             Bytes::copy_from_slice(value),
         );
 
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -1442,7 +1444,8 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         let mut db_iter = reader.scan::<Vec<u8>, _>(..).await.unwrap();
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
 
         let manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert!(!manifest.manifest.core.checkpoints.is_empty());

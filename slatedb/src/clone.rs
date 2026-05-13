@@ -435,6 +435,7 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
+    use crate::iter::IterationOrder;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::manifest::ManifestCore;
@@ -518,7 +519,8 @@ mod tests {
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
         clone_db.close().await.unwrap();
     }
 
@@ -586,7 +588,13 @@ mod tests {
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
-        test_utils::assert_ranged_db_scan(&checkpoint_table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(
+            &checkpoint_table,
+            ..,
+            IterationOrder::Ascending,
+            &mut db_iter,
+        )
+        .await;
         clone_db.close().await.unwrap();
     }
 

@@ -177,11 +177,15 @@ pub(crate) fn decode_codec_entries(
 pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     table: &BTreeMap<Bytes, Bytes>,
     range: T,
+    ordering: IterationOrder,
     iter: &mut DbIterator,
 ) {
     let mut expected = table.range(range);
     loop {
-        let expected_next = expected.next();
+        let expected_next = match ordering {
+            IterationOrder::Ascending => expected.next(),
+            IterationOrder::Descending => expected.next_back(),
+        };
         let actual_next = iter.next().await.unwrap();
         if expected_next.is_none() && actual_next.is_none() {
             return;
