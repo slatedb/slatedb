@@ -558,6 +558,31 @@ impl DbInner {
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
+            // RFC-0024: re-extract each replayed entry's prefix to
+            // populate the memtable's touched-segment set. Per the
+            // validation model, durable WAL entries were validated when
+            // the writer accepted them, so we do not re-run the
+            // antichain check here. An empty/absent prefix under
+            // the current extractor remains a hard error — the
+            // entry can't be routed to any segment.
+            if let Some(extractor) = self.segment_extractor.as_ref() {
+                let mut touched_segments: std::collections::BTreeSet<Bytes> =
+                    std::collections::BTreeSet::new();
+                let mut iter = replayed_table.table.table().iter();
+                while let Some(entry) = iter.next_sync() {
+                    match extractor.prefix_len(&crate::PrefixTarget::Point(entry.key.clone())) {
+                        Some(0) | None => {
+                            return Err(SlateDBError::EmptySegmentPrefix { key: entry.key });
+                        }
+                        Some(n) => {
+                            touched_segments.insert(entry.key.slice(0..n));
+                        }
+                    }
+                }
+                replayed_table
+                    .table
+                    .record_touched_segments(touched_segments);
+            }
             // Replayed rows come from WAL SSTs in remote storage, so they are already
             // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
             // the memtable flusher. The flusher calls flush_wals() to guarantee all data in the
@@ -2045,7 +2070,6 @@ mod tests {
         WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
-    use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
     use crate::instrumented_object_store::stats::{
@@ -4192,11 +4216,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_flushes_memtable_after_max_wal_flushes() {
+        const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 4096;
+
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_memtable_max_wal_flushes";
 
         let mut settings = test_db_options(0, usize::MAX, None);
         settings.flush_interval = None; // Disable flushing
+        settings.max_wal_flushes_before_l0_flush = MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
 
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(settings)
@@ -6618,6 +6645,7 @@ mod tests {
             l0_flush_parallelism: 1,
             min_filter_keys,
             l0_sst_size_bytes,
+            max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
@@ -8933,5 +8961,656 @@ mod tests {
                 Some(Bytes::copy_from_slice(value))
             );
         }
+    }
+
+    /// RFC-0024: WAL replay through a conforming extractor preserves the
+    /// keys and lets segment-aware writes resume after the next open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_replay_with_extractor_preserves_keys() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_with_extractor_preserves_keys";
+
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        for (key, value) in [
+            (b"aaa-1".as_slice(), b"v1".as_slice()),
+            (b"bbb-1".as_slice(), b"v2".as_slice()),
+        ] {
+            source
+                .put_with_options(key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+        }
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+        // Drop without close so writes remain in WAL only.
+        drop(source);
+
+        let recovered = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.get(b"aaa-1").await.unwrap().unwrap().as_ref(),
+            b"v1"
+        );
+        assert_eq!(
+            recovered.get(b"bbb-1").await.unwrap().unwrap().as_ref(),
+            b"v2"
+        );
+        recovered.close().await.unwrap();
+    }
+
+    /// RFC-0024: WAL replay rejects entries whose prefix under the
+    /// current extractor would be empty. We reach this path via the
+    /// silent-swap pattern: the source writes through a conforming
+    /// fixed-3 extractor, then a reopen substitutes an aliased
+    /// `fixed-3` extractor whose `prefix_len` always returns `Some(0)`.
+    /// The open-time name check passes; replay catches the empty
+    /// prefix as `EmptySegmentPrefix`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_replay_rejects_empty_extractor_prefix() {
+        #[derive(Debug)]
+        struct AliasedAlwaysEmptyExtractor;
+        impl crate::PrefixExtractor for AliasedAlwaysEmptyExtractor {
+            fn name(&self) -> &str {
+                "fixed-3"
+            }
+            fn prefix_len(&self, _target: &crate::PrefixTarget) -> Option<usize> {
+                Some(0)
+            }
+        }
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_rejects_empty_extractor_prefix";
+
+        // Source with a conforming extractor — keys get a 3-byte
+        // prefix and reach the WAL cleanly.
+        let mut source_settings = test_db_options(0, 16 * 1024, None);
+        source_settings.flush_interval = None;
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(source_settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        source
+            .put_with_options(b"abc-1", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+        drop(source);
+
+        // Reopen with the same `name()`, but the swapped extractor's
+        // logic returns `Some(0)` for every key — replay must reject.
+        let result = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 16 * 1024, None))
+            .with_segment_extractor(Arc::new(AliasedAlwaysEmptyExtractor))
+            .build()
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected empty-prefix rejection at replay, got Ok"),
+            Err(e) => e,
+        };
+        assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+        assert!(
+            err.to_string().contains("empty prefix"),
+            "expected empty-prefix error, got: {err}"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ExtractorConfig {
+        None,
+        Fixed3,
+        Other,
+    }
+
+    impl ExtractorConfig {
+        fn to_extractor(self) -> Option<Arc<dyn crate::PrefixExtractor>> {
+            #[derive(Debug)]
+            struct OtherExtractor;
+            impl crate::PrefixExtractor for OtherExtractor {
+                fn name(&self) -> &str {
+                    "other"
+                }
+                fn prefix_len(&self, _target: &crate::PrefixTarget) -> Option<usize> {
+                    Some(3)
+                }
+            }
+            match self {
+                ExtractorConfig::None => None,
+                ExtractorConfig::Fixed3 => {
+                    Some(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+                }
+                ExtractorConfig::Other => Some(Arc::new(OtherExtractor)),
+            }
+        }
+    }
+
+    /// RFC-0024 open-time reconciliation: the configured extractor on
+    /// reopen must agree with what was persisted at creation.
+    /// `(persisted, configured) → outcome` for every combination of
+    /// `None`, the conforming `Fixed3` extractor, and a differently-named
+    /// `Other` extractor.
+    #[rstest::rstest]
+    #[case::no_extractor_round_trip(ExtractorConfig::None, ExtractorConfig::None, true)]
+    #[case::same_extractor_round_trip(ExtractorConfig::Fixed3, ExtractorConfig::Fixed3, true)]
+    #[case::name_mismatch(ExtractorConfig::Fixed3, ExtractorConfig::Other, false)]
+    #[case::removed(ExtractorConfig::Fixed3, ExtractorConfig::None, false)]
+    #[case::added(ExtractorConfig::None, ExtractorConfig::Fixed3, false)]
+    #[tokio::test]
+    async fn test_open_extractor_reconciliation(
+        #[case] initial: ExtractorConfig,
+        #[case] reopen: ExtractorConfig,
+        #[case] expect_ok: bool,
+    ) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = format!("/tmp/test_open_extractor_reconciliation_{initial:?}_{reopen:?}");
+
+        let mut builder = Db::builder(path.clone(), object_store.clone());
+        if let Some(extractor) = initial.to_extractor() {
+            builder = builder.with_segment_extractor(extractor);
+        }
+        builder.build().await.unwrap().close().await.unwrap();
+
+        let mut builder = Db::builder(path, object_store);
+        if let Some(extractor) = reopen.to_extractor() {
+            builder = builder.with_segment_extractor(extractor);
+        }
+        match (expect_ok, builder.build().await) {
+            (true, Ok(reopened)) => reopened.close().await.unwrap(),
+            (true, Err(err)) => panic!("expected reopen to succeed, got {err:?}"),
+            (false, Ok(_)) => panic!("expected reopen to fail"),
+            (false, Err(err)) => {
+                assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+            }
+        }
+    }
+
+    /// RFC-0024 open-time per-segment check: every persisted segment
+    /// prefix `p` must satisfy `prefix_len(Prefix(p)) == Some(p.len())`
+    /// under the configured extractor. This catches a silent-swap case
+    /// the name check misses — same `name()`, but the new logic no
+    /// longer treats an existing prefix as a complete segment boundary.
+    #[tokio::test]
+    async fn test_open_rejects_when_segment_prefix_unrecognized() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_open_rejects_unrecognized_segment_prefix";
+
+        let db = Db::builder(path, object_store.clone())
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        // Persist segments "abc" and "ab-": both produce 3-byte
+        // prefixes under fixed-3 and route to disjoint segments. The
+        // close() call flushes the memtable to L0, which is what
+        // creates the persisted segment entries.
+        db.put(b"abc-1", b"v1").await.unwrap();
+        db.put(b"ab--1", b"v2").await.unwrap();
+        db.close().await.unwrap();
+
+        // Reopen with an aliased extractor — same name, different
+        // logic. Under the swapped logic, `Prefix("ab-")` returns
+        // Some(2) (prefix "ab"), which does not equal `"ab-".len()`.
+        // The per-segment check must reject.
+        let result = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::AliasedFixed3PrefixExtractor))
+            .build()
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected unrecognized-prefix rejection, got Ok"),
+            Err(e) => e,
+        };
+        assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+        assert!(
+            err.to_string().contains("not recognized"),
+            "expected error to mention recognition, got: {err}"
+        );
+    }
+
+    /// Helper: collect the segment prefix list from `db`'s in-memory
+    /// manifest snapshot.
+    fn segment_prefixes(db: &Db) -> Vec<Bytes> {
+        let guard = db.inner.state.read();
+        let cow = guard.state();
+        cow.core()
+            .segments
+            .iter()
+            .map(|s| s.prefix.clone())
+            .collect()
+    }
+
+    /// RFC-0024: a DB created with both an extractor and a separate
+    /// WAL object store writes a V2 manifest, which intentionally
+    /// drops `wal_object_store_uri` (commit 52cead43). The reopen
+    /// path must skip the WAL-store reconfiguration check when the
+    /// persisted URI is absent, so a matching configuration on
+    /// reopen still succeeds.
+    #[tokio::test]
+    async fn test_open_with_extractor_and_wal_store_round_trips() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_open_extractor_with_wal_store";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_segment_extractor(extractor.clone())
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .with_wal_object_store(wal_object_store)
+            .build()
+            .await
+            .unwrap();
+        reopened.close().await.unwrap();
+    }
+
+    /// End-to-end: write to multiple segments, flush, close, reopen,
+    /// read every key back. The manifest carries one segment per
+    /// touched prefix and survives the encode/decode cycle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segments_round_trip_through_flush_and_reopen() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_segments_round_trip";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let entries: &[(&[u8], &[u8])] = &[
+            (b"aaa-1", b"v1"),
+            (b"aaa-2", b"v2"),
+            (b"bbb-1", b"v3"),
+            (b"ccc-1", b"v4"),
+            (b"ccc-2", b"v5"),
+        ];
+        for (k, v) in entries {
+            db.put(*k, *v).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let prefixes = segment_prefixes(&db);
+        assert_eq!(
+            prefixes,
+            vec![
+                Bytes::from_static(b"aaa"),
+                Bytes::from_static(b"bbb"),
+                Bytes::from_static(b"ccc"),
+            ],
+            "expected one segment per touched prefix, in sorted order"
+        );
+        db.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        for (k, v) in entries {
+            assert_eq!(
+                reopened.get(*k).await.unwrap().unwrap().as_ref(),
+                *v,
+                "round-trip mismatch for key {:?}",
+                k
+            );
+        }
+        // Segments survived encode/decode.
+        assert_eq!(
+            segment_prefixes(&reopened),
+            vec![
+                Bytes::from_static(b"aaa"),
+                Bytes::from_static(b"bbb"),
+                Bytes::from_static(b"ccc"),
+            ]
+        );
+        reopened.close().await.unwrap();
+    }
+
+    /// One batch covering N segments must reach the manifest atomically:
+    /// after the flush, every touched segment has exactly one L0 SST
+    /// from this flush — no partial visibility.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mixed_batch_publishes_atomically() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_mixed_batch_atomic";
+
+        let db = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put(b"aaa-1", b"v1");
+        batch.put(b"bbb-1", b"v2");
+        batch.put(b"ccc-1", b"v3");
+        db.write(batch).await.unwrap();
+
+        // Pre-flush: segments are still empty (data is in memtable / WAL).
+        assert!(segment_prefixes(&db).is_empty());
+
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Scope the read guard so it is dropped before the `await` below.
+        {
+            let guard = db.inner.state.read();
+            let cow = guard.state();
+            let core = cow.core();
+            assert_eq!(core.segments.len(), 3);
+            for segment in &core.segments {
+                assert_eq!(
+                    segment.tree.l0.len(),
+                    1,
+                    "expected exactly one L0 SST in segment {:?}, got {}",
+                    segment.prefix,
+                    segment.tree.l0.len()
+                );
+                assert!(
+                    segment.tree.compacted.is_empty(),
+                    "no compaction expected yet"
+                );
+            }
+        }
+        db.close().await.unwrap();
+    }
+
+    /// WAL replay reconstructs segment state when the source process
+    /// dropped before flushing. After reopen, replayed entries land in
+    /// the memtable; a subsequent flush then publishes them as
+    /// per-segment L0 SSTs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_replay_reconstructs_segments_from_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_replay_reconstructs_segments";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        for (k, v) in [(b"aaa-1".as_slice(), b"v1"), (b"bbb-1".as_slice(), b"v2")] {
+            source
+                .put_with_options(k, v, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+        }
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+        // Drop without close so entries stay in WAL only.
+        drop(source);
+
+        // Reopen — the manifest still has no segments at this point.
+        let recovered = Db::builder(path, object_store)
+            .with_settings(settings)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            segment_prefixes(&recovered).is_empty(),
+            "replay should not stamp segments until the memtable flushes"
+        );
+        // Reads see the replayed data via the memtable.
+        assert_eq!(
+            recovered.get(b"aaa-1").await.unwrap().unwrap().as_ref(),
+            b"v1"
+        );
+        assert_eq!(
+            recovered.get(b"bbb-1").await.unwrap().unwrap().as_ref(),
+            b"v2"
+        );
+
+        // Force the memtable through, segments should appear.
+        recovered
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            segment_prefixes(&recovered),
+            vec![Bytes::from_static(b"aaa"), Bytes::from_static(b"bbb")]
+        );
+        recovered.close().await.unwrap();
+    }
+
+    /// A timeseries-style workload: hot writes to a "current" segment
+    /// interleaved with occasional backfill into an "older" one. Both
+    /// segments end up correctly populated and reads succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_backfill_alongside_active_segment() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_backfill_active";
+
+        let db = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        // Active segment "cur" sees most writes; segment "old" gets a
+        // sprinkle of backfill. Interleaved on purpose so several
+        // batches touch both.
+        let mut expected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for i in 0..20u32 {
+            let cur_key = format!("cur-{i:03}").into_bytes();
+            let cur_val = format!("c{i}").into_bytes();
+            db.put(&cur_key, &cur_val).await.unwrap();
+            expected.push((cur_key, cur_val));
+            if i % 7 == 0 {
+                let old_key = format!("old-{i:03}").into_bytes();
+                let old_val = format!("o{i}").into_bytes();
+                db.put(&old_key, &old_val).await.unwrap();
+                expected.push((old_key, old_val));
+            }
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            segment_prefixes(&db),
+            vec![Bytes::from_static(b"cur"), Bytes::from_static(b"old")]
+        );
+        for (k, v) in &expected {
+            assert_eq!(
+                db.get(k).await.unwrap().unwrap().as_ref(),
+                v.as_slice(),
+                "missing value for {:?}",
+                k
+            );
+        }
+        db.close().await.unwrap();
+    }
+
+    /// After a clean restart, writes resume into existing segments and
+    /// both the prior (in compacted/L0) and new (in fresh L0) entries
+    /// remain readable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_restart_resumes_writes_into_existing_segment() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_restart_resume";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let initial = Db::builder(path, object_store.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+        initial.put(b"aaa-1", b"v1").await.unwrap();
+        initial.put(b"aaa-2", b"v2").await.unwrap();
+        initial.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        // Prior writes still readable after reopen.
+        assert_eq!(
+            reopened.get(b"aaa-1").await.unwrap().unwrap().as_ref(),
+            b"v1"
+        );
+        assert_eq!(
+            reopened.get(b"aaa-2").await.unwrap().unwrap().as_ref(),
+            b"v2"
+        );
+
+        // Resume writes into the same segment.
+        reopened.put(b"aaa-3", b"v3").await.unwrap();
+        reopened.put(b"aaa-4", b"v4").await.unwrap();
+        reopened
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        // Still exactly the one "aaa" segment, now with two L0 SSTs.
+        let prefixes = segment_prefixes(&reopened);
+        assert_eq!(prefixes, vec![Bytes::from_static(b"aaa")]);
+        {
+            let guard = reopened.inner.state.read();
+            let cow = guard.state();
+            let segment = &cow.core().segments[0];
+            assert_eq!(
+                segment.tree.l0.len(),
+                2,
+                "expected two L0 SSTs after the second flush, got {}",
+                segment.tree.l0.len()
+            );
+        }
+
+        for (k, v) in [
+            (b"aaa-1".as_slice(), b"v1".as_slice()),
+            (b"aaa-2".as_slice(), b"v2".as_slice()),
+            (b"aaa-3".as_slice(), b"v3".as_slice()),
+            (b"aaa-4".as_slice(), b"v4".as_slice()),
+        ] {
+            assert_eq!(
+                reopened.get(k).await.unwrap().unwrap().as_ref(),
+                v,
+                "missing value for {:?}",
+                k
+            );
+        }
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_db_reader_cache_scoping() {
+        use crate::db_cache::{DbCache, SplitCache};
+
+        // Create two separate databases
+        let object_store_a: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store_b: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // Write different data to each database
+        let db_a = Db::builder("/tmp/test_reader_cache_a", object_store_a.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        db_a.put(b"key1", b"value_from_db_a").await.unwrap();
+        db_a.flush().await.unwrap();
+        db_a.close().await.unwrap();
+
+        let db_b = Db::builder("/tmp/test_reader_cache_b", object_store_b.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        db_b.put(b"key1", b"value_from_db_b").await.unwrap();
+        db_b.flush().await.unwrap();
+        db_b.close().await.unwrap();
+
+        // Create a shared cache
+        let shared_cache: Arc<dyn DbCache> = Arc::new(SplitCache::new().build());
+
+        // Open both databases as readers with the shared cache
+        let reader_a = DbReaderBuilder::new("/tmp/test_reader_cache_a", object_store_a)
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let reader_b = DbReaderBuilder::new("/tmp/test_reader_cache_b", object_store_b)
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Verify each reader returns its own data, not the other's
+        let value_a = reader_a.get(b"key1").await.unwrap();
+        assert_eq!(value_a, Some(Bytes::from("value_from_db_a")));
+
+        let value_b = reader_b.get(b"key1").await.unwrap();
+        assert_eq!(value_b, Some(Bytes::from("value_from_db_b")));
+
+        // Read again to exercise cached paths
+        let value_a_cached = reader_a.get(b"key1").await.unwrap();
+        assert_eq!(value_a_cached, Some(Bytes::from("value_from_db_a")));
+
+        let value_b_cached = reader_b.get(b"key1").await.unwrap();
+        assert_eq!(value_b_cached, Some(Bytes::from("value_from_db_b")));
     }
 }

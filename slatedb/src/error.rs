@@ -85,6 +85,23 @@ pub(crate) enum SlateDBError {
     #[error("recency scan prefix spans multiple segments, which is unsupported")]
     RecencyScanPrefixSpansMultipleSegments,
 
+    #[error(
+        "segment extractor configuration mismatch (persisted: {persisted:?}, \
+         configured: {configured:?})"
+    )]
+    SegmentExtractorMismatch {
+        persisted: Option<String>,
+        configured: Option<String>,
+    },
+
+    #[error(
+        "segment prefix {prefix:?} is not recognized by the configured extractor `{extractor}`"
+    )]
+    SegmentPrefixNotRecognized { prefix: Bytes, extractor: String },
+
+    #[error("segment extractor produced an empty prefix for key {key:?}")]
+    EmptySegmentPrefix { key: Bytes },
+
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
 
@@ -553,6 +570,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidCompaction => Error::invalid(msg),
             SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
             SlateDBError::RecencyScanPrefixSpansMultipleSegments => Error::invalid(msg),
+            SlateDBError::SegmentExtractorMismatch { .. } => Error::invalid(msg),
+            SlateDBError::SegmentPrefixNotRecognized { .. } => Error::invalid(msg),
+            SlateDBError::EmptySegmentPrefix { .. } => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),

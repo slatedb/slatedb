@@ -12,6 +12,7 @@
 //! - manifest durability sequencing
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::debug;
@@ -199,26 +200,83 @@ impl FlushTracker {
         self.dispatch_ready_memtables()
     }
 
-    fn available_l0_slots(&self) -> usize {
-        let (l0_len, peak) = {
-            let state = self.inner.state.read().state();
-            let l0 = &state.core().tree.l0;
-            (l0.len(), crate::db_state::max_l0_overlap(l0))
-        };
-        let reserved = self.frontier.reserved_l0_slots();
+    /// RFC-0024 §Backpressure: returns `true` iff every segment the
+    /// next memtable will touch has room for one more L0 SST under
+    /// both `l0_max_ssts` and `l0_max_ssts_per_key`. A memtable that
+    /// touches multiple segments waits for all of them — its SSTs
+    /// publish atomically and the global `last_l0_seq` invariant
+    /// pins commits to seqno order.
+    ///
+    /// When the imm's touched-segment set is empty (no extractor
+    /// configured, or the imm came from a path that bypassed
+    /// validation) we fall back to the max-across-trees heuristic.
+    fn can_dispatch(&self, imm: &crate::mem_table::ImmutableMemtable) -> bool {
+        let state = self.inner.state.read().state();
+        let core = state.core();
         let settings = &self.inner.settings;
-        let total_slots = settings.l0_max_ssts.saturating_sub(l0_len + reserved);
-        // Each reserved (in-flight) upload is treated as +1 at every point
-        // because its output key range is not yet known.
-        let per_key_slots = settings.l0_max_ssts_per_key.saturating_sub(peak + reserved);
-        total_slots.min(per_key_slots)
+        let touched = imm.touched_segments();
+        if touched.is_empty() {
+            // Fallback path — no precomputed segment set. Use the
+            // legacy max-across-trees heuristic with `reserved`
+            // counted against every tree.
+            let (max_l0_len, max_peak) =
+                core.trees().fold((0_usize, 0_usize), |(len, peak), tree| {
+                    (
+                        len.max(tree.l0.len()),
+                        peak.max(crate::db_state::max_l0_overlap(&tree.l0)),
+                    )
+                });
+            let reserved = self.frontier.reserved_l0_slots();
+            return max_l0_len + reserved < settings.l0_max_ssts
+                && max_peak + reserved < settings.l0_max_ssts_per_key;
+        }
+        // Per-segment check: every touched segment must have room
+        // accounting for in-flight reservations against that segment.
+        // `core.segments` is sorted by prefix, so use a binary search
+        // rather than a linear scan.
+        for prefix in touched.iter() {
+            let (tree_l0_len, tree_peak) =
+                match core.segments.binary_search_by(|s| s.prefix.cmp(prefix)) {
+                    Ok(idx) => {
+                        let tree = &core.segments[idx].tree;
+                        (tree.l0.len(), crate::db_state::max_l0_overlap(&tree.l0))
+                    }
+                    Err(_) => (0, 0),
+                };
+            let reserved = self.frontier.reserved_l0_slots_for(prefix);
+            if tree_l0_len + reserved >= settings.l0_max_ssts {
+                return false;
+            }
+            if tree_peak + reserved >= settings.l0_max_ssts_per_key {
+                return false;
+            }
+        }
+        true
     }
 
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
-        while self.available_l0_slots() > 0 {
-            let Some(tracked) = self.frontier.prepare_next_upload() else {
+        loop {
+            // Find the next pending imm whose touched segments all
+            // have room. Skip blocked imms rather than stalling — the
+            // manifest writer commits in seqno order regardless of
+            // upload dispatch order, so an unrelated later imm can
+            // make progress while an older one waits on its
+            // saturated segment.
+            let next_idx = self
+                .frontier
+                .tracked
+                .iter()
+                .enumerate()
+                .find(|(_, t)| {
+                    matches!(t.state, TrackedImmState::PendingDispatch)
+                        && self.can_dispatch(&t.imm_memtable)
+                })
+                .map(|(idx, _)| idx);
+            let Some(idx) = next_idx else {
                 return Ok(());
             };
+            self.frontier.tracked[idx].state = TrackedImmState::Uploading;
+            let tracked = &self.frontier.tracked[idx];
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
             let last_seq = tracked.last_seq;
             debug!(
@@ -228,7 +286,6 @@ impl FlushTracker {
 
             self.uploader.submit(UploadJob::new(imm_memtable))?;
         }
-        Ok(())
     }
 
     /// Drain remaining messages during shutdown. Process completions so
@@ -314,6 +371,8 @@ impl TrackedImmFrontier {
     }
 
     /// Number of in-flight slots (uploading or writing manifest).
+    /// Used by the legacy fallback path in `can_dispatch` when no
+    /// touched-segment set is available.
     fn reserved_l0_slots(&self) -> usize {
         self.tracked
             .iter()
@@ -326,7 +385,32 @@ impl TrackedImmFrontier {
             .count()
     }
 
+    /// Number of in-flight slots that target the segment with the
+    /// given `prefix`. An in-flight imm with a populated
+    /// `touched_segments` is counted iff the set contains `prefix`.
+    /// An in-flight imm with an *empty* set is conservatively counted
+    /// against every prefix — its targets are unknown so we can't
+    /// rule it out. In a fully wired pipeline (writes + replay both
+    /// stamp the set) this fallback path doesn't fire.
+    fn reserved_l0_slots_for(&self, prefix: &Bytes) -> usize {
+        self.tracked
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    TrackedImmState::Uploading | TrackedImmState::WritingManifest
+                )
+            })
+            .filter(|t| {
+                t.imm_memtable
+                    .table()
+                    .touched_segments_empty_or_contains(prefix)
+            })
+            .count()
+    }
+
     /// Transition the next `PendingDispatch` entry to `Uploading` and return it.
+    #[cfg(test)]
     fn prepare_next_upload(&mut self) -> Option<&TrackedImm> {
         let index = self
             .tracked
@@ -583,6 +667,29 @@ mod tests {
             ));
         }
         stored_manifest.update(dirty).await.unwrap();
+    }
+
+    fn set_local_segment_l0_len(harness: &TestHarness, prefix: &[u8], l0_len: usize) {
+        use crate::manifest::{LsmTreeState, Segment};
+        let mut guard = harness.inner.state.write();
+        guard.modify(|modifier| {
+            let mut l0 = std::collections::VecDeque::new();
+            for idx in 0..l0_len {
+                l0.push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle(format!("local-segment-seed-{idx}").as_bytes()),
+                ));
+            }
+            modifier.state.manifest.value.core.segments = vec![Segment {
+                prefix: Bytes::copy_from_slice(prefix),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0,
+                    compacted: vec![],
+                },
+            }];
+        });
     }
 
     fn set_local_l0_len(harness: &TestHarness, l0_len: usize) {
@@ -933,6 +1040,144 @@ mod tests {
         set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
         let flusher = start_flusher(harness);
         freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    /// RFC-0024 §Backpressure: l0_max_ssts is per-tree, not global.
+    /// A full segment must stall flushes even when the unsegmented
+    /// tree is empty. Mirrors `should_wait_for_manifest_refresh_before_dispatching_when_l0_is_full`
+    /// but pre-populates a *segment's* L0 instead of the unsegmented one.
+    #[tokio::test]
+    async fn flush_blocked_when_segment_l0_is_full() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_segment_backpressure",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        // Unsegmented tree stays empty; segment "aaa" is at the limit.
+        set_local_segment_l0_len(&harness, b"aaa", 1);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"aaa-1", b"v1", 41);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        // Blocked — segment "aaa" is at l0_max_ssts.
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+
+        // Drain the segment locally; flush should now progress.
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| {
+                modifier.state.manifest.value.core.segments.clear();
+            });
+        }
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    /// RFC-0024 §Backpressure: per-segment isolation. When the
+    /// memtable's `touched_segments` is precomputed, a saturated
+    /// segment that the memtable does *not* touch must not block
+    /// dispatch. Pre-populates segment "aaa" past the limit, freezes
+    /// a memtable whose touched-segment set is `{"bbb"}` only, and
+    /// expects the flush to dispatch normally.
+    #[tokio::test]
+    async fn flush_proceeds_when_saturated_segment_is_untouched() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_per_segment_isolation",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        // Saturate segment "aaa" — but the memtable below only
+        // claims to touch "bbb", so dispatch should not block.
+        set_local_segment_l0_len(&harness, b"aaa", 1);
+        let flusher = start_flusher(harness);
+        // Stamp `{"bbb"}` onto the active memtable before freezing
+        // so the imm carries that touched-segment set forward.
+        {
+            let guard = flusher.inner.state.write();
+            let mut bbb_only = std::collections::BTreeSet::new();
+            bbb_only.insert(Bytes::from_static(b"bbb"));
+            guard.memtable().record_touched_segments(bbb_only);
+        }
+        freeze_value_imm(&flusher.inner, b"bbb-1", b"v1", 41);
+
+        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    /// Cold/empty segments must not stall flushes when nothing else is
+    /// over the limit. With `l0_max_ssts = 4`, three empty segments
+    /// alongside an unsegmented tree of length 0 should still let a
+    /// fresh flush dispatch immediately.
+    #[tokio::test]
+    async fn flush_proceeds_when_segments_are_below_limit() {
+        use crate::manifest::{LsmTreeState, Segment};
+        let settings = Settings {
+            l0_max_ssts: 4,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_cold_segments",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        // Three sibling segments, each well below the limit.
+        {
+            let mut guard = harness.inner.state.write();
+            guard.modify(|modifier| {
+                modifier.state.manifest.value.core.segments = vec![
+                    Segment {
+                        prefix: Bytes::from_static(b"aaa"),
+                        tree: LsmTreeState::default(),
+                    },
+                    Segment {
+                        prefix: Bytes::from_static(b"bbb"),
+                        tree: LsmTreeState::default(),
+                    },
+                    Segment {
+                        prefix: Bytes::from_static(b"ccc"),
+                        tree: LsmTreeState::default(),
+                    },
+                ];
+            });
+        }
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"aaa-1", b"v1", 41);
 
         let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
             .await

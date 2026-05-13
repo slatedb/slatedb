@@ -1452,26 +1452,44 @@ mod tests {
         started.shutdown().await;
     }
 
-    /// Construct an UploadedMemtable whose flush output spans multiple named
-    /// segments. The same underlying SST is reused for each handle — the
-    /// apply path routes by prefix and does not validate SST contents
-    /// against the prefix.
+    /// Construct an `UploadedMemtable` whose flush output spans
+    /// multiple named segments. Each segment handle is an
+    /// independently-uploaded SST tagged with one of the requested
+    /// `prefixes`. The apply path routes by prefix without
+    /// validating SST contents, so the synthetic fabrication is
+    /// sound for manifest-writer tests.
+    ///
+    /// Goes around `build_imm_ssts` because the synthetic setup
+    /// (one key, many fake prefixes) can't satisfy that path's
+    /// requirement that recorded prefixes match the keys.
     async fn next_uploaded_memtable_with_segments(
         inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
         prefixes: &[&[u8]],
     ) -> UploadedMemtable {
+        use crate::utils::IdGenerator;
         let imm_memtable = freeze_imm(inner, key, value);
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
         let mut segments = Vec::with_capacity(prefixes.len());
         for prefix in prefixes {
-            let handles = inner
-                .flush_l0_for_test(imm_memtable.table(), true)
+            // Each synthetic SST needs at least one entry so the
+            // resulting handle can construct an `SsTableView` in the
+            // apply path. The actual contents don't matter — the
+            // manifest writer routes by `prefix` from the surrounding
+            // `SegmentedSstHandle`, not by the SST's keys.
+            let mut builder = inner.table_store.table_builder();
+            let row = crate::types::RowEntry::new_value(prefix, value, first_seq);
+            builder.add(row).await.unwrap();
+            let encoded_sst = builder.build().await.unwrap();
+            let id = crate::db_state::SsTableId::Compacted(
+                inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
+            );
+            let sst_handle = inner
+                .upload_sst(&id, imm_memtable.table(), &encoded_sst, false)
                 .await
                 .unwrap();
-            let sst_handle = handles.into_iter().next().expect("expected single SST");
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,

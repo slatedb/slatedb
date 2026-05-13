@@ -49,6 +49,7 @@
 //! manifest_update_timeout = "300s"
 //! min_filter_keys = 1000
 //! l0_sst_size_bytes = 67108864
+//! max_wal_flushes_before_l0_flush = 4096
 //! l0_max_ssts = 8
 //! l0_max_ssts_per_key = 8
 //! l0_flush_parallelism = 4
@@ -97,6 +98,7 @@
 //!  "manifest_update_timeout": "300s",
 //!  "min_filter_keys": 1000,
 //!  "l0_sst_size_bytes": 67108864,
+//!  "max_wal_flushes_before_l0_flush": 4096,
 //!  "l0_max_ssts": 8,
 //!  "l0_max_ssts_per_key": 8,
 //!  "l0_flush_parallelism": 4,
@@ -148,6 +150,7 @@
 //! manifest_update_timeout: '300s'
 //! min_filter_keys: 1000
 //! l0_sst_size_bytes: 67108864
+//! max_wal_flushes_before_l0_flush: 4096
 //! l0_max_ssts: 8
 //! l0_max_ssts_per_key: 8
 //! l0_flush_parallelism: 1
@@ -669,6 +672,17 @@ pub struct Settings {
     ///   secondary readers to see new data.
     pub l0_sst_size_bytes: usize,
 
+    /// The maximum number of WAL flushes that can occur before the active memtable is
+    /// frozen and flushed to L0, regardless of memtable size.
+    ///
+    /// For databases with low write throughput, this can cause data to be available in
+    /// L0 SSTs sooner, making it accessible to readers.
+    ///
+    /// This also bounds the amount of WAL data that needs to be replayed on recovery: once
+    /// this many WAL flushes have occurred since the last memtable freeze, the active
+    /// memtable will be frozen even if it has not reached `l0_sst_size_bytes`.
+    pub max_wal_flushes_before_l0_flush: u64,
+
     /// Defines the max total number of SSTs in L0 across the entire key space. Memtables
     /// will not be flushed if the total L0 count (including in-flight uploads) would exceed
     /// this value, until compaction can compact the ssts into compacted.
@@ -746,6 +760,10 @@ impl std::fmt::Debug for Settings {
             .field("min_filter_keys", &self.min_filter_keys)
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
+            .field(
+                "max_wal_flushes_before_l0_flush",
+                &self.max_wal_flushes_before_l0_flush,
+            )
             .field("l0_max_ssts", &self.l0_max_ssts)
             .field("l0_max_ssts_per_key", &self.l0_max_ssts_per_key)
             .field("l0_flush_parallelism", &self.l0_flush_parallelism)
@@ -944,6 +962,7 @@ impl Default for Settings {
             min_filter_keys: 1000,
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_wal_flushes_before_l0_flush: 4096,
             l0_max_ssts: 8,
             l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 4,

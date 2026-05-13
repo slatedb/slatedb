@@ -58,26 +58,11 @@ impl LsmTreeState {
         Self::merge_writer_and_compactor(self, compactor)
     }
 
-    /// True iff this tree is a "drain marker": no L0, no compacted runs, but
-    /// the watermark is set. Drain markers are produced when the compactor
-    /// drains a segment (advances `last_compacted_l0_*` to cover all observed
-    /// L0s and clears `compacted`). They persist on the compactor's side and
-    /// propagate to the writer; the writer's side prunes them at merge time
-    /// once it has observed the marker and has no new data to add.
-    pub(crate) fn is_drained(&self) -> bool {
-        self.l0.is_empty()
-            && self.compacted.is_empty()
-            && (self.last_compacted_l0_sst_view_id.is_some()
-                || self.last_compacted_l0_sst_id.is_some())
-    }
-
-    /// True iff this tree carries no state at all — no L0, no compacted runs,
-    /// and no watermark. Truly-empty trees should not appear in the manifest.
+    /// True iff this tree has no L0 SSTs and no compacted runs. The watermark
+    /// (`last_compacted_l0_sst_view_id`) may or may not be set; an empty tree
+    /// with a set watermark is a drain marker.
     pub(crate) fn is_empty(&self) -> bool {
-        self.l0.is_empty()
-            && self.compacted.is_empty()
-            && self.last_compacted_l0_sst_view_id.is_none()
-            && self.last_compacted_l0_sst_id.is_none()
+        self.l0.is_empty() && self.compacted.is_empty()
     }
 
     /// Total number of SST views referenced by this tree — L0 plus every
@@ -177,17 +162,16 @@ pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) 
             MergeStep::WriterOnly(w) => {
                 // Compactor hasn't seen this prefix yet (newly-flushed).
                 let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &empty);
-                if !tree.is_empty() {
-                    merged.push(Segment {
-                        prefix: w.prefix.clone(),
-                        tree,
-                    });
-                }
+                merged.push(Segment {
+                    prefix: w.prefix.clone(),
+                    tree,
+                });
             }
             MergeStep::CompactorOnly(c) => {
-                // Expected: writer has pruned a drain marker — drop to
-                // follow. Anything else is a protocol violation.
-                if !c.tree.is_drained() {
+                // Expected: writer has pruned this prefix — drop to follow.
+                // Any tree with data here is a protocol violation: the
+                // compactor never produces data the writer hasn't seen.
+                if !c.tree.is_empty() {
                     unreachable!(
                         "compactor-only segment with data: prefix={:?} tree={:?}",
                         c.prefix, c.tree
@@ -195,15 +179,14 @@ pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) 
                 }
             }
             MergeStep::Both(w, c) => {
-                // Kernel merge. The compactor keeps markers in this
-                // branch — only the writer prunes.
+                // Kernel merge. The compactor never prunes — any empty
+                // result (drain marker or otherwise) flows through and is
+                // pruned by the writer.
                 let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &c.tree);
-                if !tree.is_empty() {
-                    merged.push(Segment {
-                        prefix: w.prefix.clone(),
-                        tree,
-                    });
-                }
+                merged.push(Segment {
+                    prefix: w.prefix.clone(),
+                    tree,
+                });
             }
         }
     }
@@ -246,9 +229,10 @@ pub(crate) fn merge_segments_from_compactor(
                 LsmTreeState::merge_writer_and_compactor(&w.tree, &c.tree),
             ),
         };
-        // Writer prune: drop drain markers (and truly-empty results, which
-        // arise after the compactor has already pruned).
-        if !tree.is_drained() && !tree.is_empty() {
+        // Writer is the sole pruner: drop any tree with no L0 and no SR.
+        // The watermark signal, if any, has already been applied by the
+        // `merge_writer_and_compactor` call above.
+        if !tree.is_empty() {
             merged.push(Segment { prefix, tree });
         }
     }
@@ -411,6 +395,43 @@ impl ManifestCore {
         std::iter::once(&self.tree).chain(self.segments.iter().map(|s| &s.tree))
     }
 
+    /// Iterate every tree paired with its segment prefix: the empty-prefix
+    /// root tree (RFC-0024 compatibility encoding) first, then each named
+    /// segment in `segments` order. Use [`trees`] when only the LSM state
+    /// matters.
+    pub(crate) fn trees_with_prefix(&self) -> impl Iterator<Item = (Bytes, &LsmTreeState)> {
+        std::iter::once((Bytes::new(), &self.tree))
+            .chain(self.segments.iter().map(|s| (s.prefix.clone(), &s.tree)))
+    }
+
+    /// Look up the LSM tree for a given segment prefix. An empty `prefix`
+    /// returns the root tree (compatibility-encoded `prefix=""` segment);
+    /// a non-empty prefix returns the named segment's tree, or `None` if no
+    /// segment with that prefix exists.
+    pub(crate) fn tree_for_segment(&self, prefix: &[u8]) -> Option<&LsmTreeState> {
+        if prefix.is_empty() {
+            Some(&self.tree)
+        } else {
+            self.segments
+                .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
+                .ok()
+                .map(|idx| &self.segments[idx].tree)
+        }
+    }
+
+    /// Mutable variant of [`tree_for_segment`].
+    pub(crate) fn tree_for_segment_mut(&mut self, prefix: &[u8]) -> Option<&mut LsmTreeState> {
+        if prefix.is_empty() {
+            Some(&mut self.tree)
+        } else {
+            let idx = self
+                .segments
+                .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
+                .ok()?;
+            Some(&mut self.segments[idx].tree)
+        }
+    }
+
     /// Iterate every SST view referenced by this manifest — L0 views and
     /// sorted-run views across the unsegmented tree and every segment.
     pub(crate) fn all_sst_views(&self) -> impl Iterator<Item = &SsTableView> {
@@ -421,6 +442,129 @@ impl ManifestCore {
         })
     }
 
+    /// Compare a configured WAL-store URI against the manifest's
+    /// persisted value. `ManifestV2` drops `wal_object_store_uri`
+    /// entirely (commit 52cead43, PR #1473) and always decodes it as
+    /// `None`, so the check is a no-op for V2 manifests; on `ManifestV1`
+    /// it enforces that the user did not silently swap a separate WAL
+    /// store on or off across opens.
+    pub(crate) fn validate_wal_object_store_uri(
+        &self,
+        configured: Option<&str>,
+    ) -> Result<(), SlateDBError> {
+        if let Some(persisted) = self.wal_object_store_uri.as_deref() {
+            if Some(persisted) != configured {
+                return Err(SlateDBError::WalStoreReconfigurationError);
+            }
+        }
+        Ok(())
+    }
+
+    /// RFC-0024 open-time reconciliation. Compares the configured
+    /// extractor against the manifest's persisted state and rejects any
+    /// reconfiguration that could route data inconsistently.
+    ///
+    /// Rules:
+    ///
+    /// - both `None` → fine.
+    /// - both `Some` and `name()` matches → fine; additionally every
+    ///   existing segment prefix must satisfy
+    ///   `prefix_len(Prefix(p)) == Some(p.len())` so the current
+    ///   extractor still claims the persisted prefixes.
+    /// - persisted `Some`, configured `None` → reject (extractor was
+    ///   removed; existing data is no longer addressable).
+    /// - persisted `None`, configured `Some` → reject (extractor was
+    ///   added to an existing database; pre-existing keys would route
+    ///   wrong). Caller is responsible for skipping this call when
+    ///   creating a fresh manifest.
+    /// - both `Some` but `name()` differs → reject.
+    pub(crate) fn validate_extractor_configuration(
+        &self,
+        configured: Option<&dyn crate::prefix_extractor::PrefixExtractor>,
+    ) -> Result<(), SlateDBError> {
+        let persisted = self.segment_extractor_name.as_deref();
+        let configured_name = configured.map(|e| e.name());
+        match (persisted, configured_name) {
+            (None, None) => Ok(()),
+            (Some(p), Some(c)) if p == c => self.validate_segment_prefixes_recognized(
+                configured.expect("configured extractor present"),
+            ),
+            _ => Err(SlateDBError::SegmentExtractorMismatch {
+                persisted: persisted.map(str::to_string),
+                configured: configured_name.map(str::to_string),
+            }),
+        }
+    }
+
+    /// For each entry in `segments`, verify that `extractor` recognizes
+    /// the prefix as a complete segment boundary
+    /// (`prefix_len(Prefix(p)) == Some(p.len())`). A failure means the
+    /// extractor's logic has shifted — the same `name()`, but it would
+    /// no longer assign `p`-keys to the segment they currently live in.
+    fn validate_segment_prefixes_recognized(
+        &self,
+        extractor: &dyn crate::prefix_extractor::PrefixExtractor,
+    ) -> Result<(), SlateDBError> {
+        for segment in &self.segments {
+            let n = extractor.prefix_len(&crate::prefix_extractor::PrefixTarget::Prefix(
+                segment.prefix.clone(),
+            ));
+            if n != Some(segment.prefix.len()) {
+                return Err(SlateDBError::SegmentPrefixNotRecognized {
+                    prefix: segment.prefix.clone(),
+                    extractor: extractor.name().to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify that `candidate` could join the segment set without violating
+    /// the antichain invariant. Returns `Ok` if `candidate` matches an
+    /// existing segment exactly or has no nesting neighbor in `segments`;
+    /// otherwise returns [`SlateDBError::InvalidSegmentPrefix`].
+    ///
+    /// Used at write time (RFC-0024 route-consistency) and from
+    /// [`Self::maybe_insert_tree`]. Cheap — one binary search plus two
+    /// `starts_with` comparisons against the sort-order neighbors.
+    pub(crate) fn check_segment_prefix_antichain(
+        &self,
+        candidate: &[u8],
+    ) -> Result<(), SlateDBError> {
+        match self
+            .segments
+            .binary_search_by(|s| s.prefix.as_ref().cmp(candidate))
+        {
+            Ok(_) => Ok(()),
+            Err(idx) => {
+                // Sort-order neighbors are the only candidates for nesting:
+                // by induction the existing list is already an antichain, so
+                // any nest with `candidate` must involve an element
+                // immediately less than or greater than it.
+                if let Some(succ) = self.segments.get(idx) {
+                    // succ.prefix > candidate; nested iff succ extends candidate.
+                    if succ.prefix.starts_with(candidate) {
+                        return Err(SlateDBError::InvalidSegmentPrefix {
+                            prefix: Bytes::copy_from_slice(candidate),
+                            conflict: succ.prefix.clone(),
+                        });
+                    }
+                }
+                if idx > 0 {
+                    let pred = &self.segments[idx - 1];
+                    // pred.prefix < candidate; nested iff candidate extends pred.
+                    if candidate.starts_with(pred.prefix.as_ref()) {
+                        return Err(SlateDBError::InvalidSegmentPrefix {
+                            prefix: Bytes::copy_from_slice(candidate),
+                            conflict: pred.prefix.clone(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Return a mutable reference to the LSM tree of the segment with the
     /// given `prefix`, inserting an empty entry at the sorted position if
     /// the segment does not yet exist. Preserves the `segments` ascending-
@@ -429,33 +573,11 @@ impl ManifestCore {
     pub(crate) fn maybe_insert_tree(
         &mut self,
         prefix: &Bytes,
-    ) -> Result<&mut LsmTreeState, crate::error::SlateDBError> {
+    ) -> Result<&mut LsmTreeState, SlateDBError> {
         match self.segments.binary_search_by(|s| s.prefix.cmp(prefix)) {
             Ok(idx) => Ok(&mut self.segments[idx].tree),
             Err(idx) => {
-                // Sort-order neighbors are the only candidates for nesting:
-                // by induction the existing list is already an antichain, so
-                // any nest with `prefix` must involve an element
-                // immediately less than or greater than it.
-                if let Some(succ) = self.segments.get(idx) {
-                    // succ.prefix > prefix; nested iff succ extends prefix.
-                    if succ.prefix.starts_with(prefix.as_ref()) {
-                        return Err(crate::error::SlateDBError::InvalidSegmentPrefix {
-                            prefix: prefix.clone(),
-                            conflict: succ.prefix.clone(),
-                        });
-                    }
-                }
-                if idx > 0 {
-                    let pred = &self.segments[idx - 1];
-                    // pred.prefix < prefix; nested iff prefix extends pred.
-                    if prefix.starts_with(pred.prefix.as_ref()) {
-                        return Err(crate::error::SlateDBError::InvalidSegmentPrefix {
-                            prefix: prefix.clone(),
-                            conflict: pred.prefix.clone(),
-                        });
-                    }
-                }
+                self.check_segment_prefix_antichain(prefix.as_ref())?;
                 self.segments.insert(
                     idx,
                     Segment {
@@ -711,7 +833,11 @@ impl Manifest {
         for parent_external_db in &parent_manifest.external_dbs {
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
-                source_checkpoint_id: parent_external_db.source_checkpoint_id,
+                // don't depend on the original source_checkpoint: it was supplied by the user and
+                // might have been deleted; use slatedb-generated final checkpoint instead
+                source_checkpoint_id: parent_external_db
+                    .final_checkpoint_id
+                    .expect("final_checkpoint_id must be present"),
                 final_checkpoint_id: Some(rand.rng().gen_uuid()),
                 sst_ids: parent_external_db.sst_ids.clone(),
             });
@@ -899,11 +1025,11 @@ impl Manifest {
 
     /// Extractor-configured case. Build a per-prefix accumulator from
     /// every source's `core.segments`, validate the antichain, and write
-    /// the result into `core.segments`. Drain-marker (empty) entries
-    /// produced by the loop are dropped to preserve
-    /// `LsmTreeState::is_empty`'s invariant. Watermarks are intentionally
-    /// not carried over: the unioned manifest is a fresh DB that begins
-    /// compaction tracking from scratch.
+    /// the result into `core.segments`. Empty entries (no L0, no compacted
+    /// runs) are dropped — the unioned manifest should not carry
+    /// placeholders. Watermarks are intentionally not carried over: the
+    /// unioned manifest is a fresh DB that begins compaction tracking from
+    /// scratch.
     fn build_segmented_lsm_state(
         core: &mut ManifestCore,
         sources: &[&CloneSource],
@@ -940,7 +1066,11 @@ impl Manifest {
             for parent_external_db in &manifest.external_dbs {
                 external_dbs.push(ExternalDb {
                     path: parent_external_db.path.clone(),
-                    source_checkpoint_id: parent_external_db.source_checkpoint_id,
+                    // don't depend on the original source_checkpoint: it was supplied by the user and
+                    // might have been deleted; use slatedb-generated final checkpoint instead
+                    source_checkpoint_id: parent_external_db
+                        .final_checkpoint_id
+                        .expect("final_checkpoint_id must be present"),
                     final_checkpoint_id: None,
                     sst_ids: parent_external_db.sst_ids.clone(),
                 });
@@ -1220,6 +1350,88 @@ mod tests {
         assert_eq!(
             parent_manifest.manifest().compactor_epoch,
             clone_manifest.compactor_epoch
+        );
+    }
+
+    #[test]
+    fn test_cloned_breaks_chain_via_final_checkpoint() {
+        // When the parent is itself a clone, its external_dbs already carry an entry for
+        // the grandparent. Cloning the parent must NOT propagate the grandparent's
+        // user-supplied source_checkpoint_id forward — the user could delete that
+        // checkpoint at any time, which would invalidate any future clones in the chain.
+        // Instead, the carried-over entry's source_checkpoint_id is set to the parent's
+        // final_checkpoint_id (slatedb-generated and pinned by the parent), breaking the
+        // chain back to the user-supplied checkpoint.
+        let rand = Arc::new(DbRand::default());
+
+        let grandparent_sst = SsTableId::Compacted(Ulid::new());
+        let parent_owned_sst = SsTableId::Compacted(Ulid::new());
+        let grandparent_source_cp = Uuid::new_v4();
+        let grandparent_final_cp = Uuid::new_v4();
+
+        let mut parent = build_manifest(
+            &SimpleManifest {
+                l0: vec![SstEntry::projected("parent_owned", "a", "a"..)],
+                sorted_runs: vec![],
+            },
+            |_| parent_owned_sst,
+        );
+        parent.external_dbs.push(ExternalDb {
+            path: "/tmp/grandparent".to_string(),
+            source_checkpoint_id: grandparent_source_cp,
+            final_checkpoint_id: Some(grandparent_final_cp),
+            sst_ids: vec![grandparent_sst],
+        });
+
+        let parent_cp = Uuid::new_v4();
+        let cloned = Manifest::cloned(&parent, "/tmp/parent".to_string(), parent_cp, rand);
+
+        // Two entries: the new immediate-parent entry, plus the carried-over grandparent.
+        assert_eq!(cloned.external_dbs.len(), 2);
+
+        let grandparent_entry = cloned
+            .external_dbs
+            .iter()
+            .find(|e| e.path == "/tmp/grandparent")
+            .expect("grandparent entry should be carried over");
+
+        // The chain to the user-supplied grandparent_source_cp must be broken:
+        // source_checkpoint_id is now the parent's final_checkpoint_id.
+        assert_eq!(
+            grandparent_entry.source_checkpoint_id, grandparent_final_cp,
+            "carried-over source_checkpoint_id must be the parent's final_checkpoint_id"
+        );
+        assert_ne!(
+            grandparent_entry.source_checkpoint_id, grandparent_source_cp,
+            "carried-over source_checkpoint_id must not depend on the user-supplied checkpoint"
+        );
+        // A fresh final_checkpoint_id is generated for the new clone's entry.
+        assert!(grandparent_entry.final_checkpoint_id.is_some());
+        assert_ne!(
+            grandparent_entry.final_checkpoint_id,
+            Some(grandparent_final_cp),
+            "final_checkpoint_id must be regenerated for the new clone"
+        );
+        assert_eq!(grandparent_entry.sst_ids, vec![grandparent_sst]);
+
+        // The new immediate-parent entry uses the user-supplied checkpoint as expected.
+        let parent_entry = cloned
+            .external_dbs
+            .iter()
+            .find(|e| e.path == "/tmp/parent")
+            .expect("parent entry should be added for the immediate parent");
+        assert_eq!(parent_entry.source_checkpoint_id, parent_cp);
+        assert_eq!(parent_entry.sst_ids, vec![parent_owned_sst]);
+
+        // The chain-break must hold across the whole clone manifest: no entry
+        // anywhere should still reference the user-supplied grandparent checkpoint.
+        assert!(
+            cloned
+                .external_dbs
+                .iter()
+                .all(|e| e.source_checkpoint_id != grandparent_source_cp
+                    && e.final_checkpoint_id != Some(grandparent_source_cp)),
+            "no entry in the clone may reference the user-supplied grandparent_source_cp"
         );
     }
 
@@ -1766,6 +1978,50 @@ mod tests {
         // Empty prefix is a strict prefix of every non-empty prefix.
         let err = core.maybe_insert_tree(&Bytes::new()).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidSegmentPrefix { .. }));
+    }
+
+    #[test]
+    fn check_segment_prefix_antichain_accepts_exact_and_disjoint() {
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"a")).unwrap();
+        core.maybe_insert_tree(&Bytes::from_static(b"c")).unwrap();
+        // Exact match: routing into an existing segment is fine.
+        core.check_segment_prefix_antichain(b"a").unwrap();
+        // Disjoint sibling between a and c.
+        core.check_segment_prefix_antichain(b"b").unwrap();
+        // Disjoint past the tail.
+        core.check_segment_prefix_antichain(b"d").unwrap();
+    }
+
+    #[test]
+    fn check_segment_prefix_antichain_rejects_descendant_and_ancestor() {
+        use crate::error::SlateDBError;
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"abc")).unwrap();
+        let err = core.check_segment_prefix_antichain(b"abcd").unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::InvalidSegmentPrefix { ref prefix, ref conflict }
+                if prefix.as_ref() == b"abcd" && conflict.as_ref() == b"abc"
+        ));
+        let err = core.check_segment_prefix_antichain(b"ab").unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::InvalidSegmentPrefix { ref prefix, ref conflict }
+                if prefix.as_ref() == b"ab" && conflict.as_ref() == b"abc"
+        ));
+    }
+
+    #[test]
+    fn check_segment_prefix_antichain_does_not_mutate_segments() {
+        let mut core = ManifestCore::new();
+        core.maybe_insert_tree(&Bytes::from_static(b"a")).unwrap();
+        let before = core.segments.clone();
+        // A passing check must not alter state.
+        core.check_segment_prefix_antichain(b"b").unwrap();
+        // Neither must a failing one.
+        let _ = core.check_segment_prefix_antichain(b"abc");
+        assert_eq!(core.segments, before);
     }
 
     /// Simulator-based protocol check: drive a random interleaving of writer
@@ -2334,9 +2590,11 @@ mod tests {
             .iter()
             .find(|e| e.path == "/tmp/grandparent")
             .unwrap();
-        // source_checkpoint_id is preserved so the union still depends on the
-        // same checkpoint on grandparent that the parent's clone depends on.
-        assert_eq!(grandparent.source_checkpoint_id, grandparent_source_cp);
+        // The carried-over entry's source_checkpoint_id must be replaced with the
+        // parent's final_checkpoint_id, so the union does not depend on the original
+        // user-supplied grandparent_source_cp (which the user could delete).
+        assert_eq!(grandparent.source_checkpoint_id, grandparent_final_cp);
+        assert_ne!(grandparent.source_checkpoint_id, grandparent_source_cp);
         // final_checkpoint_id must be regenerated — the union clone owns its own
         // checkpoint and must not claim ownership over the parent's.
         assert!(grandparent.final_checkpoint_id.is_some());
@@ -2761,16 +3019,24 @@ mod tests {
 
         let result = Manifest::cloned_from_union(sources, rand).unwrap();
 
+        // After the commit, carried-over external_dbs use the parent's final_checkpoint_id
+        // as their source_checkpoint_id (not the original user-supplied source_cp), so
+        // dedup on the union side keys off original_final_cp.
         let shared_entries: Vec<_> = result
             .external_dbs
             .iter()
-            .filter(|db| db.path == shared_path && db.source_checkpoint_id == shared_source_cp)
+            .filter(|db| db.path == shared_path && db.source_checkpoint_id == original_final_cp)
             .collect();
         assert_eq!(
             shared_entries.len(),
             1,
             "Should have exactly one entry for the shared (path, source_checkpoint_id)"
         );
+        // No entry should still reference the user-supplied shared_source_cp.
+        assert!(result
+            .external_dbs
+            .iter()
+            .all(|db| db.source_checkpoint_id != shared_source_cp));
 
         let merged_ids: HashSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
         let expected_ids: HashSet<SsTableId> = [sst_a, sst_b, sst_c].iter().copied().collect();
@@ -3219,8 +3485,7 @@ mod tests {
         // A source whose `core.segments` mixes a data-bearing segment
         // with a drain-marker segment (no L0, no compacted, watermark
         // set). The drain marker carries no meaning in the resulting
-        // clone and must not produce an empty entry in `core.segments`
-        // (which would violate `LsmTreeState::is_empty`'s invariant).
+        // clone and must not produce an empty entry in `core.segments`.
         let (mut m1, _, _) = manifest_with_segment(
             b"hour=11/",
             Some("hour"),
@@ -3239,7 +3504,6 @@ mod tests {
         });
         // `manifest.core.segments` invariant: sorted by prefix.
         m1.core.segments.sort_by(|a, b| a.prefix.cmp(&b.prefix));
-        debug_assert!(m1.core.segments[1].tree.is_drained());
 
         let (m2, _, _) =
             manifest_with_segment(b"hour=12/", Some("hour"), b"m", BytesRange::from_ref("m"..));
