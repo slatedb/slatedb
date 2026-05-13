@@ -73,8 +73,8 @@ fn test_dst_bank_with_toxics(
                     && toxic
                         .path_prefix
                         .as_deref()
-                        // None applies to all paths, so skip it, too.
-                        .is_none_or(|p| p.ends_with("wal"));
+                        // None and "bank" both apply to all paths, so skip them, too.
+                        .is_none_or(|p| p.ends_with("wal") || p.ends_with("bank"));
                 if !skip_toxic {
                     info!("adding toxic: {toxic:?}");
                     failures.add_toxic(toxic);
