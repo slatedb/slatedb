@@ -37,10 +37,11 @@ use crate::flatbuffer_types::root_generated::{
     CompactedSsTableArgs, CompactedSsTableV2, CompactedSsTableV2Args, CompactedSsTableView,
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
-    CompactionsV1Args, CompressionFormat, ManifestV1Args, Segment as FbSegment,
-    SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
-    SortedRunV2, SortedRunV2Args, SstType as FbSstType, TieredCompactionSpec,
-    TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
+    CompactionsV1Args, CompressionFormat, DrainSegmentSpec, DrainSegmentSpecArgs, ManifestV1Args,
+    Segment as FbSegment, SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1,
+    SortedRunArgs as FbSortedRunV1Args, SortedRunV2, SortedRunV2Args, SstType as FbSstType,
+    TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
+    UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
 use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
@@ -50,7 +51,12 @@ use crate::utils::clamp_allocated_size_bytes;
 use slatedb_txn_obj::ObjectCodec;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 2;
-pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 1;
+/// v2 (current) adds the `DrainSegmentSpec` union variant per RFC-0024 and
+/// persists the tiered destination explicitly so L0-only compactions round-trip
+/// across restart. v1 files have no destination field and infer it from SR
+/// inputs on decode.
+pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 2;
+pub(crate) const SUPPORTED_COMPACTIONS_FORMAT_VERSIONS: &[u16] = &[1, 2];
 pub(crate) const ORIGINAL_SST_FORMAT_VERSION: u16 = SST_FORMAT_VERSION;
 
 /// FlatBuffer verifier options with increased table limit.
@@ -554,10 +560,10 @@ impl FlatBufferCompactionsCodec {
             return Err(SlateDBError::InvalidCompaction);
         }
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
-        if version != COMPACTIONS_FORMAT_VERSION {
+        if !SUPPORTED_COMPACTIONS_FORMAT_VERSIONS.contains(&version) {
             return Err(SlateDBError::InvalidVersion {
                 format_name: "compactions",
-                supported_versions: vec![COMPACTIONS_FORMAT_VERSION],
+                supported_versions: SUPPORTED_COMPACTIONS_FORMAT_VERSIONS.to_vec(),
                 actual_version: version,
             });
         }
@@ -566,23 +572,27 @@ impl FlatBufferCompactionsCodec {
             &verifier_options(),
             unversioned_bytes.as_ref(),
         )?;
-        Self::compactions(&fb)
+        Self::compactions(&fb, version)
     }
 
     pub(crate) fn compactions(
         compactions: &CompactionsV1,
+        version: u16,
     ) -> Result<CompactorCompactions, SlateDBError> {
         let recent_compactions = compactions
             .recent_compactions()
             .iter()
-            .map(|c| Self::compaction(&c))
+            .map(|c| Self::compaction(&c, version))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(CompactorCompactions::new(compactions.compactor_epoch())
             .with_compactions(recent_compactions))
     }
 
-    fn compaction(compaction: &FbCompaction) -> Result<CompactorCompaction, SlateDBError> {
-        let spec = Self::compaction_spec(compaction)?;
+    fn compaction(
+        compaction: &FbCompaction,
+        version: u16,
+    ) -> Result<CompactorCompaction, SlateDBError> {
+        let spec = Self::compaction_spec(compaction, version)?;
         let status = CompactionStatus::from(compaction.status());
         let output_ssts = compaction
             .output_ssts()
@@ -593,7 +603,10 @@ impl FlatBufferCompactionsCodec {
             .with_output_ssts(output_ssts))
     }
 
-    fn compaction_spec(compaction: &FbCompaction) -> Result<CompactorCompactionSpec, SlateDBError> {
+    fn compaction_spec(
+        compaction: &FbCompaction,
+        version: u16,
+    ) -> Result<CompactorCompactionSpec, SlateDBError> {
         match compaction.spec_type() {
             FbCompactionSpec::TieredCompactionSpec => {
                 let Some(spec) = compaction.spec_as_tiered_compaction_spec() else {
@@ -613,8 +626,12 @@ impl FlatBufferCompactionsCodec {
                     .map(|runs| runs.iter().collect())
                     .unwrap_or_default();
                 sources.extend(sorted_runs.iter().copied().map(SourceId::SortedRun));
-                // Destination is not explicitly encoded in the flatbuffer; derive it from SR inputs.
-                let destination = sorted_runs.iter().copied().min().unwrap_or(0);
+                let destination = if version >= 2 {
+                    spec.destination()
+                } else {
+                    // Legacy v1 files do not encode destination explicitly.
+                    sorted_runs.iter().copied().min().unwrap_or(0)
+                };
                 // Pre-segment specs serialized before this field existed have
                 // no segment; treat as the compatibility-encoded `prefix=""`
                 // segment (root tree).
@@ -627,6 +644,20 @@ impl FlatBufferCompactionsCodec {
                     sources,
                     destination,
                 ))
+            }
+            FbCompactionSpec::DrainSegmentSpec => {
+                let Some(spec) = compaction.spec_as_drain_segment_spec() else {
+                    return Err(SlateDBError::InvalidCompaction);
+                };
+                let mut sources = Vec::new();
+                if let Some(view_ids) = spec.l0_view_ids() {
+                    sources.extend(view_ids.iter().map(|id| SourceId::SstView(id.ulid())));
+                }
+                if let Some(sorted_runs) = spec.sorted_runs() {
+                    sources.extend(sorted_runs.iter().map(SourceId::SortedRun));
+                }
+                let segment = Bytes::copy_from_slice(spec.segment().bytes());
+                Ok(CompactorCompactionSpec::drain_segment(segment, sources))
             }
             _ => Err(SlateDBError::InvalidCompaction),
         }
@@ -965,19 +996,38 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let sorted_runs =
             (!sorted_runs.is_empty()).then(|| self.builder.create_vector(sorted_runs.as_slice()));
         let segment = self.builder.create_vector(spec.segment().as_ref());
-        let tiered_spec = TieredCompactionSpec::create(
-            &mut self.builder,
-            &TieredCompactionSpecArgs {
-                ssts: None,
-                sorted_runs,
-                l0_view_ids,
-                segment: Some(segment),
-            },
-        );
-        (
-            FbCompactionSpec::TieredCompactionSpec,
-            tiered_spec.as_union_value(),
-        )
+        match spec {
+            CompactorCompactionSpec::Tiered(_) => {
+                let tiered_spec = TieredCompactionSpec::create(
+                    &mut self.builder,
+                    &TieredCompactionSpecArgs {
+                        ssts: None,
+                        sorted_runs,
+                        destination: spec.destination().expect("tiered spec"),
+                        l0_view_ids,
+                        segment: Some(segment),
+                    },
+                );
+                (
+                    FbCompactionSpec::TieredCompactionSpec,
+                    tiered_spec.as_union_value(),
+                )
+            }
+            CompactorCompactionSpec::DrainSegment(_) => {
+                let drain_spec = DrainSegmentSpec::create(
+                    &mut self.builder,
+                    &DrainSegmentSpecArgs {
+                        segment: Some(segment),
+                        l0_view_ids,
+                        sorted_runs,
+                    },
+                );
+                (
+                    FbCompactionSpec::DrainSegmentSpec,
+                    drain_spec.as_union_value(),
+                )
+            }
+        }
     }
 
     fn add_compaction(&mut self, compaction: &CompactorCompaction) -> WIPOffset<FbCompaction<'b>> {
@@ -1755,7 +1805,7 @@ mod tests {
         let output_ssts = vec![new_output_sst(b"a"), new_output_sst(b"m")];
         let compaction_l0 = Compaction::new(
             ulid::Ulid::new(),
-            CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 0),
+            CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 11),
         )
         .with_status(CompactionStatus::Running)
         .with_output_ssts(output_ssts);
@@ -1764,9 +1814,34 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
         )
         .with_status(CompactionStatus::Failed);
+        // Targets a named segment to exercise the non-empty `segment` path
+        // through encode/decode.
+        let segment_prefix = Bytes::from_static(b"hour=12/");
+        let compaction_segment = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::for_segment(
+                segment_prefix.clone(),
+                vec![SourceId::SortedRun(8), SourceId::SortedRun(6)],
+                6,
+            ),
+        )
+        .with_status(CompactionStatus::Running);
+        // Drain spec exercises the new `DrainSegmentSpec` union variant
+        // (RFC-0024). The codec must round-trip both spec kinds.
+        let drain_prefix = Bytes::from_static(b"hour=10/");
+        let compaction_drain = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::drain_segment(
+                drain_prefix.clone(),
+                vec![SourceId::SstView(ulid::Ulid::new()), SourceId::SortedRun(4)],
+            ),
+        )
+        .with_status(CompactionStatus::Submitted);
         let mut compactions = Compactions::new(9);
         compactions.insert(compaction_l0.clone());
         compactions.insert(compaction_sr.clone());
+        compactions.insert(compaction_segment.clone());
+        compactions.insert(compaction_drain.clone());
 
         let codec = FlatBufferCompactionsCodec {};
         let bytes = codec.encode(&compactions);
@@ -1785,6 +1860,40 @@ mod tests {
                 .expect("missing sr compaction"),
             &compaction_sr
         );
+        let decoded_segment = decoded
+            .get(&compaction_segment.id())
+            .expect("missing segment compaction");
+        assert_eq!(decoded_segment, &compaction_segment);
+        assert_eq!(decoded_segment.spec().segment(), &segment_prefix);
+        let decoded_drain = decoded
+            .get(&compaction_drain.id())
+            .expect("missing drain compaction");
+        assert_eq!(decoded_drain, &compaction_drain);
+        assert!(decoded_drain.spec().is_drain());
+        assert_eq!(decoded_drain.spec().segment(), &drain_prefix);
+        assert_eq!(decoded_drain.spec().destination(), None);
+    }
+
+    #[test]
+    fn test_should_roundtrip_v2_l0_only_compaction_destination() {
+        // Regression guard for issue #1652: an L0-only tiered compaction has
+        // no SR inputs, so the pre-fix decoder inferred destination=0 and
+        // dropped any real destination N>0 across restart. With the explicit
+        // `destination` field on the v2 wire format, the destination must
+        // round-trip through encode/decode.
+        let compaction = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 7),
+        );
+        let mut compactions = Compactions::new(1);
+        compactions.insert(compaction.clone());
+
+        let codec = FlatBufferCompactionsCodec {};
+        let bytes = codec.encode(&compactions);
+        let decoded = codec.decode(&bytes).expect("failed to decode compactions");
+
+        let decoded_compaction = decoded.get(&compaction.id()).expect("missing compaction");
+        assert_eq!(decoded_compaction.spec().destination(), Some(7));
     }
 
     #[test]
@@ -1827,7 +1936,10 @@ mod tests {
                     panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
                 };
                 assert_eq!(*format_name, "compactions");
-                assert_eq!(*supported_versions, vec![COMPACTIONS_FORMAT_VERSION]);
+                assert_eq!(
+                    *supported_versions,
+                    super::SUPPORTED_COMPACTIONS_FORMAT_VERSIONS.to_vec()
+                );
                 assert_eq!(*actual_version, invalid_version);
             }
             _ => panic!("Should fail with version mismatch"),
@@ -2172,6 +2284,7 @@ mod tests {
             &TieredCompactionSpecArgs {
                 ssts: Some(source_ssts),
                 sorted_runs: None,
+                destination: 0,
                 l0_view_ids: None,
                 segment: Some(segment_bytes),
             },
@@ -2245,6 +2358,7 @@ mod tests {
             &TieredCompactionSpecArgs {
                 ssts: Some(source_ssts),
                 sorted_runs: None,
+                destination: 0,
                 l0_view_ids: None,
                 segment: None,
             },
@@ -2289,6 +2403,70 @@ mod tests {
         // segment (root tree).
         let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
         assert_eq!(decoded_compaction.spec().segment(), &Bytes::new());
+    }
+
+    #[test]
+    fn test_should_decode_v1_tiered_compaction_with_legacy_inferred_destination() {
+        // given: a v1 compactions flatbuffer encoding a tiered compaction with
+        // SR inputs but no explicit destination field. v1 readers must infer
+        // the destination as `min(sorted_runs)` for backward compatibility.
+        use super::root_generated::{
+            Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
+            CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus,
+            CompactionsV1, CompactionsV1Args, TieredCompactionSpec, TieredCompactionSpecArgs,
+        };
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+        let sorted_runs = fbb.create_vector(&[5u32, 3u32]);
+        let segment_bytes = fbb.create_vector::<u8>(&[]);
+        let spec = TieredCompactionSpec::create(
+            &mut fbb,
+            &TieredCompactionSpecArgs {
+                ssts: None,
+                sorted_runs: Some(sorted_runs),
+                destination: 0, // absent on v1 wire; default 0 is skipped
+                l0_view_ids: None,
+                segment: Some(segment_bytes),
+            },
+        );
+        let compaction_ulid = ulid::Ulid::new();
+        let compaction_id = super::root_generated::Ulid::create(
+            &mut fbb,
+            &super::root_generated::UlidArgs {
+                high: (compaction_ulid.0 >> 64) as u64,
+                low: ((compaction_ulid.0 << 64) >> 64) as u64,
+            },
+        );
+        let compaction = FbCompaction::create(
+            &mut fbb,
+            &FbCompactionArgs {
+                id: Some(compaction_id),
+                spec_type: FbCompactionSpec::TieredCompactionSpec,
+                spec: Some(spec.as_union_value()),
+                status: FbCompactionStatus::Running,
+                output_ssts: None,
+            },
+        );
+        let compactions_vec = fbb.create_vector(&[compaction]);
+        let compactions = CompactionsV1::create(
+            &mut fbb,
+            &CompactionsV1Args {
+                compactor_epoch: 1,
+                recent_compactions: Some(compactions_vec),
+            },
+        );
+        fbb.finish(compactions, None);
+        let mut bytes = BytesMut::new();
+        bytes.put_u16(1);
+        bytes.put_slice(fbb.finished_data());
+        let bytes = bytes.freeze();
+
+        // when:
+        let codec = FlatBufferCompactionsCodec {};
+        let decoded = codec.decode(&bytes).expect("failed to decode compactions");
+
+        // then: destination is inferred as min(sorted_runs) = 3.
+        let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
+        assert_eq!(decoded_compaction.spec().destination(), Some(3));
     }
 
     #[test]

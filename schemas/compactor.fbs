@@ -3,6 +3,7 @@ include "sst.fbs";
 
 union CompactionSpec {
     TieredCompactionSpec,
+    DrainSegmentSpec,
 }
 
 enum CompactionStatus : byte {
@@ -32,6 +33,34 @@ table TieredCompactionSpec {
     // serialized before this field existed; readers default missing values
     // to empty bytes.
     segment: [ubyte];
+
+    // Destination Sorted Run ID for the compaction output. Appended after
+    // pre-existing fields so vtable offsets for earlier fields remain stable
+    // across schema evolution. Absent in v1 wire files; readers infer the
+    // destination from SR inputs for v1 and trust this field for v2+.
+    destination: uint32;
+}
+
+// Drains a named segment as part of segment retention (RFC-0024). The
+// executor performs no merge; on commit the segment's
+// `last_compacted_l0_sst_view_id` watermark advances to cover the listed
+// L0 views and the listed sorted runs are removed from `compacted`. The
+// segment entry remains in the manifest as a "drain marker" until the
+// writer's merge protocol observes it and prunes the segment. The
+// compatibility-encoded `prefix=""` segment cannot be drained by this
+// operation.
+table DrainSegmentSpec {
+    // Target segment prefix. Must be non-empty.
+    segment: [ubyte] (required);
+
+    // L0 SSTable View IDs the compactor has observed in the segment and is
+    // draining. `last_compacted_l0_sst_view_id` advances to the newest L0
+    // named here.
+    l0_view_ids: [Ulid];
+
+    // Sorted Run IDs the compactor has observed in the segment and is
+    // draining. These runs are removed from the segment's compacted list.
+    sorted_runs: [uint32];
 }
 
 table Compaction {

@@ -54,8 +54,11 @@ impl ConflictChecker {
         for source in compaction.sources().iter() {
             self.sources_used.insert(*source);
         }
-        self.sources_used
-            .insert(SourceId::SortedRun(compaction.destination()));
+        // Drain specs produce no destination SR; only tiered specs reserve
+        // a destination id in the conflict set.
+        if let Some(dst) = compaction.destination() {
+            self.sources_used.insert(SourceId::SortedRun(dst));
+        }
     }
 }
 
@@ -254,6 +257,13 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         state: &CompactorStateView,
         compaction: &CompactionSpec,
     ) -> Result<(), crate::error::Error> {
+        // Size-tiered does not propose drain specs and has no policy
+        // opinions on them. Drain invariants belong to the compactor-level
+        // validation.
+        if compaction.is_drain() {
+            return Ok(());
+        }
+
         let core = state.manifest().core();
         let Some(tree) = core.tree_for_segment(compaction.segment()) else {
             warn!(
@@ -274,7 +284,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         // Validate if the compaction sources are strictly consecutive elements in the target tree.
         if !sources_logical_order
             .windows(compaction.sources().len())
-            .any(|w| w == compaction.sources().as_slice())
+            .any(|w| w == compaction.sources())
         {
             warn!("submitted compaction is not a consecutive series of sources from db state: {:?} {:?}",
             compaction.sources(), sources_logical_order);
@@ -283,20 +293,15 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             ));
         }
 
-        let has_sr = compaction
+        // Must merge into the lowest-id SR among sources.
+        let min_sr = compaction
             .sources()
             .iter()
-            .any(|s| matches!(s, SourceId::SortedRun(_)));
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .min();
 
-        if has_sr {
-            // Must merge into the lowest-id SR among sources
-            let min_sr = compaction
-                .sources()
-                .iter()
-                .filter_map(|s| s.maybe_unwrap_sorted_run())
-                .min()
-                .expect("at least one SR in sources");
-            if compaction.destination() != min_sr {
+        if let Some(min_sr) = min_sr {
+            if compaction.destination() != Some(min_sr) {
                 warn!(
                     "destination does not match lowest-id SR among sources: {:?} {:?}",
                     compaction.destination(),
@@ -453,9 +458,10 @@ fn next_global_sr_id(db_state: &ManifestCore, active_compactions: &[&Compaction]
         .trees()
         .flat_map(|tree| tree.compacted.iter().map(|sr| sr.id))
         .max();
+    // Drain specs have no destination — `filter_map` skips them.
     let max_in_flight = active_compactions
         .iter()
-        .map(|c| c.spec().destination())
+        .filter_map(|c| c.spec().destination())
         .max();
     [max_committed, max_in_flight]
         .into_iter()
@@ -534,7 +540,7 @@ mod tests {
         let request = requests.first().unwrap();
         let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(request.sources(), &expected_sources);
-        assert_eq!(request.destination(), 0);
+        assert_eq!(request.destination(), Some(0));
     }
 
     #[test]
@@ -587,7 +593,7 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        assert_eq!(request.destination(), 11);
+        assert_eq!(request.destination(), Some(11));
     }
 
     #[test]
@@ -909,9 +915,10 @@ mod tests {
 
         let mut l0 = state.db_state().tree.l0.clone();
         let request = create_l0_compaction(l0.make_contiguous(), 0);
-        let mut new_sources: Vec<SourceId> = request.sources().clone();
+        let mut new_sources: Vec<SourceId> = request.sources().to_vec();
         new_sources.push(SourceId::SortedRun(5));
-        let new_request = CompactionSpec::new(new_sources, request.destination());
+        let new_request =
+            CompactionSpec::new(new_sources, request.destination().expect("tiered spec"));
         // when:
         let result = scheduler.validate(&state.into(), &new_request);
 
@@ -1054,7 +1061,7 @@ mod tests {
         assert_eq!(spec.segment().as_ref(), b"hour=12/");
         let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(spec.sources(), &expected_sources);
-        assert_eq!(spec.destination(), 0);
+        assert_eq!(spec.destination(), Some(0));
     }
 
     /// Cross-tree priority: when two trees are both eligible, the tree with
@@ -1079,8 +1086,8 @@ mod tests {
         assert_eq!(requests[0].segment().as_ref(), b"hour=12/");
         assert!(requests[1].segment().is_empty());
         // Globally-unique destination ids: segment gets 0, root gets 1.
-        assert_eq!(requests[0].destination(), 0);
-        assert_eq!(requests[1].destination(), 1);
+        assert_eq!(requests[0].destination(), Some(0));
+        assert_eq!(requests[1].destination(), Some(1));
     }
 
     /// Fresh L0 → SR destinations skip past every committed SR id in every
@@ -1103,7 +1110,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let spec = &requests[0];
         assert_eq!(spec.segment().as_ref(), b"seg/");
-        assert_eq!(spec.destination(), 21);
+        assert_eq!(spec.destination(), Some(21));
     }
 
     /// Round-robin fairness: when one tree could absorb the entire budget on
@@ -1207,5 +1214,25 @@ mod tests {
         let result = scheduler.validate(&state.into(), &spec);
 
         assert!(result.is_err());
+    }
+
+    /// `validate` accepts drain specs without running any size-tiered policy
+    /// checks. A drain spec has no destination and lists SRs to be retired,
+    /// neither of which fits the tiered "merge into the lowest-id SR" rule.
+    #[test]
+    fn test_validate_accepts_drain_spec_with_sr_sources() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let l0: Vec<SsTableView> = (0..2).map(|_| create_sst_view(1)).collect();
+        let srs = vec![create_sr2(1, 2), create_sr2(0, 2)];
+        let segment = segment_with(b"seg/", l0.iter().cloned().collect(), srs.clone());
+        let state = &create_compactor_state(create_db_state_with_segment(segment));
+
+        let mut sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
+        sources.extend(srs.iter().map(|sr| SourceId::SortedRun(sr.id)));
+        let spec = CompactionSpec::drain_segment(Bytes::from_static(b"seg/"), sources);
+
+        scheduler
+            .validate(&state.into(), &spec)
+            .expect("drain spec with SR sources must validate");
     }
 }
