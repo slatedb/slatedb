@@ -2561,6 +2561,7 @@ impl<'a> TieredCompactionSpec<'a> {
   pub const VT_SORTED_RUNS: flatbuffers::VOffsetT = 6;
   pub const VT_L0_VIEW_IDS: flatbuffers::VOffsetT = 8;
   pub const VT_SEGMENT: flatbuffers::VOffsetT = 10;
+  pub const VT_DESTINATION: flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2572,6 +2573,7 @@ impl<'a> TieredCompactionSpec<'a> {
     args: &'args TieredCompactionSpecArgs<'args>
   ) -> flatbuffers::WIPOffset<TieredCompactionSpec<'bldr>> {
     let mut builder = TieredCompactionSpecBuilder::new(_fbb);
+    builder.add_destination(args.destination);
     if let Some(x) = args.segment { builder.add_segment(x); }
     if let Some(x) = args.l0_view_ids { builder.add_l0_view_ids(x); }
     if let Some(x) = args.sorted_runs { builder.add_sorted_runs(x); }
@@ -2608,6 +2610,13 @@ impl<'a> TieredCompactionSpec<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(TieredCompactionSpec::VT_SEGMENT, None)}
   }
+  #[inline]
+  pub fn destination(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(TieredCompactionSpec::VT_DESTINATION, Some(0)).unwrap()}
+  }
 }
 
 impl flatbuffers::Verifiable for TieredCompactionSpec<'_> {
@@ -2621,6 +2630,7 @@ impl flatbuffers::Verifiable for TieredCompactionSpec<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u32>>>("sorted_runs", Self::VT_SORTED_RUNS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("l0_view_ids", Self::VT_L0_VIEW_IDS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("segment", Self::VT_SEGMENT, false)?
+     .visit_field::<u32>("destination", Self::VT_DESTINATION, false)?
      .finish();
     Ok(())
   }
@@ -2630,6 +2640,7 @@ pub struct TieredCompactionSpecArgs<'a> {
     pub sorted_runs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u32>>>,
     pub l0_view_ids: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
     pub segment: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    pub destination: u32,
 }
 impl<'a> Default for TieredCompactionSpecArgs<'a> {
   #[inline]
@@ -2639,6 +2650,7 @@ impl<'a> Default for TieredCompactionSpecArgs<'a> {
       sorted_runs: None,
       l0_view_ids: None,
       segment: None,
+      destination: 0,
     }
   }
 }
@@ -2665,6 +2677,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> TieredCompactionSpecBuilder<'a,
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionSpec::VT_SEGMENT, segment);
   }
   #[inline]
+  pub fn add_destination(&mut self, destination: u32) {
+    self.fbb_.push_slot::<u32>(TieredCompactionSpec::VT_DESTINATION, destination, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> TieredCompactionSpecBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     TieredCompactionSpecBuilder {
@@ -2686,6 +2702,7 @@ impl core::fmt::Debug for TieredCompactionSpec<'_> {
       ds.field("sorted_runs", &self.sorted_runs());
       ds.field("l0_view_ids", &self.l0_view_ids());
       ds.field("segment", &self.segment());
+      ds.field("destination", &self.destination());
       ds.finish()
   }
 }

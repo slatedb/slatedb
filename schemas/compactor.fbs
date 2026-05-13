@@ -33,6 +33,12 @@ table TieredCompactionSpec {
     // serialized before this field existed; readers default missing values
     // to empty bytes.
     segment: [ubyte];
+
+    // Destination Sorted Run ID for the compaction output. Appended after
+    // pre-existing fields so vtable offsets for earlier fields remain stable
+    // across schema evolution. Absent in v1 wire files; readers infer the
+    // destination from SR inputs for v1 and trust this field for v2+.
+    destination: uint32;
 }
 
 // Drains a named segment as part of segment retention (RFC-0024). The
