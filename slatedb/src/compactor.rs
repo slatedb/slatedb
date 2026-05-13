@@ -54,6 +54,7 @@
 //! represents a description (Spec), a durable decision (Compaction), or a running
 //! attempt (JobSpec).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,7 +76,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
-use crate::db_state::SortedRun;
+use crate::db_state::{SortedRun, SsTableView};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
@@ -614,25 +615,15 @@ impl CompactorEventHandler {
     }
 
     /// Calculates the estimated total source bytes for a compaction.
-    fn calculate_estimated_source_bytes(
-        compaction: &Compaction,
-        db_state: &crate::manifest::ManifestCore,
-    ) -> u64 {
-        use crate::db_state::{SortedRun, SsTableView};
-        use std::collections::HashMap;
+    fn calculate_estimated_source_bytes(compaction: &Compaction, db_state: &ManifestCore) -> u64 {
+        let tree = db_state
+            .tree_for_segment(compaction.spec().segment())
+            .expect("compaction target segment missing from manifest");
 
-        let views_by_id: HashMap<Ulid, &SsTableView> = db_state
-            .tree
-            .l0
-            .iter()
-            .map(|view| (view.id, view))
-            .collect();
-        let srs_by_id: HashMap<u32, &SortedRun> = db_state
-            .tree
-            .compacted
-            .iter()
-            .map(|sr| (sr.id, sr))
-            .collect();
+        let views_by_id: HashMap<Ulid, &SsTableView> =
+            tree.l0.iter().map(|view| (view.id, view)).collect();
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            tree.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
         compaction
             .spec()
@@ -1259,19 +1250,140 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
+    use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::test_utils::assert_iterator;
+    use crate::test_utils::{assert_iterator, FixedThreeBytePrefixExtractor};
     use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     const PATH: &str = "/test/db";
+
+    #[derive(Clone)]
+    struct SegmentTestScheduler {
+        segment: Bytes,
+        min_l0_sources: usize,
+    }
+
+    impl CompactionScheduler for SegmentTestScheduler {
+        fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
+            let db_state = state.manifest().core();
+            let Some(tree) = db_state.tree_for_segment(self.segment.as_ref()) else {
+                return vec![];
+            };
+            if tree.l0.len() < self.min_l0_sources {
+                return vec![];
+            }
+
+            let mut sources: Vec<SourceId> = tree
+                .l0
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect();
+            sources.extend(tree.compacted.iter().map(|sr| SourceId::SortedRun(sr.id)));
+
+            let destination = db_state
+                .trees()
+                .flat_map(|tree| tree.compacted.iter().map(|sr| sr.id))
+                .max()
+                .map(|id| id.saturating_add(1))
+                .unwrap_or(0);
+
+            vec![CompactionSpec::for_segment(
+                self.segment.clone(),
+                sources,
+                destination,
+            )]
+        }
+    }
+
+    struct SegmentTestSchedulerSupplier {
+        scheduler: SegmentTestScheduler,
+    }
+
+    impl SegmentTestSchedulerSupplier {
+        fn new(segment: Bytes, min_l0_sources: usize) -> Self {
+            Self {
+                scheduler: SegmentTestScheduler {
+                    segment,
+                    min_l0_sources,
+                },
+            }
+        }
+    }
+
+    impl CompactionSchedulerSupplier for SegmentTestSchedulerSupplier {
+        fn compaction_scheduler(
+            &self,
+            _options: &CompactorOptions,
+        ) -> Box<dyn CompactionScheduler + Send + Sync> {
+            Box::new(self.scheduler.clone())
+        }
+    }
+
+    /// Test scheduler that proposes a single drain spec for the target
+    /// segment, listing every observed L0 and SR as a source. Used to drive
+    /// the segment-drain e2e path; there is no admin-triggered drain API.
+    #[derive(Clone)]
+    struct SegmentDrainTestScheduler {
+        segment: Bytes,
+    }
+
+    impl CompactionScheduler for SegmentDrainTestScheduler {
+        fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
+            let db_state = state.manifest().core();
+            let Some(tree) = db_state.tree_for_segment(self.segment.as_ref()) else {
+                return vec![];
+            };
+            if tree.l0.is_empty() && tree.compacted.is_empty() {
+                return vec![];
+            }
+            let active_drain = state
+                .compactions()
+                .map(|compactions| {
+                    compactions.recent_compactions().any(|c| {
+                        c.active() && c.spec().is_drain() && c.spec().segment() == &self.segment
+                    })
+                })
+                .unwrap_or(false);
+            if active_drain {
+                return vec![];
+            }
+            let mut sources: Vec<SourceId> = tree
+                .l0
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect();
+            sources.extend(tree.compacted.iter().map(|sr| SourceId::SortedRun(sr.id)));
+            vec![CompactionSpec::drain_segment(self.segment.clone(), sources)]
+        }
+    }
+
+    struct SegmentDrainTestSchedulerSupplier {
+        scheduler: SegmentDrainTestScheduler,
+    }
+
+    impl SegmentDrainTestSchedulerSupplier {
+        fn new(segment: Bytes) -> Self {
+            Self {
+                scheduler: SegmentDrainTestScheduler { segment },
+            }
+        }
+    }
+
+    impl CompactionSchedulerSupplier for SegmentDrainTestSchedulerSupplier {
+        fn compaction_scheduler(
+            &self,
+            _options: &CompactorOptions,
+        ) -> Box<dyn CompactionScheduler + Send + Sync> {
+            Box::new(self.scheduler.clone())
+        }
+    }
 
     struct StringConcatMergeOperator;
 
@@ -1384,6 +1496,399 @@ mod tests {
             }
         }
         assert!(expected.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_compacts_only_target_segment() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_compactor_compacts_only_target_segment";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options.clone())
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, os.clone())
+                    .with_options(compactor_options())
+                    .with_scheduler_supplier(Arc::new(SegmentTestSchedulerSupplier::new(
+                        Bytes::from_static(b"aaa"),
+                        2,
+                    ))),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        for (key, value) in [
+            (b"aaa-001".as_slice(), b"v1".as_slice()),
+            (b"aaa-002".as_slice(), b"v2".as_slice()),
+            (b"aaa-003".as_slice(), b"v3".as_slice()),
+            (b"bbb-001".as_slice(), b"v4".as_slice()),
+        ] {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        let db_state = run_for(Duration::from_secs(10), || async {
+            system_clock
+                .as_ref()
+                .advance(Duration::from_millis(60000))
+                .await;
+            let core = read_db_state_core(&db);
+            let aaa = core
+                .segments
+                .iter()
+                .find(|segment| segment.prefix.as_ref() == b"aaa")
+                .expect("missing segment aaa");
+            let bbb = core
+                .segments
+                .iter()
+                .find(|segment| segment.prefix.as_ref() == b"bbb")
+                .expect("missing segment bbb");
+            if aaa.tree.l0.is_empty()
+                && !aaa.tree.compacted.is_empty()
+                && bbb.tree.l0.len() == 1
+                && bbb.tree.compacted.is_empty()
+            {
+                Some(core)
+            } else {
+                None
+            }
+        })
+        .await
+        .expect("segment-scoped compaction did not complete");
+
+        let aaa = db_state
+            .segments
+            .iter()
+            .find(|segment| segment.prefix.as_ref() == b"aaa")
+            .expect("missing segment aaa");
+        let bbb = db_state
+            .segments
+            .iter()
+            .find(|segment| segment.prefix.as_ref() == b"bbb")
+            .expect("missing segment bbb");
+        assert!(aaa.tree.l0.is_empty());
+        assert_eq!(aaa.tree.compacted.len(), 1);
+        assert_eq!(bbb.tree.l0.len(), 1);
+        assert!(bbb.tree.compacted.is_empty());
+
+        for (key, value) in [
+            (b"aaa-001".as_slice(), b"v1".as_slice()),
+            (b"aaa-002".as_slice(), b"v2".as_slice()),
+            (b"aaa-003".as_slice(), b"v3".as_slice()),
+            (b"bbb-001".as_slice(), b"v4".as_slice()),
+        ] {
+            assert_eq!(
+                db.get(key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_compacts_all_segments_with_size_tiered_scheduler() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_compactor_compacts_all_segments_with_size_tiered_scheduler";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        let compactor_opts = options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options must be set");
+        compactor_opts.scheduler_options = scheduler_options;
+        compactor_opts.max_concurrent_compactions = 3;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        let entries: &[(&[u8], &[u8])] = &[
+            (b"aaa-001", b"v1"),
+            (b"aaa-002", b"v2"),
+            (b"bbb-001", b"v3"),
+            (b"bbb-002", b"v4"),
+            (b"ccc-001", b"v5"),
+            (b"ccc-002", b"v6"),
+        ];
+
+        for (key, value) in entries {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        let prefixes: [&[u8]; 3] = [b"aaa", b"bbb", b"ccc"];
+
+        let db_state = run_for(Duration::from_secs(10), || async {
+            system_clock
+                .as_ref()
+                .advance(Duration::from_millis(60000))
+                .await;
+            let core = read_db_state_core(&db);
+            let all_compacted = prefixes.iter().all(|prefix| {
+                core.segments
+                    .iter()
+                    .find(|segment| segment.prefix.as_ref() == *prefix)
+                    .map(|segment| segment.tree.l0.is_empty() && !segment.tree.compacted.is_empty())
+                    .unwrap_or(false)
+            });
+            if all_compacted {
+                Some(core)
+            } else {
+                None
+            }
+        })
+        .await
+        .expect("not every segment compacted via size-tiered scheduler");
+
+        for prefix in prefixes {
+            let segment = db_state
+                .segments
+                .iter()
+                .find(|segment| segment.prefix.as_ref() == prefix)
+                .unwrap_or_else(|| panic!("missing segment {:?}", prefix));
+            assert!(
+                segment.tree.l0.is_empty(),
+                "segment {:?} still has L0 SSTs",
+                prefix
+            );
+            assert_eq!(
+                segment.tree.compacted.len(),
+                1,
+                "segment {:?} should have a single sorted run",
+                prefix
+            );
+        }
+
+        for (key, value) in entries {
+            assert_eq!(
+                db.get(key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_drains_segment() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_compactor_drains_segment";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options.clone())
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, os.clone())
+                    .with_options(compactor_options())
+                    .with_scheduler_supplier(Arc::new(SegmentDrainTestSchedulerSupplier::new(
+                        Bytes::from_static(b"aaa"),
+                    ))),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        for (key, value) in [
+            (b"aaa-001".as_slice(), b"v1".as_slice()),
+            (b"aaa-002".as_slice(), b"v2".as_slice()),
+            (b"bbb-001".as_slice(), b"v3".as_slice()),
+        ] {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        // The marker is pruned on the writer's next commit, so periodically
+        // write a fresh bbb-* key to nudge the writer-side merge.
+        let nudge = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let db_state = run_for(Duration::from_secs(10), || {
+            let db = &db;
+            let system_clock = system_clock.clone();
+            let nudge_value = nudge.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move {
+                system_clock
+                    .as_ref()
+                    .advance(Duration::from_millis(60000))
+                    .await;
+                let key = format!("bbb-nudge-{:04}", nudge_value);
+                put_and_flush_memtable(db, key.as_bytes(), b"nudge").await;
+                let core = read_db_state_core(db);
+                let aaa_gone = !core
+                    .segments
+                    .iter()
+                    .any(|segment| segment.prefix.as_ref() == b"aaa");
+                let bbb_present = core
+                    .segments
+                    .iter()
+                    .any(|segment| segment.prefix.as_ref() == b"bbb");
+                if aaa_gone && bbb_present {
+                    Some(core)
+                } else {
+                    None
+                }
+            }
+        })
+        .await
+        .expect("drain marker for segment aaa was not pruned");
+
+        assert!(
+            !db_state
+                .segments
+                .iter()
+                .any(|segment| segment.prefix.as_ref() == b"aaa"),
+            "aaa segment should be gone from manifest"
+        );
+        let bbb = db_state
+            .segments
+            .iter()
+            .find(|segment| segment.prefix.as_ref() == b"bbb")
+            .expect("missing segment bbb");
+        assert!(
+            !bbb.tree.l0.is_empty() || !bbb.tree.compacted.is_empty(),
+            "bbb segment should still hold data"
+        );
+
+        assert_eq!(db.get(b"aaa-001").await.unwrap(), None);
+        assert_eq!(db.get(b"aaa-002").await.unwrap(), None);
+        assert_eq!(
+            db.get(b"bbb-001").await.unwrap(),
+            Some(Bytes::from_static(b"v3"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_scan_across_segments_after_compaction() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_scan_across_segments_after_compaction";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        let compactor_opts = options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options must be set");
+        compactor_opts.scheduler_options = scheduler_options;
+        compactor_opts.max_concurrent_compactions = 3;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        // Two keys per segment, each flushed to its own L0 SST. Written in
+        // intra-segment lex order so the post-compaction scan order is
+        // deterministic without re-sorting on the test side.
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = [
+            b"aaa-001".as_slice(),
+            b"aaa-002",
+            b"bbb-001",
+            b"bbb-002",
+            b"ccc-001",
+            b"ccc-002",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.to_vec(), format!("v{}", i + 1).into_bytes()))
+        .collect();
+
+        for (key, value) in &entries {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        let prefixes: [&[u8]; 3] = [b"aaa", b"bbb", b"ccc"];
+        let _db_state = run_for(Duration::from_secs(10), || async {
+            system_clock
+                .as_ref()
+                .advance(Duration::from_millis(60000))
+                .await;
+            let core = read_db_state_core(&db);
+            let all_compacted = prefixes.iter().all(|prefix| {
+                core.segments
+                    .iter()
+                    .find(|segment| segment.prefix.as_ref() == *prefix)
+                    .map(|segment| segment.tree.l0.is_empty() && !segment.tree.compacted.is_empty())
+                    .unwrap_or(false)
+            });
+            if all_compacted {
+                Some(core)
+            } else {
+                None
+            }
+        })
+        .await
+        .expect("not every segment compacted before scan");
+
+        // Full ascending scan crosses every segment in prefix order.
+        let mut iter = db.scan::<Vec<u8>, _>(..).await.unwrap();
+        let mut collected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            collected.push((kv.key.to_vec(), kv.value.to_vec()));
+        }
+        assert_eq!(
+            collected, entries,
+            "full scan should yield every key in order"
+        );
+
+        // Per-segment prefix scan should return only that segment's keys.
+        for prefix in prefixes {
+            let mut iter = db.scan_prefix(prefix).await.unwrap();
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            while let Some(kv) = iter.next().await.unwrap() {
+                keys.push(kv.key.to_vec());
+            }
+            let expected: Vec<Vec<u8>> = entries
+                .iter()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .map(|(k, _)| k.clone())
+                .collect();
+            assert_eq!(keys, expected, "prefix scan for {:?}", prefix);
+        }
+
+        // Cross-segment range scan: spans the tail of aaa, all of bbb, and stops
+        // before the head of ccc.
+        let mut iter = db
+            .scan::<Vec<u8>, _>(b"aaa-002".to_vec()..b"ccc-001".to_vec())
+            .await
+            .unwrap();
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            keys.push(kv.key.to_vec());
+        }
+        assert_eq!(
+            keys,
+            vec![
+                b"aaa-002".to_vec(),
+                b"bbb-001".to_vec(),
+                b"bbb-002".to_vec(),
+            ],
+            "range scan spanning aaa and bbb"
+        );
     }
 
     #[cfg(feature = "wal_disable")]
@@ -2978,6 +3483,60 @@ mod tests {
             "Expected throughput > 0, got {}",
             throughput
         );
+    }
+
+    #[test]
+    fn test_calculate_estimated_source_bytes_uses_target_segment_tree() {
+        let segment_l0 = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"seg/a")),
+                index_offset: 11,
+                index_len: 13,
+                ..SsTableInfo::default()
+            },
+        ));
+        let segment_sr_view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"seg/m")),
+                index_offset: 17,
+                index_len: 19,
+                ..SsTableInfo::default()
+            },
+        ));
+        let segment_sr = SortedRun {
+            id: 7,
+            sst_views: vec![segment_sr_view.clone()],
+        };
+
+        let mut core = ManifestCore::new();
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"seg"),
+            tree: LsmTreeState {
+                l0: VecDeque::from(vec![segment_l0.clone()]),
+                compacted: vec![segment_sr.clone()],
+                ..LsmTreeState::default()
+            },
+        }];
+
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::for_segment(
+                Bytes::from_static(b"seg"),
+                vec![
+                    SourceId::SstView(segment_l0.id),
+                    SourceId::SortedRun(segment_sr.id),
+                ],
+                9,
+            ),
+        );
+
+        let expected = segment_l0.estimate_size() + segment_sr.estimate_size();
+        let actual = CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core);
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
@@ -4592,6 +5151,30 @@ mod tests {
         );
         let err = fixture.handler.validate_compaction(&spec).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    async fn put_and_flush_memtable(db: &Db, key: &[u8], value: &[u8]) {
+        db.put_with_options(
+            key,
+            value,
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+    }
+
+    fn read_db_state_core(db: &Db) -> ManifestCore {
+        let db_state = db.inner.state.read();
+        db_state.state().core().clone()
     }
 
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>
