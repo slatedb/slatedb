@@ -2,6 +2,7 @@ use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
+use crate::db_iter::{apply_filters, DbRecencyIterator};
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
 use crate::manifest::ManifestCore;
@@ -9,7 +10,8 @@ use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
 use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
-use crate::sst_iter::SstIteratorOptions;
+use crate::sorted_run_iterator::SortedRunIterator;
+use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
@@ -314,6 +316,111 @@ impl Reader {
             options.order,
         )
         .await
+    }
+
+    /// See [`crate::Db::scan_prefix_by_recency`].
+    ///
+    /// Builds a flat chain of per-source iterators newest-first so the
+    /// outer [`RecencyIterator`] can drain them in order, lazily
+    /// initializing each source only when the recency walk reaches it.
+    /// Cross-source order is always newest-first (active memtable, immutable
+    /// memtables, then within the single matching segment that segment's L0
+    /// SSTs newest-first followed by its sorted runs newest-first).
+    /// `options.order` controls iteration order *within* each source. Each
+    /// source is fully drained before moving to the next.
+    ///
+    /// Returns [`SlateDBError::RecencyScanPrefixSpansMultipleSegments`] if
+    /// the prefix overlaps more than one segment, since the recency
+    /// guarantee is only well-defined within a single segment.
+    pub(crate) async fn scan_prefix_by_recency_with_options(
+        &self,
+        prefix: Bytes,
+        options: &ScanOptions,
+        db_state: &(dyn DbStateReader + Sync),
+    ) -> Result<DbRecencyIterator, SlateDBError> {
+        self.db_stats.scan_requests.increment(1);
+        let max_seq = self.prepare_max_seq(None, options.durability_filter, options.dirty);
+        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
+
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: options.max_fetch_tasks,
+            blocks_to_fetch: read_ahead_blocks,
+            cache_blocks: options.cache_blocks,
+            // Recency scans are designed for early-stop. Eager spawning would
+            // proactively fetch blocks for sources the caller may never reach,
+            // defeating the early-stop savings.
+            eager_spawn: false,
+            order: options.order,
+            prefix: Some(prefix),
+            filter_context: options.filter_context.clone(),
+        };
+
+        // Cross-segment recency is not well-defined: walking segment A's
+        // oldest sorted run before touching segment B's freshest data
+        // breaks the freshest-first contract callers expect.
+        // `select_segments` always returns at least one entry (the default
+        // unsegmented tree when no segments are configured).
+        let mut segments = db_state.core().select_segments(&range);
+        if segments.len() > 1 {
+            return Err(SlateDBError::RecencyScanPrefixSpansMultipleSegments);
+        }
+        let segment = segments.pop();
+
+        let mut all_iters: Vec<Box<dyn RowEntryIterator + 'static>> = Vec::new();
+
+        // Memtables drain first (newest data, always in memory).
+        all_iters.push(Box::new(
+            db_state
+                .memtable()
+                .range(range.clone(), sst_iter_options.order),
+        ));
+        for memtable in db_state.imm_memtable() {
+            all_iters.push(Box::new(
+                memtable
+                    .table()
+                    .range(range.clone(), sst_iter_options.order),
+            ));
+        }
+
+        // Single-segment chain: L0 newest-first, then sorted runs newest-first.
+        // SST and SortedRun iterators are constructed without `init`, so the
+        // filter check / index load / first-block fetch only happens when the
+        // recency walk reaches the source.
+        if let Some(segment) = segment {
+            for sst in segment.tree.l0.iter().cloned() {
+                let iter = SstIterator::new_owned_with_stats(
+                    range.clone(),
+                    sst,
+                    self.table_store.clone(),
+                    sst_iter_options.clone(),
+                    Some(self.db_stats.clone()),
+                )?;
+                if let Some(iter) = iter {
+                    all_iters.push(Box::new(iter));
+                }
+            }
+            for sr in segment
+                .tree
+                .compacted
+                .iter()
+                .filter(|sr| sr.overlaps_range(&range))
+                .cloned()
+            {
+                let iter = SortedRunIterator::new_owned(
+                    range.clone(),
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options.clone(),
+                    Some(self.db_stats.clone()),
+                )
+                .await?;
+                all_iters.push(Box::new(iter));
+            }
+        }
+
+        let filtered = apply_filters(all_iters, max_seq);
+        Ok(DbRecencyIterator::new(VecDeque::from(filtered)))
     }
 }
 
