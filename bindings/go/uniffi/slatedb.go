@@ -7992,8 +7992,9 @@ func (_ FfiDestroyerCompaction) Destroy(value Compaction) {
 type CompactionSpec struct {
 	// Ordered compaction sources.
 	Sources []SourceId
-	// Destination sorted run ID.
-	Destination uint32
+	// Destination sorted run ID. `None` for drain-segment specs, which
+	// produce no new sorted run.
+	Destination *uint32
 	// Whether any input source is an L0 SST view.
 	HasL0Sources bool
 	// Whether any input source is a sorted run.
@@ -8002,7 +8003,7 @@ type CompactionSpec struct {
 
 func (r *CompactionSpec) Destroy() {
 	FfiDestroyerSequenceSourceId{}.Destroy(r.Sources)
-	FfiDestroyerUint32{}.Destroy(r.Destination)
+	FfiDestroyerOptionalUint32{}.Destroy(r.Destination)
 	FfiDestroyerBool{}.Destroy(r.HasL0Sources)
 	FfiDestroyerBool{}.Destroy(r.HasSrSources)
 }
@@ -8018,7 +8019,7 @@ func (c FfiConverterCompactionSpec) Lift(rb RustBufferI) CompactionSpec {
 func (c FfiConverterCompactionSpec) Read(reader io.Reader) CompactionSpec {
 	return CompactionSpec{
 		FfiConverterSequenceSourceIdINSTANCE.Read(reader),
-		FfiConverterUint32INSTANCE.Read(reader),
+		FfiConverterOptionalUint32INSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 	}
@@ -8034,7 +8035,7 @@ func (c FfiConverterCompactionSpec) LowerExternal(value CompactionSpec) External
 
 func (c FfiConverterCompactionSpec) Write(writer io.Writer, value CompactionSpec) {
 	FfiConverterSequenceSourceIdINSTANCE.Write(writer, value.Sources)
-	FfiConverterUint32INSTANCE.Write(writer, value.Destination)
+	FfiConverterOptionalUint32INSTANCE.Write(writer, value.Destination)
 	FfiConverterBoolINSTANCE.Write(writer, value.HasL0Sources)
 	FfiConverterBoolINSTANCE.Write(writer, value.HasSrSources)
 }

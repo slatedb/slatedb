@@ -58,26 +58,11 @@ impl LsmTreeState {
         Self::merge_writer_and_compactor(self, compactor)
     }
 
-    /// True iff this tree is a "drain marker": no L0, no compacted runs, but
-    /// the watermark is set. Drain markers are produced when the compactor
-    /// drains a segment (advances `last_compacted_l0_*` to cover all observed
-    /// L0s and clears `compacted`). They persist on the compactor's side and
-    /// propagate to the writer; the writer's side prunes them at merge time
-    /// once it has observed the marker and has no new data to add.
-    pub(crate) fn is_drained(&self) -> bool {
-        self.l0.is_empty()
-            && self.compacted.is_empty()
-            && (self.last_compacted_l0_sst_view_id.is_some()
-                || self.last_compacted_l0_sst_id.is_some())
-    }
-
-    /// True iff this tree carries no state at all — no L0, no compacted runs,
-    /// and no watermark. Truly-empty trees should not appear in the manifest.
+    /// True iff this tree has no L0 SSTs and no compacted runs. The watermark
+    /// (`last_compacted_l0_sst_view_id`) may or may not be set; an empty tree
+    /// with a set watermark is a drain marker.
     pub(crate) fn is_empty(&self) -> bool {
-        self.l0.is_empty()
-            && self.compacted.is_empty()
-            && self.last_compacted_l0_sst_view_id.is_none()
-            && self.last_compacted_l0_sst_id.is_none()
+        self.l0.is_empty() && self.compacted.is_empty()
     }
 
     /// Total number of SST views referenced by this tree — L0 plus every
@@ -177,17 +162,16 @@ pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) 
             MergeStep::WriterOnly(w) => {
                 // Compactor hasn't seen this prefix yet (newly-flushed).
                 let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &empty);
-                if !tree.is_empty() {
-                    merged.push(Segment {
-                        prefix: w.prefix.clone(),
-                        tree,
-                    });
-                }
+                merged.push(Segment {
+                    prefix: w.prefix.clone(),
+                    tree,
+                });
             }
             MergeStep::CompactorOnly(c) => {
-                // Expected: writer has pruned a drain marker — drop to
-                // follow. Anything else is a protocol violation.
-                if !c.tree.is_drained() {
+                // Expected: writer has pruned this prefix — drop to follow.
+                // Any tree with data here is a protocol violation: the
+                // compactor never produces data the writer hasn't seen.
+                if !c.tree.is_empty() {
                     unreachable!(
                         "compactor-only segment with data: prefix={:?} tree={:?}",
                         c.prefix, c.tree
@@ -195,15 +179,14 @@ pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) 
                 }
             }
             MergeStep::Both(w, c) => {
-                // Kernel merge. The compactor keeps markers in this
-                // branch — only the writer prunes.
+                // Kernel merge. The compactor never prunes — any empty
+                // result (drain marker or otherwise) flows through and is
+                // pruned by the writer.
                 let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &c.tree);
-                if !tree.is_empty() {
-                    merged.push(Segment {
-                        prefix: w.prefix.clone(),
-                        tree,
-                    });
-                }
+                merged.push(Segment {
+                    prefix: w.prefix.clone(),
+                    tree,
+                });
             }
         }
     }
@@ -246,9 +229,10 @@ pub(crate) fn merge_segments_from_compactor(
                 LsmTreeState::merge_writer_and_compactor(&w.tree, &c.tree),
             ),
         };
-        // Writer prune: drop drain markers (and truly-empty results, which
-        // arise after the compactor has already pruned).
-        if !tree.is_drained() && !tree.is_empty() {
+        // Writer is the sole pruner: drop any tree with no L0 and no SR.
+        // The watermark signal, if any, has already been applied by the
+        // `merge_writer_and_compactor` call above.
+        if !tree.is_empty() {
             merged.push(Segment { prefix, tree });
         }
     }
@@ -1041,11 +1025,11 @@ impl Manifest {
 
     /// Extractor-configured case. Build a per-prefix accumulator from
     /// every source's `core.segments`, validate the antichain, and write
-    /// the result into `core.segments`. Drain-marker (empty) entries
-    /// produced by the loop are dropped to preserve
-    /// `LsmTreeState::is_empty`'s invariant. Watermarks are intentionally
-    /// not carried over: the unioned manifest is a fresh DB that begins
-    /// compaction tracking from scratch.
+    /// the result into `core.segments`. Empty entries (no L0, no compacted
+    /// runs) are dropped — the unioned manifest should not carry
+    /// placeholders. Watermarks are intentionally not carried over: the
+    /// unioned manifest is a fresh DB that begins compaction tracking from
+    /// scratch.
     fn build_segmented_lsm_state(
         core: &mut ManifestCore,
         sources: &[&CloneSource],
@@ -3501,8 +3485,7 @@ mod tests {
         // A source whose `core.segments` mixes a data-bearing segment
         // with a drain-marker segment (no L0, no compacted, watermark
         // set). The drain marker carries no meaning in the resulting
-        // clone and must not produce an empty entry in `core.segments`
-        // (which would violate `LsmTreeState::is_empty`'s invariant).
+        // clone and must not produce an empty entry in `core.segments`.
         let (mut m1, _, _) = manifest_with_segment(
             b"hour=11/",
             Some("hour"),
@@ -3521,7 +3504,6 @@ mod tests {
         });
         // `manifest.core.segments` invariant: sorted by prefix.
         m1.core.segments.sort_by(|a, b| a.prefix.cmp(&b.prefix));
-        debug_assert!(m1.core.segments[1].tree.is_drained());
 
         let (m2, _, _) =
             manifest_with_segment(b"hour=12/", Some("hour"), b"m", BytesRange::from_ref("m"..));

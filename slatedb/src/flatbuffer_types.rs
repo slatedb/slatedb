@@ -37,10 +37,11 @@ use crate::flatbuffer_types::root_generated::{
     CompactedSsTableArgs, CompactedSsTableV2, CompactedSsTableV2Args, CompactedSsTableView,
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
-    CompactionsV1Args, CompressionFormat, ManifestV1Args, Segment as FbSegment,
-    SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
-    SortedRunV2, SortedRunV2Args, SstType as FbSstType, TieredCompactionSpec,
-    TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
+    CompactionsV1Args, CompressionFormat, DrainSegmentSpec, DrainSegmentSpecArgs, ManifestV1Args,
+    Segment as FbSegment, SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1,
+    SortedRunArgs as FbSortedRunV1Args, SortedRunV2, SortedRunV2Args, SstType as FbSstType,
+    TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
+    UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
 use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
@@ -50,7 +51,11 @@ use crate::utils::clamp_allocated_size_bytes;
 use slatedb_txn_obj::ObjectCodec;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 2;
-pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 1;
+/// v2 (current) adds the `DrainSegmentSpec` union variant per RFC-0024.
+/// v1 files contain only `TieredCompactionSpec` specs and decode under
+/// the current schema without modification.
+pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 2;
+pub(crate) const SUPPORTED_COMPACTIONS_FORMAT_VERSIONS: &[u16] = &[1, 2];
 pub(crate) const ORIGINAL_SST_FORMAT_VERSION: u16 = SST_FORMAT_VERSION;
 
 /// FlatBuffer verifier options with increased table limit.
@@ -554,10 +559,10 @@ impl FlatBufferCompactionsCodec {
             return Err(SlateDBError::InvalidCompaction);
         }
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
-        if version != COMPACTIONS_FORMAT_VERSION {
+        if !SUPPORTED_COMPACTIONS_FORMAT_VERSIONS.contains(&version) {
             return Err(SlateDBError::InvalidVersion {
                 format_name: "compactions",
-                supported_versions: vec![COMPACTIONS_FORMAT_VERSION],
+                supported_versions: SUPPORTED_COMPACTIONS_FORMAT_VERSIONS.to_vec(),
                 actual_version: version,
             });
         }
@@ -627,6 +632,20 @@ impl FlatBufferCompactionsCodec {
                     sources,
                     destination,
                 ))
+            }
+            FbCompactionSpec::DrainSegmentSpec => {
+                let Some(spec) = compaction.spec_as_drain_segment_spec() else {
+                    return Err(SlateDBError::InvalidCompaction);
+                };
+                let mut sources = Vec::new();
+                if let Some(view_ids) = spec.l0_view_ids() {
+                    sources.extend(view_ids.iter().map(|id| SourceId::SstView(id.ulid())));
+                }
+                if let Some(sorted_runs) = spec.sorted_runs() {
+                    sources.extend(sorted_runs.iter().map(SourceId::SortedRun));
+                }
+                let segment = Bytes::copy_from_slice(spec.segment().bytes());
+                Ok(CompactorCompactionSpec::drain_segment(segment, sources))
             }
             _ => Err(SlateDBError::InvalidCompaction),
         }
@@ -965,19 +984,37 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let sorted_runs =
             (!sorted_runs.is_empty()).then(|| self.builder.create_vector(sorted_runs.as_slice()));
         let segment = self.builder.create_vector(spec.segment().as_ref());
-        let tiered_spec = TieredCompactionSpec::create(
-            &mut self.builder,
-            &TieredCompactionSpecArgs {
-                ssts: None,
-                sorted_runs,
-                l0_view_ids,
-                segment: Some(segment),
-            },
-        );
-        (
-            FbCompactionSpec::TieredCompactionSpec,
-            tiered_spec.as_union_value(),
-        )
+        match spec {
+            CompactorCompactionSpec::Tiered(_) => {
+                let tiered_spec = TieredCompactionSpec::create(
+                    &mut self.builder,
+                    &TieredCompactionSpecArgs {
+                        ssts: None,
+                        sorted_runs,
+                        l0_view_ids,
+                        segment: Some(segment),
+                    },
+                );
+                (
+                    FbCompactionSpec::TieredCompactionSpec,
+                    tiered_spec.as_union_value(),
+                )
+            }
+            CompactorCompactionSpec::DrainSegment(_) => {
+                let drain_spec = DrainSegmentSpec::create(
+                    &mut self.builder,
+                    &DrainSegmentSpecArgs {
+                        segment: Some(segment),
+                        l0_view_ids,
+                        sorted_runs,
+                    },
+                );
+                (
+                    FbCompactionSpec::DrainSegmentSpec,
+                    drain_spec.as_union_value(),
+                )
+            }
+        }
     }
 
     fn add_compaction(&mut self, compaction: &CompactorCompaction) -> WIPOffset<FbCompaction<'b>> {
@@ -1764,9 +1801,34 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
         )
         .with_status(CompactionStatus::Failed);
+        // Targets a named segment to exercise the non-empty `segment` path
+        // through encode/decode.
+        let segment_prefix = Bytes::from_static(b"hour=12/");
+        let compaction_segment = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::for_segment(
+                segment_prefix.clone(),
+                vec![SourceId::SortedRun(8), SourceId::SortedRun(6)],
+                6,
+            ),
+        )
+        .with_status(CompactionStatus::Running);
+        // Drain spec exercises the new `DrainSegmentSpec` union variant
+        // (RFC-0024). The codec must round-trip both spec kinds.
+        let drain_prefix = Bytes::from_static(b"hour=10/");
+        let compaction_drain = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::drain_segment(
+                drain_prefix.clone(),
+                vec![SourceId::SstView(ulid::Ulid::new()), SourceId::SortedRun(4)],
+            ),
+        )
+        .with_status(CompactionStatus::Submitted);
         let mut compactions = Compactions::new(9);
         compactions.insert(compaction_l0.clone());
         compactions.insert(compaction_sr.clone());
+        compactions.insert(compaction_segment.clone());
+        compactions.insert(compaction_drain.clone());
 
         let codec = FlatBufferCompactionsCodec {};
         let bytes = codec.encode(&compactions);
@@ -1785,6 +1847,18 @@ mod tests {
                 .expect("missing sr compaction"),
             &compaction_sr
         );
+        let decoded_segment = decoded
+            .get(&compaction_segment.id())
+            .expect("missing segment compaction");
+        assert_eq!(decoded_segment, &compaction_segment);
+        assert_eq!(decoded_segment.spec().segment(), &segment_prefix);
+        let decoded_drain = decoded
+            .get(&compaction_drain.id())
+            .expect("missing drain compaction");
+        assert_eq!(decoded_drain, &compaction_drain);
+        assert!(decoded_drain.spec().is_drain());
+        assert_eq!(decoded_drain.spec().segment(), &drain_prefix);
+        assert_eq!(decoded_drain.spec().destination(), None);
     }
 
     #[test]
@@ -1827,7 +1901,10 @@ mod tests {
                     panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
                 };
                 assert_eq!(*format_name, "compactions");
-                assert_eq!(*supported_versions, vec![COMPACTIONS_FORMAT_VERSION]);
+                assert_eq!(
+                    *supported_versions,
+                    super::SUPPORTED_COMPACTIONS_FORMAT_VERSIONS.to_vec()
+                );
                 assert_eq!(*actual_version, invalid_version);
             }
             _ => panic!("Should fail with version mismatch"),
