@@ -249,6 +249,24 @@ impl TableStore {
         ))
     }
 
+    /// Writes a zero-byte WAL object as a fencing marker.
+    ///
+    /// Uses create-if-absent semantics so any existing WAL object at this ID
+    /// fences the writer by returning [`SlateDBError::Fenced`].
+    pub(crate) async fn write_wal_fence(&self, wal_id: u64) -> Result<(), SlateDBError> {
+        let id = SsTableId::Wal(wal_id);
+        fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
+            Result::Err(slatedb_io_error())
+        });
+        write_sst_in_object_store(
+            self.object_stores.store_for(&id),
+            &id,
+            &self.path(&id),
+            &Bytes::new(),
+        )
+        .await
+    }
+
     async fn cache_filters(&self, sst: SsTableId, id: u64, filters: Arc<[NamedFilter]>) {
         let Some(ref cache) = self.cache else {
             return;
@@ -1062,6 +1080,58 @@ mod tests {
 
         // write another wal sst with the same id.
         let result = ts.write_sst(&wal_id, &table2, false).await;
+        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_wal_fence_should_write_zero_bytes() {
+        let os = Arc::new(InMemory::new());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        ts.write_wal_fence(1).await.unwrap();
+
+        let metadata = ts.metadata(&SsTableId::Wal(1)).await.unwrap();
+        assert_eq!(metadata.size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_wal_fence_should_fail_when_fenced() {
+        let os = Arc::new(InMemory::new());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        ts.write_wal_fence(1).await.unwrap();
+        let result = ts.write_wal_fence(1).await;
+        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_wal_write_should_fail_after_zero_byte_fence() {
+        let os = Arc::new(InMemory::new());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        ts.write_wal_fence(1).await.unwrap();
+
+        let mut sst = ts.table_builder();
+        sst.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table = sst.build().await.unwrap();
+        let result = ts.write_sst(&SsTableId::Wal(1), &table, false).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
 

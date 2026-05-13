@@ -161,25 +161,11 @@ impl DbInner {
         Ok(handle)
     }
 
-    /// Write an empty WAL SST at `wal_id` as a fencing barrier. The
+    /// Write a zero-byte WAL object at `wal_id` as a fencing barrier. The
     /// object-storage put-if-absent at this slot is what fences in-flight
     /// WAL writes from older-epoch writers — see [`Self::fence_writers`].
-    ///
-    /// Builds the empty SST blob directly from an empty builder; bypasses
-    /// the L0 build pipeline since there's no memtable to flush. L0 data
-    /// must go through the segment-aware upload pipeline
-    /// ([`Self::build_imm_ssts`]).
     pub(crate) async fn flush_empty_wal(&self, wal_id: u64) -> Result<(), SlateDBError> {
-        let encoded_sst = self.table_store.table_builder().build().await?;
-        let empty = crate::mem_table::WritableKVTable::new();
-        self.upload_sst(
-            &db_state::SsTableId::Wal(wal_id),
-            empty.table().clone(),
-            &encoded_sst,
-            false,
-        )
-        .await?;
-        Ok(())
+        self.table_store.write_wal_fence(wal_id).await
     }
 
     /// Test helper: build L0 SSTs from `imm_table` via the segment-aware

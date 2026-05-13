@@ -157,7 +157,15 @@ impl WalReplayIterator<'_> {
             sst_iter_options: SstIteratorOptions,
             table_store: Arc<TableStore>,
         ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
-            let sst = table_store.open_sst(&SsTableId::Wal(wal_id)).await?;
+            let sst = match table_store.open_sst(&SsTableId::Wal(wal_id)).await {
+                Ok(sst) => sst,
+                Err(SlateDBError::EmptySSTable) => {
+                    // Zero-byte WAL files are fence markers; replay them as empty WALs
+                    // so the last replayed WAL ID still advances past the marker.
+                    return Ok(Some(SstIterator::new_empty(SsTableId::Wal(wal_id))));
+                }
+                Err(err) => return Err(err),
+            };
             SstIterator::new_owned_initialized(
                 ..,
                 SsTableView::identity(sst),
@@ -309,6 +317,62 @@ mod tests {
         assert_eq!(table.last_seq, 0);
         assert!(table.table.is_empty());
         assert_eq!(table.last_tick, i64::MIN);
+        assert!(replay_iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_replay_zero_byte_wal_fence() {
+        let table_store = test_table_store();
+        table_store.write_wal_fence(1).await.unwrap();
+        let mut replay_iter = WalReplayIterator::new(
+            &ManifestCore::new(),
+            WalReplayOptions::default(),
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let Some(table) = replay_iter.next().await.unwrap() else {
+            panic!("Expected empty table to be returned from iterator")
+        };
+
+        assert_eq!(table.last_wal_id, 1);
+        assert_eq!(table.last_seq, 0);
+        assert!(table.table.is_empty());
+        assert_eq!(table.last_tick, i64::MIN);
+        assert!(replay_iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_replay_zero_byte_wal_fence_before_real_wal() {
+        let table_store = test_table_store();
+        table_store.write_wal_fence(1).await.unwrap();
+
+        let row = RowEntry::new_value(b"key", b"value", 1);
+        let mut builder = table_store.wal_table_builder();
+        builder.add(row.clone()).await.unwrap();
+        let encoded_sst = builder.build().await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(2), &encoded_sst, false)
+            .await
+            .unwrap();
+
+        let mut replay_iter = WalReplayIterator::new(
+            &ManifestCore::new(),
+            WalReplayOptions::default(),
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let Some(replayed_table) = replay_iter.next().await.unwrap() else {
+            panic!("Expected table to be returned from iterator")
+        };
+        assert_eq!(replayed_table.last_wal_id, 2);
+        assert_eq!(replayed_table.last_seq, 1);
+
+        let mut iter = replayed_table.table.table().iter();
+        test_utils::assert_iterator(&mut iter, vec![row]).await;
         assert!(replay_iter.next().await.unwrap().is_none());
     }
 

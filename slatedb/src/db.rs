@@ -3554,8 +3554,8 @@ mod tests {
             vec![
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 0),
-            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
-            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 1),
+            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 0),
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
         ];
 
@@ -3577,8 +3577,8 @@ mod tests {
             // `cache_puts_enabled` starts taking effect.
             ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 0),
             ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 0),
-            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
-            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 1),
+            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 0),
             // 1 part is cached because the put with cache_puts enabled should cache the test_key put
             ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 1),
         ];
@@ -6091,6 +6091,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        let wal_ssts = db.inner.table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 1);
+        assert_eq!(wal_ssts[0].size, 0);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())

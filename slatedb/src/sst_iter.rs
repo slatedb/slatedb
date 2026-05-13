@@ -844,6 +844,7 @@ impl RowEntryIterator for FilterIterator<'_> {
 enum SstIteratorDelegate<'a> {
     Direct(InternalSstIterator<'a>),
     Filter(FilterIterator<'a>),
+    Empty(SsTableId),
 }
 
 pub(crate) struct SstIterator<'a> {
@@ -851,6 +852,12 @@ pub(crate) struct SstIterator<'a> {
 }
 
 impl<'a> SstIterator<'a> {
+    pub(crate) fn new_empty(table_id: SsTableId) -> Self {
+        Self {
+            delegate: SstIteratorDelegate::Empty(table_id),
+        }
+    }
+
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
         let prefix = internal.options.prefix.clone();
@@ -931,6 +938,7 @@ impl<'a> SstIterator<'a> {
                     SstIteratorDelegate::Direct(inner_iter) => {
                         inner_iter.init().await?;
                     }
+                    SstIteratorDelegate::Empty(_) => {}
                 }
                 Ok(Some(iterator))
             }
@@ -980,6 +988,7 @@ impl<'a> SstIterator<'a> {
                     SstIteratorDelegate::Direct(inner_iter) => {
                         inner_iter.init().await?;
                     }
+                    SstIteratorDelegate::Empty(_) => {}
                 }
                 Ok(Some(iterator))
             }
@@ -1021,6 +1030,7 @@ impl<'a> SstIterator<'a> {
                     SstIteratorDelegate::Direct(inner_iter) => {
                         inner_iter.init().await?;
                     }
+                    SstIteratorDelegate::Empty(_) => {}
                 }
                 Ok(Some(iterator))
             }
@@ -1032,6 +1042,7 @@ impl<'a> SstIterator<'a> {
         match &self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.table_id(),
             SstIteratorDelegate::Filter(inner) => inner.table_id(),
+            SstIteratorDelegate::Empty(table_id) => *table_id,
         }
     }
 }
@@ -1042,6 +1053,7 @@ impl RowEntryIterator for SstIterator<'_> {
         match &mut self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.init().await,
             SstIteratorDelegate::Filter(inner) => inner.init().await,
+            SstIteratorDelegate::Empty(_) => Ok(()),
         }
     }
 
@@ -1049,6 +1061,7 @@ impl RowEntryIterator for SstIterator<'_> {
         match &mut self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.next().await,
             SstIteratorDelegate::Filter(inner) => inner.next().await,
+            SstIteratorDelegate::Empty(_) => Ok(None),
         }
     }
 
@@ -1056,6 +1069,7 @@ impl RowEntryIterator for SstIterator<'_> {
         match &mut self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.seek(next_key).await,
             SstIteratorDelegate::Filter(inner) => inner.seek(next_key).await,
+            SstIteratorDelegate::Empty(_) => Ok(()),
         }
     }
 }
