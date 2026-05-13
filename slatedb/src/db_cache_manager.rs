@@ -6,7 +6,7 @@ use log::{debug, warn};
 use tokio::sync::OnceCell;
 
 use crate::bytes_range::BytesRange;
-use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::VersionedManifest;
@@ -63,24 +63,24 @@ pub(crate) async fn warm_sst_impl(
 
     // Reuse the handle embedded in the manifest view instead of calling
     // `open_sst`, which would issue an extra object_store GET for info+version.
-    // All matching views share the same physical handle, so grab the first.
-    // RFC-0024: walk every tree (unsegmented + segments) via `core()`.
-    let matching: Vec<&SsTableView> = manifest
+    // RFC-0024: walk every tree (unsegmented + segments) via `core()`. Each
+    // SST id appears in at most one view (segments have disjoint key spaces;
+    // within a tree an SST is in either L0 or one SR), so `find` is enough.
+    let Some(view) = manifest
         .core()
         .all_sst_views()
-        .filter(|view| view.sst.id == sst_id)
-        .collect();
-    let Some(first) = matching.first() else {
+        .find(|view| view.sst.id == sst_id)
+    else {
         debug!(
             "warm_sst: SST {:?} not reachable from current manifest",
             sst_id
         );
         return Ok(());
     };
-    let handle = first.sst.clone();
-    let visible_ranges: Vec<BytesRange> = matching
-        .iter()
-        .filter_map(|v| v.calculate_view_range(BytesRange::unbounded()))
+    let handle = view.sst.clone();
+    let visible_ranges: Vec<BytesRange> = view
+        .calculate_view_range(BytesRange::unbounded())
+        .into_iter()
         .collect();
     // Shared lazy index — populated at most once, so parallel target fanout
     // can share a single object-store read.
