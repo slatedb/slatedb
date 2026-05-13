@@ -9,14 +9,16 @@ Authors:
 
 ## Summary
 
-Add an opt-in, per-query trace context (`QueryTrace`) that accumulates
-counters and emits `tracing` spans as a query executes. Users attach a
-`QueryTrace` to `ReadOptions` or `ScanOptions` and inspect it after
-the query completes for both programmatic stats and timed spans.
-`QueryTrace` records the number of memtables and SSTs that were
-consulted, how many entries were skipped by read-time visibility rules,
-and how many data, filter, and index blocks were fetched from object
-storage.
+Instrument the read-path with spans and other `tracing` events as well
+as add a query `tracing` layer that subscribes to `tracing` events
+and accumulates counters as a query executes.
+Users of slateDB can register the query tracing
+layer in their applications. By giving an ID to a query via
+`ReadOptions` or `ScanOptions`, they can enable creation of the spans during
+query execution. The query tracing layer records the number of
+memtables and SSTs that were consulted, how many entries were skipped
+by read-time visibility rules, and how many data, filter, and index
+blocks were fetched from object storage.
 
 ## Motivation
 
@@ -43,7 +45,8 @@ Users today cannot:
   hit/miss, data/filter/index blocks and bytes fetched from object
   store)
 - Per-query timing via `tracing` spans (bloom filter eval, index read,
-  block read), captured by any active tracing subscriber
+  block read), captured by the subscribed tracing layers.
+- A tracing layer that specifically records spans and computes aggregates.
 - Zero overhead when not opted in (single `Option` branch skip)
 - No changes to `DbRead` trait signatures or public API beyond adding
   a field to existing options structs
@@ -51,24 +54,24 @@ Users today cannot:
 ## Non-Goals
 
 - Replacing or duplicating the global `MetricsRecorder` system. Both
-  `DbStats` (aggregate) and `QueryTrace` (per-query) report to their
-  respective consumers independently.
+  `DbStats` (aggregate) and the query tracing layer
+  report to distinct consumers independently.
 - Write-path tracing (puts, deletes, flush)
-- Distributed tracing context propagation (span IDs, trace IDs). Users
-  can parent the `QueryTrace` span under their own span if needed.
+
 
 ## Design
 
 ### Overview
 
-This proposal adds four pieces to the read path:
+This proposal adds three pieces to the read path:
 
-1. A new `QueryTrace` type that is attached to `ReadOptions` or
-   `ScanOptions` and shared across the lifetime of a query.
-2. Per-query counters that describe source selection, discarded work,
-   cache behavior, and object-store activity.
-3. Per-query `tracing` spans for the major timed phases of query
-   execution.
+1. An optional query ID to `ReadOptions` or
+   `ScanOptions`.
+2. `tracing` spans that are conditionally created when `get()` and `scan()`
+   carry a query ID.
+3. A `tracing` layer that can be registered with the `tracing` subscriber
+   in an application and records the spans created during `get()` and
+   `scan()` and computes aggregates per query.
 
 At a high level, the query path records:
 
@@ -87,23 +90,20 @@ The counters fall into four groups:
 4. Timing counters: cumulative duration spent in block, index, filter,
    and merge-operator work.
 
-The spans complement those counters by showing where time was spent in a
-single query execution. They are emitted only when a `QueryTrace` is
-attached and an active tracing subscriber is present.
-Counters show per-query aggregates; spans are meant for
-diagnosing timing and sequencing.
 
 ### Counters
 
 Definitions used below:
 
-- **consulted**: The source was effectively accessed during the read path for the query. Sources planned to be accessed, but not accessed because the result has been found, do not increment this counter.
+- **consulted**: The source was effectively accessed during the read path for the query.
+  Sources planned to be accessed, but not accessed because the result has been found,
+  do not increment this counter.
 - **skipped**: The entry was collected during the read path but discarded
   before becoming part of the final visible answer
 
 | Counter                        | Description                                                                                             |
 |--------------------------------|---------------------------------------------------------------------------------------------------------|
-| `memtables_consulted`          | Number of memtable + imm iterators accessed                                                             |
+| `memtables_consulted`          | Number of accesses to current memtable + immutable memtable                                             |
 | `ssts_consulted_l0`            | Number of L0 SSTs accessed                                                                              |
 | `ssts_consulted_compacted`     | Number of compacted SSTs accessed                                                                       |
 | `sr_consulted`                 | Number of sorted runs accessed                                                                          |
@@ -148,15 +148,15 @@ they represent *cumulative* time, not wall-clock.
 
 Child spans under the parent `slatedb.query`, all at `debug` level:
 
-| Span                         | Recorded fields                        |
-|------------------------------|----------------------------------------|
-| `slatedb.query`              | parent span                            |
-| `slatedb.query.memtable`     | `key`, `value`                         |
-| `slatedb.query.bloom_filter` | `sst_id`, `key`, `result`              |
-| `slatedb.query.read_index`   | `sst_id`, `cached`                     |
-| `slatedb.query.read_filter`  | `sst_id`, `cached`                     |
-| `slatedb.query.read_blocks`  | `sst_id`, `cache_hits`, `cache_misses` |
-| `slatedb.query.merge`        | `key`, `operands`                      |
+| Span                          | Recorded fields                                   |
+|-------------------------------|---------------------------------------------------|
+| `slatedb.query`               | parent span                                       |
+| `slatedb.query.memtable`      | `queryId`, `key`                                  |
+| `slatedb.query.read_blocks`   | `queryId`, `sst_id`, `cache_hits`, `cache_misses` |
+| `slatedb.query.bloom_filter`  | `sst_id`, `key`, `result`                         |
+| `slatedb.query.read_index`    | `sst_id`, `cached`                                |
+| `slatedb.query.read_filter`   | `sst_id`, `cached`                                |
+| `slatedb.query.merge`         | `key`, `operands`                                 |
 
 The tracing subscriber captures span duration on exit. Each
 `read_blocks` span covers one SST's block read, so a tool like Jaeger
@@ -166,7 +166,6 @@ without a subscriber can use the duration counters above
 
 Definition of the fields:
 - `key`: Key of the query
-- `value`: Found value of the `key`
 - `sst_id`: ID of the SST
 - `cached`: `true` If the block was found in the cache, `false` otherwise
 - `cache_hits`: Number of blocks found in the cache
@@ -176,73 +175,89 @@ Definition of the fields:
 
 ## Implementation
 
-### `QueryTrace`
+Internally, we instrument the read-path to emit spans and other `tracing` events.
+Instrumentation is not part of the public API. The public API is extended with a
+`tracing` layer in a new module `slatedb-tracing`. Additionally, `ReadOptions` and
+`ScanOptions` are extended by an optional query ID.
 
-The `QueryTrace` struct is the per-query trace context passed via options to the scan and get queries.
-It contains the counters and the span that are updated during query execution.
+### Query `tracing` layer
+
+If application developers use the [`tracing` crate](https://docs.rs/tracing/0.1.44/tracing/index.html),
+they can set up a `tracing` subscriber in their application that subscribes to spans instrumented
+in the application and the used library. An application can only set up one subscriber but
+multiple layers can be registered with the subscriber. All layers subscribe to the instrumented spans.
+For example, the following subscriber has two layer registered -- one for OpenTelemetry and one for
+the `fmt` subscriber that logs `tracing` events:
 
 ```rust
-#[derive(Clone, Debug, Default)]
-pub struct QueryTrace {
-    inner: Arc<QueryTraceInner>,
-}
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
-impl QueryTrace {
+tracing_subscriber::registry()
+    .with(tracing_opentelemetry::layer()
+        .with_tracer(otel_tracer))
+    .with(tracing_subscriber::fmt::layer())
+    .init();
+```
+
+
+In this RFC, we propose the following `tracing` layer:
+
+```rust
+#[derive(Clone, Default)]
+pub struct QueryTracingLayer { ... }
+
+impl QueryTracingLayer {
     // Construction
     pub fn new() -> Self;
     
     // Public: counter accessors
-    pub fn memtables_consulted(&self) -> u64;
-    pub fn ssts_consulted_l0(&self) -> u64;
-    pub fn ssts_consulted_compacted(&self) -> u64;
-    pub fn ssts_consulted_total(&self) -> u64;
+    pub fn memtables_consulted(&self, query_id: &str) -> u64;
+    pub fn ssts_consulted_l0(&self, query_id: &str) -> u64;
+    pub fn ssts_consulted_compacted(&self, query_id: &str) -> u64;
+    pub fn ssts_consulted_total(&self, query_id: &str) -> u64;
 
-    pub fn bloom_filter_checks(&self) -> u64;
-    pub fn bloom_filter_positives(&self) -> u64;
-    pub fn bloom_filter_negatives(&self) -> u64;
-    pub fn bloom_filter_false_positives(&self) -> u64;
+    pub fn bloom_filter_checks(&self, query_id: &str) -> u64;
+    pub fn bloom_filter_positives(&self, query_id: &str) -> u64;
+    pub fn bloom_filter_negatives(&self, query_id: &str) -> u64;
+    pub fn bloom_filter_false_positives(&self, query_id: &str) -> u64;
 
-    pub fn block_cache_hits(&self) -> u64;
-    pub fn block_cache_misses(&self) -> u64;
-    pub fn index_cache_hits(&self) -> u64;
-    pub fn index_cache_misses(&self) -> u64;
-    pub fn filter_cache_hits(&self) -> u64;
-    pub fn filter_cache_misses(&self) -> u64;
+    pub fn block_cache_hits(&self, query_id: &str) -> u64;
+    pub fn block_cache_misses(&self, query_id: &str) -> u64;
+    pub fn index_cache_hits(&self, query_id: &str) -> u64;
+    pub fn index_cache_misses(&self, query_id: &str) -> u64;
+    pub fn filter_cache_hits(&self, query_id: &str) -> u64;
+    pub fn filter_cache_misses(&self, query_id: &str) -> u64;
 
-    pub fn skipped_entries_seq_filtered(&self) -> u64;
-    pub fn skipped_entries_shadowed(&self) -> u64;
+    pub fn skipped_entries_seq_filtered(&self, query_id: &str) -> u64;
+    pub fn skipped_entries_shadowed(&self, query_id: &str) -> u64;
 
-    pub fn block_fetched_from_store(&self) -> u64;
-    pub fn filter_fetched_from_store(&self) -> u64;
-    pub fn index_fetched_from_store(&self) -> u64;
-    pub fn bytes_fetched_from_store(&self) -> u64;
+    pub fn block_fetched_from_store(&self, query_id: &str) -> u64;
+    pub fn filter_fetched_from_store(&self, query_id: &str) -> u64;
+    pub fn index_fetched_from_store(&self, query_id: &str) -> u64;
+    pub fn bytes_fetched_from_store(&self, query_id: &str) -> u64;
 
-    pub fn merge_operands(&self) -> u64;
+    pub fn merge_operands(&self, query_id: &str) -> u64;
 
     // Public: duration accessors
-    pub fn block_read_duration(&self) -> Duration;
-    pub fn index_read_duration(&self) -> Duration;
-    pub fn filter_read_duration(&self) -> Duration;
-    pub fn merge_duration(&self) -> Duration;
-
-    // Public: parent span accessor
-    pub fn span(&self) -> &tracing::Span;
+    pub fn block_read_duration(&self, query_id: &str) -> Duration;
+    pub fn index_read_duration(&self, query_id: &str) -> Duration;
+    pub fn filter_read_duration(&self, query_id: &str) -> Duration;
+    pub fn merge_duration(&self, query_id: &str) -> Duration;
 }
 ```
 
-The public API consists of a constructor, one read accessor per
-counter / duration, and a `span()` accessor that returns the parent
-`slatedb.query` span so callers can nest it under their own
-application span (e.g. via `span.set_parent(...)` with
-`tracing-opentelemetry`, or by entering it before issuing the
-query). Internal call sites use `pub(crate)` increment helpers and
-the same `span()` accessor for attaching child spans.
+The public API consists of a constructor and one read accessor per
+counter / duration. `QueryTracingLayer` implements the
+`tracing_subscriber::layer::Layer` trait, so that it can be registered
+with a `tracing` subscriber.
+
 
 ### `Display` implementation
 
-`QueryTrace` implements `std::fmt::Display` to pretty-print all
+`QueryTracingLayer` implements `std::fmt::Display` to pretty-print all
 counters and durations as a human-readable summary. This is intended
-for debugging (`println!("{trace}")`).
+for debugging (`println!("{layer}")`).
 
 ```rust
 impl std::fmt::Display for QueryTrace {
@@ -255,21 +270,27 @@ impl std::fmt::Display for QueryTrace {
 Example output:
 
 ```text
-QueryTrace {
-  sources: memtables=2 ssts_l0=3 ssts_compacted=5 sr=2
-  bloom_filter: checks=8 positives=5 negatives=3 false_positives=1
-  cache: block=12h/3m index=5h/0m filter=5h/0m
-  object_store: blocks=3 indexes=0 filters=0 bytes=49152
-  skipped: seq_filtered=7 shadowed=2
-  merge_operands=0
-  durations: block=1.2ms index=300µs filter=100µs memtable=50µs merge=0ns
+QueryTracingLayer {
+  query: query1 {   
+      sources: memtables=2 ssts_l0=3 ssts_compacted=5 sr=2
+      bloom_filter: checks=8 positives=5 negatives=3 false_positives=1
+      cache: block=12h/3m index=5h/0m filter=5h/0m
+      object_store: blocks=3 indexes=0 filters=0 bytes=49152
+      skipped: seq_filtered=7 shadowed=2
+      merge_operands=0
+      durations: block=1.2ms index=300µs filter=100µs memtable=50µs merge=0ns
+  }
 }
 ```
 
 The exact layout is not part of the API contract — callers that need
 stable values should use the typed accessors directly.
 
-### Attaching to options
+### Query ID in `ReadOptions` and `ScanOptions`
+
+`ReadOptions` and `ScanOptions` are extended with an optional query ID.
+If the query ID is set, the read-path is instrumented. Otherwise,
+slateDB does not create any instrumentation on the read-path.
 
 ```rust
 // config.rs
@@ -277,7 +298,7 @@ pub struct ReadOptions {
     pub durability_filter: DurabilityLevel,
     pub dirty: bool,
     pub cache_blocks: bool,
-    pub trace: Option<QueryTrace>,  // new
+    pub query_id: Option<String>,  // new
 }
 
 pub struct ScanOptions {
@@ -287,93 +308,56 @@ pub struct ScanOptions {
     pub cache_blocks: bool,
     pub max_fetch_tasks: usize,
     pub order: IterationOrder,
-    pub trace: Option<QueryTrace>,  // new
+    pub query_id: Option<String>,  // new
 }
 ```
 
-Both get a `with_trace(QueryTrace) -> Self` builder method. Default is
-`None`. This works with the existing `&ReadOptions`/`&ScanOptions`
-references because `QueryTrace` uses interior mutability.
+Both get a `with_query_id(String) -> Self` builder method. Default is
+`None`.
 
 ### Usage
 
 ```rust
+
+let query_tracing_layer = QueryTracing::new();
+tracing_subscriber::registry()
+    .with(query_tracing_layer)
+    .init();
+
 // Point lookup
-let trace = QueryTrace::new();
-let opts = ReadOptions::default().with_trace(trace.clone());
+let query_id = "query1";
+let opts = ReadOptions::default().with_query_id(query_id.to_string());
 let val = db.get_with_options(b"key", &opts).await?;
 
 // Programmatic counters
-assert_eq!(trace.bloom_filter_negatives(), 3);
-assert_eq!(trace.block_cache_hits(), 1);
+assert_eq!(trace.bloom_filter_negatives(query_id), 3);
+assert_eq!(trace.block_cache_hits(query_id), 1);
 
 // Aggregate timing
 println!(
     "block reads took {:?}",
-    trace.block_read_duration()
+    trace.block_read_duration(query_id)
 );
-
-// With a tracing subscriber active, timed child spans are
-// emitted automatically under the parent `slatedb.query` span.
 ```
 
-For scans, stats accumulate across the full iterator lifetime:
+### Visualizing spans
+
+To visualize the emitted spans, users can additionally register the
+[`tracing_chrome` layer](https://docs.rs/tracing-chrome/latest/tracing_chrome/) with the subscriber:
 
 ```rust
-let trace = QueryTrace::new();
-let opts = ScanOptions::default().with_trace(trace.clone());
-let mut iter = db.scan_with_options("a".."z", &opts).await?;
-while let Some(kv) = iter.next().await? { /* … */ }
-println!(
-    "total data blocks from store: {}",
-    trace.block_fetched_from_store()
-);
-println!("total block read time: {:?}", trace.block_read_duration());
-```
+use tracing_chrome::ChromeLayerBuilder;
+use tracing_subscriber::{registry::Registry, prelude::*};
 
-### Consuming trace spans
-
-The programmatic counters (`trace.block_cache_hits()`, etc.) work
-without any setup. To also capture timed spans, register a `tracing`
-subscriber at program startup.
-
-**Stdout logging:**
-
-```rust
-tracing_subscriber::fmt()
-    .with_max_level(tracing::Level::DEBUG)
-    .init();
-
-// Spans are now logged on close with durations:
-// DEBUG slatedb.query.read_blocks{sst_id=42 cache_hits=1 ..}: close time.busy=1.2ms
-```
-
-**Filtered to query spans only (code or env var):**
-
-```rust
-use tracing_subscriber::EnvFilter;
-
-tracing_subscriber::fmt()
-    .with_env_filter(EnvFilter::new("slatedb.query=debug"))
-    .init();
-```
-
-```bash
-RUST_LOG=slatedb.query=debug cargo run
-```
-
-**Jaeger/OTLP (production):**
-
-```rust
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+let (chrome_layer, _guard) = ChromeLayerBuilder::new().build();
+let query_tracing_layer = QueryTracing::new();
 
 tracing_subscriber::registry()
-    .with(tracing_opentelemetry::layer()
-        .with_tracer(otel_tracer))
-    .with(tracing_subscriber::fmt::layer())
+    .with(query_tracing_layer)
+    .with(chrome_layer)
     .init();
 ```
+
 
 ## Impact Analysis
 
@@ -432,7 +416,7 @@ tracing_subscriber::registry()
 
 ### Performance & Cost
 
-- When `trace: None` (default), each instrumentation point is a single
+- When `query_id: None` (default), each instrumentation point is a single
   `if let Some(trace)` branch. Predictable skip, zero allocation.
 - When active: one `Arc` clone per iterator built, `Relaxed` atomic
   increments at each instrumentation point, `Instant::now()` calls
@@ -446,7 +430,7 @@ tracing_subscriber::registry()
   `ScanOptions`.
 - No changes to global `DbStats` / `MetricsRecorder`.
 - New `slatedb.query.*` spans at `debug` level, only emitted when a
-  `QueryTrace` is attached and a subscriber is registered.
+  query ID is specified and the query tracing layer is registered.
 
 ### Compatibility
 
@@ -458,13 +442,13 @@ tracing_subscriber::registry()
 
 ## Testing
 
-- Unit tests: Create `QueryTrace`, run get/scan against a DB with
-  known SST structure, assert counter values for consulted sources,
-  skipped-entry reasons, bloom negative, cache hit/miss, and multi-SST
-  scan.
+- Unit tests: Specify a query ID and register the query tracing layer,
+  run get/scan against a DB with known SST structure, assert counter
+  values for consulted sources, skipped-entry reasons, bloom negative,
+  cache hit/miss, and multi-SST scan.
 - Integration tests: Verify counters and durations are non-zero for
   object-store-backed reads.
-- Existing tests pass unchanged (default options -> `trace: None`).
+- Existing tests pass unchanged (default options -> `query_id: None`).
 
 ## Rollout
 
@@ -479,16 +463,16 @@ users.
   be returned upfront.
 - **Separate parameter** (`get(key, opts, trace)`): Signature change
   across `DbRead` trait and all four implementations.
-- **Tracing-only** (no counters): Requires a tracing subscriber and
-  custom layers to extract programmatic stats. Not viable for tests
-  or application-level adaptive logic.
+- **Passing `QueryTrace` struct to `Read-/ScanOptions`**:
+  The `QueryTrace` struct is updated during the read-path and would also
+  collect spans. That doubles the instrumentation because the fields
+  of the `QueryTrace` struct need to be updated and the spans handled.
+  Collecting aggregates with help of the spans is less invasive.
 - **Counters-only** (no tracing spans): Loses timing information,
   which is the most useful signal for debugging slow queries.
 
 ## Open Questions
 
-1. Should `QueryTrace::new()` accept an optional parent
-   `tracing::Span` so users can nest it under their application span?
 2. Should duration fields track only object store I/O or also include
    cache lookup time?
 3. Should we distinguish between:
