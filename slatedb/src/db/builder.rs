@@ -1443,12 +1443,20 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                 .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
         }
 
+        let wrapped_cache = self.db_cache.as_ref().map(|c| {
+            Arc::new(DbCacheWrapper::new(
+                c.clone(),
+                &self.recorder,
+                self.system_clock.clone(),
+            )) as Arc<dyn DbCache>
+        });
+
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
             object_store,
             manifest_object_store: retrying_object_store,
             wal_object_store: retrying_wal_object_store,
-            block_cache: self.db_cache.clone(),
+            block_cache: wrapped_cache,
             block_transformer: self.block_transformer.clone(),
             filter_policies: self.filter_policies.clone(),
         };
