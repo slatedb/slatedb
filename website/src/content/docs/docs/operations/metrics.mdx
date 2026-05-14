@@ -86,7 +86,8 @@ All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
 | `slatedb.db.wal_buffer_flush_requests` | counter | | WAL buffer flush requests |
 | `slatedb.db.wal_buffer_estimated_bytes` | gauge | | Estimated WAL buffer size |
 | `slatedb.db.total_mem_size_bytes` | gauge | | Total memory usage |
-| `slatedb.db.l0_sst_count` | gauge | | L0 SST count |
+| `slatedb.db.l0_sst_count` | gauge | | L0 SST count summed across all segment trees |
+| `slatedb.db.segment_max_l0_sst_count` | gauge | | Maximum L0 SST count across all segments (useful for detecting backpressure on specific segments) |
 | `slatedb.db.sst_filter_false_positive_count` | counter | | Bloom filter false positives |
 | `slatedb.db.sst_filter_positive_count` | counter | | Bloom filter positives |
 | `slatedb.db.sst_filter_negative_count` | counter | | Bloom filter negatives |
