@@ -229,10 +229,9 @@ fn plan_full_tree(prefix: &Bytes, tree: &LsmTreeState) -> Option<CompactionSpec>
         .iter()
         .map(|sr| SourceId::SortedRun(sr.id))
         .collect::<Vec<_>>();
-    let destination = tree
-        .compacted
+    let destination = sources
         .iter()
-        .map(|sr| sr.id)
+        .map(|s| s.unwrap_sorted_run())
         .min()
         .expect("at least one sorted run");
     Some(CompactionSpec::for_segment(
