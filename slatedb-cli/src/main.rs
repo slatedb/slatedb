@@ -72,9 +72,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,
+            wal_fence,
             compacted,
             compactions,
-        } => schedule_gc(&admin, manifest, wal, compacted, compactions).await?,
+        } => schedule_gc(&admin, manifest, wal, wal_fence, compacted, compactions).await?,
         CliCommands::SubmitCompaction { scheduler, request } => {
             exec_submit_compaction(&admin, scheduler, request).await?
         }
@@ -265,6 +266,14 @@ async fn exec_gc_once(
             compactions_options: None,
             detach_options: None,
         },
+        GcResource::WalFence => GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: None,
+            wal_fence_options: create_gc_dir_opts(min_age),
+            compacted_options: None,
+            compactions_options: None,
+            detach_options: None,
+        },
         GcResource::Compacted => GarbageCollectorOptions {
             manifest_options: None,
             wal_options: None,
@@ -290,6 +299,7 @@ async fn schedule_gc(
     admin: &Admin,
     manifest_schedule: Option<GcSchedule>,
     wal_schedule: Option<GcSchedule>,
+    wal_fence_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
     compactions_schedule: Option<GcSchedule>,
 ) -> Result<(), Box<dyn Error>> {
@@ -302,7 +312,7 @@ async fn schedule_gc(
     let gc_opts = GarbageCollectorOptions {
         manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
         wal_options: wal_schedule.and_then(create_gc_dir_opts),
-        wal_fence_options: None,
+        wal_fence_options: wal_fence_schedule.and_then(create_gc_dir_opts),
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
         compactions_options: compactions_schedule.and_then(create_gc_dir_opts),
         detach_options: None,
