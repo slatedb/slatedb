@@ -8826,6 +8826,76 @@ mod tests {
             "expected l0_sst_count > 0, got {:?}",
             l0_count
         );
+        // No segment extractor configured → root is the only tree, so the
+        // per-tree max equals the total. Both gauges are updated at the
+        // same call site in `merge_remote_manifest`.
+        let segment_max =
+            lookup_metric(&metrics_recorder, crate::db_stats::SEGMENT_MAX_L0_SST_COUNT);
+        assert_eq!(
+            segment_max, l0_count,
+            "expected segment_max_l0_sst_count == l0_sst_count for an unsegmented DB"
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_segment_max_l0_sst_count_with_extractor() {
+        // With a segment extractor configured, `l0_sst_count` sums L0 SSTs
+        // across every tree (root + each named segment) while
+        // `segment_max_l0_sst_count` reports the largest single tree. The
+        // two values diverge whenever segments accumulate L0 SSTs unevenly
+        // — the case the new gauge exists to catch, since `l0_max_ssts`
+        // backpressure is enforced per-tree.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let db = Db::builder(
+            "/tmp/test_should_record_segment_max_l0_sst_count_with_extractor",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_segment_extractor(extractor)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // Flush 1: two prefixes → each segment tree gets one L0 SST.
+        db.put(b"aaa-1", b"v").await.unwrap();
+        db.put(b"bbb-1", b"v").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Flush 2: only "aaa" → that tree grows to 2 L0 SSTs while "bbb"
+        // stays at 1. Final state: total = 3, per-tree max = 2.
+        db.put(b"aaa-2", b"v").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Wait for the manifest poll to refresh both gauges (interval 100ms).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let total = lookup_metric(&metrics_recorder, crate::db_stats::L0_SST_COUNT);
+        let segment_max =
+            lookup_metric(&metrics_recorder, crate::db_stats::SEGMENT_MAX_L0_SST_COUNT);
+        assert_eq!(
+            total,
+            Some(3),
+            "expected l0_sst_count to sum across trees, got {:?}",
+            total
+        );
+        assert_eq!(
+            segment_max,
+            Some(2),
+            "expected segment_max_l0_sst_count to track the largest tree, got {:?}",
+            segment_max
+        );
         db.close().await.unwrap();
     }
 
