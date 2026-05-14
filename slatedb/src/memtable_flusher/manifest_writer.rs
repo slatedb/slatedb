@@ -617,10 +617,17 @@ impl ManifestWriterHandler {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
             let cow = wguard_state.state();
-            self.db
-                .db_stats
-                .l0_sst_count
-                .set(cow.core().tree.l0.len() as i64);
+            // L0 SST counters span every tree (root + each named segment per
+            // RFC-0024). `l0_sst_count` reports the total; `segment_max_*`
+            // reports the largest single tree, which is the right quantity
+            // for backpressure since `l0_max_ssts` is enforced per-tree.
+            let (total, max) = cow
+                .core()
+                .trees()
+                .map(|t| t.l0.len())
+                .fold((0usize, 0usize), |(sum, max), n| (sum + n, max.max(n)));
+            self.db.db_stats.l0_sst_count.set(total as i64);
+            self.db.db_stats.segment_max_l0_sst_count.set(max as i64);
             cow.manifest.clone()
         };
         self.db
