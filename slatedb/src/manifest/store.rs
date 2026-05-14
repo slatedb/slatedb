@@ -1035,6 +1035,7 @@ mod tests {
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
 
+        ms.advance_boundary(1).await.unwrap();
         ms.delete_manifest(1).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);

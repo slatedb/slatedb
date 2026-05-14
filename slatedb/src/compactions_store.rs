@@ -495,6 +495,7 @@ mod tests {
         let compactions = store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 2);
 
+        store.advance_boundary(1).await.unwrap();
         store.delete_compactions(1).await.unwrap();
         let compactions = store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 1);

@@ -1072,10 +1072,10 @@ mod tests {
             .unwrap();
         assert_eq!(external.id(), start_id + 2);
 
-        // GC removes and fences the stale handler's next id, but preserves the live latest
+        // GC fences and removes the stale handler's next id, but preserves the live latest
         // version at start_id + 2.
-        manifest_store.delete_manifest(start_id + 1).await.unwrap();
         manifest_store.advance_boundary(start_id + 1).await.unwrap();
+        manifest_store.delete_manifest(start_id + 1).await.unwrap();
 
         let latest = manifest_store.read_latest_manifest().await.unwrap().id;
         assert_eq!(latest, start_id + 2);

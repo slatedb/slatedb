@@ -833,14 +833,14 @@ mod tests {
             .unwrap();
         assert_eq!(external.id(), start_id + 2);
 
-        // GC removes and fences the stale writer's next id, but preserves the live latest
+        // GC fences and removes the stale writer's next id, but preserves the live latest
         // version at start_id + 2.
         compactions_store
-            .delete_compactions(start_id + 1)
+            .advance_boundary(start_id + 1)
             .await
             .unwrap();
         compactions_store
-            .advance_boundary(start_id + 1)
+            .delete_compactions(start_id + 1)
             .await
             .unwrap();
         let latest = compactions_store

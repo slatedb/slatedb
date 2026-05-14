@@ -592,6 +592,9 @@ pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, Monotonic
 #[async_trait]
 pub trait BoundaryObject: Send + Sync {
     /// Verify that `id` is greater than the durable boundary.
+    ///
+    /// ## Errors
+    /// - Returns `ObjectVersionExists` if `id` is at or below the durable boundary
     async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
 
     /// Advance the boundary to at least `boundary`.
@@ -660,8 +663,21 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for BoundedSequencedStorage<T> 
         self.delegate.list(from, to).await
     }
 
+    /// Deletes the object with the given id. This is only allowed if the id is at or
+    /// below the durable boundary.
+    ///
+    /// ## Errors
+    /// - Returns `InvalidObjectState` if `id` is above the durable boundary
+    /// - Propagates any errors from the boundary check and delegate's `delete`
     async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
-        self.delegate.delete(id).await
+        match self.boundary.check(id).await {
+            Ok(()) => Err(TransactionalObjectError::InvalidObjectState),
+            Err(TransactionalObjectError::ObjectVersionExists) => {
+                // Object is behind the boundary, so it's safe to delete.
+                self.delegate.delete(id).await
+            }
+            e => e,
+        }
     }
 }
 
@@ -1003,6 +1019,63 @@ mod tests {
             }),
             store.try_read(1.into()).await.unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_sequenced_storage_allows_delete_at_or_below_boundary() {
+        let store = new_store();
+        let id = store
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let boundary = Arc::new(TestBoundary::new(1));
+        let bounded = BoundedSequencedStorage::new(
+            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
+            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
+        );
+
+        bounded.delete(id).await.unwrap();
+
+        assert_eq!(None, store.try_read(id).await.unwrap());
+        assert_eq!(1, boundary.checks.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_bounded_sequenced_storage_rejects_delete_above_boundary() {
+        let store = new_store();
+        let id = store
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let boundary = Arc::new(TestBoundary::new(0));
+        let bounded = BoundedSequencedStorage::new(
+            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
+            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
+        );
+
+        let err = bounded.delete(id).await.unwrap_err();
+
+        assert!(matches!(err, TransactionalObjectError::InvalidObjectState));
+        assert_eq!(
+            Some(TestVal {
+                epoch: 0,
+                payload: 1,
+            }),
+            store.try_read(id).await.unwrap()
+        );
+        assert_eq!(1, boundary.checks.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
