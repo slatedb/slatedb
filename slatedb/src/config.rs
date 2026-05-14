@@ -1304,9 +1304,9 @@ pub struct GarbageCollectorDirectoryOptions {
     /// The interval at which the garbage collector will run in the background
     /// thread.
     ///
-    /// If set to None, recurring garbage collection will be disabled for the
-    /// directory, but one-time garbage collection can still be triggered
-    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
+    /// If set to None while the parent directory options are enabled, recurring
+    /// garbage collection uses the default interval. To disable garbage
+    /// collection for a directory, set the parent `*_options` field to None.
     #[serde(deserialize_with = "deserialize_option_duration")]
     #[serde(serialize_with = "serialize_option_duration")]
     pub interval: Option<Duration>,
@@ -1322,9 +1322,9 @@ pub struct GarbageCollectorDirectoryOptions {
 pub struct GarbageCollectorScheduleOptions {
     /// The interval at which the task will run in the background thread.
     ///
-    /// If set to None, recurring execution is disabled, but a one-time pass
-    /// can still be triggered via
-    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
+    /// If set to None while the parent task options are enabled, recurring
+    /// execution uses the default interval. To disable the task, set the parent
+    /// options field to None.
     #[serde(deserialize_with = "deserialize_option_duration")]
     #[serde(serialize_with = "serialize_option_duration")]
     pub interval: Option<Duration>,
@@ -1352,6 +1352,9 @@ impl Default for GarbageCollectorOptions {
         Self {
             manifest_options: Some(GarbageCollectorDirectoryOptions::default()),
             wal_options: Some(GarbageCollectorDirectoryOptions::default()),
+            // Disable WAL fence garbage collection by default to prevent accidental
+            // data loss. This is a very conservative setting. Users can enable it
+            // with a high `min_age` if they want to clean up old fences.
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
