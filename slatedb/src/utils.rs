@@ -660,28 +660,10 @@ pub(crate) async fn preload_cache_from_manifest(
 ) -> Result<(), SlateDBError> {
     match preload_level {
         Some(PreloadLevel::AllSst) => {
-            let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
-                core.tree.l0.len()
-                    + core
-                        .tree
-                        .compacted
-                        .iter()
-                        .map(|sr| sr.sst_views.len())
-                        .sum::<usize>(),
-            );
-            all_sst_paths.extend(
-                core.tree
-                    .l0
-                    .iter()
-                    .map(|view| path_resolver.table_path(&view.sst.id)),
-            );
-            all_sst_paths.extend(
-                core.tree
-                    .compacted
-                    .iter()
-                    .flat_map(|sr| &sr.sst_views)
-                    .map(|view| path_resolver.table_path(&view.sst.id)),
-            );
+            let all_sst_paths: Vec<object_store::path::Path> = core
+                .all_sst_views()
+                .map(|view| path_resolver.table_path(&view.sst.id))
+                .collect();
             if !all_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
                     .load_files_to_cache(all_sst_paths, max_cache_size)
@@ -693,9 +675,8 @@ pub(crate) async fn preload_cache_from_manifest(
         }
         Some(PreloadLevel::L0Sst) => {
             let l0_sst_paths: Vec<object_store::path::Path> = core
-                .tree
-                .l0
-                .iter()
+                .trees()
+                .flat_map(|tree| tree.l0.iter())
                 .map(|view| path_resolver.table_path(&view.sst.id))
                 .collect();
             if !l0_sst_paths.is_empty() {

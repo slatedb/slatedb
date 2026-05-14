@@ -3675,7 +3675,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
+        test_utils::assert_ranged_db_scan(table, range, IterationOrder::Ascending, &mut iter).await;
     }
 
     #[test]
@@ -3823,7 +3823,13 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;
+            test_utils::assert_ranged_db_scan(
+                table,
+                seek_range,
+                IterationOrder::Ascending,
+                &mut iter,
+            )
+            .await;
         }
     }
 
@@ -9554,6 +9560,122 @@ mod tests {
             );
         }
         reopened.close().await.unwrap();
+    }
+
+    async fn create_segmented_scan_fixture(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> (Db, BTreeMap<Bytes, Bytes>) {
+        let db = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        let table = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"aaa-003"), Bytes::from_static(b"v2")),
+            (Bytes::from_static(b"bbb-001"), Bytes::from_static(b"v3")),
+            (Bytes::from_static(b"bbb-002"), Bytes::from_static(b"v4")),
+            (Bytes::from_static(b"ddd-001"), Bytes::from_static(b"v5")),
+            (Bytes::from_static(b"ddd-004"), Bytes::from_static(b"v6")),
+        ]);
+        test_utils::seed_database(&db, &table, true).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        (db, table)
+    }
+
+    async fn assert_segmented_scan_matrix<R>(reader: &R, table: &BTreeMap<Bytes, Bytes>)
+    where
+        R: DbReadOps + Sync,
+    {
+        let mut prefix_iter = reader.scan_prefix(b"bbb").await.unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"bbb")..Bytes::from_static(b"bbc"),
+            IterationOrder::Ascending,
+            &mut prefix_iter,
+        )
+        .await;
+
+        let mut asc_iter = reader
+            .scan::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec())
+            .await
+            .unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"),
+            IterationOrder::Ascending,
+            &mut asc_iter,
+        )
+        .await;
+
+        let desc_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut desc_iter = reader
+            .scan_with_options::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec(), &desc_options)
+            .await
+            .unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"),
+            IterationOrder::Descending,
+            &mut desc_iter,
+        )
+        .await;
+
+        let mut gap_iter = reader
+            .scan::<Vec<u8>, _>(b"bbc".to_vec()..=b"ddd-002".to_vec())
+            .await
+            .unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"bbc")..=Bytes::from_static(b"ddd-002"),
+            IterationOrder::Ascending,
+            &mut gap_iter,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segmented_scans_on_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (db, table) =
+            create_segmented_scan_fixture("/tmp/test_segmented_scans_on_db", object_store).await;
+
+        assert_segmented_scan_matrix(&db, &table).await;
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segmented_scans_on_snapshot() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (db, table) =
+            create_segmented_scan_fixture("/tmp/test_segmented_scans_on_snapshot", object_store)
+                .await;
+
+        let snapshot = db.snapshot().await.unwrap();
+        assert_segmented_scan_matrix(snapshot.as_ref(), &table).await;
+        drop(snapshot);
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segmented_scans_on_db_reader() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_segmented_scans_on_db_reader";
+        let (db, table) = create_segmented_scan_fixture(path, object_store.clone()).await;
+        db.close().await.unwrap();
+
+        let reader = DbReaderBuilder::new(path, object_store)
+            .build()
+            .await
+            .unwrap();
+        assert_segmented_scan_matrix(&reader, &table).await;
     }
 
     #[tokio::test]
