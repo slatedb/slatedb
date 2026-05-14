@@ -6,7 +6,7 @@ use log::{debug, warn};
 use tokio::sync::OnceCell;
 
 use crate::bytes_range::BytesRange;
-use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::VersionedManifest;
@@ -63,24 +63,24 @@ pub(crate) async fn warm_sst_impl(
 
     // Reuse the handle embedded in the manifest view instead of calling
     // `open_sst`, which would issue an extra object_store GET for info+version.
-    // All matching views share the same physical handle, so grab the first.
-    let matching: Vec<&SsTableView> = manifest
-        .l0()
-        .iter()
-        .chain(manifest.compacted().iter().flat_map(|run| &run.sst_views))
-        .filter(|view| view.sst.id == sst_id)
-        .collect();
-    let Some(first) = matching.first() else {
+    // RFC-0024: walk every tree (unsegmented + segments) via `core()`. Each
+    // SST id appears in at most one view (segments have disjoint key spaces;
+    // within a tree an SST is in either L0 or one SR), so `find` is enough.
+    let Some(view) = manifest
+        .core()
+        .all_sst_views()
+        .find(|view| view.sst.id == sst_id)
+    else {
         debug!(
             "warm_sst: SST {:?} not reachable from current manifest",
             sst_id
         );
         return Ok(());
     };
-    let handle = first.sst.clone();
-    let visible_ranges: Vec<BytesRange> = matching
-        .iter()
-        .filter_map(|v| v.calculate_view_range(BytesRange::unbounded()))
+    let handle = view.sst.clone();
+    let visible_ranges: Vec<BytesRange> = view
+        .calculate_view_range(BytesRange::unbounded())
+        .into_iter()
         .collect();
     // Shared lazy index — populated at most once, so parallel target fanout
     // can share a single object-store read.
@@ -511,6 +511,36 @@ mod tests {
         l0.push_front(view.with_visible_range(visible_range));
     }
 
+    /// Open a DB configured with a 3-byte prefix extractor — every flush of
+    /// `key…`-prefixed writes lands entirely in segment `b"key"` rather than
+    /// the root tree.
+    async fn open_segmented_db(object_store: Arc<dyn ObjectStore>) -> Db {
+        Db::builder(PATH, object_store)
+            .with_settings(Settings {
+                flush_interval: None,
+                ..Default::default()
+            })
+            .with_segment_extractor(Arc::new(crate::test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .expect("failed to open segmented db")
+    }
+
+    /// Return the id of the first L0 SST in the manifest, walking root tree
+    /// then named segments. Used by tests that don't care which tree the
+    /// SST lives in.
+    fn first_l0_sst_id_any_tree(db: &Db) -> SsTableId {
+        let manifest = db.manifest();
+        let id = manifest
+            .core()
+            .trees()
+            .flat_map(|t| t.l0.iter())
+            .next()
+            .map(|v| v.sst.id)
+            .expect("expected at least one L0 SST across root + segments");
+        id
+    }
+
     #[tokio::test]
     async fn should_warm_only_within_visible_view_range() {
         // given: a single-SST DB whose cache is empty
@@ -546,6 +576,50 @@ mod tests {
         assert!(
             !is_key_cached(&db.inner.table_store, sst_id, b"key000000").await,
             "block below visible view should not be cached",
+        );
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_warm_sst_resident_in_named_segment() {
+        // RFC-0024: a DB configured with a segment extractor routes flushes
+        // into named segments, leaving the root tree empty. `warm_sst_impl`
+        // must reach those segment-resident SSTs. Pre-fix it only walked
+        // `manifest.l0()`/`compacted()` and silently no-op'd here.
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = open_segmented_db(os).await;
+        write_keys(&db, 64).await;
+        flush_to_l0(&db).await;
+
+        let manifest = db.manifest();
+        assert!(
+            manifest.l0().is_empty() && manifest.compacted().is_empty(),
+            "extractor-configured DB should leave root tree empty"
+        );
+        assert!(
+            !manifest.segments().is_empty(),
+            "extractor-configured flush should populate at least one segment"
+        );
+
+        let sst_id = first_l0_sst_id_any_tree(&db);
+        db.evict_cached_sst(sst_id).await.expect("evict");
+
+        warm_sst_impl(
+            &db.inner.table_store,
+            &manifest,
+            sst_id,
+            &[CacheTarget::data::<&[u8], _>(..)],
+        )
+        .await
+        .expect("warm_sst_impl");
+
+        let mask = cached_block_mask(&db.inner.table_store, sst_id).await;
+        assert!(!mask.is_empty(), "expected SST to have data blocks");
+        assert!(
+            mask.iter().all(|&b| b),
+            "expected all blocks cached for segment-resident SST, got {:?}",
+            mask,
         );
 
         db.close().await.expect("close");
