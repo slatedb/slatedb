@@ -707,6 +707,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_boundary_advance_retries_after_conflicting_boundary_update() {
+        let object_store = Arc::new(InMemory::new());
+        let first_boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+        let second_boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+
+        first_boundary.advance(MonotonicId::new(2)).await.unwrap();
+        second_boundary.advance(MonotonicId::new(3)).await.unwrap();
+
+        first_boundary.advance(MonotonicId::new(4)).await.unwrap();
+
+        let raw_boundary = object_store
+            .get(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!("4", std::str::from_utf8(&raw_boundary).unwrap());
+    }
+
+    #[tokio::test]
     async fn test_boundary_check_returns_invalid_state_when_observed_boundary_disappears() {
         let object_store = Arc::new(InMemory::new());
         let boundary =
