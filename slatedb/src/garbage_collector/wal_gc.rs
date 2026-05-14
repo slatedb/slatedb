@@ -11,17 +11,37 @@ use std::sync::Arc;
 
 use super::{GcStats, GcTask};
 
+/// Selects which class of WAL object a [`WalGcTask`] collects.
+///
+/// Regular WAL SSTs and zero-byte WAL fence objects share the same WAL
+/// directory and `SsTableId::Wal` identifier space, but they have separate
+/// retention policies. This mode keeps a single task implementation while
+/// allowing regular WAL GC and fence WAL GC to run on independent schedules.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum WalGcMode {
+    /// Collect non-empty WAL SSTs that are older than the compacted WAL
+    /// boundary, old enough for retention, and unreferenced by active
+    /// checkpoint manifests.
+    Regular,
+
+    /// Collect zero-byte WAL fence objects under the same safety checks as
+    /// regular WAL GC.
+    Fence,
+}
+
 pub(crate) struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     stats: Arc<GcStats>,
     wal_options: GarbageCollectorDirectoryOptions,
+    mode: WalGcMode,
 }
 
 impl std::fmt::Debug for WalGcTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WalGcTask")
             .field("wal_options", &self.wal_options)
+            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -32,12 +52,14 @@ impl WalGcTask {
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
         wal_options: GarbageCollectorDirectoryOptions,
+        mode: WalGcMode,
     ) -> Self {
         WalGcTask {
             manifest_store,
             table_store,
             stats,
             wal_options,
+            mode,
         }
     }
 
@@ -81,6 +103,13 @@ impl GcTask for WalGcTask {
             .list_wal_ssts(..last_compacted_wal_sst_id)
             .await?
             .into_iter()
+            .filter(|wal_sst| match self.mode {
+                // In regular mode, only consider WAL SSTs with size > 0 for deletion.
+                WalGcMode::Regular => wal_sst.size > 0,
+                // In fence mode, only consider zero-byte WAL SSTs for deletion.
+                WalGcMode::Fence => wal_sst.size == 0,
+            })
+            // Respect min_age and any WAL references held by active checkpoint manifests.
             .filter(|wal_sst| {
                 Self::is_wal_sst_eligible_for_deletion(
                     &utc_now,
@@ -96,7 +125,10 @@ impl GcTask for WalGcTask {
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting WAL SST [id={:?}, error={}]", id, e);
             } else {
-                self.stats.gc_wal_count.increment(1);
+                match self.mode {
+                    WalGcMode::Regular => self.stats.gc_wal_count.increment(1),
+                    WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(1),
+                }
             }
         }
 
@@ -104,6 +136,9 @@ impl GcTask for WalGcTask {
     }
 
     fn resource(&self) -> &str {
-        "WAL"
+        match self.mode {
+            WalGcMode::Regular => "WAL",
+            WalGcMode::Fence => "WAL fence",
+        }
     }
 }

@@ -118,6 +118,7 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
             interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
             min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),
         }),
+        wal_fence_options: None,
         compacted_options: Some(GarbageCollectorDirectoryOptions {
             interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
             min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(900)),

@@ -7274,6 +7274,7 @@ mod tests {
                 interval: None,
                 min_age: Duration::from_millis(0),
             }),
+            wal_fence_options: None,
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),

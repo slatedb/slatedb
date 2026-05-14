@@ -37,7 +37,7 @@ use slatedb_txn_obj::{DirtyObject, SimpleTransactionalObject, TransactionalObjec
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::instrument;
-use wal_gc::WalGcTask;
+use wal_gc::{WalGcMode, WalGcTask};
 
 mod compacted_gc;
 mod compactions_gc;
@@ -58,6 +58,7 @@ trait GcTask {
 #[derive(Debug)]
 pub(crate) enum GcMessage {
     Wal,
+    WalFence,
     Compacted,
     Compactions,
     Manifest,
@@ -87,6 +88,7 @@ pub struct GarbageCollector {
     system_clock: Arc<dyn SystemClock>,
     manifest_gc_task: Option<ManifestGcTask>,
     wal_gc_task: Option<WalGcTask>,
+    wal_fence_gc_task: Option<WalGcTask>,
     compacted_gc_task: Option<CompactedGcTask>,
     compactions_gc_task: Option<CompactionsGcTask>,
     detach_gc_task: Option<DetachGcTask>,
@@ -107,6 +109,12 @@ impl MessageHandler<GcMessage> for GarbageCollector {
             tickers.push((
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Wal),
+            ));
+        }
+        if let Some(opts) = self.options.wal_fence_options {
+            tickers.push((
+                opts.interval.unwrap_or(DEFAULT_INTERVAL),
+                Box::new(|| GcMessage::WalFence),
             ));
         }
         if let Some(opts) = self.options.compacted_options {
@@ -145,6 +153,13 @@ impl MessageHandler<GcMessage> for GarbageCollector {
                     .wal_gc_task
                     .as_ref()
                     .expect("got wal tick with unconfigured wal task");
+                self.run_gc_task(task).await;
+            }
+            GcMessage::WalFence => {
+                let task = self
+                    .wal_fence_gc_task
+                    .as_ref()
+                    .expect("got wal fence tick with unconfigured wal fence task");
                 self.run_gc_task(task).await;
             }
             GcMessage::Compacted => {
@@ -213,6 +228,16 @@ impl GarbageCollector {
                 table_store.clone(),
                 stats.clone(),
                 wal_options,
+                WalGcMode::Regular,
+            )
+        });
+        let wal_fence_gc_task = options.wal_fence_options.map(|wal_fence_options| {
+            WalGcTask::new(
+                manifest_store.clone(),
+                table_store.clone(),
+                stats.clone(),
+                wal_fence_options,
+                WalGcMode::Fence,
             )
         });
         let compacted_gc_task = options.compacted_options.map(|compacted_options| {
@@ -250,6 +275,7 @@ impl GarbageCollector {
             system_clock,
             manifest_gc_task,
             wal_gc_task,
+            wal_fence_gc_task,
             compacted_gc_task,
             compactions_gc_task,
             detach_gc_task,
@@ -269,6 +295,9 @@ impl GarbageCollector {
             self.run_gc_task(task).await;
         }
         if let Some(task) = &self.wal_gc_task {
+            self.run_gc_task(task).await;
+        }
+        if let Some(task) = &self.wal_fence_gc_task {
             self.run_gc_task(task).await;
         }
         if let Some(task) = &self.compacted_gc_task {
@@ -1003,6 +1032,265 @@ mod tests {
         assert_eq!(wal_ssts[0].id, id2);
     }
 
+    #[tokio::test]
+    async fn test_regular_wal_gc_does_not_delete_wal_fences() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+
+        let fence_id = SsTableId::Wal(1);
+        table_store.write_wal_fence(1).await.unwrap();
+
+        let regular_wal_id = SsTableId::Wal(2);
+        write_sst(table_store.clone(), &regular_wal_id)
+            .await
+            .unwrap();
+
+        for id in [fence_id, regular_wal_id] {
+            set_modified(
+                local_object_store.clone(),
+                &path_resolver.table_path(&id),
+                86400,
+            );
+        }
+
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = 3;
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: None,
+            }),
+            wal_fence_options: None,
+            compacted_options: None,
+            compactions_options: None,
+            detach_options: None,
+        };
+        let gc = GarbageCollector::new(
+            manifest_store.clone(),
+            compactions_store,
+            table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
+            gc_opts,
+            &MetricsRecorderHelper::noop(),
+            Arc::new(DefaultSystemClock::default()),
+        );
+
+        gc.run_gc_once().await;
+
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 1);
+        assert_eq!(wal_ssts[0].id, fence_id);
+        assert_eq!(wal_ssts[0].size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_wal_fence_gc_deletes_old_fences() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+
+        let old_fence_id = SsTableId::Wal(1);
+        table_store.write_wal_fence(1).await.unwrap();
+
+        let regular_wal_id = SsTableId::Wal(2);
+        write_sst(table_store.clone(), &regular_wal_id)
+            .await
+            .unwrap();
+
+        let newer_fence_id = SsTableId::Wal(3);
+        table_store.write_wal_fence(3).await.unwrap();
+
+        for id in [old_fence_id, regular_wal_id, newer_fence_id] {
+            set_modified(
+                local_object_store.clone(),
+                &path_resolver.table_path(&id),
+                86400,
+            );
+        }
+
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = 4;
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: None,
+            wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: None,
+            }),
+            compacted_options: None,
+            compactions_options: None,
+            detach_options: None,
+        };
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
+        let gc = GarbageCollector::new(
+            manifest_store.clone(),
+            compactions_store,
+            table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
+            gc_opts,
+            &helper,
+            Arc::new(DefaultSystemClock::default()),
+        );
+
+        gc.run_gc_once().await;
+
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        let wal_ids = wal_ssts.iter().map(|sst| sst.id).collect::<Vec<_>>();
+        assert_eq!(wal_ids, vec![regular_wal_id]);
+        assert!(wal_ssts[0].size > 0);
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                crate::garbage_collector::stats::DELETED_COUNT,
+                &[("resource", "wal_fence")]
+            ),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wal_fence_gc_deletes_single_old_fence() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+
+        let fence_id = SsTableId::Wal(1);
+        table_store.write_wal_fence(1).await.unwrap();
+        set_modified(
+            local_object_store,
+            &path_resolver.table_path(&fence_id),
+            86400,
+        );
+
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = 2;
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: None,
+            wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: None,
+            }),
+            compacted_options: None,
+            compactions_options: None,
+            detach_options: None,
+        };
+        let gc = GarbageCollector::new(
+            manifest_store.clone(),
+            compactions_store,
+            table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
+            gc_opts,
+            &MetricsRecorderHelper::noop(),
+            Arc::new(DefaultSystemClock::default()),
+        );
+
+        gc.run_gc_once().await;
+
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        assert!(wal_ssts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_regular_and_wal_fence_gc_run_independently() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+
+        let old_fence_id = SsTableId::Wal(1);
+        table_store.write_wal_fence(1).await.unwrap();
+
+        let regular_wal_id_1 = SsTableId::Wal(2);
+        write_sst(table_store.clone(), &regular_wal_id_1)
+            .await
+            .unwrap();
+
+        let newer_fence_id = SsTableId::Wal(3);
+        table_store.write_wal_fence(3).await.unwrap();
+
+        let regular_wal_id_2 = SsTableId::Wal(4);
+        write_sst(table_store.clone(), &regular_wal_id_2)
+            .await
+            .unwrap();
+
+        for id in [
+            old_fence_id,
+            regular_wal_id_1,
+            newer_fence_id,
+            regular_wal_id_2,
+        ] {
+            set_modified(
+                local_object_store.clone(),
+                &path_resolver.table_path(&id),
+                86400,
+            );
+        }
+
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = 4;
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: None,
+            }),
+            wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: None,
+            }),
+            compacted_options: None,
+            compactions_options: None,
+            detach_options: None,
+        };
+        let gc = GarbageCollector::new(
+            manifest_store.clone(),
+            compactions_store,
+            table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
+            gc_opts,
+            &MetricsRecorderHelper::noop(),
+            Arc::new(DefaultSystemClock::default()),
+        );
+
+        gc.run_gc_once().await;
+
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 1);
+        assert_eq!(wal_ssts[0].id, regular_wal_id_2);
+        assert!(wal_ssts[0].size > 0);
+    }
+
     /// This test creates eight compacted SSTs:
     /// - One L0 SST
     /// - One active L0 SST that's a day old
@@ -1420,6 +1708,7 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            wal_fence_options: None,
             compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
@@ -1488,6 +1777,7 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
@@ -1552,6 +1842,7 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
@@ -1595,6 +1886,10 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(11)),
             }),
+            wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: Some(Duration::from_secs(13)),
+            }),
             compacted_options: None,
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
@@ -1620,7 +1915,11 @@ mod tests {
             .collect();
         assert_eq!(
             intervals,
-            vec![Duration::from_secs(11), Duration::from_secs(17),]
+            vec![
+                Duration::from_secs(11),
+                Duration::from_secs(13),
+                Duration::from_secs(17),
+            ]
         );
     }
 
@@ -1638,6 +1937,7 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
             }),
+            wal_fence_options: None,
             compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),

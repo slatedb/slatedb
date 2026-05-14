@@ -1233,6 +1233,26 @@ pub struct GarbageCollectorOptions {
     /// None means garbage collection is disabled for the WAL directory.
     pub wal_options: Option<GarbageCollectorDirectoryOptions>,
 
+    /// Garbage collection options for zero-byte WAL fence objects.
+    ///
+    /// WARNING: Setting this to a non-None value can cause data loss if set
+    /// too aggressively. It's possible for the following scenario to occur:
+    ///
+    /// - t0: A writer W1 calculates position 7 for its next WAL entry
+    /// - t1: A writer W2 writes a fence at position 7
+    /// - t2: `min_age` + 1 passes
+    /// - t3: The garbage collector runs and deletes the fence at position 7
+    /// - t4: W1 writes its WAL entry at position 7 and returns success
+    ///
+    /// Because the fence at position 7 was deleted, W1's write will succeed,
+    /// but the data at position 7 is invalid. The only way to protect against
+    /// this scenario is to ensure fence writes are never deleted. In practice,
+    /// setting `min_age` to a very high number (longer than any writer is
+    /// expected to run) should be sufficient to prevent this scenario.
+    ///
+    /// None means garbage collection is disabled for WAL fence objects.
+    pub wal_fence_options: Option<GarbageCollectorDirectoryOptions>,
+
     /// Garbage collection options for the compacted directory.
     ///
     /// None means garbage collection is disabled for the compacted directory.
@@ -1258,6 +1278,7 @@ impl GarbageCollectorOptions {
     pub fn is_empty(&self) -> bool {
         self.manifest_options.is_none()
             && self.wal_options.is_none()
+            && self.wal_fence_options.is_none()
             && self.compacted_options.is_none()
             && self.compactions_options.is_none()
             && self.detach_options.is_none()
@@ -1322,6 +1343,7 @@ impl Default for GarbageCollectorScheduleOptions {
 /// By default, garbage collection is enabled for all managed directories
 /// (manifest, WAL, compacted SSTs, and compactions) using
 /// [`GarbageCollectorDirectoryOptions::default()`].
+/// WAL fence garbage collection is disabled by default.
 ///
 /// To disable garbage collection for a specific file type, set that
 /// directory option to `None`.
@@ -1330,6 +1352,7 @@ impl Default for GarbageCollectorOptions {
         Self {
             manifest_options: Some(GarbageCollectorDirectoryOptions::default()),
             wal_options: Some(GarbageCollectorDirectoryOptions::default()),
+            wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
             detach_options: Some(GarbageCollectorScheduleOptions::default()),
