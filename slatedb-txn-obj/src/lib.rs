@@ -39,10 +39,8 @@
 //!
 //! ## Error semantics
 //! - `ObjectVersionExists` is returned when a CAS write fails because a concurrent writer
-//!   created the target id first. Callers typically handle this by `refresh()` and retrying.
-//! - `ObjectVersionBehindBoundary` is returned when a sequenced write created an id that has
-//!   been durably fenced by a garbage collector. Callers can handle this like a sequenced write
-//!   conflict: `refresh()` and retry with the latest id.
+//!   created the target id first, or when a sequenced write created an id that has been durably
+//!   fenced by a garbage collector. Callers typically handle this by `refresh()` and retrying.
 //! - `InvalidState` may be returned when an expected record is missing or file names are
 //!   malformed.
 //!
@@ -104,9 +102,6 @@ pub enum TransactionalObjectError {
     #[error("object version exists")]
     ObjectVersionExists,
 
-    #[error("object version is behind boundary: id={id:?}, boundary={boundary:?}")]
-    ObjectVersionBehindBoundary { id: u64, boundary: u64 },
-
     #[error("detected newer client")]
     Fenced,
 
@@ -122,14 +117,7 @@ impl TransactionalObjectError {
     /// Returns true if this error means a a conflict occurred and the caller
     /// should refresh and retry.
     pub fn is_sequenced_write_conflict(&self) -> bool {
-        match self {
-            Self::ObjectVersionBehindBoundary { id, boundary } => {
-                warn!("sequenced write behind boundary: id={id:?}, boundary={boundary:?}");
-                true
-            }
-            Self::ObjectVersionExists => true,
-            _ => false,
-        }
+        matches!(self, Self::ObjectVersionExists)
     }
 }
 
@@ -236,7 +224,7 @@ pub trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
     /// Transactionally update the object. Will succeed iff the version id in durable storage
     /// matches the version id of the provided `DirtyObject`. If the versions don't match
     /// then this fn returns `ObjectVersionExists`. If a bounded sequenced store rejects the
-    /// created version after a boundary check, this fn returns `ObjectVersionBehindBoundary`.
+    /// created version after a boundary check, this fn also returns `ObjectVersionExists`.
     async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), TransactionalObjectError>;
 
     /// Transactionally update the object using the supplied mutator, if the mutator returns
@@ -562,9 +550,9 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 pub trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
     /// Write the object given the expected current version ID. If the version ID is None then
     /// `write` expects that no object currently exists in durable storage. If the version condition
-    /// fails then this fn returns `ObjectVersionExists`. Bounded sequenced implementations can
-    /// also return `ObjectVersionBehindBoundary` after creating an id that has been fenced by the
-    /// durable boundary.
+    /// fails then this fn returns `ObjectVersionExists`. Bounded sequenced implementations also
+    /// return `ObjectVersionExists` after creating an id that has been fenced by the durable
+    /// boundary.
     async fn write(
         &self,
         current_id: Option<Id>,
@@ -599,8 +587,8 @@ pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, Monotonic
 ///
 /// A boundary value `B` means that object IDs `<= B` have been durably fenced. Writers must call
 /// [`BoundaryObject::check`] after creating an object and treat
-/// [`TransactionalObjectError::ObjectVersionBehindBoundary`] as a failed write if the just-created
-/// ID is at or below the current boundary.
+/// [`TransactionalObjectError::ObjectVersionExists`] as a failed write if the just-created ID is
+/// at or below the current boundary.
 #[async_trait]
 pub trait BoundaryObject: Send + Sync {
     /// Verify that `id` is greater than the durable boundary.
@@ -648,8 +636,8 @@ impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId> for BoundedSeq
 
             match self.boundary.check(id).await {
                 Ok(()) => return Ok(Some((id, value))),
-                Err(TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }) => {
-                    warn!("sequenced read behind boundary: id={id:?}, boundary={boundary:?}");
+                Err(TransactionalObjectError::ObjectVersionExists) => {
+                    warn!("sequenced read behind boundary: id={id:?}");
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -800,10 +788,7 @@ mod tests {
             self.checks.fetch_add(1, Ordering::SeqCst);
             let boundary = MonotonicId::new(self.boundary.load(Ordering::SeqCst));
             if id <= boundary {
-                return Err(TransactionalObjectError::ObjectVersionBehindBoundary {
-                    id: id.id(),
-                    boundary: boundary.id(),
-                });
+                return Err(TransactionalObjectError::ObjectVersionExists);
             }
             Ok(())
         }
@@ -1009,11 +994,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
-            err,
-            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
-                if id == 1 && boundary == 1
-        ));
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
         assert_eq!(1, boundary.checks.load(Ordering::SeqCst));
         assert_eq!(
             Some(TestVal {

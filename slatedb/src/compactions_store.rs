@@ -351,14 +351,10 @@ mod tests {
 
         let result = sc.update(sc.prepare_dirty().unwrap()).await;
 
-        match result {
-            Err(SlateDBError::SequencedObjectVersionBehindBoundary { id, boundary }) => {
-                assert_eq!(2, id);
-                assert_eq!(2, boundary);
-            }
-            Err(err) => panic!("expected boundary error, got {err:?}"),
-            Ok(_) => panic!("expected boundary error, got success"),
-        }
+        assert!(matches!(
+            result,
+            Err(SlateDBError::TransactionalObjectVersionExists)
+        ));
     }
 
     #[tokio::test]

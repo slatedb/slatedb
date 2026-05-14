@@ -178,8 +178,9 @@ create-if-absent operation succeeds:
 2. If create-if-absent fails because the object already exists, return the
    existing sequenced write conflict error.
 3. Read the namespace boundary.
-4. If the just-created ID is less than or equal to the boundary, return a
-   boundary error and do not report the write as committed.
+4. If the just-created ID is less than or equal to the boundary, return the
+   existing sequenced write conflict error and do not report the write as
+   committed.
 5. Otherwise, return success.
 
 Boundary reads can be optimized with an in-memory cache and conditional GETs
@@ -211,8 +212,8 @@ rules:
   returning success.
 - Add `ObjectStoreBoundaryObject`, stored under `<root>/gc/<name>.boundary`,
   using ASCII `u64` encoding.
-- Add `ObjectVersionBehindBoundary { id, boundary }` error type to represent a
-  write that created an ID at or behind the durable boundary.
+- Treat a write that created an ID at or behind the durable boundary as the
+  existing sequenced write conflict error.
 - Wrap `ManifestStore` with `manifest.boundary`.
 - Wrap `CompactionsStore` with `compactions.boundary`.
 - Add `advance_boundary` methods to the manifest and compactions stores for GC.

@@ -183,10 +183,12 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
     async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
         let (boundary, _) = self.read_boundary().await?;
         if id <= boundary {
-            return Err(TransactionalObjectError::ObjectVersionBehindBoundary {
-                id: id.id(),
-                boundary: boundary.id(),
-            });
+            warn!(
+                "object version is behind boundary: id={:?}, boundary={:?}",
+                id.id(),
+                boundary.id()
+            );
+            return Err(TransactionalObjectError::ObjectVersionExists);
         }
         Ok(())
     }
@@ -578,11 +580,7 @@ mod tests {
         boundary.advance(MonotonicId::new(2)).await.unwrap();
 
         let err = boundary.check(MonotonicId::new(2)).await.unwrap_err();
-        assert!(matches!(
-            err,
-            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
-                if id == 2 && boundary == 2
-        ));
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
         boundary.check(MonotonicId::new(3)).await.unwrap();
 
         let raw_boundary = object_store
@@ -605,11 +603,7 @@ mod tests {
         boundary.advance(MonotonicId::new(2)).await.unwrap();
 
         let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
-        assert!(matches!(
-            err,
-            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
-                if id == 3 && boundary == 3
-        ));
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
 
         let raw_boundary = object_store
             .get(&Path::from("/root/gc/manifest.boundary"))
@@ -633,11 +627,7 @@ mod tests {
         let if_none_match_gets = counting_store.if_none_match_gets.load(Ordering::SeqCst);
         let err = boundary.check(MonotonicId::new(2)).await.unwrap_err();
 
-        assert!(matches!(
-            err,
-            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
-                if id == 2 && boundary == 2
-        ));
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
         assert_eq!(
             if_none_match_gets + 1,
             counting_store.if_none_match_gets.load(Ordering::SeqCst)
@@ -658,11 +648,7 @@ mod tests {
 
         let err = first_boundary.check(MonotonicId::new(4)).await.unwrap_err();
 
-        assert!(matches!(
-            err,
-            TransactionalObjectError::ObjectVersionBehindBoundary { id, boundary }
-                if id == 4 && boundary == 4
-        ));
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
     }
 
     #[tokio::test]
