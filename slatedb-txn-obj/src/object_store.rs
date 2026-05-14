@@ -176,12 +176,22 @@ impl ObjectStoreBoundaryObject {
             Err(e) => Err(TransactionalObjectError::from(e)),
         }
     }
-}
 
-#[async_trait]
-impl BoundaryObject for ObjectStoreBoundaryObject {
-    async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
-        let (boundary, _) = self.read_boundary().await?;
+    /// Checks that the given id is above the boundary, returning an error if not.
+    ///
+    /// ## Arguments
+    /// - `id` - The id to check against the boundary.
+    /// - `boundary` - The boundary to check against.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the id is above the boundary.
+    /// - `Err(TransactionalObjectError::ObjectVersionExists)` if the id is at or
+    ///   below the boundary.
+    async fn check_boundary(
+        &self,
+        id: MonotonicId,
+        boundary: MonotonicId,
+    ) -> Result<(), TransactionalObjectError> {
         if id <= boundary {
             warn!(
                 "object version is behind boundary: id={:?}, boundary={:?}",
@@ -192,10 +202,34 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
         }
         Ok(())
     }
+}
+
+#[async_trait]
+impl BoundaryObject for ObjectStoreBoundaryObject {
+    async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+        // Check the cache first to avoid an object store call when the boundary is stable.
+        let cached_boundary = self.cache.lock().clone();
+        if let Some((boundary, _)) = cached_boundary {
+            self.check_boundary(id, boundary).await?;
+        }
+        // If cache passed, double check against object store using GET If-None-Match.
+        let (boundary, _) = self.read_boundary().await?;
+        self.check_boundary(id, boundary).await
+    }
 
     async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
         loop {
-            let (current_boundary, current_version) = self.read_boundary().await?;
+            // Use the cache if it's available. If it's stale, we'll refresh the cache when
+            // we check the `put_result`.
+            let cached_boundary = self.cache.lock().clone();
+            let (current_boundary, current_version) =
+                if let Some((boundary, version)) = cached_boundary {
+                    (boundary, Some(version))
+                } else {
+                    // No cache, so we have to go to the object store.
+                    self.read_boundary().await?
+                };
+
             if current_boundary >= boundary {
                 return Ok(());
             }
@@ -227,7 +261,10 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
                     return Ok(());
                 }
                 // Try again if the boundary was concurrently updated by another process.
-                Err(Error::AlreadyExists { .. } | Error::Precondition { .. }) => {}
+                Err(Error::AlreadyExists { .. } | Error::Precondition { .. }) => {
+                    // Refresh the cache so re-attempts always use the fresh boundary.
+                    self.read_boundary().await?;
+                }
                 Err(e) => return Err(TransactionalObjectError::from(e)),
             }
         }
@@ -625,12 +662,30 @@ mod tests {
         boundary.advance(MonotonicId::new(2)).await.unwrap();
 
         let if_none_match_gets = counting_store.if_none_match_gets.load(Ordering::SeqCst);
+        boundary.check(MonotonicId::new(3)).await.unwrap();
+
+        assert_eq!(
+            if_none_match_gets + 1,
+            counting_store.if_none_match_gets.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_boundary_check_rejects_from_cache_without_get() {
+        let counting_store = Arc::new(CountingGetStore::new());
+        let object_store: Arc<dyn ObjectStore> = counting_store.clone();
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+
+        let get_opts_calls = counting_store.get_opts_calls.load(Ordering::SeqCst);
         let err = boundary.check(MonotonicId::new(2)).await.unwrap_err();
 
         assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
         assert_eq!(
-            if_none_match_gets + 1,
-            counting_store.if_none_match_gets.load(Ordering::SeqCst)
+            get_opts_calls,
+            counting_store.get_opts_calls.load(Ordering::SeqCst)
         );
     }
 
