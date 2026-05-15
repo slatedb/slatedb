@@ -1,7 +1,7 @@
 use crate::TransactionalObjectError::CallbackError;
 use crate::{
     BoundaryObject, GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
-    TransactionalObjectError, TransactionalStorageProtocol,
+    TransactionalObjectError,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -31,6 +31,7 @@ pub struct ObjectStoreSequencedStorageProtocol<T> {
     object_store: Box<dyn ObjectStore>,
     codec: Box<dyn ObjectCodec<T>>,
     file_suffix: &'static str,
+    boundary: Arc<dyn BoundaryObject>,
 }
 
 impl<T> ObjectStoreSequencedStorageProtocol<T> {
@@ -41,6 +42,29 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
         file_suffix: &'static str,
         codec: Box<dyn ObjectCodec<T>>,
     ) -> Self {
+        let boundary = Arc::new(ObjectStoreBoundaryObject::new(
+            root_path,
+            object_store.clone(),
+            subdir,
+        ));
+        Self::new_with_boundary(
+            root_path,
+            object_store,
+            subdir,
+            file_suffix,
+            codec,
+            boundary,
+        )
+    }
+
+    pub fn new_with_boundary(
+        root_path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        subdir: &str,
+        file_suffix: &'static str,
+        codec: Box<dyn ObjectCodec<T>>,
+        boundary: Arc<dyn BoundaryObject>,
+    ) -> Self {
         Self {
             object_store: Box::new(::object_store::prefix::PrefixStore::new(
                 object_store,
@@ -48,6 +72,7 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
             )),
             codec,
             file_suffix,
+            boundary,
         }
     }
 
@@ -272,10 +297,19 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
 }
 
 #[async_trait]
-impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId>
-    for ObjectStoreSequencedStorageProtocol<T>
-{
-    async fn write(
+impl<T: Send + Sync> BoundaryObject for ObjectStoreSequencedStorageProtocol<T> {
+    async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+        self.boundary.check(id).await
+    }
+
+    async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
+        self.boundary.advance(boundary).await
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorageProtocol<T> {
+    async fn write_unchecked(
         &self,
         current_id: Option<MonotonicId>,
         new_value: &T,
@@ -301,12 +335,14 @@ impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId>
         Ok(id)
     }
 
-    async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
+    async fn try_read_latest_unchecked(
+        &self,
+    ) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
         loop {
             let files = self.list(Unbounded, Unbounded).await?;
             if let Some(file) = files.last() {
                 let result = self
-                    .try_read(file.id)
+                    .try_read_unchecked(file.id)
                     .await
                     .map(|opt| opt.map(|v| (file.id, v)));
                 match result {
@@ -327,11 +363,11 @@ impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId>
         }
         Ok(None)
     }
-}
 
-#[async_trait]
-impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorageProtocol<T> {
-    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError> {
+    async fn try_read_unchecked(
+        &self,
+        id: MonotonicId,
+    ) -> Result<Option<T>, TransactionalObjectError> {
         let path = self.path_for(id);
         match self.object_store.get(&path).await {
             Ok(obj) => match obj.bytes().await {
@@ -380,7 +416,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
     }
 
     // Delete a specific versioned file (no additional validation)
-    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+    async fn delete_unchecked(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
         let path = self.path_for(id);
         debug!("deleting object [record_path={}]", path);
         self.object_store
@@ -783,10 +819,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_try_read_missing_returns_none() {
+    async fn test_try_read_unchecked_missing_returns_none() {
         let store = new_store();
 
-        let missing = store.try_read(1.into()).await.unwrap();
+        let missing = store.try_read_unchecked(1.into()).await.unwrap();
 
         assert!(missing.is_none());
     }
@@ -818,6 +854,11 @@ mod tests {
             object_store: Box::new(object_store),
             codec: Box::new(TestValCodec),
             file_suffix: "val",
+            boundary: Arc::new(ObjectStoreBoundaryObject::new(
+                &Path::from("/root"),
+                flaky_store.clone(),
+                "test",
+            )),
         };
 
         let latest = store.try_read_latest().await.unwrap().unwrap();

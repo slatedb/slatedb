@@ -12,13 +12,10 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::object_store::{
-    ObjectStoreBoundaryObject, ObjectStoreSequencedStorageProtocol,
-};
+use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
-    BoundaryObject, BoundedSequencedStorage, DirtyObject, FenceableTransactionalObject,
-    MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
-    TransactionalStorageProtocol,
+    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
@@ -462,31 +459,23 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<dyn SequencedStorageProtocol<Manifest>>,
-    boundary: Arc<dyn BoundaryObject>,
 }
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        let sequenced: Arc<dyn SequencedStorageProtocol<Manifest>> =
+        let inner: Arc<dyn SequencedStorageProtocol<Manifest>> =
             Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
                 root_path,
-                object_store.clone(),
+                object_store,
                 "manifest",
                 "manifest",
                 Box::new(FlatBufferManifestCodec {}),
             ));
-        let boundary: Arc<dyn BoundaryObject> = Arc::new(ObjectStoreBoundaryObject::new(
-            root_path,
-            object_store,
-            "manifest",
-        ));
-        let inner: Arc<dyn SequencedStorageProtocol<Manifest>> =
-            Arc::new(BoundedSequencedStorage::new(sequenced, boundary.clone()));
-        Self { inner, boundary }
+        Self { inner }
     }
 
     pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
-        Ok(self.boundary.advance(MonotonicId::new(id)).await?)
+        Ok(self.inner.advance(MonotonicId::new(id)).await?)
     }
 
     /// Delete a manifest from the object store.
@@ -581,7 +570,7 @@ impl ManifestStore {
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        Ok(self.inner.try_read(MonotonicId::new(id)).await?)
+        Ok(self.inner.try_read_unchecked(MonotonicId::new(id)).await?)
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {

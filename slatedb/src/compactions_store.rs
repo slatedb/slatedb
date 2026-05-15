@@ -8,13 +8,10 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::object_store::{
-    ObjectStoreBoundaryObject, ObjectStoreSequencedStorageProtocol,
-};
+use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
-    BoundaryObject, BoundedSequencedStorage, DirtyObject, FenceableTransactionalObject,
-    MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
-    TransactionalStorageProtocol,
+    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -200,31 +197,23 @@ where
 
 pub(crate) struct CompactionsStore {
     inner: Arc<dyn SequencedStorageProtocol<Compactions>>,
-    boundary: Arc<dyn BoundaryObject>,
 }
 
 impl CompactionsStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        let sequenced: Arc<dyn SequencedStorageProtocol<Compactions>> =
+        let inner: Arc<dyn SequencedStorageProtocol<Compactions>> =
             Arc::new(ObjectStoreSequencedStorageProtocol::<Compactions>::new(
                 root_path,
-                object_store.clone(),
+                object_store,
                 "compactions",
                 "compactions",
                 Box::new(FlatBufferCompactionsCodec {}),
             ));
-        let boundary: Arc<dyn BoundaryObject> = Arc::new(ObjectStoreBoundaryObject::new(
-            root_path,
-            object_store,
-            "compactions",
-        ));
-        let inner: Arc<dyn SequencedStorageProtocol<Compactions>> =
-            Arc::new(BoundedSequencedStorage::new(sequenced, boundary.clone()));
-        Self { inner, boundary }
+        Self { inner }
     }
 
     pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
-        Ok(self.boundary.advance(MonotonicId::new(id)).await?)
+        Ok(self.inner.advance(MonotonicId::new(id)).await?)
     }
 
     /// Delete a compactions file from the object store.
@@ -282,7 +271,7 @@ impl CompactionsStore {
         &self,
         id: u64,
     ) -> Result<Option<Compactions>, SlateDBError> {
-        Ok(self.inner.try_read(MonotonicId::new(id)).await?)
+        Ok(self.inner.try_read_unchecked(MonotonicId::new(id)).await?)
     }
 
     #[allow(dead_code)]

@@ -16,9 +16,10 @@
 //!   interacts with backing storage. Implementations implement some protocol for providing
 //!   transactional guarantees. The trait supports reading the latest object and its version id
 //!   and writing a new version conditional on the existing stored version matching the current id.
-//! - `SequencedStorageProtocol<T>`: Extends TransactionalStorageProtocol<T, MonotonicId> by
-//!   requiring that the protocol persist objects as a series of versions with monotonically
-//!   increasing IDs. This  is useful if it's important to observe earlier versions of the object.
+//! - `SequencedStorageProtocol<T>`: Extends TransactionalStorageProtocol<T, MonotonicId> and
+//!   BoundaryObject by requiring that the protocol persist objects as a series of versions with
+//!   monotonically increasing IDs. This is useful if it's important to observe earlier versions of
+//!   the object.
 //! - `ObjectStoreSequencedStorageProtocol<T>`: Implements SequencedStorageProtocol<T> on
 //!   Object Stores.
 //! - `MonotonicId`: A monotonically increasing version ID.
@@ -223,8 +224,8 @@ pub trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
 
     /// Transactionally update the object. Will succeed iff the version id in durable storage
     /// matches the version id of the provided `DirtyObject`. If the versions don't match
-    /// then this fn returns `ObjectVersionExists`. If a bounded sequenced store rejects the
-    /// created version after a boundary check, this fn also returns `ObjectVersionExists`.
+    /// then this fn returns `ObjectVersionExists`. If a sequenced store rejects the created version
+    /// after a boundary check, this fn also returns `ObjectVersionExists`.
     async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), TransactionalObjectError>;
 
     /// Transactionally update the object using the supplied mutator, if the mutator returns
@@ -550,9 +551,8 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 pub trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
     /// Write the object given the expected current version ID. If the version ID is None then
     /// `write` expects that no object currently exists in durable storage. If the version condition
-    /// fails then this fn returns `ObjectVersionExists`. Bounded sequenced implementations also
-    /// return `ObjectVersionExists` after creating an id that has been fenced by the durable
-    /// boundary.
+    /// fails then this fn returns `ObjectVersionExists`. Sequenced implementations also return
+    /// `ObjectVersionExists` after creating an id that has been fenced by the durable boundary.
     async fn write(
         &self,
         current_id: Option<Id>,
@@ -562,25 +562,6 @@ pub trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
     /// Read the latest version of the object and return it along with its version ID. If no
     /// object is found, returns `Ok(None)`
     async fn try_read_latest(&self) -> Result<Option<(Id, T)>, TransactionalObjectError>;
-}
-
-/// Extends TransactionalStorageProtocol<T, MonotonicId> by requiring that the protocol persist objects
-/// as a series of versions with monotonically increasing IDs. This is useful if it's important to
-/// observe earlier versions of the object.
-#[async_trait]
-pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, MonotonicId> {
-    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError>;
-
-    async fn list(
-        &self,
-        // use explicit from/to params here because RangeBounds is not object safe (so can't use
-        // &dyn), and leaving the bound type as a type-parameter makes SequencedStorageProtocol not
-        // object-safe
-        from: Bound<MonotonicId>,
-        to: Bound<MonotonicId>,
-    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError>;
-
-    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
 /// A durable inclusive high-watermark for a sequenced object namespace.
@@ -604,40 +585,109 @@ pub trait BoundaryObject: Send + Sync {
     async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
-/// A [`SequencedStorageProtocol`] wrapper that fences stale writes using a [`BoundaryObject`].
-pub struct BoundedSequencedStorage<T> {
-    delegate: Arc<dyn SequencedStorageProtocol<T>>,
-    boundary: Arc<dyn BoundaryObject>,
-}
+/// Extends TransactionalStorageProtocol<T, MonotonicId> by requiring that the protocol persist
+/// objects as a series of versions with monotonically increasing IDs. This is useful if it's
+/// important to observe earlier versions of the object.
+///
+/// Boundary checks are applied by the generic checked operations: writes create a version with
+/// [`SequencedStorageProtocol::write_unchecked`] and then call [`BoundaryObject::check`];
+/// latest-version reads retry [`SequencedStorageProtocol::try_read_latest_unchecked`] until the
+/// returned ID is above the durable boundary; and [`SequencedStorageProtocol::delete`] only deletes
+/// versions at or below the boundary. Methods with `_unchecked` in their names, along with
+/// [`SequencedStorageProtocol::list`], expose physically present versions without boundary
+/// filtering.
+#[async_trait]
+pub trait SequencedStorageProtocol<T: Send + Sync>:
+    TransactionalStorageProtocol<T, MonotonicId> + BoundaryObject
+{
+    /// Write a new version without checking it against the durable boundary.
+    ///
+    /// Implementations provide this storage primitive and should rely on the generic
+    /// [`TransactionalStorageProtocol::write`] implementation for normal checked writes.
+    async fn write_unchecked(
+        &self,
+        current_id: Option<MonotonicId>,
+        new_value: &T,
+    ) -> Result<MonotonicId, TransactionalObjectError>;
 
-impl<T> BoundedSequencedStorage<T> {
-    pub fn new(
-        delegate: Arc<dyn SequencedStorageProtocol<T>>,
-        boundary: Arc<dyn BoundaryObject>,
-    ) -> Self {
-        Self { delegate, boundary }
+    /// Read the latest version without checking it against the durable boundary.
+    ///
+    /// Implementations provide this storage primitive and should rely on the generic
+    /// [`TransactionalStorageProtocol::try_read_latest`] implementation for normal checked reads.
+    async fn try_read_latest_unchecked(
+        &self,
+    ) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError>;
+
+    /// Read a specific object version by ID.
+    ///
+    /// Returns `Ok(None)` if that version does not exist. This method does not check the requested
+    /// ID against the durable boundary, so callers may use it to inspect historical versions that
+    /// are still physically present.
+    async fn try_read_unchecked(
+        &self,
+        id: MonotonicId,
+    ) -> Result<Option<T>, TransactionalObjectError>;
+
+    /// List stored object versions in ascending ID order over the supplied ID bounds.
+    ///
+    /// The returned metadata describes versions that are physically present in storage. This method
+    /// does not filter results against the durable boundary.
+    async fn list(
+        &self,
+        // use explicit from/to params here because RangeBounds is not object safe (so can't use
+        // &dyn), and leaving the bound type as a type-parameter makes SequencedStorageProtocol not
+        // object-safe
+        from: Bound<MonotonicId>,
+        to: Bound<MonotonicId>,
+    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError>;
+
+    /// Delete a version without checking it against the durable boundary.
+    ///
+    /// Implementations provide this storage primitive and should rely on the generic [`delete`]
+    /// implementation for normal checked deletes.
+    async fn delete_unchecked(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
+
+    /// Deletes the object with the given id. This is only allowed if the id is at or
+    /// below the durable boundary.
+    ///
+    /// ## Errors
+    /// - Returns `InvalidObjectState` if `id` is above the durable boundary
+    /// - Propagates any errors from the boundary check and delete primitive
+    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+        match self.check(id).await {
+            Ok(()) => Err(TransactionalObjectError::InvalidObjectState),
+            Err(TransactionalObjectError::ObjectVersionExists) => {
+                // Object is behind the boundary, so it's safe to delete.
+                self.delete_unchecked(id).await
+            }
+            e => e,
+        }
     }
 }
 
 #[async_trait]
-impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId> for BoundedSequencedStorage<T> {
+impl<T, Store> TransactionalStorageProtocol<T, MonotonicId> for Store
+where
+    T: Send + Sync,
+    Store: SequencedStorageProtocol<T> + ?Sized,
+{
     async fn write(
         &self,
         current_id: Option<MonotonicId>,
         new_value: &T,
     ) -> Result<MonotonicId, TransactionalObjectError> {
-        let id = self.delegate.write(current_id, new_value).await?;
-        self.boundary.check(id).await?;
+        let id = self.write_unchecked(current_id, new_value).await?;
+        self.check(id).await?;
         Ok(id)
     }
 
     async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
         loop {
-            let Some((id, value)) = self.delegate.try_read_latest().await? else {
+            let Some((id, value)) = self.try_read_latest_unchecked().await? else {
                 return Ok(None);
             };
 
-            match self.boundary.check(id).await {
+            match self.check(id).await {
                 Ok(()) => return Ok(Some((id, value))),
                 Err(TransactionalObjectError::ObjectVersionExists) => {
                     warn!("sequenced read behind boundary: id={id:?}");
@@ -645,38 +695,6 @@ impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId> for BoundedSeq
                 }
                 Err(err) => return Err(err),
             }
-        }
-    }
-}
-
-#[async_trait]
-impl<T: Send + Sync> SequencedStorageProtocol<T> for BoundedSequencedStorage<T> {
-    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError> {
-        self.delegate.try_read(id).await
-    }
-
-    async fn list(
-        &self,
-        from: Bound<MonotonicId>,
-        to: Bound<MonotonicId>,
-    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
-        self.delegate.list(from, to).await
-    }
-
-    /// Deletes the object with the given id. This is only allowed if the id is at or
-    /// below the durable boundary.
-    ///
-    /// ## Errors
-    /// - Returns `InvalidObjectState` if `id` is above the durable boundary
-    /// - Propagates any errors from the boundary check and delegate's `delete`
-    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
-        match self.boundary.check(id).await {
-            Ok(()) => Err(TransactionalObjectError::InvalidObjectState),
-            Err(TransactionalObjectError::ObjectVersionExists) => {
-                // Object is behind the boundary, so it's safe to delete.
-                self.delegate.delete(id).await
-            }
-            e => e,
         }
     }
 }
@@ -698,9 +716,9 @@ mod tests {
     use crate::object_store::ObjectStoreSequencedStorageProtocol;
     use crate::TransactionalObjectError;
     use crate::{
-        BoundaryObject, BoundedSequencedStorage, FenceableTransactionalObject,
-        GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
-        SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+        BoundaryObject, FenceableTransactionalObject, GenericObjectMetadata, MonotonicId,
+        ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+        TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -749,6 +767,20 @@ mod tests {
         ))
     }
 
+    fn new_store_with_boundary(
+        boundary: Arc<dyn BoundaryObject>,
+    ) -> Arc<ObjectStoreSequencedStorageProtocol<TestVal>> {
+        let os = Arc::new(InMemory::new());
+        Arc::new(ObjectStoreSequencedStorageProtocol::new_with_boundary(
+            &Path::from("/root"),
+            os,
+            "test",
+            "val",
+            Box::new(TestValCodec),
+            boundary,
+        ))
+    }
+
     async fn new_store_with_stale_base_and_live_latest(
         live_latest_value: TestVal,
     ) -> (
@@ -780,6 +812,7 @@ mod tests {
             .write(Some(expired_slot_id), &live_latest_value)
             .await
             .unwrap();
+        store.advance(expired_slot_id).await.unwrap();
         store.delete(expired_slot_id).await.unwrap();
         (store, stale_base_id)
     }
@@ -818,20 +851,33 @@ mod tests {
     struct ScriptedReadLatestStore {
         reads: Mutex<VecDeque<Option<(MonotonicId, TestVal)>>>,
         try_read_latest_calls: AtomicU64,
+        boundary: TestBoundary,
     }
 
     impl ScriptedReadLatestStore {
-        fn new(reads: Vec<Option<(MonotonicId, TestVal)>>) -> Self {
+        fn new(reads: Vec<Option<(MonotonicId, TestVal)>>, boundary: u64) -> Self {
             Self {
                 reads: Mutex::new(reads.into()),
                 try_read_latest_calls: AtomicU64::new(0),
+                boundary: TestBoundary::new(boundary),
             }
         }
     }
 
     #[async_trait::async_trait]
-    impl TransactionalStorageProtocol<TestVal, MonotonicId> for ScriptedReadLatestStore {
-        async fn write(
+    impl BoundaryObject for ScriptedReadLatestStore {
+        async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+            self.boundary.check(id).await
+        }
+
+        async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
+            self.boundary.advance(boundary).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SequencedStorageProtocol<TestVal> for ScriptedReadLatestStore {
+        async fn write_unchecked(
             &self,
             _current_id: Option<MonotonicId>,
             _new_value: &TestVal,
@@ -839,7 +885,7 @@ mod tests {
             Err(TransactionalObjectError::InvalidObjectState)
         }
 
-        async fn try_read_latest(
+        async fn try_read_latest_unchecked(
             &self,
         ) -> Result<Option<(MonotonicId, TestVal)>, TransactionalObjectError> {
             self.try_read_latest_calls.fetch_add(1, Ordering::SeqCst);
@@ -848,11 +894,8 @@ mod tests {
                 .pop_front()
                 .ok_or(TransactionalObjectError::InvalidObjectState)
         }
-    }
 
-    #[async_trait::async_trait]
-    impl SequencedStorageProtocol<TestVal> for ScriptedReadLatestStore {
-        async fn try_read(
+        async fn try_read_unchecked(
             &self,
             _id: MonotonicId,
         ) -> Result<Option<TestVal>, TransactionalObjectError> {
@@ -867,7 +910,7 @@ mod tests {
             Err(TransactionalObjectError::InvalidObjectState)
         }
 
-        async fn delete(&self, _id: MonotonicId) -> Result<(), TransactionalObjectError> {
+        async fn delete_unchecked(&self, _id: MonotonicId) -> Result<(), TransactionalObjectError> {
             Err(TransactionalObjectError::InvalidObjectState)
         }
     }
@@ -922,30 +965,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bounded_sequenced_storage_retries_read_latest_behind_boundary() {
-        let store = Arc::new(ScriptedReadLatestStore::new(vec![
-            Some((
-                MonotonicId::new(1),
-                TestVal {
-                    epoch: 0,
-                    payload: 1,
-                },
-            )),
-            Some((
-                MonotonicId::new(3),
-                TestVal {
-                    epoch: 0,
-                    payload: 3,
-                },
-            )),
-        ]));
-        let boundary = Arc::new(TestBoundary::new(2));
-        let bounded = BoundedSequencedStorage::new(
-            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-        );
+    async fn test_sequenced_storage_retries_read_latest_behind_boundary() {
+        let store = Arc::new(ScriptedReadLatestStore::new(
+            vec![
+                Some((
+                    MonotonicId::new(1),
+                    TestVal {
+                        epoch: 0,
+                        payload: 1,
+                    },
+                )),
+                Some((
+                    MonotonicId::new(3),
+                    TestVal {
+                        epoch: 0,
+                        payload: 3,
+                    },
+                )),
+            ],
+            2,
+        ));
 
-        let latest = bounded.try_read_latest().await.unwrap().unwrap();
+        let latest = store.try_read_latest().await.unwrap().unwrap();
 
         assert_eq!(3, latest.0);
         assert_eq!(
@@ -956,19 +997,15 @@ mod tests {
             latest.1
         );
         assert_eq!(2, store.try_read_latest_calls.load(Ordering::SeqCst));
-        assert_eq!(2, boundary.checks.load(Ordering::SeqCst));
+        assert_eq!(2, store.boundary.checks.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    async fn test_bounded_sequenced_storage_checks_boundary_after_successful_write() {
-        let store = new_store();
+    async fn test_sequenced_storage_checks_boundary_after_successful_write() {
         let boundary = Arc::new(TestBoundary::new(0));
-        let bounded = BoundedSequencedStorage::new(
-            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-        );
+        let store = new_store_with_boundary(Arc::clone(&boundary) as Arc<dyn BoundaryObject>);
 
-        let id = bounded
+        let id = store
             .write(
                 None,
                 &TestVal {
@@ -986,20 +1023,16 @@ mod tests {
                 epoch: 0,
                 payload: 1,
             }),
-            bounded.try_read(id).await.unwrap()
+            store.try_read_unchecked(id).await.unwrap()
         );
     }
 
     #[tokio::test]
-    async fn test_bounded_sequenced_storage_rejects_write_behind_boundary() {
-        let store = new_store();
+    async fn test_sequenced_storage_rejects_write_behind_boundary() {
         let boundary = Arc::new(TestBoundary::new(1));
-        let bounded = BoundedSequencedStorage::new(
-            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-        );
+        let store = new_store_with_boundary(Arc::clone(&boundary) as Arc<dyn BoundaryObject>);
 
-        let err = bounded
+        let err = store
             .write(
                 None,
                 &TestVal {
@@ -1017,55 +1050,53 @@ mod tests {
                 epoch: 0,
                 payload: 1,
             }),
-            store.try_read(1.into()).await.unwrap()
+            store.try_read_unchecked(1.into()).await.unwrap()
         );
     }
 
     #[tokio::test]
-    async fn test_bounded_sequenced_storage_allows_delete_at_or_below_boundary() {
-        let store = new_store();
-        let id = store
-            .write(
-                None,
-                &TestVal {
-                    epoch: 0,
-                    payload: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let boundary = Arc::new(TestBoundary::new(1));
-        let bounded = BoundedSequencedStorage::new(
-            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-        );
-
-        bounded.delete(id).await.unwrap();
-
-        assert_eq!(None, store.try_read(id).await.unwrap());
-        assert_eq!(1, boundary.checks.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn test_bounded_sequenced_storage_rejects_delete_above_boundary() {
-        let store = new_store();
-        let id = store
-            .write(
-                None,
-                &TestVal {
-                    epoch: 0,
-                    payload: 1,
-                },
-            )
-            .await
-            .unwrap();
+    async fn test_sequenced_storage_allows_delete_at_or_below_boundary() {
         let boundary = Arc::new(TestBoundary::new(0));
-        let bounded = BoundedSequencedStorage::new(
-            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-        );
+        let store = new_store_with_boundary(Arc::clone(&boundary) as Arc<dyn BoundaryObject>);
+        let id = store
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let checks_before_delete = boundary.checks.load(Ordering::SeqCst);
+        boundary.advance(id).await.unwrap();
 
-        let err = bounded.delete(id).await.unwrap_err();
+        store.delete(id).await.unwrap();
+
+        assert_eq!(None, store.try_read_unchecked(id).await.unwrap());
+        assert_eq!(
+            checks_before_delete + 1,
+            boundary.checks.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sequenced_storage_rejects_delete_above_boundary() {
+        let boundary = Arc::new(TestBoundary::new(0));
+        let store = new_store_with_boundary(Arc::clone(&boundary) as Arc<dyn BoundaryObject>);
+        let id = store
+            .write(
+                None,
+                &TestVal {
+                    epoch: 0,
+                    payload: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let checks_before_delete = boundary.checks.load(Ordering::SeqCst);
+
+        let err = store.delete(id).await.unwrap_err();
 
         assert!(matches!(err, TransactionalObjectError::InvalidObjectState));
         assert_eq!(
@@ -1073,9 +1104,12 @@ mod tests {
                 epoch: 0,
                 payload: 1,
             }),
-            store.try_read(id).await.unwrap()
+            store.try_read_unchecked(id).await.unwrap()
         );
-        assert_eq!(1, boundary.checks.load(Ordering::SeqCst));
+        assert_eq!(
+            checks_before_delete + 1,
+            boundary.checks.load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]
@@ -1086,17 +1120,17 @@ mod tests {
         })
         .await;
 
-        let boundary = Arc::new(TestBoundary::new(2));
-        let bounded: Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>> =
-            Arc::new(BoundedSequencedStorage::new(
-                Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-                Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-            ));
-        let object = store.try_read(stale_base_id).await.unwrap().unwrap();
+        let ops: Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>> =
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>;
+        let object = store
+            .try_read_unchecked(stale_base_id)
+            .await
+            .unwrap()
+            .unwrap();
         let mut txn = SimpleTransactionalObject {
             id: stale_base_id,
             object,
-            ops: bounded,
+            ops,
         };
         let attempts = AtomicU64::new(0);
 
@@ -1122,8 +1156,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bounded_sequenced_storage_does_not_check_boundary_on_write_conflict() {
-        let store = new_store();
+    async fn test_sequenced_storage_does_not_check_boundary_on_write_conflict() {
+        let boundary = Arc::new(TestBoundary::new(0));
+        let store = new_store_with_boundary(Arc::clone(&boundary) as Arc<dyn BoundaryObject>);
         store
             .write(
                 None,
@@ -1134,14 +1169,10 @@ mod tests {
             )
             .await
             .unwrap();
+        boundary.advance(MonotonicId::new(1)).await.unwrap();
+        let checks_before_conflict = boundary.checks.load(Ordering::SeqCst);
 
-        let boundary = Arc::new(TestBoundary::new(1));
-        let bounded = BoundedSequencedStorage::new(
-            Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-            Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-        );
-
-        let err = bounded
+        let err = store
             .write(
                 None,
                 &TestVal {
@@ -1153,7 +1184,10 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
-        assert_eq!(0, boundary.checks.load(Ordering::SeqCst));
+        assert_eq!(
+            checks_before_conflict,
+            boundary.checks.load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]
@@ -1164,17 +1198,17 @@ mod tests {
         })
         .await;
 
-        let boundary = Arc::new(TestBoundary::new(2));
-        let bounded: Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>> =
-            Arc::new(BoundedSequencedStorage::new(
-                Arc::clone(&store) as Arc<dyn SequencedStorageProtocol<TestVal>>,
-                Arc::clone(&boundary) as Arc<dyn BoundaryObject>,
-            ));
-        let object = store.try_read(stale_base_id).await.unwrap().unwrap();
+        let ops: Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>> =
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>;
+        let object = store
+            .try_read_unchecked(stale_base_id)
+            .await
+            .unwrap()
+            .unwrap();
         let delegate = SimpleTransactionalObject {
             id: stale_base_id,
             object,
-            ops: bounded,
+            ops,
         };
 
         let fenceable = FenceableTransactionalObject::init(
