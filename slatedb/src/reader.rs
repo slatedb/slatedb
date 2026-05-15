@@ -134,6 +134,26 @@ impl Reader {
         max_seq
     }
 
+    /// Walk the memtables (active first, then immutables freshest-first) and
+    /// return the freshest entry visible at `max_seq` for `key`. Returns
+    /// `None` if no memtable contains the key. A `Merge` operand is returned
+    /// as-is, the caller must still fold it with older sources.
+    fn memtable_get(
+        db_state: &(dyn DbStateReader + Sync + Send),
+        key: &[u8],
+        max_seq: Option<u64>,
+    ) -> Option<crate::types::RowEntry> {
+        if let Some(entry) = db_state.memtable().get(key, max_seq) {
+            return Some(entry);
+        }
+        for imm in db_state.imm_memtable() {
+            if let Some(entry) = imm.table().get(key, max_seq) {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
     async fn build_iterator_sources(
         &self,
         range: &BytesRange,
@@ -208,6 +228,25 @@ impl Reader {
         self.db_stats.get_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
+
+        // Fast path: if there's no transaction write batch in play, probe the
+        // memtables directly. A terminal hit (Value or Tombstone) in the
+        // freshest matching memtable masks every deeper source, so we can
+        // skip the merge-iterator / segment-iterator construction entirely.
+        // A `Merge` operand still requires folding with older sources, so we
+        // fall through to the full path in that case.
+        if write_batch_iter.is_none() {
+            if let Some(entry) = Self::memtable_get(db_state, key_slice, max_seq) {
+                match entry.value {
+                    crate::types::ValueDeletable::Value(_) => {
+                        return Ok(Some(KeyValue::from(entry)))
+                    }
+                    crate::types::ValueDeletable::Tombstone => return Ok(None),
+                    crate::types::ValueDeletable::Merge(_) => { /* fall through */ }
+                }
+            }
+        }
+
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
         let sst_iter_options = SstIteratorOptions {

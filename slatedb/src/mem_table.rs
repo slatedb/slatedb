@@ -482,6 +482,30 @@ impl KVTable {
         self.range_ascending(..)
     }
 
+    /// Point lookup for a single user key, returning the freshest entry with
+    /// `seq <= max_seq` (or unbounded when `max_seq` is `None`). Returns
+    /// `None` if no entry exists for `key`.
+    ///
+    /// This is a fast path for the read flow: it bypasses the merge-iterator
+    /// machinery, dynamic dispatch, and the per-bound `Bytes` clones that
+    /// `KVTable::range` does. The skip list orders entries by user-key
+    /// ascending then by sequence descending (see [`SequencedKey::cmp`]), so a
+    /// `lower_bound` probe at `(key, seq_bound)` lands on the largest-seq
+    /// entry that satisfies the filter.
+    ///
+    /// Callers must handle `Merge` operands themselves, a `Merge` hit here
+    /// only represents one operand and must still be folded with operands
+    /// from older sources. `Value` and `Tombstone` hits are terminal.
+    pub(crate) fn get(&self, key: &[u8], max_seq: Option<u64>) -> Option<RowEntry> {
+        let seq_bound = max_seq.unwrap_or(u64::MAX);
+        let probe = SequencedKey::new(Bytes::copy_from_slice(key), seq_bound);
+        let entry = self.map.lower_bound(Bound::Included(&probe))?;
+        if entry.key().user_key.as_ref() != key {
+            return None;
+        }
+        Some(entry.value().clone())
+    }
+
     pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator {
         self.range(range, IterationOrder::Ascending)
     }
@@ -567,6 +591,7 @@ mod tests {
     use crate::merge_iterator::MergeIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
+    use crate::types::ValueDeletable;
     use crate::{proptest_util, test_utils};
     use rstest::rstest;
     use tokio::runtime::Runtime;
@@ -950,6 +975,90 @@ mod tests {
         assert!(!table
             .ensure_valid_segment(&Bytes::from_static(b"zzz"))
             .unwrap());
+    }
+
+    #[test]
+    fn test_get_returns_freshest_value_for_key() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"k", b"v1", 1));
+        table.put(RowEntry::new_value(b"k", b"v2", 5));
+        table.put(RowEntry::new_value(b"k", b"v3", 3));
+
+        let entry = table.table().get(b"k", None).expect("hit expected");
+        assert_eq!(entry.seq, 5);
+        assert_eq!(
+            entry.value,
+            ValueDeletable::Value(Bytes::from_static(b"v2"))
+        );
+    }
+
+    #[test]
+    fn test_get_returns_none_for_missing_key() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"k1", b"v1", 1));
+        table.put(RowEntry::new_value(b"k3", b"v3", 2));
+
+        assert!(table.table().get(b"k2", None).is_none());
+        assert!(table.table().get(b"k0", None).is_none());
+        assert!(table.table().get(b"k4", None).is_none());
+    }
+
+    #[test]
+    fn test_get_returns_tombstone_when_freshest() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"k", b"v1", 1));
+        table.put(RowEntry::new_tombstone(b"k", 5));
+        table.put(RowEntry::new_value(b"k", b"v3", 3));
+
+        let entry = table.table().get(b"k", None).expect("hit expected");
+        assert_eq!(entry.seq, 5);
+        assert!(entry.value.is_tombstone());
+    }
+
+    #[test]
+    fn test_get_respects_max_seq() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"k", b"v1", 1));
+        table.put(RowEntry::new_value(b"k", b"v3", 3));
+        table.put(RowEntry::new_value(b"k", b"v5", 5));
+
+        // No filter: freshest wins.
+        let entry = table.table().get(b"k", None).unwrap();
+        assert_eq!(entry.seq, 5);
+
+        // max_seq=4: should return seq=3.
+        let entry = table.table().get(b"k", Some(4)).unwrap();
+        assert_eq!(entry.seq, 3);
+
+        // max_seq=2: should return seq=1.
+        let entry = table.table().get(b"k", Some(2)).unwrap();
+        assert_eq!(entry.seq, 1);
+
+        // max_seq=0: no visible entries.
+        assert!(table.table().get(b"k", Some(0)).is_none());
+    }
+
+    #[test]
+    fn test_get_returns_merge_operand() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_merge(b"k", b"m1", 1));
+        table.put(RowEntry::new_merge(b"k", b"m2", 2));
+
+        let entry = table.table().get(b"k", None).unwrap();
+        assert_eq!(entry.seq, 2);
+        assert!(matches!(entry.value, ValueDeletable::Merge(_)));
+    }
+
+    #[test]
+    fn test_get_does_not_leak_across_user_keys() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"aaa", b"v_a", 1));
+        table.put(RowEntry::new_value(b"aab", b"v_ab", 2));
+
+        // Probing "aa" must not return "aaa" or "aab".
+        assert!(table.table().get(b"aa", None).is_none());
+        // Probing "a" must not return anything either.
+        assert!(table.table().get(b"a", None).is_none());
     }
 
     #[tokio::test]
