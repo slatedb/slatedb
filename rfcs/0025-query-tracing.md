@@ -130,13 +130,14 @@ Derived counters:
 
 ### Aggregate durations
 
-| Duration                 | Description                        |
-|--------------------------|------------------------------------|
-| `block_read_duration`    | Time spent in data block reads     |
-| `index_read_duration`    | Time spent in index reads          |
-| `filter_read_duration`   | Time spent in filter reads         |
-| `memtable_read_duration` | Time spent in memtable reads       |
-| `merge_duration`         | Time spent in merge operator calls |
+| Duration                         | Description                        |
+|----------------------------------|------------------------------------|
+| `block_read_duration`            | Time spent in data block reads     |
+| `index_read_duration`            | Time spent in index reads          |
+| `filter_read_duration`           | Time spent in filter reads         |
+| `memtable_read_duration`         | Time spent in memtable reads       |
+| `bloom_filter_check_duration`    | Time spent checking bloom filters  |
+| `merge_duration`                 | Time spent in merge operator calls |
 
 Stored as `AtomicU64` microseconds internally. Exposed via accessors
 returning `std::time::Duration`. Measured with `Instant::now()` around
@@ -156,7 +157,7 @@ Child spans under the parent `slatedb.query`, all at `debug` level:
 | `slatedb.query.bloom_filter`  | `sst_id`, `key`, `result`                         |
 | `slatedb.query.read_index`    | `sst_id`, `cached`                                |
 | `slatedb.query.read_filter`   | `sst_id`, `cached`                                |
-| `slatedb.query.merge`         | `key`, `operands`                                 |
+| `slatedb.query.merge`         | `key`, `num_operands`                             |
 
 The tracing subscriber captures span duration on exit. Each
 `read_blocks` span covers one SST's block read, so a tool like Jaeger
@@ -170,7 +171,7 @@ Definition of the fields:
 - `cached`: `true` If the block was found in the cache, `false` otherwise
 - `cache_hits`: Number of blocks found in the cache
 - `cache_misses`: Number of blocks not found in the cache
-- `operands`: Operands in a merge operation
+- `num_operands`: Number of operands in a merge operation
 
 
 ## Implementation
@@ -243,6 +244,8 @@ impl QueryTracingLayer {
     pub fn block_read_duration(&self, query_id: &str) -> Duration;
     pub fn index_read_duration(&self, query_id: &str) -> Duration;
     pub fn filter_read_duration(&self, query_id: &str) -> Duration;
+    pub fn memtable_read_duration(&self, query_id: &str) -> Duration;
+    pub fn bloom_filter_check_duration(&self, query_id: &str) -> Duration;
     pub fn merge_duration(&self, query_id: &str) -> Duration;
 }
 ```
