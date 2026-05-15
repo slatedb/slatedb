@@ -1,6 +1,6 @@
 {
   "name": "@slatedb/uniffi",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Node.js bindings for SlateDB generated from UniFFI and packaged with native libraries.",
   "license": "Apache-2.0",
   "type": "module",
