@@ -3339,6 +3339,7 @@ mod tests {
             object_store.clone(),
         )
         .with_settings(opts)
+        .with_db_cache_disabled()
         .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
@@ -3348,7 +3349,12 @@ mod tests {
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
-        kv_store.flush().await.unwrap();
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
 
         let got = kv_store.get(key).await.unwrap();
         let access_count1 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
