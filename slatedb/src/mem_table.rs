@@ -102,6 +102,11 @@ pub(crate) struct KVTable {
     /// A sequence tracker that correlates sequence numbers with system clock ticks.
     /// The tracker is limited to 8192 entries and downsamples data when it gets full.
     sequence_tracker: Mutex<SequenceTracker>,
+    /// RFC-0024: distinct segment prefixes touched by writes that have
+    /// landed in this table. Populated by the write and WAL-replay
+    /// paths after the antichain check. Empty when no extractor is
+    /// configured.
+    touched_segments: Mutex<std::collections::BTreeSet<Bytes>>,
 }
 
 pub(crate) struct KVTableMetadata {
@@ -146,6 +151,11 @@ impl WritableKVTable {
 
     pub(crate) fn record_sequence(&self, seq: u64, ts: DateTime<Utc>) {
         self.table.record_sequence(seq, ts);
+    }
+
+    /// Delegate to [`KVTable::record_touched_segments`].
+    pub(crate) fn record_touched_segments(&self, prefixes: std::collections::BTreeSet<Bytes>) {
+        self.table.record_touched_segments(prefixes);
     }
 }
 
@@ -287,6 +297,12 @@ impl ImmutableMemtable {
         }
     }
 
+    /// Segment prefixes touched by writes in this imm.
+    /// Delegate to [`KVTable::touched_segments`].
+    pub(crate) fn touched_segments(&self) -> std::collections::BTreeSet<Bytes> {
+        self.table.touched_segments()
+    }
+
     pub(crate) fn table(&self) -> Arc<KVTable> {
         self.table.clone()
     }
@@ -318,6 +334,12 @@ impl ImmutableMemtable {
                 new_table.put(entry);
             }
         }
+        // Preserve the touched-segment set on the filtered table:
+        // filtering by seq can remove rows but never changes which
+        // segment prefixes the imm's surviving keys could route to,
+        // and the build path requires `KVTable` non-empty ⇒
+        // `touched_segments` populated.
+        new_table.record_touched_segments(self.table.touched_segments());
         Self::new(new_table, self.recent_flushed_wal_id)
     }
 }
@@ -332,7 +354,87 @@ impl KVTable {
             last_seq: AtomicU64::new(0),
             first_seq: AtomicU64::new(u64::MAX),
             sequence_tracker: Mutex::new(SequenceTracker::new()),
+            touched_segments: Mutex::new(std::collections::BTreeSet::new()),
         }
+    }
+
+    /// Merge a batch's touched-segment prefixes into this table's
+    /// running set. The caller's set is moved in, so the first batch
+    /// against an empty table is a direct adoption rather than an
+    /// element-wise extend.
+    pub(crate) fn record_touched_segments(&self, prefixes: std::collections::BTreeSet<Bytes>) {
+        if prefixes.is_empty() {
+            return;
+        }
+        let mut guard = self.touched_segments.lock();
+        if guard.is_empty() {
+            *guard = prefixes;
+        } else {
+            guard.extend(prefixes);
+        }
+    }
+
+    /// Snapshot of the segment prefixes touched by writes in this
+    /// table. Cheap clone (cardinality is bounded by the number of
+    /// distinct active segments — typically one).
+    pub(crate) fn touched_segments(&self) -> std::collections::BTreeSet<Bytes> {
+        self.touched_segments.lock().clone()
+    }
+
+    /// True iff this table's touched-segment set is empty *or* contains
+    /// `prefix`. Used by per-prefix reservation accounting on the
+    /// dispatch tracker, where an empty set is treated conservatively
+    /// as "may target any prefix" (because we can't rule it out).
+    /// Avoids cloning the full set when a single membership check
+    /// suffices.
+    pub(crate) fn touched_segments_empty_or_contains(&self, prefix: &Bytes) -> bool {
+        let touched = self.touched_segments.lock();
+        touched.is_empty() || touched.contains(prefix)
+    }
+
+    /// Validate `prefix` against this table's touched-segment set
+    /// (RFC-0024 antichain). Returns `Ok(true)` if `prefix` is already
+    /// an exact member — it was validated when first inserted, so the
+    /// caller can skip checking it against older sources. Returns
+    /// `Ok(false)` if `prefix` is disjoint from every recorded
+    /// prefix; the caller must continue validating against
+    /// downstream sources.
+    ///
+    /// Only the immediate sort-order neighbors in `touched_segments`
+    /// can nest with `prefix`: the predecessor (largest `<= prefix`)
+    /// is the only candidate ancestor, and the successor (smallest
+    /// `> prefix`) is the only candidate descendant. Every other
+    /// existing prefix would itself nest with one of those neighbors,
+    /// which is impossible because `touched_segments` is already an
+    /// antichain by induction on prior writes.
+    pub(crate) fn ensure_valid_segment(&self, prefix: &Bytes) -> Result<bool, SlateDBError> {
+        let touched = self.touched_segments.lock();
+        if touched.is_empty() {
+            return Ok(false);
+        }
+        if let Some(pred) = touched.range::<Bytes, _>(..=prefix).next_back() {
+            if pred == prefix {
+                return Ok(true);
+            }
+            if prefix.starts_with(pred.as_ref()) {
+                return Err(SlateDBError::InvalidSegmentPrefix {
+                    prefix: prefix.clone(),
+                    conflict: pred.clone(),
+                });
+            }
+        }
+        if let Some(succ) = touched
+            .range::<Bytes, _>((Bound::Excluded(prefix), Bound::Unbounded))
+            .next()
+        {
+            if succ.starts_with(prefix.as_ref()) {
+                return Err(SlateDBError::InvalidSegmentPrefix {
+                    prefix: prefix.clone(),
+                    conflict: succ.clone(),
+                });
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn metadata(&self) -> KVTableMetadata {
@@ -753,6 +855,101 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    fn touched(prefixes: &[&[u8]]) -> std::collections::BTreeSet<Bytes> {
+        prefixes.iter().map(|p| Bytes::copy_from_slice(p)).collect()
+    }
+
+    fn assert_invalid_segment_prefix(err: SlateDBError, prefix: &[u8], conflict: &[u8]) {
+        match err {
+            SlateDBError::InvalidSegmentPrefix {
+                prefix: p,
+                conflict: c,
+            } => {
+                assert_eq!(p.as_ref(), prefix, "unexpected prefix in error");
+                assert_eq!(c.as_ref(), conflict, "unexpected conflict in error");
+            }
+            other => panic!("expected InvalidSegmentPrefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ensure_valid_segment_returns_false_when_table_has_no_touched_segments() {
+        let table = KVTable::new();
+        assert!(!table
+            .ensure_valid_segment(&Bytes::from_static(b"abc"))
+            .unwrap());
+    }
+
+    #[test]
+    fn ensure_valid_segment_returns_true_on_exact_match() {
+        let table = KVTable::new();
+        table.record_touched_segments(touched(&[b"abc"]));
+        assert!(table
+            .ensure_valid_segment(&Bytes::from_static(b"abc"))
+            .unwrap());
+    }
+
+    #[test]
+    fn ensure_valid_segment_returns_false_when_disjoint() {
+        let table = KVTable::new();
+        table.record_touched_segments(touched(&[b"abc", b"xyz"]));
+        // "def" sorts between but does not nest with either neighbor.
+        assert!(!table
+            .ensure_valid_segment(&Bytes::from_static(b"def"))
+            .unwrap());
+    }
+
+    #[test]
+    fn ensure_valid_segment_rejects_when_predecessor_is_proper_prefix() {
+        let table = KVTable::new();
+        table.record_touched_segments(touched(&[b"abc"]));
+        let err = table
+            .ensure_valid_segment(&Bytes::from_static(b"abcd"))
+            .unwrap_err();
+        assert_invalid_segment_prefix(err, b"abcd", b"abc");
+    }
+
+    #[test]
+    fn ensure_valid_segment_rejects_when_candidate_is_proper_prefix_of_successor() {
+        let table = KVTable::new();
+        table.record_touched_segments(touched(&[b"abc"]));
+        let err = table
+            .ensure_valid_segment(&Bytes::from_static(b"ab"))
+            .unwrap_err();
+        assert_invalid_segment_prefix(err, b"ab", b"abc");
+    }
+
+    #[test]
+    fn ensure_valid_segment_only_inspects_immediate_neighbors() {
+        // Predecessor "aa" doesn't nest with "ac"; successor "az" doesn't
+        // either. The far-away "x" must not be consulted.
+        let table = KVTable::new();
+        table.record_touched_segments(touched(&[b"aa", b"az", b"x"]));
+        assert!(!table
+            .ensure_valid_segment(&Bytes::from_static(b"ac"))
+            .unwrap());
+    }
+
+    #[test]
+    fn ensure_valid_segment_handles_candidate_smaller_than_all() {
+        let table = KVTable::new();
+        table.record_touched_segments(touched(&[b"mmm", b"ppp"]));
+        // "aaa" has no predecessor; "mmm" doesn't start with "aaa".
+        assert!(!table
+            .ensure_valid_segment(&Bytes::from_static(b"aaa"))
+            .unwrap());
+    }
+
+    #[test]
+    fn ensure_valid_segment_handles_candidate_larger_than_all() {
+        let table = KVTable::new();
+        table.record_touched_segments(touched(&[b"aaa", b"bbb"]));
+        // "zzz" has no successor; predecessor "bbb" is not a prefix of "zzz".
+        assert!(!table
+            .ensure_valid_segment(&Bytes::from_static(b"zzz"))
+            .unwrap());
     }
 
     #[tokio::test]

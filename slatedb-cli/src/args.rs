@@ -176,11 +176,25 @@ pub(crate) enum CliCommands {
         #[arg(long, default_value = "size-tiered")]
         scheduler: String,
 
-        /// Submit a full JSON-encoded compaction request.
+        /// Submit a JSON-encoded compaction request.
+        ///
+        /// `"Full"` sweeps every tree in the DB (root + every named segment)
+        /// best-effort, skipping trees that have no compacted sorted runs.
+        ///
+        /// `FullSegment` targets a single tree. Its `segment` field is a byte
+        /// array — an empty array `[]` targets the compatibility-encoded root
+        /// tree (the only valid segment on an unsegmented DB); a non-empty
+        /// array names a segment by prefix.
         ///
         /// ## Examples
         /// ```json
         /// "Full"
+        /// ```
+        /// ```json
+        /// {"FullSegment":{"segment":[]}}
+        /// ```
+        /// ```json
+        /// {"FullSegment":{"segment":[104,111,117,114,61,49,50,47]}}
         /// ```
         /// ```json
         /// {"Spec":{"sources":[{"SortedRun":3},{"Sst":"01H8FQ5K6K7QK6EJ0E9HNF1J2B"}],"destination":7}}

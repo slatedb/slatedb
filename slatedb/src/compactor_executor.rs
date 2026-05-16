@@ -333,6 +333,7 @@ impl TokioCompactionExecutorInner {
             job_args.compaction_clock_tick,
             self.clock.clone(),
             Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
+            Some(self.stats.retention_metrics()),
         )
         .await?;
         retention_iter.init().await?;

@@ -535,7 +535,7 @@ impl ManifestWriterHandler {
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
         loop {
             let result = self.write_manifest_update(checkpoint_options).await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -563,7 +563,7 @@ impl ManifestWriterHandler {
     async fn write_current_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_current_manifest().await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -617,10 +617,17 @@ impl ManifestWriterHandler {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
             let cow = wguard_state.state();
-            self.db
-                .db_stats
-                .l0_sst_count
-                .set(cow.core().tree.l0.len() as i64);
+            // L0 SST counters span every tree (root + each named segment per
+            // RFC-0024). `l0_sst_count` reports the total; `segment_max_*`
+            // reports the largest single tree, which is the right quantity
+            // for backpressure since `l0_max_ssts` is enforced per-tree.
+            let (total, max) = cow
+                .core()
+                .trees()
+                .map(|t| t.l0.len())
+                .fold((0usize, 0usize), |(sum, max), n| (sum + n, max.max(n)));
+            self.db.db_stats.l0_sst_count.set(total as i64);
+            self.db.db_stats.segment_max_l0_sst_count.set(max as i64);
             cow.manifest.clone()
         };
         self.db
@@ -802,7 +809,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, TrackerMessage};
+    use super::{ManifestWriter, ManifestWriterHandler, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -930,6 +937,18 @@ mod tests {
         setup_harness_with_extractor(path, fp_registry, None).await
     }
 
+    fn new_handler_from_harness(harness: TestHarness) -> ManifestWriterHandler {
+        let closed_result = WatchableOnceCell::new();
+        let (tracker_tx, _) =
+            crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
+        ManifestWriterHandler::new(
+            harness.inner,
+            harness.manifest,
+            Duration::from_secs(3600),
+            tracker_tx,
+        )
+    }
+
     async fn setup_harness_with_extractor(
         path: &str,
         fp_registry: Arc<FailPointRegistry>,
@@ -1034,6 +1053,42 @@ mod tests {
         manifest.manifest.core.checkpoints.len()
     }
 
+    async fn stage_manifest_boundary_conflict(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> u64 {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut external =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let start_id = external.id();
+
+        // The external writer wins the stale handler's intended id.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // A second external write leaves a live latest version above the future boundary,
+        // so the stale handler can make progress after refreshing.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // GC fences and removes the stale handler's next id, but preserves the live latest
+        // version at start_id + 2.
+        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+        manifest_store.delete_manifest(start_id + 1).await.unwrap();
+
+        let latest = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(latest, start_id + 2);
+        start_id
+    }
+
     fn freeze_imm(
         inner: &Arc<DbInner>,
         key: &[u8],
@@ -1072,6 +1127,63 @@ mod tests {
         let uploaded = next_uploaded_memtable_no_wal(inner, key, value).await;
         inner.oracle.advance_durable_seq(uploaded.last_seq);
         uploaded
+    }
+
+    #[tokio::test]
+    async fn write_current_manifest_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_current_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path.clone()),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
+
+        // The safe write path should reload the live newer manifest and retry safely.
+        handler.write_current_manifest_safely().await.unwrap();
+
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(start_id + 3, final_id);
+    }
+
+    #[tokio::test]
+    async fn write_manifest_update_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_update_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path.clone()),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
+
+        // The safe update path should reload the live newer manifest and retry safely.
+        let checkpoints = handler.write_manifest_update_safely(&[]).await.unwrap();
+
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert!(checkpoints.is_empty());
+        assert_eq!(start_id + 3, final_id);
     }
 
     #[tokio::test]
@@ -1452,26 +1564,44 @@ mod tests {
         started.shutdown().await;
     }
 
-    /// Construct an UploadedMemtable whose flush output spans multiple named
-    /// segments. The same underlying SST is reused for each handle — the
-    /// apply path routes by prefix and does not validate SST contents
-    /// against the prefix.
+    /// Construct an `UploadedMemtable` whose flush output spans
+    /// multiple named segments. Each segment handle is an
+    /// independently-uploaded SST tagged with one of the requested
+    /// `prefixes`. The apply path routes by prefix without
+    /// validating SST contents, so the synthetic fabrication is
+    /// sound for manifest-writer tests.
+    ///
+    /// Goes around `build_imm_ssts` because the synthetic setup
+    /// (one key, many fake prefixes) can't satisfy that path's
+    /// requirement that recorded prefixes match the keys.
     async fn next_uploaded_memtable_with_segments(
         inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
         prefixes: &[&[u8]],
     ) -> UploadedMemtable {
+        use crate::utils::IdGenerator;
         let imm_memtable = freeze_imm(inner, key, value);
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
         let mut segments = Vec::with_capacity(prefixes.len());
         for prefix in prefixes {
-            let handles = inner
-                .flush_l0_for_test(imm_memtable.table(), true)
+            // Each synthetic SST needs at least one entry so the
+            // resulting handle can construct an `SsTableView` in the
+            // apply path. The actual contents don't matter — the
+            // manifest writer routes by `prefix` from the surrounding
+            // `SegmentedSstHandle`, not by the SST's keys.
+            let mut builder = inner.table_store.table_builder();
+            let row = crate::types::RowEntry::new_value(prefix, value, first_seq);
+            builder.add(row).await.unwrap();
+            let encoded_sst = builder.build().await.unwrap();
+            let id = crate::db_state::SsTableId::Compacted(
+                inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
+            );
+            let sst_handle = inner
+                .upload_sst(&id, imm_memtable.table(), &encoded_sst, false)
                 .await
                 .unwrap();
-            let sst_handle = handles.into_iter().next().expect("expected single SST");
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,

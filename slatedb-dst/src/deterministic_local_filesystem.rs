@@ -9,7 +9,6 @@ use std::fs::{metadata, symlink_metadata, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Component, Path as StdPath, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -44,8 +43,20 @@ pub struct DeterministicLocalFilesystem {
 
 #[derive(Debug)]
 struct MetadataState {
-    last_modified: RwLock<HashMap<Path, DateTime<Utc>>>,
-    next_micros: AtomicI64,
+    values: RwLock<MetadataValues>,
+}
+
+#[derive(Debug)]
+struct MetadataValues {
+    metadata: HashMap<Path, SyntheticMetadata>,
+    next_micros: i64,
+    next_etag: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SyntheticMetadata {
+    last_modified: DateTime<Utc>,
+    e_tag: String,
 }
 
 #[derive(Debug, Default)]
@@ -56,37 +67,49 @@ struct AttributeState {
 impl Default for MetadataState {
     fn default() -> Self {
         Self {
-            last_modified: RwLock::new(HashMap::new()),
-            next_micros: AtomicI64::new(1),
+            values: RwLock::new(MetadataValues {
+                metadata: HashMap::new(),
+                next_micros: 1,
+                next_etag: 1,
+            }),
         }
     }
 }
 
 impl MetadataState {
-    fn zero_time() -> DateTime<Utc> {
-        DateTime::from_timestamp_micros(0).expect("unix epoch is valid")
+    fn default_metadata() -> SyntheticMetadata {
+        SyntheticMetadata {
+            last_modified: DateTime::from_timestamp_micros(0).expect("unix epoch is valid"),
+            e_tag: "0".to_string(),
+        }
     }
 
-    fn record_modified(&self, location: &Path) -> DateTime<Utc> {
-        let micros = self.next_micros.fetch_add(1, Ordering::SeqCst);
+    fn record_modified(&self, location: &Path) -> SyntheticMetadata {
+        let mut values = self.values.write();
+        let micros = values.next_micros;
+        values.next_micros += 1;
         let timestamp = DateTime::from_timestamp_micros(micros)
             .expect("deterministic local filesystem timestamp must be valid");
-        self.last_modified
-            .write()
-            .insert(location.clone(), timestamp);
-        timestamp
+        let metadata = SyntheticMetadata {
+            last_modified: timestamp,
+            e_tag: values.next_etag.to_string(),
+        };
+        values.next_etag += 1;
+        values.metadata.insert(location.clone(), metadata.clone());
+        metadata
     }
 
     fn remove(&self, location: &Path) {
-        self.last_modified.write().remove(location);
+        self.values.write().metadata.remove(location);
     }
 
-    fn get(&self, location: &Path) -> DateTime<Utc> {
-        self.last_modified
+    fn get(&self, location: &Path) -> SyntheticMetadata {
+        self.values
             .read()
+            .metadata
             .get(location)
-            .copied()
-            .unwrap_or_else(Self::zero_time)
+            .cloned()
+            .unwrap_or_else(Self::default_metadata)
     }
 }
 
@@ -226,11 +249,12 @@ impl DeterministicLocalFilesystem {
     }
 
     fn object_meta(&self, metadata: Metadata, location: Path) -> ObjectMeta {
+        let synthetic_metadata = self.metadata_state.get(&location);
         ObjectMeta {
-            last_modified: self.metadata_state.get(&location),
+            last_modified: synthetic_metadata.last_modified,
             location,
             size: metadata.len(),
-            e_tag: None,
+            e_tag: Some(synthetic_metadata.e_tag),
             version: None,
         }
     }
@@ -331,11 +355,29 @@ impl ObjectStore for DeterministicLocalFilesystem {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        if matches!(opts.mode, PutMode::Update(_)) {
-            return Err(object_store::Error::NotImplemented);
+        let path = self.path_to_filesystem(location)?;
+        if let PutMode::Update(version) = &opts.mode {
+            let expected = version.e_tag.as_deref().ok_or_else(|| {
+                precondition_error(location, "conditional update requires an ETag")
+            })?;
+            let (_, metadata) = open_file(&path).map_err(|error| match error {
+                object_store::Error::NotFound { .. } => {
+                    precondition_error(location, format!("Object at location {location} not found"))
+                }
+                other => other,
+            })?;
+            let current = self
+                .object_meta(metadata, location.clone())
+                .e_tag
+                .expect("deterministic metadata always has an ETag");
+            if current != expected {
+                return Err(precondition_error(
+                    location,
+                    format!("{current} does not match {expected}"),
+                ));
+            }
         }
 
-        let path = self.path_to_filesystem(location)?;
         let (mut file, staging_path) = new_staged_upload(&path)?;
         yield_now().await;
         let attributes = opts.attributes.clone();
@@ -344,7 +386,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
             write_payload_with_yields(&mut file, &payload).await?;
 
             match opts.mode {
-                PutMode::Overwrite => {
+                PutMode::Overwrite | PutMode::Update(_) => {
                     drop(file);
                     std::fs::rename(&staging_path, &path)
                         .expect("failed to move staged file into place");
@@ -358,24 +400,22 @@ impl ObjectStore for DeterministicLocalFilesystem {
                     }
                     Err(source) => return Err(generic_error(source)),
                 },
-                PutMode::Update(_) => unreachable!(),
             }
 
             Ok(())
         }
         .await;
 
-        if result.is_err() {
+        if let Err(error) = result {
             let _ = std::fs::remove_file(&staging_path);
-        } else {
-            self.attribute_state.set(location, attributes);
-            self.metadata_state.record_modified(location);
+            return Err(error);
         }
 
-        result?;
+        self.attribute_state.set(location, attributes);
+        let metadata = self.metadata_state.record_modified(location);
         yield_now().await;
         Ok(PutResult {
-            e_tag: None,
+            e_tag: Some(metadata.e_tag),
             version: None,
         })
     }
@@ -755,12 +795,13 @@ impl MultipartUpload for LocalUpload {
         self.state
             .attribute_state
             .set(&self.state.location, self.state.attributes.clone());
-        self.state
+        let metadata = self
+            .state
             .metadata_state
             .record_modified(&self.state.location);
         yield_now().await;
         Ok(PutResult {
-            e_tag: None,
+            e_tag: Some(metadata.e_tag),
             version: None,
         })
     }
@@ -799,6 +840,13 @@ where
 
 fn invalid_input_error(message: String) -> object_store::Error {
     generic_error(io::Error::new(ErrorKind::InvalidInput, message))
+}
+
+fn precondition_error(path: &Path, message: impl Into<String>) -> object_store::Error {
+    object_store::Error::Precondition {
+        path: path.to_string(),
+        source: message.into().into(),
+    }
 }
 
 fn not_found_error(path: &StdPath, source: io::Error) -> object_store::Error {
@@ -1091,6 +1139,198 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_ref(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn should_return_etags_and_change_them_after_overwrite() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+        let location = Path::from("foo");
+
+        let first = store
+            .put_opts(&location, b"hello".to_vec().into(), PutOptions::default())
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+
+        let get = store
+            .get_opts(&location, GetOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(get.meta.e_tag.as_deref(), Some(first.as_str()));
+
+        let head = store.head(&location).await.unwrap();
+        assert_eq!(head.e_tag.as_deref(), Some(first.as_str()));
+
+        let listed = store.list(None).try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].e_tag.as_deref(), Some(first.as_str()));
+
+        let delimited = store.list_with_delimiter(None).await.unwrap();
+        assert_eq!(delimited.objects.len(), 1);
+        assert_eq!(delimited.objects[0].e_tag.as_deref(), Some(first.as_str()));
+
+        let second = store
+            .put_opts(&location, b"world".to_vec().into(), PutOptions::default())
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+        assert_ne!(first, second);
+
+        let overwritten = store.head(&location).await.unwrap();
+        assert_eq!(overwritten.e_tag.as_deref(), Some(second.as_str()));
+    }
+
+    #[tokio::test]
+    async fn should_return_not_modified_for_current_if_none_match() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+        let location = Path::from("foo");
+        let e_tag = store
+            .put_opts(&location, b"hello".to_vec().into(), PutOptions::default())
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+
+        let result = store
+            .get_opts(
+                &location,
+                GetOptions {
+                    if_none_match: Some(e_tag),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(object_store::Error::NotModified { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_return_precondition_for_stale_if_match() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+        let location = Path::from("foo");
+        let stale = store
+            .put_opts(&location, b"hello".to_vec().into(), PutOptions::default())
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+        store
+            .put_opts(&location, b"world".to_vec().into(), PutOptions::default())
+            .await
+            .unwrap();
+
+        let result = store
+            .get_opts(
+                &location,
+                GetOptions {
+                    if_match: Some(stale),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(object_store::Error::Precondition { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_update_object_with_current_etag() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+        let location = Path::from("foo");
+        let initial = store
+            .put_opts(&location, b"hello".to_vec().into(), PutOptions::default())
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+
+        let updated = store
+            .put_opts(
+                &location,
+                b"world".to_vec().into(),
+                PutOptions {
+                    mode: PutMode::Update(object_store::UpdateVersion {
+                        e_tag: Some(initial.clone()),
+                        version: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+
+        assert_ne!(initial, updated);
+        let result = store
+            .get_opts(&location, GetOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(result.meta.e_tag.as_deref(), Some(updated.as_str()));
+        assert_eq!(result.bytes().await.unwrap().as_ref(), b"world");
+    }
+
+    #[tokio::test]
+    async fn should_reject_stale_update_and_preserve_object() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+        let location = Path::from("foo");
+        let stale = store
+            .put_opts(&location, b"old".to_vec().into(), PutOptions::default())
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+        let current = store
+            .put_opts(
+                &location,
+                b"current".to_vec().into(),
+                PutOptions {
+                    attributes: test_attributes(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .e_tag
+            .unwrap();
+
+        let result = store
+            .put_opts(
+                &location,
+                b"bad".to_vec().into(),
+                PutOptions {
+                    mode: PutMode::Update(object_store::UpdateVersion {
+                        e_tag: Some(stale),
+                        version: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(object_store::Error::Precondition { .. })
+        ));
+
+        let preserved = store
+            .get_opts(&location, GetOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(preserved.meta.e_tag.as_deref(), Some(current.as_str()));
+        assert_eq!(preserved.attributes, test_attributes());
+        assert_eq!(preserved.bytes().await.unwrap().as_ref(), b"current");
     }
 
     #[tokio::test]
