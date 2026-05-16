@@ -574,9 +574,21 @@ impl FlatBufferCompactionsCodec {
             .output_ssts()
             .map(|ssts| ssts.iter().map(Self::compacted_sst).collect())
             .unwrap_or_default();
+        let worker = compaction.worker().and_then(Self::worker_spec);
         Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
             .with_status(status)
-            .with_output_ssts(output_ssts))
+            .with_output_ssts(output_ssts)
+            .with_worker(worker))
+    }
+
+    fn worker_spec(
+        worker: root_generated::WorkerSpec,
+    ) -> Option<crate::compactor_state::WorkerSpec> {
+        // worker_id is the discriminator for "claimed" vs "unclaimed"; treat a
+        // missing string as unclaimed even if the table itself was emitted.
+        worker.worker_id().map(|id| {
+            crate::compactor_state::WorkerSpec::new(id.to_string(), worker.last_heartbeat_ms())
+        })
     }
 
     fn compaction_spec(compaction: &FbCompaction) -> Result<CompactorCompactionSpec, SlateDBError> {
@@ -972,6 +984,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let status = FbCompactionStatus::from(compaction.status());
         let output_ssts = (!compaction.output_ssts().is_empty())
             .then(|| self.add_compacted_ssts(compaction.output_ssts().iter()));
+        let worker = compaction.worker().map(|w| self.add_worker_spec(w));
         FbCompaction::create(
             &mut self.builder,
             &FbCompactionArgs {
@@ -980,6 +993,21 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 spec: Some(spec),
                 status,
                 output_ssts,
+                worker,
+            },
+        )
+    }
+
+    fn add_worker_spec(
+        &mut self,
+        worker: &crate::compactor_state::WorkerSpec,
+    ) -> WIPOffset<root_generated::WorkerSpec<'b>> {
+        let worker_id = self.builder.create_string(&worker.worker_id);
+        root_generated::WorkerSpec::create(
+            &mut self.builder,
+            &root_generated::WorkerSpecArgs {
+                worker_id: Some(worker_id),
+                last_heartbeat_ms: worker.last_heartbeat_ms,
             },
         )
     }
@@ -1323,6 +1351,7 @@ impl From<CompactionStatus> for FbCompactionStatus {
         match value {
             CompactionStatus::Submitted => FbCompactionStatus::Submitted,
             CompactionStatus::Running => FbCompactionStatus::Running,
+            CompactionStatus::Compacted => FbCompactionStatus::Compacted,
             CompactionStatus::Completed => FbCompactionStatus::Completed,
             CompactionStatus::Failed => FbCompactionStatus::Failed,
         }
@@ -1334,6 +1363,7 @@ impl From<FbCompactionStatus> for CompactionStatus {
         match value {
             FbCompactionStatus::Submitted => CompactionStatus::Submitted,
             FbCompactionStatus::Running => CompactionStatus::Running,
+            FbCompactionStatus::Compacted => CompactionStatus::Compacted,
             FbCompactionStatus::Completed => CompactionStatus::Completed,
             FbCompactionStatus::Failed => CompactionStatus::Failed,
             _ => CompactionStatus::Submitted,
@@ -1778,6 +1808,7 @@ mod tests {
         let statuses = [
             CompactionStatus::Submitted,
             CompactionStatus::Running,
+            CompactionStatus::Compacted,
             CompactionStatus::Completed,
             CompactionStatus::Failed,
         ];
@@ -1787,6 +1818,45 @@ mod tests {
             let round_trip = CompactionStatus::from(fb_status);
             assert_eq!(round_trip, status);
         }
+    }
+
+    #[test]
+    fn test_should_round_trip_compaction_worker_spec() {
+        use crate::compactor_state::WorkerSpec;
+
+        let claimed = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
+        )
+        .with_status(CompactionStatus::Running)
+        .with_worker(Some(WorkerSpec::new(
+            "worker-abc".to_string(),
+            1_700_000_000_000,
+        )));
+        let unclaimed = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(2)], 2),
+        )
+        .with_status(CompactionStatus::Submitted);
+
+        let mut compactions = Compactions::new(3);
+        compactions.insert(claimed.clone());
+        compactions.insert(unclaimed.clone());
+
+        let codec = FlatBufferCompactionsCodec {};
+        let bytes = codec.encode(&compactions);
+        let decoded = codec.decode(&bytes).expect("failed to decode compactions");
+
+        assert_eq!(decoded.get(&claimed.id()).expect("missing claimed"), &claimed);
+        assert_eq!(
+            decoded.get(&unclaimed.id()).expect("missing unclaimed"),
+            &unclaimed
+        );
+        assert!(decoded
+            .get(&unclaimed.id())
+            .unwrap()
+            .worker()
+            .is_none());
     }
 
     #[test]
@@ -2178,6 +2248,7 @@ mod tests {
                 spec: Some(spec.as_union_value()),
                 status: FbCompactionStatus::Running,
                 output_ssts: Some(output_ssts_vec),
+                worker: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);
@@ -2251,6 +2322,7 @@ mod tests {
                 spec: Some(spec.as_union_value()),
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
+                worker: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);

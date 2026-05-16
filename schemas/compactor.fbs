@@ -10,10 +10,15 @@ enum CompactionStatus : byte {
     Submitted = 0,
     /// The compaction is currently running.
     Running,
-    /// The compaction finished successfully.
+    /// The compaction finished successfully and was committed to the manifest.
     Completed,
     /// The compaction failed. It might or might not have started before failure.
     Failed,
+    /// The worker finished execution and wrote its final output SSTs; the
+    /// coordinator has not yet committed the result to the manifest. This is
+    /// the distributed equivalent of the in-process CompactionJobFinished
+    /// signal (see RFC-0025).
+    Compacted,
 }
 
 table TieredCompactionSpec {

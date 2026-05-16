@@ -92,7 +92,6 @@ pub use crate::compactor_state::{
     Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
 };
 pub use crate::compactor_state_protocols::CompactorStateView;
-pub use crate::db::builder::CompactionWorkerBuilder;
 pub use crate::db::builder::CompactorBuilder;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
