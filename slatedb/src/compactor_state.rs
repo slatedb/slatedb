@@ -253,9 +253,7 @@ impl CompactionStatus {
     fn active(self) -> bool {
         matches!(
             self,
-            CompactionStatus::Submitted
-                | CompactionStatus::Running
-                | CompactionStatus::Compacted
+            CompactionStatus::Submitted | CompactionStatus::Running | CompactionStatus::Compacted
         )
     }
 

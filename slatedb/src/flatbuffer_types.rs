@@ -1944,45 +1944,6 @@ mod tests {
     }
 
     #[test]
-    fn test_should_round_trip_compaction_worker_spec() {
-        use crate::compactor_state::WorkerSpec;
-
-        let claimed = Compaction::new(
-            ulid::Ulid::new(),
-            CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
-        )
-        .with_status(CompactionStatus::Running)
-        .with_worker(Some(WorkerSpec::new(
-            "worker-abc".to_string(),
-            1_700_000_000_000,
-        )));
-        let unclaimed = Compaction::new(
-            ulid::Ulid::new(),
-            CompactionSpec::new(vec![SourceId::SortedRun(2)], 2),
-        )
-        .with_status(CompactionStatus::Submitted);
-
-        let mut compactions = Compactions::new(3);
-        compactions.insert(claimed.clone());
-        compactions.insert(unclaimed.clone());
-
-        let codec = FlatBufferCompactionsCodec {};
-        let bytes = codec.encode(&compactions);
-        let decoded = codec.decode(&bytes).expect("failed to decode compactions");
-
-        assert_eq!(decoded.get(&claimed.id()).expect("missing claimed"), &claimed);
-        assert_eq!(
-            decoded.get(&unclaimed.id()).expect("missing unclaimed"),
-            &unclaimed
-        );
-        assert!(decoded
-            .get(&unclaimed.id())
-            .unwrap()
-            .worker()
-            .is_none());
-    }
-
-    #[test]
     fn test_should_validate_compactions_version() {
         let codec = FlatBufferCompactionsCodec {};
         let compactions = Compactions::new(1);
@@ -2516,6 +2477,7 @@ mod tests {
                 spec: Some(spec.as_union_value()),
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
+                worker: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);

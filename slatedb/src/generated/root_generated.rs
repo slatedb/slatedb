@@ -488,9 +488,7 @@ impl CompactionStatus {
   /// The compaction failed. It might or might not have started before failure.
   pub const Failed: Self = Self(3);
   /// The worker finished execution and wrote its final output SSTs; the
-  /// coordinator has not yet committed the result to the manifest. This is
-  /// the distributed equivalent of the in-process CompactionJobFinished
-  /// signal (see RFC-0025).
+  /// compaction coordinator has not yet committed the result to the manifest.
   pub const Compacted: Self = Self(4);
 
   pub const ENUM_MIN: i8 = 0;

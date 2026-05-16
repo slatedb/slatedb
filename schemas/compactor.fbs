@@ -16,9 +16,7 @@ enum CompactionStatus : byte {
     /// The compaction failed. It might or might not have started before failure.
     Failed,
     /// The worker finished execution and wrote its final output SSTs; the
-    /// coordinator has not yet committed the result to the manifest. This is
-    /// the distributed equivalent of the in-process CompactionJobFinished
-    /// signal (see RFC-0025).
+    /// compaction coordinator has not yet committed the result to the manifest.
     Compacted,
 }
 
