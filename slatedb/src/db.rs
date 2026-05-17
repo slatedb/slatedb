@@ -332,7 +332,7 @@ impl DbInner {
 
             // If the fence failed or was behind the replay_after_wal_id barrier, we need to
             // try again with a higher empty WAL ID.
-            empty_wal_id += 1;
+            empty_wal_id = (empty_wal_id + 1).max(replay_after_wal_id + 1);
         }
     }
 
