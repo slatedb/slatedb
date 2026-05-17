@@ -305,25 +305,34 @@ impl DbInner {
         let mut empty_wal_id = next_wal_id;
 
         loop {
-            match self.flush_empty_wal(empty_wal_id).await {
-                Ok(()) => {
-                    return Ok(());
-                }
-                Err(SlateDBError::Fenced) => {
-                    manifest.refresh().await?;
-                    let remote_dirty = manifest.prepare_dirty()?;
-                    let dirty_manifest = {
-                        let mut state = self.state.write();
-                        state.merge_remote_manifest(remote_dirty);
-                        state.state().manifest.clone()
-                    };
-                    self.status_manager.report_manifest(dirty_manifest.into());
-                    empty_wal_id += 1;
-                }
-                Err(e) => {
-                    return Err(e);
-                }
+            let wrote_fence = match self.flush_empty_wal(empty_wal_id).await {
+                Ok(()) => true,
+                Err(SlateDBError::Fenced) => false,
+                Err(err) => return Err(err),
+            };
+
+            // Refresh validates tha we own the latest epoch still.
+            manifest.refresh().await?;
+            let remote_dirty = manifest.prepare_dirty()?;
+            let replay_after_wal_id = remote_dirty.value.core.replay_after_wal_id;
+            let dirty_manifest = {
+                let mut state = self.state.write();
+                state.merge_remote_manifest(remote_dirty);
+                state.state().manifest.clone()
+            };
+            self.status_manager.report_manifest(dirty_manifest.into());
+
+            // Our fence write might be behind replay_after_wal_id since we're racing with
+            // older writers that can advance replay_after_wal_id by flushing data to L0.
+            // We need to make sure the fence write falls above this barrier so it's visible
+            // to all other active writers.
+            if wrote_fence && empty_wal_id > replay_after_wal_id {
+                return Ok(());
             }
+
+            // If the fence failed or was behind the replay_after_wal_id barrier, we need to
+            // try again with a higher empty WAL ID.
+            empty_wal_id += 1;
         }
     }
 
