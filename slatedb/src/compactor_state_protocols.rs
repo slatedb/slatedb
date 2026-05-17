@@ -15,7 +15,7 @@ use std::time::Duration;
 use log::{debug, info};
 
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
-use crate::compactor_state::{CompactionStatus, CompactorState, VersionedCompactions};
+use crate::compactor_state::{CompactionStatus, Compactions, CompactorState, VersionedCompactions};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -23,6 +23,7 @@ use crate::manifest::VersionedManifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::DirtyObject;
 
 /// A read-only view of compactor state suitable for consumers like GC.
 ///
@@ -143,18 +144,7 @@ impl CompactorStateWriter {
         )
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
-        let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Move running compactions back to submitted so we can resume them after restart.
-        // Submitted compactions are left intact for future scheduling.
-        // Keep only the most recent finished compaction for GC safety (#1044).
-        dirty_compactions.value.iter_mut().for_each(|c| {
-            if matches!(c.status(), CompactionStatus::Running) {
-                c.set_status(CompactionStatus::Submitted);
-            }
-        });
-        dirty_compactions.value.retain_active_and_last_finished();
-        // Persist recovery state before any refresh() can overwrite it.
-        compactions.update(dirty_compactions.clone()).await?;
+        let dirty_compactions = Self::write_recovered_compactions_safely(&mut compactions).await?;
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -192,6 +182,35 @@ impl CompactorStateWriter {
         )
         .await?;
         Ok((fenceable_manifest, fenceable_compactions))
+    }
+
+    async fn write_recovered_compactions_safely(
+        compactions: &mut FenceableCompactions,
+    ) -> Result<DirtyObject<Compactions>, SlateDBError> {
+        // This runs before `CompactorStateWriter` has a `state`, so it can't call
+        // `write_compactions_safely`. Recovery also needs to recompute from the
+        // refreshed compactions value after each boundary/CAS conflict.
+        loop {
+            let mut dirty = compactions.prepare_dirty()?;
+
+            // Move running compactions back to submitted so we can resume them after restart.
+            // Submitted compactions are left intact for future scheduling.
+            // Keep only the most recent finished compaction for GC safety (#1044).
+            dirty.value.iter_mut().for_each(|c| {
+                if matches!(c.status(), CompactionStatus::Running) {
+                    c.set_status(CompactionStatus::Submitted);
+                }
+            });
+            dirty.value.retain_active_and_last_finished();
+
+            match compactions.update(dirty).await {
+                Ok(()) => return compactions.prepare_dirty(),
+                Err(err) if err.is_sequenced_write_conflict() => {
+                    compactions.refresh().await?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// Refreshes the manifest and updates the local compactor state with any remote
@@ -332,6 +351,7 @@ mod tests {
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
+    use crate::test_utils::GatedObjectStore;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -858,6 +878,136 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(final_id, start_id + 3);
+    }
+
+    #[tokio::test]
+    async fn test_write_recovered_compactions_safely_retries_on_boundary_conflict() {
+        // Set up a gated store for the recovering writer and a raw store for the
+        // external writer so only the recovery write is paused.
+        let raw_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_object_store = Arc::new(GatedObjectStore::new(Arc::clone(&raw_object_store)));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            gated_object_store.clone(),
+        ));
+        let external_compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&raw_object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        // Seed a compactions record with a Running entry that startup recovery must
+        // move back to Submitted.
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 1)
+            .await
+            .unwrap();
+        let running_id = Ulid::from_parts(1, 0);
+        let mut dirty = stored_compactions.prepare_dirty().unwrap();
+        dirty.value.insert(
+            Compaction::new(running_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Running),
+        );
+        stored_compactions.update(dirty).await.unwrap();
+
+        // Fence the recovering compactor so the helper writes with the same handle
+        // used by CompactorStateWriter::new.
+        let stored_compactions = StoredCompactions::load(compactions_store.clone())
+            .await
+            .unwrap();
+        let mut compactions = FenceableCompactions::init_with_epoch(
+            stored_compactions,
+            Duration::from_secs(300),
+            system_clock,
+            2,
+        )
+        .await
+        .unwrap();
+        let start_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+
+        // Pause the recovery write after it has chosen its stale next ID.
+        let arrivals = gated_object_store.put_opts_gate.arrivals();
+        gated_object_store.put_opts_gate.close();
+        let recovery_task = tokio::spawn(async move {
+            CompactorStateWriter::write_recovered_compactions_safely(&mut compactions).await
+        });
+        gated_object_store
+            .put_opts_gate
+            .wait_for_arrivals(arrivals + 1)
+            .await;
+
+        // Let an external writer win the recovering writer's intended ID.
+        let mut external = StoredCompactions::load(external_compactions_store.clone())
+            .await
+            .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // Add a second external version above the future boundary, carrying a
+        // submitted compaction that recovery must preserve after refreshing.
+        let external_id = Ulid::from_parts(2, 0);
+        let mut external_dirty = external.prepare_dirty().unwrap();
+        external_dirty
+            .value
+            .insert(Compaction::new(external_id, CompactionSpec::new(vec![], 0)));
+        external.update(external_dirty).await.unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // Fence and delete the stale ID so the paused recovery write hits a
+        // boundary conflict instead of a plain version conflict.
+        external_compactions_store
+            .advance_boundary(start_id + 1)
+            .await
+            .unwrap();
+        external_compactions_store
+            .delete_compactions(start_id + 1)
+            .await
+            .unwrap();
+
+        // Release the paused write; it should see the boundary conflict, refresh,
+        // recompute recovery, and write the next safe ID.
+        gated_object_store.put_opts_gate.release();
+
+        // Verify the returned recovered state advanced past the fenced ID.
+        let recovered = recovery_task.await.unwrap().unwrap();
+        assert_eq!(u64::from(recovered.id), start_id + 3);
+        // Verify startup recovery converted the original Running compaction.
+        assert_eq!(
+            recovered
+                .value
+                .get(&running_id)
+                .expect("missing recovered running compaction")
+                .status(),
+            CompactionStatus::Submitted
+        );
+        // Verify the recompute-after-refresh preserved the external submitted compaction.
+        assert_eq!(
+            recovered
+                .value
+                .get(&external_id)
+                .expect("missing external submitted compaction")
+                .status(),
+            CompactionStatus::Submitted
+        );
+
+        // Verify the durable latest compactions record matches the recovered state.
+        let latest = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(latest.id, start_id + 3);
+        assert_eq!(
+            latest
+                .compactions
+                .get(&running_id)
+                .expect("missing latest recovered running compaction")
+                .status(),
+            CompactionStatus::Submitted
+        );
+        assert!(latest.compactions.contains(&external_id));
     }
 
     #[tokio::test]
