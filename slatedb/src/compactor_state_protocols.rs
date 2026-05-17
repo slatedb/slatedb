@@ -166,14 +166,19 @@ impl CompactorStateWriter {
             system_clock.clone(),
         )
         .await?;
-        let stored_compactions =
+        let stored_compactions = loop {
             match StoredCompactions::try_load(compactions_store.clone()).await? {
-                Some(compactions) => compactions,
+                Some(compactions) => break compactions,
                 None => {
                     info!("creating new compactions file [compactor_epoch=0]");
-                    StoredCompactions::create(compactions_store.clone(), 0).await?
+                    match StoredCompactions::create(compactions_store.clone(), 0).await {
+                        Ok(compactions) => break compactions,
+                        Err(err) if err.is_sequenced_write_conflict() => continue,
+                        Err(err) => return Err(err),
+                    }
                 }
-            };
+            }
+        };
         let fenceable_compactions = FenceableCompactions::init_with_epoch(
             stored_compactions,
             options.manifest_update_timeout,
@@ -878,6 +883,108 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(final_id, start_id + 3);
+    }
+
+    #[tokio::test]
+    async fn test_new_retries_initial_compactions_create_on_boundary_conflict() {
+        // Use a gated store only for compactions so manifest fencing can complete
+        // before the test pauses the initial compactions create.
+        let raw_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_object_store = Arc::new(GatedObjectStore::new(Arc::clone(&raw_object_store)));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&raw_object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            gated_object_store.clone(),
+        ));
+        let external_compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&raw_object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Pause CompactorStateWriter::new after it observes missing compactions and
+        // attempts to create the initial compactions file.
+        let arrivals = gated_object_store.put_opts_gate.arrivals();
+        gated_object_store.put_opts_gate.close();
+        let writer_task = tokio::spawn({
+            let manifest_store = manifest_store.clone();
+            let compactions_store = compactions_store.clone();
+            let system_clock = system_clock.clone();
+            async move {
+                let options = CompactorOptions::default();
+                CompactorStateWriter::new(
+                    manifest_store,
+                    compactions_store,
+                    system_clock,
+                    &options,
+                    Arc::new(DbRand::new(7)),
+                )
+                .await
+            }
+        });
+        gated_object_store
+            .put_opts_gate
+            .wait_for_arrivals(arrivals + 1)
+            .await;
+
+        // Let an external writer create the ID that the paused writer intended
+        // to create.
+        let mut external = StoredCompactions::create(external_compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(external.id(), 1);
+
+        // Add a live version above the future boundary that the retried constructor
+        // should load and preserve.
+        let external_id = Ulid::from_parts(2, 0);
+        let mut external_dirty = external.prepare_dirty().unwrap();
+        external_dirty
+            .value
+            .insert(Compaction::new(external_id, CompactionSpec::new(vec![], 0)));
+        external.update(external_dirty).await.unwrap();
+        assert_eq!(external.id(), 2);
+
+        // Fence and delete the stale initial ID so the paused create returns a
+        // boundary conflict rather than a plain version conflict.
+        external_compactions_store
+            .advance_boundary(1)
+            .await
+            .unwrap();
+        external_compactions_store
+            .delete_compactions(1)
+            .await
+            .unwrap();
+
+        // Release the paused create. fence() should retry, load the external live
+        // compactions file, and continue initialization.
+        gated_object_store.put_opts_gate.release();
+        let writer = writer_task.await.unwrap().unwrap();
+
+        let latest = external_compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        assert_eq!(latest.id, 4);
+        assert_eq!(u64::from(writer.state.compactions().id), latest.id);
+        assert_eq!(
+            latest
+                .compactions
+                .get(&external_id)
+                .expect("missing external submitted compaction")
+                .status(),
+            CompactionStatus::Submitted
+        );
     }
 
     #[tokio::test]
