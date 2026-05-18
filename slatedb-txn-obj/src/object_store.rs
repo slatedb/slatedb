@@ -190,13 +190,26 @@ impl ObjectStoreBoundaryObject {
                 // treat as invalid state.
                 None => Err(TransactionalObjectError::InvalidObjectState),
             },
-            Err(Error::NotFound { .. }) => match self.cache.lock().clone() {
-                // Once observed, the boundary file disappearing means durable state
-                // regressed; do not treat it as an initial zero boundary.
-                Some(_) => Err(TransactionalObjectError::InvalidObjectState),
+            Err(Error::NotFound { .. }) => match (cached, self.cache.lock().clone()) {
+                // This read began before this boundary object had observed a
+                // boundary, and another task advanced/read the boundary while
+                // the GET was in flight. Use the newer local observation rather
+                // than treating the racing GET as a durable disappearance.
+                (None, Some((boundary, version))) => {
+                    debug!(
+                        "boundary was observed while missing boundary read was in flight [path={}, boundary={}]",
+                        self.filepath,
+                        boundary.id()
+                    );
+                    Ok((boundary, Some(version)))
+                }
+                // Once this read starts with an observed boundary, the boundary
+                // file disappearing means durable state regressed; do not treat
+                // it as an initial zero boundary.
+                (Some(_), _) => Err(TransactionalObjectError::InvalidObjectState),
                 // Default to zero boundary if file is missing and we've never
                 // observed it before.
-                None => Ok((MonotonicId::new(0), None)),
+                (None, None) => Ok((MonotonicId::new(0), None)),
             },
             Err(e) => Err(TransactionalObjectError::from(e)),
         }
@@ -441,13 +454,15 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
+        Error as ObjectStoreError, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        Result as ObjectStoreResult, UpdateVersion,
     };
     use std::collections::Bound::{Excluded, Included, Unbounded};
     use std::fmt;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Notify;
 
     /// A flaky object store that simulates a missing file on the first list() call.
     /// On the first call to list(), it returns a file with `missing_id`. On subsequent
@@ -558,10 +573,17 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct BlockingNotFoundGet {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[derive(Debug)]
     struct CountingGetStore {
         inner: InMemory,
         get_opts_calls: AtomicUsize,
         if_none_match_gets: AtomicUsize,
+        blocking_not_found: StdMutex<Option<BlockingNotFoundGet>>,
     }
 
     impl CountingGetStore {
@@ -570,7 +592,18 @@ mod tests {
                 inner: InMemory::new(),
                 get_opts_calls: AtomicUsize::new(0),
                 if_none_match_gets: AtomicUsize::new(0),
+                blocking_not_found: StdMutex::new(None),
             }
+        }
+
+        fn block_next_get_opts_with_not_found(&self) -> (Arc<Notify>, Arc<Notify>) {
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            *self.blocking_not_found.lock().unwrap() = Some(BlockingNotFoundGet {
+                started: started.clone(),
+                release: release.clone(),
+            });
+            (started, release)
         }
     }
 
@@ -607,6 +640,18 @@ mod tests {
             self.get_opts_calls.fetch_add(1, Ordering::SeqCst);
             if options.if_none_match.is_some() {
                 self.if_none_match_gets.fetch_add(1, Ordering::SeqCst);
+            }
+            let blocking = self.blocking_not_found.lock().unwrap().take();
+            if let Some(blocking) = blocking {
+                blocking.started.notify_one();
+                blocking.release.notified().await;
+                return Err(ObjectStoreError::NotFound {
+                    path: location.to_string(),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "injected missing boundary",
+                    )),
+                });
             }
             self.inner.get_opts(location, options).await
         }
@@ -763,6 +808,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!("4", std::str::from_utf8(&raw_boundary).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_boundary_read_uses_cache_populated_while_initial_missing_read_is_in_flight() {
+        let counting_store = Arc::new(CountingGetStore::new());
+        let (started, release) = counting_store.block_next_get_opts_with_not_found();
+        let object_store: Arc<dyn ObjectStore> = counting_store;
+        let boundary = Arc::new(ObjectStoreBoundaryObject::new(
+            &Path::from("/root"),
+            object_store,
+            "manifest",
+        ));
+
+        let read = tokio::spawn({
+            let boundary = boundary.clone();
+            async move { boundary.read_boundary().await }
+        });
+
+        started.notified().await;
+        *boundary.cache.lock() = Some((
+            MonotonicId::new(2),
+            UpdateVersion {
+                e_tag: Some("\"etag\"".to_string()),
+                version: None,
+            },
+        ));
+        release.notify_one();
+
+        let (observed_boundary, observed_version) = read.await.unwrap().unwrap();
+        assert_eq!(MonotonicId::new(2), observed_boundary);
+        assert_eq!(
+            Some("\"etag\""),
+            observed_version.as_ref().and_then(|v| v.e_tag.as_deref())
+        );
     }
 
     #[tokio::test]
