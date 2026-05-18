@@ -1525,7 +1525,7 @@ mod tests {
             for sst in run.sst_views.iter() {
                 let mut iter = SstIterator::new_borrowed_initialized(
                     ..,
-                    &sst,
+                    sst,
                     table_store.clone(),
                     SstIteratorOptions::default(),
                 )
