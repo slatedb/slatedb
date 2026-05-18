@@ -5,7 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::StreamExt;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{
@@ -188,20 +188,30 @@ impl ObjectStoreBoundaryObject {
                 // NotModified implies we have a cache, since we need the
                 // version's ETag for the conditional GET. If cache is missing,
                 // treat as invalid state.
-                None => Err(TransactionalObjectError::InvalidObjectState),
+                None => {
+                    error!(
+                        "received NotModified without cache [path={}]",
+                        self.filepath
+                    );
+                    Err(TransactionalObjectError::InvalidObjectState)
+                }
             },
             Err(Error::NotFound { .. }) => match (cached, self.cache.lock().clone()) {
                 // This read began before this boundary object had observed a
                 // boundary, and another task advanced/read the boundary while
                 // the GET was in flight. Use the newer local observation rather
                 // than treating the racing GET as a durable disappearance.
-                (None, Some((boundary, version))) => {
-                    Ok((boundary, Some(version)))
-                }
+                (None, Some((boundary, version))) => Ok((boundary, Some(version))),
                 // Once this read starts with an observed boundary, the boundary
                 // file disappearing means durable state regressed; do not treat
                 // it as an initial zero boundary.
-                (Some(_), _) => Err(TransactionalObjectError::InvalidObjectState),
+                (Some(_), _) => {
+                    error!(
+                        "received NotFound after observing boundary [path={}]",
+                        self.filepath
+                    );
+                    Err(TransactionalObjectError::InvalidObjectState)
+                }
                 // Default to zero boundary if file is missing and we've never
                 // observed it before.
                 (None, None) => Ok((MonotonicId::new(0), None)),
