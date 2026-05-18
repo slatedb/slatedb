@@ -196,11 +196,6 @@ impl ObjectStoreBoundaryObject {
                 // the GET was in flight. Use the newer local observation rather
                 // than treating the racing GET as a durable disappearance.
                 (None, Some((boundary, version))) => {
-                    debug!(
-                        "boundary was observed while missing boundary read was in flight [path={}, boundary={}]",
-                        self.filepath,
-                        boundary.id()
-                    );
                     Ok((boundary, Some(version)))
                 }
                 // Once this read starts with an observed boundary, the boundary
