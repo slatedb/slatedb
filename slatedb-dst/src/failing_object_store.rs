@@ -401,7 +401,11 @@ impl ObjectStore for FailingObjectStore {
         self.apply_request_faults(op, &[location.clone()], 0)
             .await?;
         let result = self.inner.get_opts(location, options).await?;
-        let size = result.meta.size;
+        let size = if op == Operation::GetRange {
+            result.range.end.saturating_sub(result.range.start)
+        } else {
+            result.meta.size
+        };
         self.apply_response_faults(op, &[location.clone()], size)
             .await?;
         Ok(result)
