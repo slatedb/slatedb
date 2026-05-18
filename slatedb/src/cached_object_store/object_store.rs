@@ -736,6 +736,19 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.put_multipart_opts(location, opts).await
     }
 
+    /// Deletion of the cache entries associated with the object being
+    /// deleted is not atomic with respect to the object deletion from
+    /// the underlying object store. So for some period of time after
+    /// the deletion, cached object parts are still visible in the cache.
+    /// But assuming each object ever created by SlateDB is immutable and
+    /// has a unique name, this is not a problem.
+    ///
+    /// If eviction is enabled, deletion of the associated cache entries
+    /// happens asynchronously; when the control returns to the caller,
+    /// the entries still might be present in the cache. If eviction is
+    /// off, the deletion happens synchronously; when the control returns
+    /// to the caller, it is guaranteed no entries present in the cache
+    /// (assuming no errors happened during the deletion).
     fn delete_stream(
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
