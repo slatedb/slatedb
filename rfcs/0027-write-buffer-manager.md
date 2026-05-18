@@ -299,6 +299,44 @@ combined budget of these managers, or retained as a secondary safety net.
 Detailed design of Phase 2 is deferred to a future RFC or an addendum to this
 one, once Phase 1 is validated in production.
 
+### Phase 3: Instance Registry for Intelligent Backpressure (WIP)
+
+Phase 1 and 2 enforce budget limits but apply backpressure blindly — when the
+budget is exhausted, all writers block regardless of which DB instance holds the
+majority of the allocation. Phase 3 proposes a registry pattern that enables
+smarter backpressure strategies by tracking which instances share the budget.
+
+**Problem:** When a single `WriteBufferManager` is shared across multiple DB
+instances (e.g. via `DbBuilder::with_write_buffer_manager()`), an instance
+that has consumed a disproportionate share of the budget causes all other
+instances to stall. There is no mechanism today to identify the heavy consumer
+or to direct backpressure at it specifically.
+
+**Proposed direction:** Introduce an instance registry within the
+`WriteBufferManager`:
+
+- **Registration** — Each DB instance registers itself with the shared
+  `WriteBufferManager` on startup and deregisters on shutdown. The registry
+  tracks per-instance metadata such as current byte allocation and instance
+  identity.
+- **Per-instance accounting** — Permits are tagged with their owning instance,
+  allowing the manager to report per-instance budget consumption.
+- **Backpressure policies** — With per-instance visibility, the manager can
+  support smarter strategies such as:
+  - *Proportional fairness* — stall only the instance that has exceeded its
+    fair share rather than blocking all writers.
+  - *Priority-based* — allow high-priority instances to preempt or receive
+    larger budget slices.
+  - *Targeted flush signaling* — notify the heaviest consumer to trigger an
+    early flush, freeing budget for other instances.
+- **Observability** — The registry enables per-instance metrics (bytes held,
+  permits outstanding, time spent blocked) for debugging shared-budget
+  contention.
+
+Detailed design of Phase 3 is deferred to a future RFC, once Phase 2's
+per-pool tracking is in place and multi-instance sharing patterns are better
+understood from production usage.
+
 ## Impact Analysis
 
 SlateDB features and components that this RFC interacts with. Check all that
