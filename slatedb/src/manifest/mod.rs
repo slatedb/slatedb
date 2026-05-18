@@ -133,7 +133,7 @@ pub struct Segment {
     pub(crate) prefix: Bytes,
 
     /// LSM state for this segment.
-    pub(crate) tree: LsmTreeState,
+    pub(crate) tree: Arc<LsmTreeState>,
 }
 
 impl Segment {
@@ -191,7 +191,7 @@ pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) 
                 let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &empty);
                 merged.push(Segment {
                     prefix: w.prefix.clone(),
-                    tree,
+                    tree: Arc::new(tree),
                 });
             }
             MergeStep::CompactorOnly(c) => {
@@ -212,7 +212,7 @@ pub(crate) fn merge_segments_from_writer(local: &[Segment], writer: &[Segment]) 
                 let tree = LsmTreeState::merge_writer_and_compactor(&w.tree, &c.tree);
                 merged.push(Segment {
                     prefix: w.prefix.clone(),
-                    tree,
+                    tree: Arc::new(tree),
                 });
             }
         }
@@ -260,7 +260,10 @@ pub(crate) fn merge_segments_from_compactor(
         // The watermark signal, if any, has already been applied by the
         // `merge_writer_and_compactor` call above.
         if !tree.is_empty() {
-            merged.push(Segment { prefix, tree });
+            merged.push(Segment {
+                prefix,
+                tree: Arc::new(tree),
+            });
         }
     }
     merged
@@ -339,7 +342,7 @@ pub(crate) struct ManifestCore {
     /// segmentation is not configured this is the only tree; otherwise it sits
     /// alongside the named segments in `segments`.
     #[serde(flatten)]
-    pub tree: LsmTreeState,
+    pub tree: Arc<LsmTreeState>,
 
     /// Per-segment LSM state (RFC-0024). Empty when no segment extractor is
     /// configured. Each segment carries the LSM state for the keys whose
@@ -396,7 +399,7 @@ impl ManifestCore {
     pub(crate) fn new() -> Self {
         Self {
             initialized: true,
-            tree: LsmTreeState::default(),
+            tree: Arc::new(LsmTreeState::default()),
             segments: vec![],
             segment_extractor_name: None,
             next_wal_sst_id: 1,
@@ -419,7 +422,7 @@ impl ManifestCore {
     /// Iterate all per-tree LSM states: the unsegmented `tree` followed by
     /// each named segment's `tree` (RFC-0024).
     pub(crate) fn trees(&self) -> impl Iterator<Item = &LsmTreeState> {
-        std::iter::once(&self.tree).chain(self.segments.iter().map(|s| &s.tree))
+        std::iter::once(self.tree.as_ref()).chain(self.segments.iter().map(|s| s.tree.as_ref()))
     }
 
     /// Iterate every tree paired with its segment prefix: the empty-prefix
@@ -427,8 +430,11 @@ impl ManifestCore {
     /// segment in `segments` order. Use [`trees`] when only the LSM state
     /// matters.
     pub(crate) fn trees_with_prefix(&self) -> impl Iterator<Item = (Bytes, &LsmTreeState)> {
-        std::iter::once((Bytes::new(), &self.tree))
-            .chain(self.segments.iter().map(|s| (s.prefix.clone(), &s.tree)))
+        std::iter::once((Bytes::new(), self.tree.as_ref())).chain(
+            self.segments
+                .iter()
+                .map(|s| (s.prefix.clone(), s.tree.as_ref())),
+        )
     }
 
     /// Look up the LSM tree for a given segment prefix. An empty `prefix`
@@ -437,25 +443,48 @@ impl ManifestCore {
     /// segment with that prefix exists.
     pub(crate) fn tree_for_segment(&self, prefix: &[u8]) -> Option<&LsmTreeState> {
         if prefix.is_empty() {
-            Some(&self.tree)
+            Some(self.tree.as_ref())
         } else {
             self.segments
                 .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
                 .ok()
-                .map(|idx| &self.segments[idx].tree)
+                .map(|idx| self.segments[idx].tree.as_ref())
         }
     }
 
-    /// Mutable variant of [`tree_for_segment`].
-    pub(crate) fn tree_for_segment_mut(&mut self, prefix: &[u8]) -> Option<&mut LsmTreeState> {
+    /// Return a clone of the [`Arc`] wrapping the LSM tree for the given
+    /// segment prefix.  An empty `prefix` addresses the root tree; a
+    /// non-empty prefix addresses a named segment.  Returns `None` when no
+    /// segment with that prefix exists.
+    pub(crate) fn tree_for_segment_arc(&self, prefix: &[u8]) -> Option<Arc<LsmTreeState>> {
         if prefix.is_empty() {
-            Some(&mut self.tree)
+            Some(Arc::clone(&self.tree))
         } else {
             let idx = self
                 .segments
                 .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
                 .ok()?;
-            Some(&mut self.segments[idx].tree)
+            Some(Arc::clone(&self.segments[idx].tree))
+        }
+    }
+
+    /// Replace the LSM tree for the given segment prefix.  An empty
+    /// `prefix` replaces the root tree; a non-empty prefix replaces the
+    /// named segment's tree.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `prefix` is non-empty and no segment with that prefix
+    /// exists.
+    pub(crate) fn replace_tree(&mut self, prefix: &[u8], tree: Arc<LsmTreeState>) {
+        if prefix.is_empty() {
+            self.tree = tree;
+        } else {
+            let idx = self
+                .segments
+                .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
+                .expect("replace_tree: segment not found");
+            self.segments[idx].tree = tree;
         }
     }
 
@@ -602,17 +631,17 @@ impl ManifestCore {
         prefix: &Bytes,
     ) -> Result<&mut LsmTreeState, SlateDBError> {
         match self.segments.binary_search_by(|s| s.prefix.cmp(prefix)) {
-            Ok(idx) => Ok(&mut self.segments[idx].tree),
+            Ok(idx) => Ok(Arc::make_mut(&mut self.segments[idx].tree)),
             Err(idx) => {
                 self.check_segment_prefix_antichain(prefix.as_ref())?;
                 self.segments.insert(
                     idx,
                     Segment {
                         prefix: prefix.clone(),
-                        tree: LsmTreeState::default(),
+                        tree: Arc::new(LsmTreeState::default()),
                     },
                 );
-                Ok(&mut self.segments[idx].tree)
+                Ok(Arc::make_mut(&mut self.segments[idx].tree))
             }
         }
     }
@@ -643,34 +672,46 @@ impl ManifestCore {
         self.checkpoints.iter().find(|c| c.id == checkpoint_id)
     }
 
-    /// Returns owned `Segment`s whose intervals may contain entries in
-    /// `range`. Used by the read path to route a query to the relevant
-    /// tree(s) and by `SegmentRangeIterator` to binary-search seek
-    /// across the chain.
+    /// Returns the segments whose intervals may contain entries in
+    /// `range`, or `None` when the database is unconfigured (no
+    /// segments).  Used by the read path to route a query to the
+    /// relevant tree(s) and by `SegmentRangeIterator` to
+    /// binary-search seek across the chain.
     ///
-    /// In an unconfigured database (no segments) the routing collapses to
-    /// the unsegmented `tree`, returned as a single segment with empty
-    /// prefix — the empty prefix's interval `[b"", +∞)` trivially covers
-    /// every key, which is what unsegmented mode requires. In an
-    /// extractor-configured database (mandatory full segmentation:
-    /// `tree` empty, `segments` non-empty), returns every segment whose
-    /// `[prefix, prefix++)` interval overlaps `range`, in prefix-
-    /// ascending order. Because segments are pairwise disjoint and
-    /// sorted, the matching set is a contiguous slice of `segments`
-    /// located via binary search on the query bounds.
+    /// In an extractor-configured database (mandatory full
+    /// segmentation: `tree` empty, `segments` non-empty), returns
+    /// every segment whose `[prefix, prefix++)` interval overlaps
+    /// `range`, in prefix-ascending order.  Because segments are
+    /// pairwise disjoint and sorted, the matching set is a contiguous
+    /// slice of `segments` located via binary search on the query
+    /// bounds.
     ///
-    /// A point query that lands outside every segment's interval — and
-    /// any query against a configured-but-empty database — returns an
-    /// empty vector: no tree can hold a matching key.
-    pub(crate) fn select_segments(&self, range: &BytesRange) -> Vec<Segment> {
+    /// A point query that lands outside every segment's interval —
+    /// and any query against a configured-but-empty database —
+    /// returns an empty slice: no tree can hold a matching key.
+    ///
+    /// When `None` is returned, callers should use
+    /// [`default_segment`](Self::default_segment) to obtain the
+    /// single unsegmented tree.
+    pub(crate) fn select_segments(&self, range: &BytesRange) -> Option<&[Segment]> {
         if self.segments.is_empty() {
-            return vec![Segment {
-                prefix: Bytes::new(),
-                tree: self.tree.clone(),
-            }];
+            return None;
         }
         let indices = self.overlapping_segment_indices(range);
-        self.segments[indices].to_vec()
+        Some(&self.segments[indices])
+    }
+
+    /// Returns the unsegmented tree wrapped in a [`Segment`] with an
+    /// empty prefix.  This is the fallback for unconfigured databases
+    /// where [`select_segments`](Self::select_segments) returns `None`.
+    ///
+    /// The empty prefix's interval `[b"", +∞)` trivially covers every
+    /// key, which is what unsegmented mode requires.
+    pub(crate) fn default_segment(&self) -> Segment {
+        Segment {
+            prefix: Bytes::new(),
+            tree: self.tree.clone(),
+        }
     }
 
     /// Half-open `[start, end)` index range of segments whose intervals
@@ -918,7 +959,7 @@ impl Manifest {
 
     pub(crate) fn projected(source_manifest: &Manifest, range: BytesRange) -> Manifest {
         let mut projected = source_manifest.clone();
-        Self::project_tree_in_place(&mut projected.core.tree, &range);
+        Self::project_tree_in_place(Arc::make_mut(&mut projected.core.tree), &range);
         // Project each segment's tree against the range; drop segments
         // that become empty (no L0 and no compacted views remain). The
         // projector is acting as the first writer of the resulting clone,
@@ -926,7 +967,7 @@ impl Manifest {
         // marker carries no meaning in the new DB and is dropped along
         // with the segment.
         projected.core.segments.retain_mut(|segment| {
-            Self::project_tree_in_place(&mut segment.tree, &range);
+            Self::project_tree_in_place(Arc::make_mut(&mut segment.tree), &range);
             !segment.tree.l0.is_empty() || !segment.tree.compacted.is_empty()
         });
         // Drop unused external_dbs based on the surviving SST set across
@@ -1071,8 +1112,10 @@ impl Manifest {
         }
         for source in sources {
             let manifest = &source.manifest;
-            core.tree.l0.extend(manifest.core.tree.l0.iter().cloned());
-            core.tree
+            Arc::make_mut(&mut core.tree)
+                .l0
+                .extend(manifest.core.tree.l0.iter().cloned());
+            Arc::make_mut(&mut core.tree)
                 .compacted
                 .extend(manifest.core.tree.compacted.iter().cloned());
         }
@@ -1106,7 +1149,10 @@ impl Manifest {
         core.segments = segments_by_prefix
             .into_iter()
             .filter(|(_, tree)| !tree.is_empty())
-            .map(|(prefix, tree)| Segment { prefix, tree })
+            .map(|(prefix, tree)| Segment {
+                prefix,
+                tree: Arc::new(tree),
+            })
             .collect();
         Ok(())
     }
@@ -1162,10 +1208,10 @@ impl Manifest {
                 .iter()
                 .map(|s| s.tree.compacted.len())
                 .sum::<usize>();
-        let all_compacted = core.tree.compacted.iter_mut().chain(
+        let all_compacted = Arc::make_mut(&mut core.tree).compacted.iter_mut().chain(
             core.segments
                 .iter_mut()
-                .flat_map(|s| s.tree.compacted.iter_mut()),
+                .flat_map(|s| Arc::make_mut(&mut s.tree).compacted.iter_mut()),
         );
         for (idx, sr) in all_compacted.enumerate() {
             sr.id = (count - 1 - idx) as u32;
@@ -1922,11 +1968,11 @@ mod tests {
             for (idx, kind) in kinds.iter().enumerate() {
                 let prefix = Bytes::from(format!("p{:02}/", idx));
                 match kind % 4 {
-                    0 => writer.push(Segment { prefix: prefix.clone(), tree: live_tree(idx as u64) }),
-                    1 => compactor.push(Segment { prefix: prefix.clone(), tree: marker_tree(idx as u64) }),
+                    0 => writer.push(Segment { prefix: prefix.clone(), tree: Arc::new(live_tree(idx as u64)) }),
+                    1 => compactor.push(Segment { prefix: prefix.clone(), tree: Arc::new(marker_tree(idx as u64)) }),
                     2 => {
-                        writer.push(Segment { prefix: prefix.clone(), tree: live_tree(idx as u64) });
-                        compactor.push(Segment { prefix: prefix.clone(), tree: live_tree((idx as u64) + 100) });
+                        writer.push(Segment { prefix: prefix.clone(), tree: Arc::new(live_tree(idx as u64)) });
+                        compactor.push(Segment { prefix: prefix.clone(), tree: Arc::new(live_tree((idx as u64) + 100)) });
                     }
                     _ => {}
                 }
@@ -2176,17 +2222,19 @@ mod tests {
                     .writer
                     .binary_search_by(|s| s.prefix.as_ref().cmp(prefix.as_ref()))
                 {
-                    Ok(idx) => self.writer[idx].tree.l0.push_front(view),
+                    Ok(idx) => Arc::make_mut(&mut self.writer[idx].tree)
+                        .l0
+                        .push_front(view),
                     Err(idx) => self.writer.insert(
                         idx,
                         Segment {
                             prefix,
-                            tree: LsmTreeState {
+                            tree: Arc::new(LsmTreeState {
                                 last_compacted_l0_sst_view_id: None,
                                 last_compacted_l0_sst_id: None,
                                 l0: VecDeque::from(vec![view]),
                                 compacted: vec![],
-                            },
+                            }),
                         },
                     ),
                 }
@@ -2213,18 +2261,19 @@ mod tests {
                     .binary_search_by(|s| s.prefix.as_ref().cmp(prefix.as_ref()))
                 {
                     let seg = &mut self.compactor[idx];
-                    let count = (count as usize).min(seg.tree.l0.len());
+                    let tree = Arc::make_mut(&mut seg.tree);
+                    let count = (count as usize).min(tree.l0.len());
                     if count == 0 {
                         return;
                     }
-                    let newest = seg.tree.l0[0].id;
-                    let sr_views: Vec<_> = (0..count).map(|i| seg.tree.l0[i].clone()).collect();
+                    let newest = tree.l0[0].id;
+                    let sr_views: Vec<_> = (0..count).map(|i| tree.l0[i].clone()).collect();
                     for _ in 0..count {
-                        seg.tree.l0.pop_front();
+                        tree.l0.pop_front();
                     }
-                    seg.tree.last_compacted_l0_sst_view_id = Some(newest);
+                    tree.last_compacted_l0_sst_view_id = Some(newest);
                     self.next_sr_id += 1;
-                    seg.tree.compacted.insert(
+                    tree.compacted.insert(
                         0,
                         SortedRun {
                             id: self.next_sr_id,
@@ -2242,11 +2291,12 @@ mod tests {
                     .binary_search_by(|s| s.prefix.as_ref().cmp(prefix.as_ref()))
                 {
                     let seg = &mut self.compactor[idx];
-                    if let Some(newest) = seg.tree.l0.front() {
-                        seg.tree.last_compacted_l0_sst_view_id = Some(newest.id);
+                    let tree = Arc::make_mut(&mut seg.tree);
+                    if let Some(newest) = tree.l0.front() {
+                        tree.last_compacted_l0_sst_view_id = Some(newest.id);
                     }
-                    seg.tree.l0.clear();
-                    seg.tree.compacted.clear();
+                    tree.l0.clear();
+                    tree.compacted.clear();
                 }
             }
 
@@ -2716,21 +2766,23 @@ mod tests {
         for entry in &manifest.l0 {
             let sst_id = sst_id_fn(entry.sst_alias);
             let view_id = sst_id.unwrap_compacted_id();
-            core.tree.l0.push_back(SsTableView::new_projected(
-                view_id,
-                SsTableHandle::new(
-                    sst_id,
-                    SST_FORMAT_VERSION_LATEST,
-                    SsTableInfo {
-                        first_entry: Some(entry.first_entry.clone()),
-                        ..SsTableInfo::default()
-                    },
-                ),
-                entry.visible_range.clone(),
-            ));
+            Arc::make_mut(&mut core.tree)
+                .l0
+                .push_back(SsTableView::new_projected(
+                    view_id,
+                    SsTableHandle::new(
+                        sst_id,
+                        SST_FORMAT_VERSION_LATEST,
+                        SsTableInfo {
+                            first_entry: Some(entry.first_entry.clone()),
+                            ..SsTableInfo::default()
+                        },
+                    ),
+                    entry.visible_range.clone(),
+                ));
         }
         for (idx, sorted_run) in manifest.sorted_runs.iter().enumerate() {
-            core.tree.compacted.push(SortedRun {
+            Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
                 id: idx as u32,
                 sst_views: sorted_run
                     .iter()
@@ -2867,10 +2919,18 @@ mod tests {
 
         let mut core = ManifestCore::new();
 
-        core.tree.l0.push_back(create_sst_view(sst_id_1, b"a")); // inside projection_range
-        core.tree.l0.push_back(create_sst_view(sst_id_2, b"c")); // outside projection_range
-        core.tree.l0.push_back(create_sst_view(sst_id_3, b"d")); // outside projection_range
-        core.tree.l0.push_back(create_sst_view(sst_id_4, b"e")); // outside projection_range
+        Arc::make_mut(&mut core.tree)
+            .l0
+            .push_back(create_sst_view(sst_id_1, b"a")); // inside projection_range
+        Arc::make_mut(&mut core.tree)
+            .l0
+            .push_back(create_sst_view(sst_id_2, b"c")); // outside projection_range
+        Arc::make_mut(&mut core.tree)
+            .l0
+            .push_back(create_sst_view(sst_id_3, b"d")); // outside projection_range
+        Arc::make_mut(&mut core.tree)
+            .l0
+            .push_back(create_sst_view(sst_id_4, b"e")); // outside projection_range
 
         let mut manifest = Manifest::initial(core);
 
@@ -2905,8 +2965,10 @@ mod tests {
         let stale_b = SsTableId::Compacted(Ulid::new());
 
         let mut core = ManifestCore::new();
-        core.tree.l0.push_back(create_sst_view(live_l0, b"a"));
-        core.tree.compacted.push(SortedRun {
+        Arc::make_mut(&mut core.tree)
+            .l0
+            .push_back(create_sst_view(live_l0, b"a"));
+        Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
             id: 0,
             sst_views: vec![create_sst_view(live_compacted, b"b")],
         });
@@ -2954,12 +3016,12 @@ mod tests {
         let stale = SsTableId::Compacted(Ulid::new());
 
         let mut core = ManifestCore::new();
-        core.tree
+        Arc::make_mut(&mut core.tree)
             .l0
             .push_back(create_sst_view(unsegmented_l0, b"a"));
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"seg/"),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![create_sst_view(segment_l0, b"seg/a")]),
@@ -2967,7 +3029,7 @@ mod tests {
                     id: 0,
                     sst_views: vec![create_sst_view(segment_compacted, b"seg/b")],
                 }],
-            },
+            }),
         }];
 
         let mut manifest = Manifest::initial(core);
@@ -3010,7 +3072,7 @@ mod tests {
         visible_range: BytesRange,
     ) -> Manifest {
         let mut core = ManifestCore::new();
-        core.tree.compacted.push(SortedRun {
+        Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
             id: 0,
             sst_views: vec![SsTableView::new_projected(
                 sst_id.unwrap_compacted_id(),
@@ -3108,12 +3170,12 @@ mod tests {
         );
         super::Segment {
             prefix: Bytes::copy_from_slice(prefix),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::new(view_id, handle)]),
                 compacted: vec![],
-            },
+            }),
         }
     }
 
@@ -3123,11 +3185,12 @@ mod tests {
 
     #[test]
     fn test_select_segments_unconfigured_returns_unsegmented_tree() {
-        // No segments configured -> route always lands on `core.tree`,
-        // identical to today's single-tree read path.
+        // No segments configured -> select_segments returns None;
+        // callers fall back to default_segment().
         let core = ManifestCore::new();
-        let segments = core.select_segments(&BytesRange::unbounded());
-        assert_eq!(collect_prefixes(&segments), vec![Bytes::new()]);
+        assert!(core.select_segments(&BytesRange::unbounded()).is_none());
+        let ds = core.default_segment();
+        assert_eq!(ds.prefix, Bytes::new());
     }
 
     #[test]
@@ -3141,8 +3204,8 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"b/k".as_ref()..=b"b/k".as_ref());
-        let segments = core.select_segments(&range);
-        assert_eq!(collect_prefixes(&segments), vec![Bytes::from_static(b"b/")]);
+        let segments = core.select_segments(&range).unwrap();
+        assert_eq!(collect_prefixes(segments), vec![Bytes::from_static(b"b/")]);
     }
 
     #[test]
@@ -3152,7 +3215,7 @@ mod tests {
         let mut core = ManifestCore::new();
         core.segments = vec![segment_with_prefix(b"a/", 1), segment_with_prefix(b"c/", 3)];
         let range = BytesRange::from_slice(b"b/k".as_ref()..=b"b/k".as_ref());
-        let segments = core.select_segments(&range);
+        let segments = core.select_segments(&range).unwrap();
         assert!(segments.is_empty());
     }
 
@@ -3167,9 +3230,9 @@ mod tests {
             segment_with_prefix(b"d/", 4),
         ];
         let range = BytesRange::from_slice(b"b/".as_ref()..b"d/".as_ref());
-        let segments = core.select_segments(&range);
+        let segments = core.select_segments(&range).unwrap();
         assert_eq!(
-            collect_prefixes(&segments),
+            collect_prefixes(segments),
             vec![Bytes::from_static(b"b/"), Bytes::from_static(b"c/")]
         );
     }
@@ -3181,7 +3244,7 @@ mod tests {
         let mut core = ManifestCore::new();
         core.segments = vec![segment_with_prefix(b"a/", 1), segment_with_prefix(b"c/", 3)];
         let range = BytesRange::from_slice(b"x/".as_ref()..b"y/".as_ref());
-        let segments = core.select_segments(&range);
+        let segments = core.select_segments(&range).unwrap();
         assert!(segments.is_empty());
     }
 
@@ -3194,9 +3257,9 @@ mod tests {
             segment_with_prefix(b"b/", 2),
             segment_with_prefix(b"c/", 3),
         ];
-        let segments = core.select_segments(&BytesRange::unbounded());
+        let segments = core.select_segments(&BytesRange::unbounded()).unwrap();
         assert_eq!(
-            collect_prefixes(&segments),
+            collect_prefixes(segments),
             vec![
                 Bytes::from_static(b"a/"),
                 Bytes::from_static(b"b/"),
@@ -3217,8 +3280,8 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"a/".as_ref()..b"b/".as_ref());
-        let segments = core.select_segments(&range);
-        assert_eq!(collect_prefixes(&segments), vec![Bytes::from_static(b"a/")]);
+        let segments = core.select_segments(&range).unwrap();
+        assert_eq!(collect_prefixes(segments), vec![Bytes::from_static(b"a/")]);
     }
 
     #[test]
@@ -3232,9 +3295,9 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"a/".as_ref()..=b"b/".as_ref());
-        let segments = core.select_segments(&range);
+        let segments = core.select_segments(&range).unwrap();
         assert_eq!(
-            collect_prefixes(&segments),
+            collect_prefixes(segments),
             vec![Bytes::from_static(b"a/"), Bytes::from_static(b"b/")]
         );
     }
@@ -3250,9 +3313,9 @@ mod tests {
             segment_with_prefix(b"c/", 3),
         ];
         let range = BytesRange::from_slice(b"b/middle".as_ref()..b"d/".as_ref());
-        let segments = core.select_segments(&range);
+        let segments = core.select_segments(&range).unwrap();
         assert_eq!(
-            collect_prefixes(&segments),
+            collect_prefixes(segments),
             vec![Bytes::from_static(b"b/"), Bytes::from_static(b"c/")]
         );
     }
@@ -3265,19 +3328,21 @@ mod tests {
         // antichain check and the included-vs-excluded upper bound.
         use proptest::prelude::*;
 
-        fn brute_force(core: &ManifestCore, range: &BytesRange) -> Vec<Bytes> {
+        fn brute_force(core: &ManifestCore, range: &BytesRange) -> Option<Vec<Bytes>> {
             if core.segments.is_empty() {
-                return vec![Bytes::new()];
+                return None;
             }
-            core.segments
-                .iter()
-                .filter(|s| {
-                    BytesRange::from_prefix(&s.prefix)
-                        .intersect(range)
-                        .is_some()
-                })
-                .map(|s| s.prefix.clone())
-                .collect()
+            Some(
+                core.segments
+                    .iter()
+                    .filter(|s| {
+                        BytesRange::from_prefix(&s.prefix)
+                            .intersect(range)
+                            .is_some()
+                    })
+                    .map(|s| s.prefix.clone())
+                    .collect(),
+            )
         }
 
         // Antichain-respecting prefix universe: short, distinct, and
@@ -3316,7 +3381,7 @@ mod tests {
                 return Ok(());
             };
 
-            let actual = collect_prefixes(&core.select_segments(&range));
+            let actual = core.select_segments(&range).map(collect_prefixes);
             let expected = brute_force(&core, &range);
             prop_assert_eq!(actual, expected);
         });
@@ -3338,7 +3403,7 @@ mod tests {
         core.segment_extractor_name = extractor_name.map(|s| s.to_string());
         core.segments = vec![Segment {
             prefix: Bytes::copy_from_slice(prefix),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -3368,7 +3433,7 @@ mod tests {
                         Some(visible_range),
                     )],
                 }],
-            },
+            }),
         }];
         (Manifest::initial(core), l0_sst, sr_sst)
     }
@@ -3433,25 +3498,25 @@ mod tests {
 
         let mut core = ManifestCore::new();
         // Unsegmented tree carries two SRs sharing the same id.
-        core.tree.compacted = vec![make_sr(7), make_sr(7)];
+        Arc::make_mut(&mut core.tree).compacted = vec![make_sr(7), make_sr(7)];
         core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
                     compacted: vec![make_sr(0), make_sr(7)],
-                },
+                }),
             },
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
                     compacted: vec![make_sr(0)],
-                },
+                }),
             },
         ];
 
@@ -3551,12 +3616,12 @@ mod tests {
         // Add a drain-marker segment alongside the data-bearing one.
         m1.core.segments.push(Segment {
             prefix: Bytes::from_static(b"hour=99/"),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: Some(Ulid::new()),
                 last_compacted_l0_sst_id: Some(Ulid::new()),
                 l0: VecDeque::new(),
                 compacted: vec![],
-            },
+            }),
         });
         // `manifest.core.segments` invariant: sorted by prefix.
         m1.core.segments.sort_by(|a, b| a.prefix.cmp(&b.prefix));
@@ -3615,7 +3680,7 @@ mod tests {
         ) -> Segment {
             Segment {
                 prefix: Bytes::from_static(prefix),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -3645,7 +3710,7 @@ mod tests {
                             Some(range),
                         )],
                     }],
-                },
+                }),
             }
         }
 
@@ -3794,7 +3859,7 @@ mod tests {
             core.segment_extractor_name = Some("test".into());
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"foo/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -3810,7 +3875,7 @@ mod tests {
                         Some(BytesRange::from_ref("foo/a".."foo/h")),
                     )]),
                     compacted: vec![],
-                },
+                }),
             }];
             Manifest::initial(core)
         };
@@ -3819,7 +3884,7 @@ mod tests {
             core.segment_extractor_name = Some("test".into());
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"foo/bar/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -3835,7 +3900,7 @@ mod tests {
                         Some(BytesRange::from_ref("q".."z")),
                     )]),
                     compacted: vec![],
-                },
+                }),
             }];
             Manifest::initial(core)
         };
@@ -4052,7 +4117,7 @@ mod tests {
         core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -4082,11 +4147,11 @@ mod tests {
                             Some(BytesRange::from_ref("a".."m")),
                         )],
                     }],
-                },
+                }),
             },
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4105,7 +4170,7 @@ mod tests {
                             Some(BytesRange::from_ref("n".."z")),
                         )],
                     }],
-                },
+                }),
             },
         ];
         let manifest = Manifest::initial(core);
@@ -4199,7 +4264,7 @@ mod tests {
                 .iter()
                 .map(|p| Segment {
                     prefix: Bytes::copy_from_slice(p),
-                    tree: LsmTreeState::default(),
+                    tree: Arc::new(LsmTreeState::default()),
                 })
                 .collect();
         }

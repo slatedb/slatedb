@@ -5,7 +5,7 @@ use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_iter::{apply_filters, DbRecencyIterator};
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
-use crate::manifest::ManifestCore;
+use crate::manifest::{ManifestCore, Segment};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
@@ -156,7 +156,14 @@ impl Reader {
             })
             .collect::<Vec<_>>();
 
-        let segments = db_state.core().select_segments(range);
+        let default_seg;
+        let segments: &[Segment] = match db_state.core().select_segments(range) {
+            Some(segments) => segments,
+            None => {
+                default_seg = db_state.core().default_segment();
+                std::slice::from_ref(&default_seg)
+            }
+        };
         let total_ssts: usize = segments.iter().map(|s| s.tree.total_ssts()).sum();
         let max_parallel = total_ssts.clamp(1, 4);
 
@@ -359,13 +366,16 @@ impl Reader {
         // Cross-segment recency is not well-defined: walking segment A's
         // oldest sorted run before touching segment B's freshest data
         // breaks the freshest-first contract callers expect.
-        // `select_segments` always returns at least one entry (the default
-        // unsegmented tree when no segments are configured).
-        let mut segments = db_state.core().select_segments(&range);
-        if segments.len() > 1 {
+        // `select_segments` returns `None` when unconfigured; `default_segment`
+        // provides the fallback unsegmented tree.
+        let segments = db_state.core().select_segments(&range);
+        if segments.is_some_and(|s| s.len() > 1) {
             return Err(SlateDBError::RecencyScanPrefixSpansMultipleSegments);
         }
-        let segment = segments.pop();
+        let segment = match segments {
+            Some(segments) => segments.first().cloned(),
+            None => Some(db_state.core().default_segment()),
+        };
 
         let mut all_iters: Vec<Box<dyn RowEntryIterator + 'static>> = Vec::new();
 
@@ -545,8 +555,7 @@ mod tests {
                 return Ok(());
             }
             let sst_handle = self.build_sst(entries).await?;
-            self.core
-                .tree
+            Arc::make_mut(&mut self.core.tree)
                 .l0
                 .push_front(SsTableView::identity(sst_handle));
             Ok(())
@@ -564,20 +573,15 @@ mod tests {
             let sst_handle = self.build_sst(entries).await?;
 
             // Find or create the sorted run
-            if let Some(sr) = self
-                .core
-                .tree
-                .compacted
-                .iter_mut()
-                .find(|sr| sr.id == sr_id)
-            {
+            let tree = Arc::make_mut(&mut self.core.tree);
+            if let Some(sr) = tree.compacted.iter_mut().find(|sr| sr.id == sr_id) {
                 sr.sst_views.push(SsTableView::identity(sst_handle));
             } else {
                 let new_sr = SortedRun {
                     id: sr_id,
                     sst_views: vec![SsTableView::identity(sst_handle)],
                 };
-                self.core.tree.compacted.push(new_sr);
+                tree.compacted.push(new_sr);
             }
             Ok(())
         }

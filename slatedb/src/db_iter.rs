@@ -125,11 +125,11 @@ impl GetIterator {
     /// and stops the search.
     pub(crate) fn from_lsm_tree(
         key: Bytes,
-        tree: LsmTreeState,
+        tree: &LsmTreeState,
         ctx: &SegmentScanContext,
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let l0 = build_l0_point_iters(tree.l0, ctx)?;
+        let l0 = build_l0_point_iters(&tree.l0, ctx)?;
         let sr = build_sr_point_iters(&key, &tree.compacted, ctx)?;
         let iters = apply_filters(l0.into_iter().chain(sr), max_seq);
         Ok(Self { key, iters, idx: 0 })

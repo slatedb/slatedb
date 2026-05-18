@@ -494,7 +494,7 @@ impl ManifestWriterHandler {
                     } else if segment.prefix.is_empty() {
                         // No extractor — singleton compatibility-encoded
                         // `prefix=""` segment lives in the top-level tree.
-                        &mut core.tree
+                        Arc::make_mut(&mut core.tree)
                     } else {
                         return Err(SlateDBError::InvalidSegmentPrefix {
                             prefix: segment.prefix.clone(),

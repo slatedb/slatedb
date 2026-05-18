@@ -1,6 +1,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use log::{error, info};
@@ -696,7 +697,7 @@ impl CompactorState {
         // Segment configuration is stable; the writer is the source of truth.
         let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
-            tree,
+            tree: Arc::new(tree),
             segments,
             segment_extractor_name: remote_manifest.value.core.segment_extractor_name.clone(),
             next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
@@ -813,7 +814,7 @@ impl CompactorState {
                 .first()
                 .expect("illegal: empty compaction spec");
 
-            let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
+            let Some(tree_arc) = db_state.tree_for_segment_arc(&segment) else {
                 error!(
                     "finish_compaction: target segment missing [segment={:?}, compaction_id={}]",
                     segment, compaction_id
@@ -826,6 +827,8 @@ impl CompactorState {
                 });
                 return;
             };
+
+            let mut tree = Arc::unwrap_or_clone(tree_arc);
 
             let new_l0: VecDeque<SsTableView> = tree
                 .l0
@@ -861,6 +864,7 @@ impl CompactorState {
             }
             tree.l0 = new_l0;
             tree.compacted = new_compacted;
+            db_state.replace_tree(&segment, Arc::new(tree));
             self.manifest.value.core = db_state;
             self.manifest.value.prune_external_sst_ids();
             self.update_compaction(&compaction_id, |c| {
@@ -917,7 +921,7 @@ impl CompactorState {
             .filter_map(|id| id.maybe_unwrap_sorted_run())
             .collect();
 
-        let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
+        let Some(tree_arc) = db_state.tree_for_segment_arc(&segment) else {
             error!(
                 "finish_drain_compaction: target segment missing [segment={:?}, compaction_id={}]",
                 segment, compaction_id
@@ -929,6 +933,8 @@ impl CompactorState {
             });
             return;
         };
+
+        let mut tree = Arc::unwrap_or_clone(tree_arc);
 
         // tree.l0 is sorted newest-first, so the first match is the newest L0
         // in `sources`. Per RFC-0024 the watermark advances to that L0 only;
@@ -945,6 +951,7 @@ impl CompactorState {
 
         tree.l0.retain(|view| !drained_l0_ids.contains(&view.id));
         tree.compacted.retain(|sr| !drained_sr_ids.contains(&sr.id));
+        db_state.replace_tree(&segment, Arc::new(tree));
 
         self.manifest.value.core = db_state;
         self.manifest.value.prune_external_sst_ids();
@@ -1495,21 +1502,21 @@ mod tests {
         dirty.value.core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v_b.clone()]),
                     compacted: vec![],
-                },
+                }),
             },
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v_a.clone()]),
                     compacted: vec![],
-                },
+                }),
             },
         ];
 
@@ -1552,12 +1559,12 @@ mod tests {
         // V0: writer has X with l0=[v1]. Compactor matches.
         let writer_v0 = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![v1.clone()]),
                 compacted: vec![],
-            },
+            }),
         }];
 
         // V1: compactor's drain post-spec state. Watermark advanced to v1,
@@ -1565,12 +1572,12 @@ mod tests {
         // side merge with writer.V0 keeps the marker.
         let compactor_post_drain = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: Some(v1.id),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: vec![],
-            },
+            }),
         }];
         let v1_segments =
             crate::manifest::merge_segments_from_writer(&compactor_post_drain, &writer_v0);
@@ -1747,12 +1754,12 @@ mod tests {
         };
         let segment = Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: vec![sr5.clone(), sr3.clone()],
-            },
+            }),
         };
         state.manifest.value.core.segments = vec![segment];
         let root_compacted_before = state.db_state().tree.compacted.clone();
@@ -1800,7 +1807,7 @@ mod tests {
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -1808,7 +1815,7 @@ mod tests {
                     id: 7,
                     sst_views: Vec::new(),
                 }],
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -1845,14 +1852,14 @@ mod tests {
 
         // Seed real sources so the source-isolation check passes for both
         // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
-        state.manifest.value.core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
             id: 99,
             sst_views: Vec::new(),
         }];
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -1860,7 +1867,7 @@ mod tests {
                     id: 100,
                     sst_views: Vec::new(),
                 }],
-            },
+            }),
         }];
 
         let root_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -1888,7 +1895,7 @@ mod tests {
 
         // Seed SR(7) in the root tree so the source-isolation check passes
         // for the first submission; the spec rewrites that SR (destination=7).
-        state.manifest.value.core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
             id: 7,
             sst_views: Vec::new(),
         }];
@@ -1920,12 +1927,12 @@ mod tests {
         let l0_b = drain_test_view(2);
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_b.clone(), l0_a.clone()]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let first_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -1956,21 +1963,21 @@ mod tests {
         state.manifest.value.core.segments = vec![
             Segment {
                 prefix: prefix_a.clone(),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![l0_a.clone()]),
                     compacted: Vec::new(),
-                },
+                }),
             },
             Segment {
                 prefix: prefix_b.clone(),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![l0_b.clone()]),
                     compacted: Vec::new(),
-                },
+                }),
             },
         ];
 
@@ -1998,12 +2005,12 @@ mod tests {
         let l0 = drain_test_view(1);
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0.clone()]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -2053,12 +2060,12 @@ mod tests {
         let prefix = Bytes::from_static(b"hour=10/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_newer.clone(), l0_older.clone()]),
                 compacted: vec![sr.clone()],
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -2104,12 +2111,12 @@ mod tests {
         let prefix = Bytes::from_static(b"hour=10/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_late.clone(), l0_observed.clone()]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());

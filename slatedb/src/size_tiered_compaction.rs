@@ -981,12 +981,12 @@ mod tests {
     fn create_db_state(l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> ManifestCore {
         ManifestCore {
             initialized: true,
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0,
                 compacted: srs,
-            },
+            }),
             segments: vec![],
             segment_extractor_name: None,
             next_wal_sst_id: 0,
@@ -1021,12 +1021,12 @@ mod tests {
     fn segment_with(prefix: &[u8], l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> Segment {
         Segment {
             prefix: Bytes::copy_from_slice(prefix),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0,
                 compacted: srs,
-            },
+            }),
         }
     }
 

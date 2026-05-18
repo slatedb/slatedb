@@ -2399,7 +2399,7 @@ mod tests {
         fn segment_with(prefix: &'static [u8], tree: LsmTreeState) -> Segment {
             Segment {
                 prefix: Bytes::from_static(prefix),
-                tree,
+                tree: Arc::new(tree),
             }
         }
         fn tree_l0(views: Vec<SsTableView>) -> LsmTreeState {

@@ -1521,8 +1521,8 @@ mod tests {
 
         // then:
         let db_state = db_state.expect("db was not compacted");
-        for run in db_state.tree.compacted {
-            for sst in run.sst_views {
+        for run in db_state.tree.compacted.iter() {
+            for sst in run.sst_views.iter() {
                 let mut iter = SstIterator::new_borrowed_initialized(
                     ..,
                     &sst,
@@ -2020,7 +2020,7 @@ mod tests {
 
         let db_state = await_compacted_compaction(
             manifest_store.clone(),
-            db_state.tree.compacted,
+            db_state.tree.compacted.clone(),
             Some(system_clock.clone()),
         )
         .await
@@ -2120,7 +2120,7 @@ mod tests {
         // Trigger compaction of L0 (tombstone) + L1 (values)
         let db_state = await_compacted_compaction(
             manifest_store.clone(),
-            db_state.tree.compacted,
+            db_state.tree.compacted.clone(),
             Some(system_clock.clone()),
         )
         .await
@@ -3563,11 +3563,11 @@ mod tests {
         let mut core = ManifestCore::new();
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"seg"),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 l0: VecDeque::from(vec![segment_l0.clone()]),
                 compacted: vec![segment_sr.clone()],
                 ..LsmTreeState::default()
-            },
+            }),
         }];
 
         let compaction = Compaction::new(
@@ -3836,8 +3836,9 @@ mod tests {
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
         ));
-        dirty.value.core.tree.l0 = VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
-        dirty.value.core.tree.compacted = vec![
+        Arc::make_mut(&mut dirty.value.core.tree).l0 =
+            VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
+        Arc::make_mut(&mut dirty.value.core.tree).compacted = vec![
             SortedRun {
                 id: 2,
                 sst_views: vec![SsTableView::identity(SsTableHandle::new(
@@ -3939,8 +3940,8 @@ mod tests {
             SST_FORMAT_VERSION_LATEST,
             l0_info,
         ));
-        core.tree.l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
-        core.tree.compacted = vec![
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
+        Arc::make_mut(&mut core.tree).compacted = vec![
             SortedRun {
                 id: 5,
                 sst_views: vec![SsTableView::identity(SsTableHandle::new(
@@ -3986,7 +3987,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
-        core.tree.l0 = VecDeque::from(vec![
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from(vec![
             SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(1, 0)),
                 SST_FORMAT_VERSION_LATEST,
@@ -4033,7 +4034,7 @@ mod tests {
         };
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"key"),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -4055,7 +4056,7 @@ mod tests {
                         ))],
                     },
                 ],
-            },
+            }),
         }];
         let state = CompactorStateView {
             compactions: None,
@@ -4093,7 +4094,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"r")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 9,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(90, 0)),
@@ -4129,7 +4130,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 4,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(40, 0)),
@@ -4167,7 +4168,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"x")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![
+        Arc::make_mut(&mut core.tree).compacted = vec![
             SortedRun {
                 id: 8,
                 sst_views: vec![SsTableView::identity(SsTableHandle::new(
@@ -4189,7 +4190,7 @@ mod tests {
         core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"a/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4201,11 +4202,11 @@ mod tests {
                             info.clone(),
                         ))],
                     }],
-                },
+                }),
             },
             Segment {
                 prefix: Bytes::from_static(b"b/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4227,7 +4228,7 @@ mod tests {
                             ))],
                         },
                     ],
-                },
+                }),
             },
         ];
         let state = CompactorStateView {
@@ -4269,7 +4270,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"x")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 5,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(50, 0)),
@@ -4282,7 +4283,7 @@ mod tests {
             // L0-only: still skipped because L0 SSTs are ineligible inputs.
             Segment {
                 prefix: Bytes::from_static(b"l0only/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
@@ -4291,17 +4292,17 @@ mod tests {
                         info,
                     ))]),
                     compacted: vec![],
-                },
+                }),
             },
             // Fully empty tree: also skipped.
             Segment {
                 prefix: Bytes::from_static(b"none/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
                     compacted: vec![],
-                },
+                }),
             },
         ];
         let state = CompactorStateView {
@@ -5318,18 +5319,18 @@ mod tests {
         // Root tree holds SR(7) — the global max. The segment-targeted spec
         // below proposes dst=3, which is above the segment's local max (0)
         // but below the global max.
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 7,
             sst_views: Vec::new(),
         }];
         core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_view)]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
@@ -5424,7 +5425,7 @@ mod tests {
         let l0_b = Ulid::from_parts(2, 0);
         let make_segment = |prefix: Bytes, l0_view_id: Ulid| Segment {
             prefix,
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
@@ -5433,7 +5434,7 @@ mod tests {
                     SsTableInfo::default(),
                 ))]),
                 compacted: Vec::new(),
-            },
+            }),
         };
 
         // Seed the compactor's local state with the two segments. We never
@@ -5514,19 +5515,19 @@ mod tests {
             .manifest_mut_for_test()
             .value
             .core;
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 99,
             sst_views: Vec::new(),
         }];
         let prefix = Bytes::from_static(b"seg/");
         core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         // Segment-targeted spec lists SR(99) as a source — but SR(99) lives in
@@ -5554,7 +5555,7 @@ mod tests {
             .core;
         // Place SR(7) in the root tree. The segment-targeted spec below uses 7 as
         // its destination but does not list it among its sources.
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 7,
             sst_views: Vec::new(),
         }];
@@ -5563,7 +5564,7 @@ mod tests {
         let prefix = Bytes::from_static(b"seg/");
         core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -5571,7 +5572,7 @@ mod tests {
                     id: 99,
                     sst_views: Vec::new(),
                 }],
-            },
+            }),
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
@@ -5620,12 +5621,12 @@ mod tests {
             .core
             .segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_3), make_view(l0_2), make_view(l0_1)]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let spec = CompactionSpec::drain_segment(

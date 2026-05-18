@@ -622,12 +622,14 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.tree.l0.clear();
+        Arc::make_mut(&mut dirty.value.core.tree).l0.clear();
         for (first, last) in ranges {
-            dirty.value.core.tree.l0.push_back(SsTableView::new(
-                ulid::Ulid::new(),
-                seeded_l0_handle_with_bounds(first, Some(last)),
-            ));
+            Arc::make_mut(&mut dirty.value.core.tree)
+                .l0
+                .push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle_with_bounds(first, Some(last)),
+                ));
         }
         stored_manifest.update(dirty).await.unwrap();
     }
@@ -635,14 +637,11 @@ mod tests {
     fn set_local_l0_disjoint(harness: &TestHarness, ranges: &[(&[u8], &[u8])]) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.tree.l0.clear();
+            Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                .l0
+                .clear();
             for (first, last) in ranges {
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -659,12 +658,14 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.tree.l0.clear();
+        Arc::make_mut(&mut dirty.value.core.tree).l0.clear();
         for idx in 0..l0_len {
-            dirty.value.core.tree.l0.push_back(SsTableView::new(
-                ulid::Ulid::new(),
-                seeded_l0_handle(format!("seed-{idx}").as_bytes()),
-            ));
+            Arc::make_mut(&mut dirty.value.core.tree)
+                .l0
+                .push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle(format!("seed-{idx}").as_bytes()),
+                ));
         }
         stored_manifest.update(dirty).await.unwrap();
     }
@@ -682,12 +683,12 @@ mod tests {
             }
             modifier.state.manifest.value.core.segments = vec![Segment {
                 prefix: Bytes::copy_from_slice(prefix),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0,
                     compacted: vec![],
-                },
+                }),
             }];
         });
     }
@@ -695,14 +696,11 @@ mod tests {
     fn set_local_l0_len(harness: &TestHarness, l0_len: usize) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.tree.l0.clear();
+            Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                .l0
+                .clear();
             for idx in 0..l0_len {
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -997,7 +995,11 @@ mod tests {
             // Clear both local and remote L0 so the flusher can make progress.
             {
                 let mut guard = flusher.inner.state.write();
-                guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+                guard.modify(|modifier| {
+                    Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                        .l0
+                        .clear()
+                });
             }
             set_remote_l0_len(&path, object_store, 0).await;
 
@@ -1163,15 +1165,15 @@ mod tests {
                 modifier.state.manifest.value.core.segments = vec![
                     Segment {
                         prefix: Bytes::from_static(b"aaa"),
-                        tree: LsmTreeState::default(),
+                        tree: Arc::new(LsmTreeState::default()),
                     },
                     Segment {
                         prefix: Bytes::from_static(b"bbb"),
-                        tree: LsmTreeState::default(),
+                        tree: Arc::new(LsmTreeState::default()),
                     },
                     Segment {
                         prefix: Bytes::from_static(b"ccc"),
-                        tree: LsmTreeState::default(),
+                        tree: Arc::new(LsmTreeState::default()),
                     },
                 ];
             });
@@ -1223,7 +1225,11 @@ mod tests {
         // Drain L0 locally and remotely; flush should now progress.
         {
             let mut guard = flusher.inner.state.write();
-            guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+            guard.modify(|modifier| {
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .clear()
+            });
         }
         set_remote_l0_disjoint(&path, object_store, &[]).await;
 

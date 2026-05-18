@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
+use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
@@ -320,13 +321,13 @@ impl FlatBufferManifestCodec {
             .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 // In V1, view IDs are SST IDs, so both fields are the same.
                 last_compacted_l0_sst_view_id: l0_last_compacted,
                 last_compacted_l0_sst_id: l0_last_compacted,
                 l0,
                 compacted,
-            },
+            }),
             // Segmentation is V2-only. V1 manifests are always unsegmented.
             segments: vec![],
             segment_extractor_name: None,
@@ -440,7 +441,7 @@ impl FlatBufferManifestCodec {
             .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            tree,
+            tree: Arc::new(tree),
             segments,
             segment_extractor_name,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
@@ -492,7 +493,10 @@ impl FlatBufferManifestCodec {
             fb_segment.compacted(),
             sst_lookup,
         )?;
-        Ok(Segment { prefix, tree })
+        Ok(Segment {
+            prefix,
+            tree: Arc::new(tree),
+        })
     }
 
     /// Decode the V2 wire shape shared by the unsegmented tree (`ManifestV2`)
@@ -1429,6 +1433,7 @@ mod tests {
     use crate::{checkpoint, error::SlateDBError};
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
+    use std::sync::Arc;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
@@ -1524,11 +1529,11 @@ mod tests {
 
         // given:
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.tree.l0 = VecDeque::from(vec![
+        Arc::make_mut(&mut manifest.core.tree).l0 = VecDeque::from(vec![
             new_sst_handle(b"a", None),
             new_sst_handle(b"a", Some(BytesRange::from_ref("c"..="d"))),
         ]);
-        manifest.core.tree.compacted = vec![
+        Arc::make_mut(&mut manifest.core.tree).compacted = vec![
             SortedRun {
                 id: 0,
                 sst_views: vec![
@@ -1714,7 +1719,7 @@ mod tests {
         manifest.core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -1722,11 +1727,11 @@ mod tests {
                         id: 0,
                         sst_views: vec![new_sst_view(), new_sst_view()],
                     }],
-                },
+                }),
             },
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![new_sst_view(), new_sst_view()]),
@@ -1734,7 +1739,7 @@ mod tests {
                         id: 1,
                         sst_views: vec![new_sst_view()],
                     }],
-                },
+                }),
             },
         ];
 
@@ -2051,15 +2056,16 @@ mod tests {
     fn test_should_encode_decode_manifest_sst_with_version_set() {
         // given: a manifest with one L0 SST and one sorted run SST
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.tree.l0 = VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(ulid::Ulid::new()),
-            SST_FORMAT_VERSION_LATEST,
-            SsTableInfo {
-                first_entry: Some(Bytes::from_static(b"l0key")),
-                ..Default::default()
-            },
-        ))]);
-        manifest.core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut manifest.core.tree).l0 =
+            VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid::Ulid::new()),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo {
+                    first_entry: Some(Bytes::from_static(b"l0key")),
+                    ..Default::default()
+                },
+            ))]);
+        Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),
@@ -2489,11 +2495,11 @@ mod tests {
         }
 
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.tree.l0 = VecDeque::from(vec![
+        Arc::make_mut(&mut manifest.core.tree).l0 = VecDeque::from(vec![
             new_view(b"a", None),
             new_view(b"b", Some(BytesRange::from_ref("c"..="d"))),
         ]);
-        manifest.core.tree.compacted = vec![
+        Arc::make_mut(&mut manifest.core.tree).compacted = vec![
             SortedRun {
                 id: 1,
                 sst_views: vec![
@@ -2509,8 +2515,9 @@ mod tests {
                 ],
             },
         ];
-        manifest.core.tree.last_compacted_l0_sst_view_id = Some(manifest.core.tree.l0[0].id);
-        manifest.core.tree.last_compacted_l0_sst_id =
+        Arc::make_mut(&mut manifest.core.tree).last_compacted_l0_sst_view_id =
+            Some(manifest.core.tree.l0[0].id);
+        Arc::make_mut(&mut manifest.core.tree).last_compacted_l0_sst_id =
             Some(manifest.core.tree.l0[0].sst.id.unwrap_compacted_id());
         manifest.writer_epoch = 42;
         manifest.compactor_epoch = 7;
@@ -2558,15 +2565,16 @@ mod tests {
         // When view IDs equal SST IDs (identity views), V1 and V2 should decode
         // to the same in-memory Manifest.
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.tree.l0 = VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(ulid::Ulid::new()),
-            SST_FORMAT_VERSION_LATEST,
-            SsTableInfo {
-                first_entry: Some(Bytes::from_static(b"l0key")),
-                ..Default::default()
-            },
-        ))]);
-        manifest.core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut manifest.core.tree).l0 =
+            VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid::Ulid::new()),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo {
+                    first_entry: Some(Bytes::from_static(b"l0key")),
+                    ..Default::default()
+                },
+            ))]);
+        Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),

@@ -4,7 +4,7 @@ use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
 use crate::rand::DbRand;
 use bytes::{Bytes, BytesMut};
-use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use futures::{stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attributes, GetRange, GetResultPayload, PutMultipartOptions, PutResult};
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
@@ -310,17 +310,17 @@ impl CachedObjectStore {
         // read parts, and concatenate them into a single stream. please note that
         // some of these part may not be cached, we'll still fallback to the object
         // store to get the missing parts.
-        let futures = parts
-            .into_iter()
-            .map(|(part_id, range_in_part)| self.read_part(location, part_id, range_in_part))
-            .collect::<Vec<_>>();
-        let result_stream = stream::iter(futures).then(|fut| fut).boxed();
+        let store = self.clone();
+        let location = location.clone();
+        let result_stream = stream::iter(parts).then(move |(part_id, range_in_part)| {
+            store.read_part(&location, part_id, range_in_part)
+        });
 
         Ok(GetResult {
             meta,
             range,
             attributes,
-            payload: GetResultPayload::Stream(result_stream),
+            payload: GetResultPayload::Stream(Box::pin(result_stream)),
         })
     }
 
@@ -523,10 +523,10 @@ impl CachedObjectStore {
         location: &Path,
         part_id: PartID,
         range_in_part: Range<usize>,
-    ) -> BoxFuture<'static, object_store::Result<Bytes>> {
+    ) -> impl std::future::Future<Output = object_store::Result<Bytes>> + 'static {
         let this = self.clone();
         let location = location.clone();
-        Box::pin(async move {
+        async move {
             this.stats.object_store_cache_part_access.increment(1);
 
             // Try local cache first.
@@ -594,7 +594,7 @@ impl CachedObjectStore {
                 .await?;
 
             Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
-        })
+        }
     }
 
     // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
