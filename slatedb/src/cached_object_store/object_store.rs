@@ -1689,8 +1689,8 @@ mod tests {
             handle.await.unwrap().unwrap();
         }
 
-        // SingleFlight should collapse them into a single actual GET request.
-        let count = get_request_count(&recorder, "get");
+        // SingleFlight should collapse them into a single actual HEAD request.
+        let count = get_request_count(&recorder, "head");
         assert_eq!(
             count, 1,
             "expected 1 actual object store request, got {count}"
@@ -1742,7 +1742,7 @@ mod tests {
 
         // The prefetch SingleFlight should collapse all prefetch GETs into one.
         // Part reads may also be deduplicated. Total GET count should be much less than 10.
-        let count = get_request_count(&recorder, "get");
+        let count = get_request_count(&recorder, "get_range");
         assert!(
             count <= 2,
             "expected at most 2 actual object store requests (prefetch + maybe 1 part), got {count}"
@@ -1789,7 +1789,7 @@ mod tests {
         }
 
         // Each distinct path should result in its own request.
-        let count = get_request_count(&recorder, "get");
+        let count = get_request_count(&recorder, "head");
         assert_eq!(
             count, 5,
             "expected 5 actual object store requests (one per path), got {count}"
@@ -1845,7 +1845,7 @@ mod tests {
         }
 
         // Each distinct range key should trigger its own prefetch request.
-        let count = get_request_count(&recorder, "get");
+        let count = get_request_count(&recorder, "get_range");
         assert!(
             count >= 3,
             "expected at least 3 object store requests (one per distinct range), got {count}"
