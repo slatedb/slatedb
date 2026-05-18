@@ -139,19 +139,16 @@ struct ByteBudgetSemaphore {
 **Why not `tokio::sync::Semaphore`?** Tokio's semaphore enforces a hard capacity
 limit — once all permits are issued, acquisitions block until permits are
 returned. The `WriteBufferManager` intentionally uses soft capacity tracking:
-`force_acquire` can push `allocated_bytes` above `capacity` (e.g. during WAL
-replay), and normal `acquire` calls allow a single writer to overshoot capacity
-rather than requiring the reservation to fit within remaining headroom. A custom
+normal `acquire` calls allow a single writer to overshoot capacity rather than
+requiring the reservation to fit within remaining headroom. A custom
 `ByteBudgetSemaphore` gives us full control over this soft-cap behavior, which
 `tokio::sync::Semaphore` does not support.
 
-The semaphore supports two acquisition modes:
+The semaphore supports one acquisition mode:
 
 - **`acquire(num_bytes)`** — async, spins on a CAS loop. When `allocated_bytes
   >= capacity`, the caller awaits a `Notify` signal that fires when any permit
   is released. On success, `allocated_bytes` is incremented by `num_bytes`.
-- **`force_acquire(num_bytes)`** — non-blocking `fetch_add`. Can push
-  `allocated_bytes` above `capacity`. Used only for WAL replay (see below).
 
 Release subtracts `num_bytes` from `allocated_bytes` via CAS and notifies
 waiters if the budget drops below capacity.
@@ -173,7 +170,6 @@ Methods:
 | Method | Blocking | Description |
 |--------|----------|-------------|
 | `acquire(num_bytes)` | async | Reserves bytes, blocks until budget available |
-| `force_acquire(num_bytes)` | no | Unconditionally reserves bytes (for replay) |
 | `available()` | no | Returns unreserved bytes remaining |
 
 #### WriteBufferPermit
@@ -247,14 +243,9 @@ fn add_write_permit(&self, permit: Arc<WriteBufferPermit>) {
 #### WAL Replay
 
 During WAL replay, the replay loop must make forward progress to populate the
-memtable state. Blocking on budget acquisition would deadlock because no
-flushes are running yet to free the budget. The solution:
-
-- Each replayed memtable calls `force_acquire(entries_size_in_bytes)` which is
-  non-blocking and can push `allocated_bytes` above `capacity`.
-- The resulting permit is attached to the replayed memtable.
-- After replay, `maybe_apply_backpressure` runs normally and will stall new
-  writes until flushes drain any overage.
+memtable state. The budget is acquired for each replayed memtable and the
+resulting permit is attached to it. After replay, `maybe_apply_backpressure`
+runs normally and will stall new writes until flushes drain any overage.
 
 #### Backpressure Enhancement
 
@@ -459,9 +450,8 @@ Tokio's semaphore is well-tested and supports async acquisition. However, it
 enforces a hard capacity limit: once all permits are issued, further
 acquisitions block until permits are returned, and there is no way to
 over-allocate. The `WriteBufferManager` relies on soft capacity tracking —
-`force_acquire` intentionally pushes allocations above the budget (e.g. during
-WAL replay), and normal `acquire` lets a single writer's reservation overshoot
-rather than requiring it to fit within remaining headroom. A custom
+normal `acquire` lets a single writer's reservation overshoot rather than
+requiring it to fit within remaining headroom. A custom
 `ByteBudgetSemaphore` gives us full control over this soft-cap behavior, which
 `tokio::sync::Semaphore` does not support.
 
