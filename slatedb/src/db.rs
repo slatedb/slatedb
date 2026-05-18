@@ -311,7 +311,7 @@ impl DbInner {
                 Err(err) => return Err(err),
             };
 
-            // Refresh validates tha we own the latest epoch still.
+            // Refresh validates that we own the latest epoch still.
             manifest.refresh().await?;
             let remote_dirty = manifest.prepare_dirty()?;
             let replay_after_wal_id = remote_dirty.value.core.replay_after_wal_id;
@@ -322,17 +322,26 @@ impl DbInner {
             };
             self.status_manager.report_manifest(dirty_manifest.into());
 
-            // Our fence write might be behind replay_after_wal_id since we're racing with
-            // older writers that can advance replay_after_wal_id by flushing data to L0.
-            // We need to make sure the fence write falls above this barrier so it's visible
-            // to all other active writers.
-            if wrote_fence && empty_wal_id > replay_after_wal_id {
-                return Ok(());
+            if wrote_fence {
+                // Our fence write might be behind replay_after_wal_id since we're racing with
+                // older writers that can advance replay_after_wal_id by flushing data to L0.
+                // We need to make sure the fence write falls above this barrier so it's visible
+                // to all other active writers.
+                if empty_wal_id > replay_after_wal_id {
+                    return Ok(());
+                } else {
+                    // If we're behind the barrier, reset to the next WAL slot.
+                    empty_wal_id = self
+                        .table_store
+                        .next_wal_sst_id(replay_after_wal_id)
+                        .await?;
+                }
+            } else {
+                // We're (probably) ahead of the barrier, but we hit a race with another writer.
+                // Instead of paying for the LIST (API cost and latency), just try the next ID.
+                // This is an optimization: we could always advance with next_wal_sst_id.
+                empty_wal_id += 1;
             }
-
-            // If the fence failed or was behind the replay_after_wal_id barrier, we need to
-            // try again with a higher empty WAL ID.
-            empty_wal_id = (empty_wal_id + 1).max(replay_after_wal_id + 1);
         }
     }
 
