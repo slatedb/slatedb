@@ -698,13 +698,6 @@ impl ObjectStore for CachedObjectStore {
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
         if options.head {
-            // object_store 0.13 moved head() into ObjectStoreExt, which routes
-            // through get_opts(head: true). Translate that back to cached_head
-            // so HEAD calls keep populating the cache and deduping concurrent
-            // requests like they did before the trait split. The synthesized
-            // GetResult mirrors what DeterministicLocalFilesystem returns for
-            // the same case: empty body stream and an empty range, since
-            // ObjectStoreExt::head only consumes the resulting meta.
             let meta = self.cached_head(location).await?;
             return Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::empty().boxed()),
