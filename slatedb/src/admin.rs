@@ -784,11 +784,6 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
         .collect::<HashMap<String, String>>();
 
     let op = Operator::via_iter(&scheme_value, iter).map_err(|error| {
-        // opendal 0.56 no longer exposes a Scheme enum, so the up-front
-        // allow-list check has moved into Operator::via_iter. Unknown or
-        // disabled schemes surface as ErrorKind::Unsupported; remap those to
-        // the same InvalidEnvironmentVariable error the typed validation used
-        // to produce so callers can keep relying on ErrorKind::Invalid.
         if error.kind() == opendal::ErrorKind::Unsupported {
             SlateDBError::InvalidEnvironmentVariable {
                 key: "OPENDAL_SCHEME".to_string(),
