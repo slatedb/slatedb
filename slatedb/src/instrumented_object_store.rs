@@ -148,14 +148,16 @@ impl ObjectStore for InstrumentedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        // object_store 0.13 routes head() and get_range() through get_opts
-        // via ObjectStoreExt, so the dedicated head / get_range metrics no
-        // longer receive direct traffic. Record everything under `get` to
-        // keep the request count and latency histogram populated for any
-        // get-style call.
+        let metric = if options.head {
+            &self.stats.head
+        } else if options.range.is_some() {
+            &self.stats.get_range
+        } else {
+            &self.stats.get
+        };
         let start = Instant::now();
         let result = self.inner.get_opts(location, options).await;
-        self.stats.get.record(start.elapsed(), result.is_ok());
+        metric.record(start.elapsed(), result.is_ok());
         result
     }
 
@@ -296,14 +298,8 @@ pub mod stats {
     /// object store API (e.g. `get`, `put`, `delete`).
     pub(crate) struct ObjectStoreStats {
         pub(crate) get: RequestMetrics,
-        // get_range and head are still registered as metric series so
-        // dashboards referencing them keep resolving, but object_store 0.13
-        // routes both through get_opts via ObjectStoreExt, so they no longer
-        // receive direct traffic from InstrumentedObjectStore.
-        #[allow(dead_code)]
         pub(crate) get_range: RequestMetrics,
         pub(crate) get_ranges: RequestMetrics,
-        #[allow(dead_code)]
         pub(crate) head: RequestMetrics,
         pub(crate) list: Arc<dyn CounterFn>,
         pub(crate) list_with_offset: Arc<dyn CounterFn>,
@@ -612,9 +608,6 @@ mod tests {
 
         // then:
         assert!(err.is_err());
-        // object_store 0.13 routes head() through get_opts via
-        // ObjectStoreExt, so the head call is observed under the `get` api
-        // series rather than the `head` series.
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
@@ -623,7 +616,7 @@ mod tests {
                     ObjectStoreComponent::Db,
                     ObjectStoreType::Main,
                     "get",
-                    "get"
+                    "head"
                 )
             ),
             Some(1)
@@ -636,7 +629,7 @@ mod tests {
                     ObjectStoreComponent::Db,
                     ObjectStoreType::Main,
                     "get",
-                    "get"
+                    "head"
                 )
             ),
             Some(1)
