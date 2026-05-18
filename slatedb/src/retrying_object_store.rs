@@ -11,9 +11,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
-    Attribute, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-    ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    RenameOptions,
+    Attribute, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
+    ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload,
+    PutResult, RenameOptions,
 };
 
 use crate::rand::DbRand;
@@ -217,9 +217,30 @@ impl ObjectStore for RetryingObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        // For range reads, drain the body inside the retry closure so a
+        // transient mid-stream error retries the entire range. Pre-0.13
+        // SlateDB explicitly overrode `ObjectStore::get_range`, which
+        // returned `Bytes` and therefore retried the whole read; in 0.13
+        // `get_range` lives on `ObjectStoreExt` and reads the body after
+        // `get_opts` returns, so without this buffering the body bytes
+        // would fall outside the retry loop.
+        let buffer_body = options.range.is_some();
         (|| async {
             // Options and location must be owned per-attempt.
-            self.inner.get_opts(location, options.clone()).await
+            let result = self.inner.get_opts(location, options.clone()).await?;
+            if !buffer_body {
+                return Ok(result);
+            }
+            let meta = result.meta.clone();
+            let range = result.range.clone();
+            let attributes = result.attributes.clone();
+            let bytes = result.bytes().await?;
+            Ok(GetResult {
+                payload: GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed()),
+                meta,
+                range,
+                attributes,
+            })
         })
         .retry(Self::retry_builder())
         .sleep(self.sleeper())
