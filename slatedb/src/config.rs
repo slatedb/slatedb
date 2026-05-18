@@ -977,7 +977,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DbReaderOptions {
     /// How frequently to poll for new manifest files and WAL data. Refreshing the manifest
     /// file allows readers to detect newly compacted data. The reader will also look for

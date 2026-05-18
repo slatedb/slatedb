@@ -288,6 +288,11 @@ impl SlateDBError {
             other => other,
         }
     }
+
+    /// Returns true if this error means a sequenced write should refresh and retry.
+    pub(crate) fn is_sequenced_write_conflict(&self) -> bool {
+        matches!(self, Self::TransactionalObjectVersionExists)
+    }
 }
 
 impl From<TransactionalObjectError> for SlateDBError {

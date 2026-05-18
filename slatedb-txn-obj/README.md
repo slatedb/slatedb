@@ -129,7 +129,7 @@ async fn fenced(
 
 ### Retrying on conflicts
 
-`maybe_apply_update` retries on version conflicts by refreshing and re-applying the mutation.
+`maybe_apply_update` retries on write conflicts by refreshing and re-applying the mutation.
 
 ```rust
 txn.maybe_apply_update(|current| {

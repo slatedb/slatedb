@@ -94,6 +94,7 @@ impl RetryingObjectStore {
             err,
             object_store::Error::AlreadyExists { .. }
                 | object_store::Error::Precondition { .. }
+                | object_store::Error::NotModified { .. }
                 | object_store::Error::NotFound { .. }
                 | object_store::Error::NotImplemented
                 | object_store::Error::NotSupported { .. }
@@ -522,7 +523,7 @@ mod tests {
     use futures::TryStreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
+    use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::MockSystemClock;
     use std::sync::Arc;
@@ -677,6 +678,35 @@ mod tests {
             e => panic!("unexpected error: {e:?}"),
         }
         assert_eq!(failing.put_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_opts_does_not_retry_on_not_modified() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let path = Path::from("/data/obj");
+
+        retrying
+            .put(&path, PutPayload::from_bytes(Bytes::from_static(b"data")))
+            .await
+            .unwrap();
+        let e_tag = retrying.head(&path).await.unwrap().e_tag.unwrap();
+
+        let err = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    if_none_match: Some(e_tag),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect_err("matching if-none-match should surface NotModified");
+
+        match err {
+            object_store::Error::NotModified { .. } => {}
+            e => panic!("unexpected error: {e:?}"),
+        }
     }
 
     #[tokio::test]

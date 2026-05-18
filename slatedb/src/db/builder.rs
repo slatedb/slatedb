@@ -490,11 +490,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup the manifest store and load latest manifest
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
-            maybe_cached_main_object_store.clone(),
+            retrying_main_object_store.clone(),
         ));
         let compactions_store = Arc::new(CompactionsStore::new(
             &path,
-            maybe_cached_main_object_store.clone(),
+            retrying_main_object_store.clone(),
         ));
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
@@ -1430,10 +1430,11 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
         let object_store: Arc<dyn ObjectStore> = match &maybe_cached {
             Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
-            None => retrying_object_store,
+            None => retrying_object_store.clone(),
         };
 
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        // Validate WAL object store configuration.
+        let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store.clone()));
         let latest_manifest =
             StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
         if let Some(latest_manifest) = &latest_manifest {
@@ -1453,6 +1454,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
             object_store,
+            manifest_object_store: retrying_object_store,
             wal_object_store: retrying_wal_object_store,
             block_cache: wrapped_cache,
             block_transformer: self.block_transformer.clone(),
@@ -1689,11 +1691,17 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::Settings;
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{
         lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder,
     };
@@ -1862,6 +1870,51 @@ mod tests {
             ),
             Some(0)
         );
+
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_object_store_cache_does_not_cache_metadata_store_reads() {
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("test_object_store_cache_does_not_cache_metadata_store_reads");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .expect("failed to seed manifest");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        StoredCompactions::create(compactions_store, 0)
+            .await
+            .expect("failed to seed compactions");
+
+        let cache_dir = tempfile::Builder::new()
+            .prefix("metadata_store_cache_test_")
+            .tempdir()
+            .expect("failed to create cache dir");
+        let cache_path = cache_dir.path().to_path_buf();
+        let mut settings = Settings {
+            garbage_collector_options: None,
+            ..Settings::default()
+        };
+        settings.object_store_cache_options.root_folder = Some(cache_path.clone());
+        settings.object_store_cache_options.part_size_bytes = 1024;
+
+        let db = crate::Db::builder(path.clone(), object_store)
+            .with_settings(settings)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .expect("failed to build db");
+
+        let cached_db_path = cache_path.join(path.as_ref());
+        assert!(!cached_db_path.join("manifest").exists());
+        assert!(!cached_db_path.join("compactions").exists());
+        assert!(!cached_db_path.join("gc").exists());
 
         db.close().await.expect("failed to close db");
     }

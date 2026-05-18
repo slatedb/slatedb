@@ -201,14 +201,19 @@ pub(crate) struct CompactionsStore {
 
 impl CompactionsStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Compactions>::new(
-            root_path,
-            object_store,
-            "compactions",
-            "compactions",
-            Box::new(FlatBufferCompactionsCodec {}),
-        ));
+        let inner: Arc<dyn SequencedStorageProtocol<Compactions>> =
+            Arc::new(ObjectStoreSequencedStorageProtocol::<Compactions>::new(
+                root_path,
+                object_store,
+                "compactions",
+                "compactions",
+                Box::new(FlatBufferCompactionsCodec {}),
+            ));
         Self { inner }
+    }
+
+    pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
+        Ok(self.inner.advance(MonotonicId::new(id)).await?)
     }
 
     /// Delete a compactions file from the object store.
@@ -266,7 +271,7 @@ impl CompactionsStore {
         &self,
         id: u64,
     ) -> Result<Option<Compactions>, SlateDBError> {
-        Ok(self.inner.try_read(MonotonicId::new(id)).await?)
+        Ok(self.inner.try_read_unchecked(MonotonicId::new(id)).await?)
     }
 
     #[allow(dead_code)]
@@ -288,6 +293,8 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_txn_obj::object_store::ObjectStoreBoundaryObject;
+    use slatedb_txn_obj::{BoundaryObject, MonotonicId};
     use std::time::Duration;
     use ulid::Ulid;
 
@@ -317,6 +324,26 @@ mod tests {
         let version = store.read_latest_compactions().await.unwrap().id;
 
         assert_eq!(version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_write_at_or_behind_boundary() {
+        let object_store = Arc::new(InMemory::new());
+        let store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            object_store.clone(),
+        ));
+        let mut sc = StoredCompactions::create(store.clone(), 0).await.unwrap();
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from(ROOT), object_store, "compactions");
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+
+        let result = sc.update(sc.prepare_dirty().unwrap()).await;
+
+        assert!(matches!(
+            result,
+            Err(SlateDBError::TransactionalObjectVersionExists)
+        ));
     }
 
     #[tokio::test]
@@ -457,6 +484,7 @@ mod tests {
         let compactions = store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 2);
 
+        store.advance_boundary(1).await.unwrap();
         store.delete_compactions(1).await.unwrap();
         let compactions = store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 1);

@@ -463,14 +463,19 @@ pub(crate) struct ManifestStore {
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
-            root_path,
-            object_store,
-            "manifest",
-            "manifest",
-            Box::new(FlatBufferManifestCodec {}),
-        ));
+        let inner: Arc<dyn SequencedStorageProtocol<Manifest>> =
+            Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
+                root_path,
+                object_store,
+                "manifest",
+                "manifest",
+                Box::new(FlatBufferManifestCodec {}),
+            ));
         Self { inner }
+    }
+
+    pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
+        Ok(self.inner.advance(MonotonicId::new(id)).await?)
     }
 
     /// Delete a manifest from the object store.
@@ -565,7 +570,7 @@ impl ManifestStore {
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        Ok(self.inner.try_read(MonotonicId::new(id)).await?)
+        Ok(self.inner.try_read_unchecked(MonotonicId::new(id)).await?)
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
@@ -600,7 +605,8 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_txn_obj::TransactionalObject;
+    use slatedb_txn_obj::object_store::ObjectStoreBoundaryObject;
+    use slatedb_txn_obj::{BoundaryObject, MonotonicId, TransactionalObject};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -646,6 +652,28 @@ mod tests {
         let version = ms.read_latest_manifest().await.unwrap().id;
 
         assert_eq!(version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_write_at_or_behind_boundary() {
+        let object_store = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), object_store.clone()));
+        let mut sm = StoredManifest::create_new_db(
+            ms.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let boundary = ObjectStoreBoundaryObject::new(&Path::from(ROOT), object_store, "manifest");
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+
+        let result = sm.update(sm.prepare_dirty().unwrap()).await;
+
+        assert!(matches!(
+            result,
+            Err(SlateDBError::TransactionalObjectVersionExists)
+        ));
     }
 
     #[tokio::test]
@@ -996,6 +1024,7 @@ mod tests {
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
 
+        ms.advance_boundary(1).await.unwrap();
         ms.delete_manifest(1).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
