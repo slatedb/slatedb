@@ -96,7 +96,7 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>>;
 
-    /// Delete this cache entry from the associated cache on the best effort
+    /// Deletes this cache entry from the associated cache on the best effort
     /// basis. If some error happens during the deletion, it's logged instead
     /// of being reported to the caller.
     async fn delete(&self);

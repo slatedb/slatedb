@@ -521,12 +521,7 @@ impl LocalCacheEntry for FsCacheEntry {
                 .track_entry_accessed(path, 0, EntryAccess::Delete)
                 .await;
         } else {
-            let result = tokio::fs::remove_dir_all(path).await;
-            if let Err(e) = result {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    error!("failed to delete cache entry {}: {e:?}", self.location);
-                }
-            }
+            delete_cache_entry(path, self.file_handle_cache.clone()).await;
         }
     }
 }
@@ -968,67 +963,10 @@ impl FsCacheEvictorInner {
     }
 
     async fn delete_entry(&self, path: std::path::PathBuf) {
-        let file_handle_cache = self.file_handle_cache.clone();
-        // Run deletion as a single blocking task rather than jumping back and
-        // forth to the same blocking thread pool tokio uses under the hood.
-        #[allow(clippy::disallowed_methods)]
-        let result = tokio::task::spawn_blocking(move || {
-            let result = std::fs::read_dir(&path);
-            match result {
-                Ok(read_dir) => {
-                    let mut deleted_entries = Vec::with_capacity(32);
-
-                    // Delete the head and the parts.
-                    for entry in read_dir {
-                        match entry {
-                            Ok(entry) => {
-                                let entry_path = entry.path();
-                                let result = std::fs::remove_file(&entry_path);
-                                match result {
-                                    Ok(()) => {
-                                        file_handle_cache.invalidate(&entry_path);
-                                        deleted_entries.push(entry_path);
-                                    }
-                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                        file_handle_cache.invalidate(&entry_path);
-                                        deleted_entries.push(entry_path);
-                                    }
-                                    Err(e) => {
-                                        error!("evictor failed to delete {entry_path:?}: {e:?}");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("evictor failed to iterate read_dir {path:?}: {e:?}");
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Delete the entry directory itself.
-                    let result = std::fs::remove_dir(&path);
-                    if let Err(e) = result {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            error!("evictor failed to delete {path:?}: {e:?}");
-                        }
-                    }
-
-                    deleted_entries
-                }
-                Err(e) => {
-                    error!("evictor failed to read_dir {path:?}: {e:?}");
-                    vec![]
-                }
-            }
-        })
-        .await;
-        let deleted_entries = match result {
-            Ok(deleted_entries) => deleted_entries,
-            Err(e) => {
-                error!("evictor failed to join deletion task: {e:?}");
-                return;
-            }
-        };
+        let deleted_entries = delete_cache_entry(path, self.file_handle_cache.clone()).await;
+        if deleted_entries.is_empty() {
+            return;
+        }
 
         let _track_guard = self.track_lock.lock().await;
 
@@ -1158,6 +1096,70 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
         store: "cached_object_store",
         source: Box::new(err),
     }
+}
+
+async fn delete_cache_entry(
+    path: std::path::PathBuf,
+    file_handle_cache: FileHandleCache,
+) -> Vec<std::path::PathBuf> {
+    // Run deletion as a single blocking task rather than jumping back and
+    // forth to the same blocking thread pool tokio uses under the hood.
+    #[allow(clippy::disallowed_methods)]
+    let result = tokio::task::spawn_blocking(move || {
+        let result = std::fs::read_dir(&path);
+        match result {
+            Ok(read_dir) => {
+                let mut deleted_entries = Vec::with_capacity(32);
+
+                // Delete the head and the parts.
+                for entry in read_dir {
+                    match entry {
+                        Ok(entry) => {
+                            let entry_path = entry.path();
+                            let result = std::fs::remove_file(&entry_path);
+                            match result {
+                                Ok(()) => {
+                                    file_handle_cache.invalidate(&entry_path);
+                                    deleted_entries.push(entry_path);
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    file_handle_cache.invalidate(&entry_path);
+                                    deleted_entries.push(entry_path);
+                                }
+                                Err(e) => {
+                                    file_handle_cache.invalidate(&entry_path);
+                                    error!("FS cache failed to delete {entry_path:?}: {e:?}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("FS cache failed to iterate read_dir {path:?}: {e:?}");
+                            continue;
+                        }
+                    }
+                }
+
+                // Delete the entry directory itself.
+                let result = std::fs::remove_dir(&path);
+                if let Err(e) = result {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        error!("FS cache failed to delete {path:?}: {e:?}");
+                    }
+                }
+
+                deleted_entries
+            }
+            Err(e) => {
+                error!("FS cache failed to read_dir {path:?}: {e:?}");
+                vec![]
+            }
+        }
+    })
+    .await;
+    result.unwrap_or_else(|e| {
+        error!("FS cache failed to join deletion task: {e:?}");
+        vec![]
+    })
 }
 
 #[cfg(test)]
