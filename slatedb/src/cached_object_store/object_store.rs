@@ -2020,17 +2020,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::no_evictor(false)]
-    #[case::with_evictor(true)]
+    #[case::no_evictor_cached(false, true)]
+    #[case::with_evictor_cached(true, true)]
+    #[case::no_evictor_uncached(false, false)]
+    #[case::with_evictor_uncached(true, false)]
     #[tokio::test]
-    async fn test_delete(#[case] evictor: bool) {
+    async fn test_delete(#[case] evictor: bool, #[case] cached: bool) {
         const PART_SIZE: usize = 1024;
 
         let location1 = Path::from("/data/testfile1");
         let location2 = Path::from("/data/testfile2");
 
         let test_cache_folder = new_test_cache_folder();
-        let payload = gen_rand_bytes(1024 * 3);
+        let payload = gen_rand_bytes(PART_SIZE * 3);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
@@ -2058,15 +2060,35 @@ mod tests {
             CachedObjectStore::new(object_store, cache_storage, PART_SIZE, false, stats).unwrap();
         cached_store.start_evictor().await;
 
-        cached_store.get(&location1).await.unwrap();
-        cached_store.get(&location2).await.unwrap();
+        if cached {
+            cached_store
+                .get(&location1)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+        }
+        cached_store
+            .get(&location2)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
 
         let cache_location1 = cached_store.cache_location_for(&location1).unwrap();
         let entry1 = cached_store
             .cache_storage
             .entry(&cache_location1, PART_SIZE);
         let parts1 = entry1.cached_parts().await.unwrap();
-        assert_eq!(parts1.len(), 3, "{parts1:?}");
+        if cached {
+            assert_eq!(parts1.len(), 3, "{parts1:?}");
+            assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 6);
+        } else {
+            assert_eq!(parts1.len(), 0, "{parts1:?}");
+            assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 3);
+        }
 
         let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
         let entry2 = cached_store
@@ -2087,6 +2109,7 @@ mod tests {
             .entry(&cache_location1, PART_SIZE);
         let parts1 = entry1.cached_parts().await.unwrap();
         assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 3);
 
         let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
         let entry2 = cached_store
@@ -2094,5 +2117,14 @@ mod tests {
             .entry(&cache_location2, PART_SIZE);
         let parts2 = entry2.cached_parts().await.unwrap();
         assert_eq!(parts2.len(), 3, "{parts2:?}");
+
+        // verify repeated delete is idempotent
+        cached_store.delete(&location1).await.unwrap();
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 3);
     }
 }

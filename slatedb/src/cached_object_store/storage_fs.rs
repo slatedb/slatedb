@@ -209,6 +209,11 @@ impl LocalCacheStorage for FsCacheStorage {
             evictor.start().await
         }
     }
+
+    #[cfg(test)]
+    fn file_handle_cache_population(&self) -> usize {
+        self.file_handle_cache.inner.lock().unwrap().len()
+    }
 }
 
 impl Display for FsCacheStorage {

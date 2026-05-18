@@ -74,6 +74,9 @@ pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + Display + 'static {
     fn entry(&self, location: &Path, part_size: usize) -> Box<dyn LocalCacheEntry>;
 
     async fn start_evictor(&self);
+
+    #[cfg(test)]
+    fn file_handle_cache_population(&self) -> usize;
 }
 
 #[async_trait]
