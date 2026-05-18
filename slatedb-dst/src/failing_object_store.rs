@@ -288,17 +288,17 @@ impl FailingObjectStore {
             match toxic {
                 ToxicKind::Latency { latency, jitter } => {
                     self.clock
-                        .advance(*latency + self.controller.sample_jitter(*jitter))
+                        .sleep(*latency + self.controller.sample_jitter(*jitter))
                         .await;
                 }
                 ToxicKind::Bandwidth { bytes_per_sec } => {
                     if let Some(delay) = bandwidth_delay(size_bytes, *bytes_per_sec) {
-                        self.clock.advance(delay).await;
+                        self.clock.sleep(delay).await;
                     }
                 }
                 ToxicKind::ResetPeer => return Err(reset_peer_error()),
                 ToxicKind::SlowClose { delay } if allow_slow_close => {
-                    self.clock.advance(*delay).await;
+                    self.clock.sleep(*delay).await;
                 }
                 ToxicKind::SlowClose { .. } => {}
             }

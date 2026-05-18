@@ -30,7 +30,16 @@ impl Actor for ShutdownActor {
         let now = system_clock.now();
 
         if now >= self.shutdown_at {
+            info!("shutdown deadline reached, cancelling shutdown token [name={}, shutdown_at={}, now={}]", ctx.name(), self.shutdown_at, now);
+
+            // Clear any configured toxics to avoid interfering with the shutdown process.
+            let failure_controller = ctx.startup_ctx().failure_controller();
+            failure_controller.clear_toxics();
+            failure_controller.clear_http_failures();
+
+            // Cancel the shutdown token to signal the harness to stop.
             shutdown_token.cancel();
+
             return Ok(());
         }
 
@@ -42,13 +51,9 @@ impl Actor for ShutdownActor {
 
         tokio::select! {
             biased;
+            // Something else cancelled before we reached the deadline.
             _ = shutdown_token.cancelled() => {}
-            _ = system_clock.sleep(remaining) => {
-                if system_clock.now() >= self.shutdown_at {
-                    info!("shutdown deadline reached, cancelling shutdown token");
-                    shutdown_token.cancel();
-                }
-            }
+            _ = system_clock.sleep(remaining) => {}
         }
 
         Ok(())

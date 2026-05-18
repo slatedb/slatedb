@@ -24,6 +24,7 @@ pub const WAL_BUFFER_FLUSH_REQUESTS: &str = db_stat_name!("wal_buffer_flush_requ
 pub const WAL_BUFFER_ESTIMATED_BYTES: &str = db_stat_name!("wal_buffer_estimated_bytes");
 pub const TOTAL_MEM_SIZE_BYTES: &str = db_stat_name!("total_mem_size_bytes");
 pub const L0_SST_COUNT: &str = db_stat_name!("l0_sst_count");
+pub const SEGMENT_MAX_L0_SST_COUNT: &str = db_stat_name!("segment_max_l0_sst_count");
 pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
 pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_false_positive_count");
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
@@ -55,6 +56,7 @@ pub(crate) struct DbStatsInner {
     pub(crate) write_ops: Arc<dyn CounterFn>,
     pub(crate) total_mem_size_bytes: Arc<dyn GaugeFn>,
     pub(crate) l0_sst_count: Arc<dyn GaugeFn>,
+    pub(crate) segment_max_l0_sst_count: Arc<dyn GaugeFn>,
     pub(crate) l0_flush_bytes: Arc<dyn CounterFn>,
     pub(crate) merge_operator_read_operands: Arc<dyn CounterFn>,
     pub(crate) merge_operator_flush_operands: Arc<dyn CounterFn>,
@@ -122,6 +124,7 @@ impl DbStats {
             write_ops: recorder.counter(WRITE_OPS).register(),
             total_mem_size_bytes: recorder.gauge(TOTAL_MEM_SIZE_BYTES).register(),
             l0_sst_count: recorder.gauge(L0_SST_COUNT).register(),
+            segment_max_l0_sst_count: recorder.gauge(SEGMENT_MAX_L0_SST_COUNT).register(),
             l0_flush_bytes: recorder.counter(L0_FLUSH_BYTES).register(),
             merge_operator_read_operands: recorder
                 .counter(MERGE_OPERATOR_OPERANDS)

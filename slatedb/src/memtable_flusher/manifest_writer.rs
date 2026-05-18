@@ -27,6 +27,7 @@ use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use std::cmp;
@@ -464,6 +465,7 @@ impl ManifestWriterHandler {
         .into_iter()
         .flatten()
         .min();
+        let segmented = self.db.segment_extractor.is_some();
         let mut guard = self.db.state.write();
         let manifest = guard.modify(|modifier| {
             for uploaded in staged_batch {
@@ -474,46 +476,50 @@ impl ManifestWriterHandler {
                     .pop_back()
                     .expect("expected imm memtable");
                 assert!(Arc::ptr_eq(&popped, &uploaded.imm_memtable));
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
-                    .l0
-                    .push_front(SsTableView::new(
+                let core = &mut modifier.state.manifest.value.core;
+                // `segments` may legitimately be empty when retention
+                // pruned every entry: no builders open → no SSTs
+                // uploaded. The memtable's seq/tick bookkeeping below
+                // still advances. (This is true with or without an
+                // extractor configured.)
+                for segment in &uploaded.segments {
+                    let view = SsTableView::new(
                         self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
-                        uploaded.sst_handle.clone(),
-                    ));
-                modifier.state.manifest.value.core.replay_after_wal_id =
-                    uploaded.imm_memtable.recent_flushed_wal_id();
+                        segment.sst_handle.clone(),
+                    );
+                    let tree = if segmented {
+                        // Extractor configured — every flush handle, including
+                        // any with empty prefix, is routed into `segments`.
+                        core.maybe_insert_tree(&segment.prefix)?
+                    } else if segment.prefix.is_empty() {
+                        // No extractor — singleton compatibility-encoded
+                        // `prefix=""` segment lives in the top-level tree.
+                        &mut core.tree
+                    } else {
+                        return Err(SlateDBError::InvalidSegmentPrefix {
+                            prefix: segment.prefix.clone(),
+                            conflict: Bytes::new(),
+                        });
+                    };
+                    tree.l0.push_front(view);
+                }
+                core.replay_after_wal_id = uploaded.imm_memtable.recent_flushed_wal_id();
 
                 let memtable_tick = uploaded.imm_memtable.table().last_tick();
-                modifier.state.manifest.value.core.last_l0_clock_tick = cmp::max(
-                    modifier.state.manifest.value.core.last_l0_clock_tick,
-                    memtable_tick,
-                );
-                if modifier.state.manifest.value.core.last_l0_clock_tick != memtable_tick {
+                core.last_l0_clock_tick = cmp::max(core.last_l0_clock_tick, memtable_tick);
+                if core.last_l0_clock_tick != memtable_tick {
                     return Err(SlateDBError::InvalidClockTick {
-                        last_tick: modifier.state.manifest.value.core.last_l0_clock_tick,
+                        last_tick: core.last_l0_clock_tick,
                         next_tick: memtable_tick,
                     });
                 }
 
                 // The same sequence number can't span multiple L0' SSTs--only SSTs in SRs
                 // can do that. So assert `>` rather than `>=`.
-                assert!(uploaded.last_seq > modifier.state.manifest.value.core.last_l0_seq);
-                modifier.state.manifest.value.core.last_l0_seq = uploaded.last_seq;
-                modifier.state.manifest.value.core.recent_snapshot_min_seq =
-                    min_active_snapshot_seq.unwrap_or(uploaded.last_seq);
-
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .sequence_tracker
-                    .extend_from(uploaded_tracker);
+                assert!(uploaded.last_seq > core.last_l0_seq);
+                core.last_l0_seq = uploaded.last_seq;
+                core.recent_snapshot_min_seq = min_active_snapshot_seq.unwrap_or(uploaded.last_seq);
+                core.sequence_tracker.extend_from(uploaded_tracker);
             }
             Ok(modifier.state.manifest.clone())
         })?;
@@ -529,7 +535,7 @@ impl ManifestWriterHandler {
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
         loop {
             let result = self.write_manifest_update(checkpoint_options).await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -557,7 +563,7 @@ impl ManifestWriterHandler {
     async fn write_current_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_current_manifest().await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -611,10 +617,17 @@ impl ManifestWriterHandler {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
             let cow = wguard_state.state();
-            self.db
-                .db_stats
-                .l0_sst_count
-                .set(cow.core().tree.l0.len() as i64);
+            // L0 SST counters span every tree (root + each named segment per
+            // RFC-0024). `l0_sst_count` reports the total; `segment_max_*`
+            // reports the largest single tree, which is the right quantity
+            // for backpressure since `l0_max_ssts` is enforced per-tree.
+            let (total, max) = cow
+                .core()
+                .trees()
+                .map(|t| t.l0.len())
+                .fold((0usize, 0usize), |(sum, max), n| (sum + n, max.max(n)));
+            self.db.db_stats.l0_sst_count.set(total as i64);
+            self.db.db_stats.segment_max_l0_sst_count.set(max as i64);
             cow.manifest.clone()
         };
         self.db
@@ -796,22 +809,22 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, TrackerMessage};
+    use super::{ManifestWriter, ManifestWriterHandler, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_state::SsTableId;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
-    use crate::memtable_flusher::uploader::UploadedMemtable;
+    use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::utils::{IdGenerator, WatchableOnceCell};
+    use crate::utils::WatchableOnceCell;
+    use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -921,6 +934,26 @@ mod tests {
     }
 
     async fn setup_harness(path: &str, fp_registry: Arc<FailPointRegistry>) -> TestHarness {
+        setup_harness_with_extractor(path, fp_registry, None).await
+    }
+
+    fn new_handler_from_harness(harness: TestHarness) -> ManifestWriterHandler {
+        let closed_result = WatchableOnceCell::new();
+        let (tracker_tx, _) =
+            crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
+        ManifestWriterHandler::new(
+            harness.inner,
+            harness.manifest,
+            Duration::from_secs(3600),
+            tracker_tx,
+        )
+    }
+
+    async fn setup_harness_with_extractor(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    ) -> TestHarness {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = path.to_string();
         let settings = Settings::default();
@@ -964,6 +997,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
+                segment_extractor,
             )
             .await
             .unwrap(),
@@ -1019,6 +1053,42 @@ mod tests {
         manifest.manifest.core.checkpoints.len()
     }
 
+    async fn stage_manifest_boundary_conflict(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> u64 {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut external =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let start_id = external.id();
+
+        // The external writer wins the stale handler's intended id.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // A second external write leaves a live latest version above the future boundary,
+        // so the stale handler can make progress after refreshing.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // GC fences and removes the stale handler's next id, but preserves the live latest
+        // version at start_id + 2.
+        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+        manifest_store.delete_manifest(start_id + 1).await.unwrap();
+
+        let latest = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(latest, start_id + 2);
+        start_id
+    }
+
     fn freeze_imm(
         inner: &Arc<DbInner>,
         key: &[u8],
@@ -1038,11 +1108,11 @@ mod tests {
         value: &[u8],
     ) -> UploadedMemtable {
         let imm_memtable = freeze_imm(inner, key, value);
-        let sst_id = SsTableId::Compacted(inner.rand.rng().gen_ulid(inner.system_clock.as_ref()));
-        let sst_handle = inner
-            .flush_imm_table(&sst_id, imm_memtable.table(), true)
+        let handles = inner
+            .flush_l0_for_test(imm_memtable.table(), true)
             .await
             .unwrap();
+        let sst_handle = handles.into_iter().next().expect("expected single SST");
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
         UploadedMemtable::new(imm_memtable, sst_handle, first_seq, last_seq)
@@ -1057,6 +1127,63 @@ mod tests {
         let uploaded = next_uploaded_memtable_no_wal(inner, key, value).await;
         inner.oracle.advance_durable_seq(uploaded.last_seq);
         uploaded
+    }
+
+    #[tokio::test]
+    async fn write_current_manifest_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_current_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path.clone()),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
+
+        // The safe write path should reload the live newer manifest and retry safely.
+        handler.write_current_manifest_safely().await.unwrap();
+
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(start_id + 3, final_id);
+    }
+
+    #[tokio::test]
+    async fn write_manifest_update_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_update_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path.clone()),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
+
+        // The safe update path should reload the live newer manifest and retry safely.
+        let checkpoints = handler.write_manifest_update_safely(&[]).await.unwrap();
+
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert!(checkpoints.is_empty());
+        assert_eq!(start_id + 3, final_id);
     }
 
     #[tokio::test]
@@ -1433,6 +1560,188 @@ mod tests {
 
         let through_seq = expect_flushed(&started.tracker_rx).await;
         assert_eq!(through_seq, last_seq2);
+
+        started.shutdown().await;
+    }
+
+    /// Construct an `UploadedMemtable` whose flush output spans
+    /// multiple named segments. Each segment handle is an
+    /// independently-uploaded SST tagged with one of the requested
+    /// `prefixes`. The apply path routes by prefix without
+    /// validating SST contents, so the synthetic fabrication is
+    /// sound for manifest-writer tests.
+    ///
+    /// Goes around `build_imm_ssts` because the synthetic setup
+    /// (one key, many fake prefixes) can't satisfy that path's
+    /// requirement that recorded prefixes match the keys.
+    async fn next_uploaded_memtable_with_segments(
+        inner: &Arc<DbInner>,
+        key: &[u8],
+        value: &[u8],
+        prefixes: &[&[u8]],
+    ) -> UploadedMemtable {
+        use crate::utils::IdGenerator;
+        let imm_memtable = freeze_imm(inner, key, value);
+        let first_seq = imm_memtable.table().first_seq().unwrap();
+        let last_seq = imm_memtable.table().last_seq().unwrap();
+        let mut segments = Vec::with_capacity(prefixes.len());
+        for prefix in prefixes {
+            // Each synthetic SST needs at least one entry so the
+            // resulting handle can construct an `SsTableView` in the
+            // apply path. The actual contents don't matter — the
+            // manifest writer routes by `prefix` from the surrounding
+            // `SegmentedSstHandle`, not by the SST's keys.
+            let mut builder = inner.table_store.table_builder();
+            let row = crate::types::RowEntry::new_value(prefix, value, first_seq);
+            builder.add(row).await.unwrap();
+            let encoded_sst = builder.build().await.unwrap();
+            let id = crate::db_state::SsTableId::Compacted(
+                inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
+            );
+            let sst_handle = inner
+                .upload_sst(&id, imm_memtable.table(), &encoded_sst, false)
+                .await
+                .unwrap();
+            segments.push(SegmentedSstHandle {
+                prefix: Bytes::copy_from_slice(prefix),
+                sst_handle,
+            });
+        }
+        inner.oracle.advance_durable_seq(last_seq);
+        UploadedMemtable {
+            imm_memtable,
+            segments,
+            first_seq,
+            last_seq,
+        }
+    }
+
+    /// Test-only extractor used solely as a marker that
+    /// `DbInner::segment_extractor.is_some()` so the apply path routes into
+    /// `core.segments`. The flush bookkeeping under test does not actually
+    /// invoke this extractor's logic.
+    struct StubExtractor;
+    impl crate::prefix_extractor::PrefixExtractor for StubExtractor {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn prefix_len(&self, _target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+            Some(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn should_route_segment_handles_into_named_segments() {
+        let harness = setup_harness_with_extractor(
+            "/tmp/test_manifest_writer_segment_routing",
+            Arc::new(FailPointRegistry::new()),
+            Some(Arc::new(StubExtractor)),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // Two segments — "aaa" and "bbb" — published from a single flush.
+        let uploaded =
+            next_uploaded_memtable_with_segments(&inner, b"aaa-key", b"v1", &[b"aaa", b"bbb"])
+                .await;
+        let last_seq = uploaded.last_seq;
+        let aaa_id = uploaded.segments[0].sst_handle.id;
+        let bbb_id = uploaded.segments[1].sst_handle.id;
+        started.notify_uploaded(uploaded).await.unwrap();
+
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, last_seq);
+
+        // Verify the manifest now has both segments, sorted by prefix, each
+        // with one L0. The top-level tree stays empty.
+        let core = inner.state.read().state().core().clone();
+        assert!(core.tree.l0.is_empty(), "root tree should be empty");
+        assert_eq!(core.segments.len(), 2);
+        assert_eq!(core.segments[0].prefix.as_ref(), b"aaa");
+        assert_eq!(core.segments[1].prefix.as_ref(), b"bbb");
+        assert_eq!(core.segments[0].tree.l0.len(), 1);
+        assert_eq!(core.segments[1].tree.l0.len(), 1);
+        assert_eq!(core.segments[0].tree.l0[0].sst.id, aaa_id);
+        assert_eq!(core.segments[1].tree.l0[0].sst.id, bbb_id);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_append_to_existing_segment_l0() {
+        let harness = setup_harness_with_extractor(
+            "/tmp/test_manifest_writer_segment_append",
+            Arc::new(FailPointRegistry::new()),
+            Some(Arc::new(StubExtractor)),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // First flush creates segment "aaa".
+        let uploaded1 =
+            next_uploaded_memtable_with_segments(&inner, b"aaa-1", b"v1", &[b"aaa"]).await;
+        started.notify_uploaded(uploaded1).await.unwrap();
+        let _ = expect_flushed(&started.tracker_rx).await;
+
+        // Second flush adds another L0 to "aaa" alongside a new "bbb".
+        let uploaded2 =
+            next_uploaded_memtable_with_segments(&inner, b"aaa-2", b"v2", &[b"aaa", b"bbb"]).await;
+        started.notify_uploaded(uploaded2).await.unwrap();
+        let _ = expect_flushed(&started.tracker_rx).await;
+
+        let core = inner.state.read().state().core().clone();
+        assert_eq!(core.segments.len(), 2);
+        assert_eq!(core.segments[0].prefix.as_ref(), b"aaa");
+        assert_eq!(core.segments[1].prefix.as_ref(), b"bbb");
+        assert_eq!(core.segments[0].tree.l0.len(), 2);
+        assert_eq!(core.segments[1].tree.l0.len(), 1);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_advance_progress_when_segments_is_empty() {
+        // With an extractor configured and post-retention pruning that
+        // drops every entry, the upload pipeline yields an UploadedMemtable
+        // with an empty segments Vec. The manifest writer must still
+        // advance per-memtable bookkeeping (last_l0_seq, replay frontier)
+        // even though no SSTs land in any tree.
+        let harness = setup_harness_with_extractor(
+            "/tmp/test_manifest_writer_empty_segments",
+            Arc::new(FailPointRegistry::new()),
+            Some(Arc::new(StubExtractor)),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        let uploaded = next_uploaded_memtable_with_segments(&inner, b"k1", b"v1", &[]).await;
+        let last_seq = uploaded.last_seq;
+        started.notify_uploaded(uploaded).await.unwrap();
+
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, last_seq);
+
+        // No SST landed in any tree, but the per-memtable progress
+        // markers still advanced.
+        let core = inner.state.read().state().core().clone();
+        assert!(core.tree.l0.is_empty(), "root tree should be empty");
+        assert!(core.segments.is_empty(), "no segments should be created");
+        assert_eq!(core.last_l0_seq, last_seq);
 
         started.shutdown().await;
     }

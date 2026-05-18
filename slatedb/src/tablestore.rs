@@ -197,7 +197,7 @@ impl TableStore {
     pub(crate) async fn write_sst(
         &self,
         id: &SsTableId,
-        encoded_sst: EncodedSsTable,
+        encoded_sst: &EncodedSsTable,
         write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         fail_point!(
@@ -220,27 +220,32 @@ impl TableStore {
 
         if let Some(ref cache) = self.cache {
             if write_cache {
-                for block in encoded_sst.unconsumed_blocks {
-                    let offset = block.offset;
-                    let block = Arc::new(block.block);
+                for block in &encoded_sst.unconsumed_blocks {
                     cache
-                        .insert((*id, offset).into(), CachedEntry::with_block(block))
+                        .insert(
+                            (*id, block.offset).into(),
+                            CachedEntry::with_block(Arc::clone(&block.block)),
+                        )
                         .await;
                 }
                 cache
                     .insert(
                         (*id, encoded_sst.info.index_offset).into(),
-                        CachedEntry::with_sst_index(Arc::new(encoded_sst.index)),
+                        CachedEntry::with_sst_index(Arc::new(encoded_sst.index.clone())),
                     )
                     .await;
             }
         }
-        self.cache_filters(*id, encoded_sst.info.filter_offset, encoded_sst.filters)
-            .await;
+        self.cache_filters(
+            *id,
+            encoded_sst.info.filter_offset,
+            encoded_sst.filters.clone(),
+        )
+        .await;
         Ok(SsTableHandle::new(
             *id,
             encoded_sst.format_version,
-            encoded_sst.info,
+            encoded_sst.info.clone(),
         ))
     }
 
@@ -1047,7 +1052,7 @@ mod tests {
             .await
             .unwrap();
         let table = sst1.build().await.unwrap();
-        ts.write_sst(&wal_id, table, false).await.unwrap();
+        ts.write_sst(&wal_id, &table, false).await.unwrap();
 
         let mut sst2 = ts.table_builder();
         sst2.add(RowEntry::new_value(b"key", b"value", 0))
@@ -1056,7 +1061,7 @@ mod tests {
         let table2 = sst2.build().await.unwrap();
 
         // write another wal sst with the same id.
-        let result = ts.write_sst(&wal_id, table2, false).await;
+        let result = ts.write_sst(&wal_id, &table2, false).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
 
@@ -1280,7 +1285,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, builder.build().await.unwrap(), false)
+            .write_sst(&id, &builder.build().await.unwrap(), false)
             .await
             .unwrap();
 
@@ -1338,7 +1343,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, builder.build().await.unwrap(), false)
+            .write_sst(&id, &builder.build().await.unwrap(), false)
             .await
             .unwrap();
 
@@ -1402,7 +1407,7 @@ mod tests {
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
-        ts.write_sst(&id, sst, true).await.unwrap();
+        ts.write_sst(&id, &sst, true).await.unwrap();
 
         let index = ts
             .sst_format
@@ -1447,7 +1452,7 @@ mod tests {
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
-        ts.write_sst(&id, sst, false).await.unwrap();
+        ts.write_sst(&id, &sst, false).await.unwrap();
 
         let index = ts
             .sst_format
@@ -1659,7 +1664,7 @@ mod tests {
         let expected_bytes = sst.remaining_as_bytes();
 
         // When writing via TableStore (should retry once)
-        ts.write_sst(&id, sst, false).await.unwrap();
+        ts.write_sst(&id, &sst, false).await.unwrap();
 
         // Then: a retry happened
         assert!(flaky.put_attempts() >= 2);

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use object_store::path::Path;
 use std::ops::Bound;
 use std::time::Duration;
@@ -77,6 +78,29 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid compaction")]
     InvalidCompaction,
+
+    #[error("segment prefix {prefix:?} would nest with existing segment {conflict:?}")]
+    InvalidSegmentPrefix { prefix: Bytes, conflict: Bytes },
+
+    #[error("recency scan prefix spans multiple segments, which is unsupported")]
+    RecencyScanPrefixSpansMultipleSegments,
+
+    #[error(
+        "segment extractor configuration mismatch (persisted: {persisted:?}, \
+         configured: {configured:?})"
+    )]
+    SegmentExtractorMismatch {
+        persisted: Option<String>,
+        configured: Option<String>,
+    },
+
+    #[error(
+        "segment prefix {prefix:?} is not recognized by the configured extractor `{extractor}`"
+    )]
+    SegmentPrefixNotRecognized { prefix: Bytes, extractor: String },
+
+    #[error("segment extractor produced an empty prefix for key {key:?}")]
+    EmptySegmentPrefix { key: Bytes },
 
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
@@ -178,6 +202,9 @@ pub(crate) enum SlateDBError {
     #[error("Source manifest set must not be empty")]
     InvalidUnionSetEmpty(),
 
+    #[error("invalid union: {0}")]
+    InvalidUnion(String),
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -260,6 +287,11 @@ impl SlateDBError {
             },
             other => other,
         }
+    }
+
+    /// Returns true if this error means a sequenced write should refresh and retry.
+    pub(crate) fn is_sequenced_write_conflict(&self) -> bool {
+        matches!(self, Self::TransactionalObjectVersionExists)
     }
 }
 
@@ -541,6 +573,11 @@ impl From<SlateDBError> for Error {
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
+            SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
+            SlateDBError::RecencyScanPrefixSpansMultipleSegments => Error::invalid(msg),
+            SlateDBError::SegmentExtractorMismatch { .. } => Error::invalid(msg),
+            SlateDBError::SegmentPrefixNotRecognized { .. } => Error::invalid(msg),
+            SlateDBError::EmptySegmentPrefix { .. } => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
@@ -598,6 +635,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
             SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
+            SlateDBError::InvalidUnion(_) => Error::invalid(msg),
         }
     }
 }

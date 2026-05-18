@@ -333,6 +333,7 @@ impl TokioCompactionExecutorInner {
             job_args.compaction_clock_tick,
             self.clock.clone(),
             Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
+            Some(self.stats.retention_metrics()),
         )
         .await?;
         retention_iter.init().await?;
@@ -1474,7 +1475,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
         let retention_min_seq_num = 2;
@@ -1619,7 +1620,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
 
@@ -1720,7 +1721,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
 
@@ -1786,7 +1787,7 @@ mod tests {
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
-            .write_sst(&id, encoded_sst, false)
+            .write_sst(&id, &encoded_sst, false)
             .await
             .unwrap();
 

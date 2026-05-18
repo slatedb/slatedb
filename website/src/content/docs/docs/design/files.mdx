@@ -2,7 +2,7 @@
 title: Files
 ---
 
-A SlateDB object store bucket contains four main directories:
+A SlateDB object store bucket contains the following directories:
 
 ```
 path/to/db/
@@ -18,9 +18,13 @@ path/to/db/
 │  ├─ 00000000000000000001.compactions
 │  ├─ 00000000000000000002.compactions
 │  └─ ...
-└─ compacted/
-   ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst
-   ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
+├─ compacted/
+│  ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst
+│  ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
+│  └─ ...
+└─ gc/
+   ├─ manifest.boundary
+   ├─ compactions.boundary
    └─ ...
 ```
 
@@ -58,3 +62,11 @@ See [RFC-0013](/rfcs/0013-compaction-state-persistence) for details on the compa
 `.sst` files in the `wal` and `compacted` directory share the same file format. Files in the `wal` directory are named `<wal_id>.sst`. `<wal_id>` is a zero-padded, 20 digit unsigned integer. Files in the `compacted` directory are named `<ulid>.sst`, where `<ulid>` is a [ULID](https://github.com/ulid/spec).
 
 The `compacted` directory contains both L0 (non-partitioned) SSTables and SRs (partitioned SSTables). As the compactor runs, it will drop compacted SSTables from the manifest. Such files will be left in the `compacted` directory until the [garbage collector](/docs/design/gc) runs.
+
+## Garbage Collector Boundaries
+
+The `gc` directory contains boundary files used for garbage collection coordination. Boundary files are named `*.boundary` (e.g., `manifest.boundary`, `compactions.boundary`). These files track the minimum sequence number of metadata objects (compactions and manifests) that are still younger than `min_age`, which enables safe deletion of expired metadata and compaction artifacts.
+
+Each boundary file stores a single unsigned 64-bit integer representing an inclusive high-watermark. A boundary value `B` means that object IDs `<= B` are eligible for deletion. Before the garbage collector deletes old sequenced metadata files, it advances the namespace boundary. After a writer creates a sequenced metadata file, it checks the boundary before returning success. If the created ID is at or behind the boundary, the write is treated as failed.
+
+Boundary files use conditional updates (ETag-based) to ensure monotonic advancement and prevent concurrent GC processes from interfering with each other. They provide a persistent marker that allows garbage collectors to safely delete objects below the boundary without risking deletion of still-referenced data.

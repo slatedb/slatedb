@@ -6,8 +6,6 @@ use crate::error::SlateDBError;
 use crate::oracle::Oracle;
 use crate::wal_replay::ReplayedMemtable;
 
-pub(crate) const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 4096;
-
 impl DbInner {
     pub(crate) fn maybe_freeze_current_memtable(&self) -> Result<(), SlateDBError> {
         let wal_id = self.wal_buffer.recent_flushed_wal_id();
@@ -29,7 +27,7 @@ impl DbInner {
             .checked_sub(last_freeze_wal_id)
             .ok_or_else(|| SlateDBError::InvalidDBState)?;
 
-        if wal_id_gap < MAX_WAL_FLUSHES_BEFORE_L0_FLUSH
+        if wal_id_gap < self.settings.max_wal_flushes_before_l0_flush
             && l0_sst_size_est < self.settings.l0_sst_size_bytes
         {
             Ok(())
@@ -62,21 +60,14 @@ impl DbInner {
         &self,
         replayed_memtable: ReplayedMemtable,
     ) -> Result<(), SlateDBError> {
+        let current_memtable_wal_id = self.wal_buffer.recent_flushed_wal_id();
         let mut guard = self.state.write();
 
-        // a WAL might contain the data across multiple memtables. we can only consider
-        // last_wal_id - 1 as the recent persisted wal id when the memtable is reconstructed.
-        // or when we need to replay again, we might risks to lose some WAL entries.
-        let recent_flushed_wal_id = if replayed_memtable.last_wal_id > 0 {
-            replayed_memtable.last_wal_id - 1
-        } else {
-            0
-        };
-        // Keep recent_flushed_wal_id ahead of imm_memtable WAL IDs so
-        // maybe_freeze_memtable's subtraction doesn't underflow.
-        self.wal_buffer
-            .advance_recent_flushed_wal_id(recent_flushed_wal_id);
-        self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
+        // The active memtable was installed by the previous replay step, so its
+        // durable WAL boundary is the WAL buffer's current boundary. Stamp the
+        // frozen table with that boundary before advancing the buffer for the new
+        // replayed memtable.
+        self.freeze_memtable(&mut guard, current_memtable_wal_id)?;
 
         let last_wal = replayed_memtable.last_wal_id;
         guard.modify(|modifier| modifier.state.manifest.value.core.next_wal_sst_id = last_wal + 1);
@@ -94,6 +85,7 @@ impl DbInner {
 
         // replace the memtable
         guard.replace_memtable(replayed_memtable.table);
+        self.wal_buffer.advance_recent_flushed_wal_id(last_wal);
         let dirty_manifest = guard.state().manifest.clone();
         drop(guard);
         self.status_manager.report_manifest(dirty_manifest.into());

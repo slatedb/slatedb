@@ -460,7 +460,7 @@ mod tests {
         assert!(size_with_filter > size_without_filter); // Should be larger due to filter
     }
 
-    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorLatest<Block> {
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorLatest<Arc<Block>> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;
@@ -611,7 +611,7 @@ mod tests {
                 .read_block_raw(&sst.info, &index, i, &bytes)
                 .await
                 .unwrap();
-            assert!(encoded_block.block == read_block);
+            assert!(*encoded_block.block == read_block);
         }
     }
 
@@ -658,7 +658,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(wal_id), encoded, false)
+            .write_sst(&SsTableId::Wal(wal_id), &encoded, false)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -730,7 +730,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -797,7 +797,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -936,7 +936,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -1054,7 +1054,7 @@ mod tests {
 
         let sst_id = SsTableId::Wal(0);
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&sst_id, encoded, false).await?)
+            SsTableView::identity(table_store.write_sst(&sst_id, &encoded, false).await?)
                 .with_visible_range(BytesRange::from_ref("c"..="f"));
 
         let expected_entries = vec![
@@ -1177,7 +1177,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -1231,7 +1231,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -1324,7 +1324,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
 
@@ -1388,7 +1388,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(1), encoded, false)
+            .write_sst(&SsTableId::Wal(1), &encoded, false)
             .await
             .unwrap();
 
@@ -1485,7 +1485,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1554,7 +1554,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1596,7 +1596,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1661,7 +1661,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let stats = table_store
@@ -1739,7 +1739,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();

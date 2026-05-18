@@ -18,7 +18,7 @@ use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::prefix_extractor::PrefixTarget;
 use crate::{
-    iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
+    iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
     tablestore::TableStore,
     types::RowEntry,
@@ -335,16 +335,6 @@ impl<'a> InternalSstIterator<'a> {
         Self::new(view, table_store, options).map(Some)
     }
 
-    async fn new_owned_initialized<T: RangeBounds<Bytes>>(
-        range: T,
-        table: SsTableView,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::new_owned(range, table, table_store, options)?;
-        init_optional_iterator(iter).await
-    }
-
     fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableView,
@@ -356,16 +346,6 @@ impl<'a> InternalSstIterator<'a> {
         };
         let view = SstView::Borrowed(table, view_range);
         Self::new(view, table_store, options).map(Some)
-    }
-
-    async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
-        range: T,
-        table: &'a SsTableView,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::new_borrowed(range, table, table_store, options)?;
-        init_optional_iterator(iter).await
     }
 
     fn for_key(
@@ -380,16 +360,6 @@ impl<'a> InternalSstIterator<'a> {
             table_store,
             options,
         )
-    }
-
-    async fn for_key_initialized(
-        table: &'a SsTableView,
-        key: &'a [u8],
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::for_key(table, key, table_store, options)?;
-        init_optional_iterator(iter).await
     }
 
     /// Spawns fetch tasks for blocks based on iteration order.
@@ -944,15 +914,22 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal =
-            InternalSstIterator::new_owned_initialized(range, table, table_store, options).await?;
+        // Construct the inner iterator without initializing it. The filter
+        // is evaluated first so that an SST whose filter rules out the query
+        // never pays for an index or data block read.
+        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
-                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
-                    inner.init().await?;
-                    if inner.is_filtered_out() {
-                        return Ok(None);
+                match &mut iterator.delegate {
+                    SstIteratorDelegate::Filter(filter_iter) => {
+                        filter_iter.init().await?;
+                        if filter_iter.is_filtered_out() {
+                            return Ok(None);
+                        }
+                    }
+                    SstIteratorDelegate::Direct(inner_iter) => {
+                        inner_iter.init().await?;
                     }
                 }
                 Ok(Some(iterator))
@@ -989,16 +966,19 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal =
-            InternalSstIterator::new_borrowed_initialized(range, table, table_store, options)
-                .await?;
+        let internal = InternalSstIterator::new_borrowed(range, table, table_store, options)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
-                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
-                    inner.init().await?;
-                    if inner.is_filtered_out() {
-                        return Ok(None);
+                match &mut iterator.delegate {
+                    SstIteratorDelegate::Filter(filter_iter) => {
+                        filter_iter.init().await?;
+                        if filter_iter.is_filtered_out() {
+                            return Ok(None);
+                        }
+                    }
+                    SstIteratorDelegate::Direct(inner_iter) => {
+                        inner_iter.init().await?;
                     }
                 }
                 Ok(Some(iterator))
@@ -1027,15 +1007,19 @@ impl<'a> SstIterator<'a> {
         options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal =
-            InternalSstIterator::for_key_initialized(table, key, table_store, options).await?;
+        let internal = InternalSstIterator::for_key(table, key, table_store, options)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, db_stats);
-                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
-                    inner.init().await?;
-                    if inner.is_filtered_out() {
-                        return Ok(None);
+                match &mut iterator.delegate {
+                    SstIteratorDelegate::Filter(filter_iter) => {
+                        filter_iter.init().await?;
+                        if filter_iter.is_filtered_out() {
+                            return Ok(None);
+                        }
+                    }
+                    SstIteratorDelegate::Direct(inner_iter) => {
+                        inner_iter.init().await?;
                     }
                 }
                 Ok(Some(iterator))
@@ -1136,7 +1120,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1378,7 +1362,7 @@ mod tests {
         let sst = writer
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
-                builder.build().await.unwrap(),
+                &builder.build().await.unwrap(),
                 false,
             )
             .await
@@ -1470,7 +1454,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -1508,7 +1492,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1727,7 +1711,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // Initialize iterator in descending order with full range
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -1907,7 +1891,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
@@ -1986,7 +1970,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -2121,7 +2105,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
@@ -2183,7 +2167,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle = table_store.write_sst(&id, &encoded, false).await.unwrap();
 
         // Verify we have multiple blocks
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2251,7 +2235,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: searching for a non-existent key (odd number)
         let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -2303,7 +2287,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, encoded, false).await.unwrap());
+            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
 
         // when: seeking past the last key
         let iter = SstIterator::new_borrowed_initialized(
@@ -2362,7 +2346,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2498,7 +2482,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
