@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, SlateDbError};
+use crate::filter_policy::FilterContext;
 
 /// Minimum durability level required for data returned by reads and scans.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
@@ -127,6 +128,10 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether fetched blocks should be inserted into the block cache.
     pub cache_blocks: bool,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters.
+    #[uniffi(default = None)]
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ReadOptions {
@@ -135,18 +140,25 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            filter_context: None,
         }
     }
 }
 
-impl From<ReadOptions> for slatedb::config::ReadOptions {
-    fn from(value: ReadOptions) -> Self {
-        slatedb::config::ReadOptions {
+impl TryFrom<ReadOptions> for slatedb::config::ReadOptions {
+    type Error = Error;
+
+    fn try_from(value: ReadOptions) -> Result<Self, Self::Error> {
+        let filter_context = value
+            .filter_context
+            .map(slatedb::FilterContext::try_from)
+            .transpose()?;
+        Ok(slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
-            ..Default::default()
-        }
+            filter_context,
+        })
     }
 }
 
@@ -219,6 +231,10 @@ pub struct ScanOptions {
     /// The iteration order for the scan. Defaults to ascending when not set.
     #[uniffi(default = None)]
     pub order: Option<IterationOrder>,
+    /// Optional context forwarded to custom filter policies; ignored by
+    /// built-in filters. Only consulted for prefix scans.
+    #[uniffi(default = None)]
+    pub filter_context: Option<FilterContext>,
 }
 
 impl Default for ScanOptions {
@@ -230,6 +246,7 @@ impl Default for ScanOptions {
             cache_blocks: false,
             max_fetch_tasks: 1,
             order: None,
+            filter_context: None,
         }
     }
 }
@@ -238,6 +255,10 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
     type Error = Error;
 
     fn try_from(value: ScanOptions) -> Result<Self, Self::Error> {
+        let filter_context = value
+            .filter_context
+            .map(slatedb::FilterContext::try_from)
+            .transpose()?;
         Ok(slatedb::config::ScanOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
@@ -253,7 +274,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                 })
             })?,
             order: value.order.unwrap_or_default().into(),
-            ..Default::default()
+            filter_context,
         })
     }
 }

@@ -33,7 +33,7 @@ impl DbSnapshot {
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;
-        let options = options.into();
+        let options = options.try_into()?;
         Ok(self
             .inner
             .get_with_options(key, &options)
@@ -54,7 +54,7 @@ impl DbSnapshot {
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
         validate_key(&key)?;
-        let options = options.into();
+        let options = options.try_into()?;
         Ok(self
             .inner
             .get_key_value_with_options(key, &options)
