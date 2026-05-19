@@ -151,7 +151,14 @@ impl WalFile {
     /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
     pub async fn iterator(&self) -> Result<WalFileIterator, crate::Error> {
-        let sst = self.table_store.open_sst(&SsTableId::Wal(self.id)).await?;
+        let sst = match self.table_store.open_sst(&SsTableId::Wal(self.id)).await {
+            Ok(sst) => sst,
+            Err(crate::error::SlateDBError::EmptySSTable) => {
+                // Zero-byte WAL files are fencing markers, not corrupt WALs.
+                return Ok(WalFileIterator::new(Box::new(EmptyIterator::new())));
+            }
+            Err(err) => return Err(err.into()),
+        };
         let iter = match SstIterator::new_owned_initialized(
             ..,
             SsTableView::identity(sst),
@@ -376,6 +383,24 @@ mod tests {
             assert_eq!(wal_metadata.size_bytes, object_metadata.size);
             assert_eq!(wal_metadata.location, object_metadata.location);
         }
+    }
+
+    #[tokio::test]
+    async fn test_zero_byte_wal_file_has_empty_iterator() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/test_wal_reader_zero_byte";
+        let wal_reader = WalReader::new(path, main_store);
+        wal_reader.table_store.write_wal_fence(1).await.unwrap();
+
+        let wal_files = wal_reader.list(..).await.unwrap();
+        assert_eq!(wal_files.len(), 1);
+        assert_eq!(wal_files[0].id, 1);
+
+        let wal_metadata = wal_files[0].metadata().await.unwrap();
+        assert_eq!(wal_metadata.size_bytes, 0);
+
+        let mut iter = wal_files[0].iterator().await.unwrap();
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
