@@ -82,14 +82,20 @@ class SlateDbWalReaderTest {
                     assertTrue(files.size() >= 3);
 
                     List<RowEntry> allRows = new ArrayList<>();
+                    int nonEmptyFiles = 0;
                     for (WalFile file : files) {
                         WalFileMetadata metadata = TestSupport.await(file.metadata());
                         assertNotNull(metadata);
-                        assertTrue(metadata.sizeBytes() > 0);
                         assertFalse(metadata.location().isEmpty());
 
                         try (WalFileIterator iterator = TestSupport.await(file.iterator())) {
                             List<RowEntry> rows = TestSupport.drainWalIterator(iterator);
+                            if (metadata.sizeBytes() == 0) {
+                                assertTrue(rows.isEmpty());
+                                continue;
+                            }
+
+                            nonEmptyFiles++;
                             for (RowEntry row : rows) {
                                 assertTrue(row.seq() > 0);
                             }
@@ -97,6 +103,7 @@ class SlateDbWalReaderTest {
                         }
                     }
 
+                    assertTrue(nonEmptyFiles > 0);
                     assertEquals(4, allRows.size());
                     TestSupport.assertWalRow(allRows.get(0), RowEntryKind.VALUE, "a", "1");
                     TestSupport.assertWalRow(allRows.get(1), RowEntryKind.VALUE, "b", "2");

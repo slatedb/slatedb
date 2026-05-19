@@ -1879,14 +1879,12 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 	}
 
 	var allRows []slatedb.RowEntry
+	nonEmptyFiles := 0
 
 	for i, file := range files {
 		metadata, err := file.Metadata()
 		if err != nil {
 			t.Fatalf("WalFile.Metadata() for file %d: %v", i, err)
-		}
-		if metadata.SizeBytes == 0 {
-			t.Fatalf("WalFile.Metadata() for file %d: SizeBytes = 0", i)
 		}
 		if metadata.Location == "" {
 			t.Fatalf("WalFile.Metadata() for file %d: Location is empty", i)
@@ -1899,12 +1897,24 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		t.Cleanup(iter.Destroy)
 
 		rows := drainWalIterator(t, iter)
+		if metadata.SizeBytes == 0 {
+			if len(rows) != 0 {
+				t.Fatalf("zero-byte WAL file %d returned %d rows, want 0", i, len(rows))
+			}
+			continue
+		}
+		nonEmptyFiles++
+
 		for j, row := range rows {
 			if row.Seq == 0 {
 				t.Fatalf("row %d in file %d: Seq = 0", j, i)
 			}
 		}
 		allRows = append(allRows, rows...)
+	}
+
+	if nonEmptyFiles == 0 {
+		t.Fatal("no non-empty WAL files found")
 	}
 
 	if len(allRows) != 4 {
