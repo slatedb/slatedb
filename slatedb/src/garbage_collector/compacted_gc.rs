@@ -218,9 +218,15 @@ impl GcTask for CompactedGcTask {
             .filter(|id| !active_ssts.contains(id))
             .collect::<Vec<_>>();
 
+        if self.compacted_options.dry_run {
+            log::info!(
+                "dry run: skipping SST deletion [count={}]",
+                sst_ids_to_delete.len()
+            );
+        }
         for id in sst_ids_to_delete {
             if self.compacted_options.dry_run {
-                log::info!("dry run: would delete SST but skipped [id={:?}]", id);
+                log::debug!("dry run: would delete SST but skipped [id={:?}]", id);
                 continue;
             }
             log::info!("deleting SST [id={:?}]", id);

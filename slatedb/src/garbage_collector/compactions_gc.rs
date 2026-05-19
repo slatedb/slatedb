@@ -84,27 +84,37 @@ impl GcTask for CompactionsGcTask {
         }
 
         // Delete compactions files older than min_age
-        for compactions_metadata in compactions_metadata_list {
-            if utc_now.signed_duration_since(compactions_metadata.last_modified) > min_age {
-                if self.compactions_options.dry_run {
-                    log::info!(
-                        "dry run: would delete compactions but skipped [id={:?}]",
-                        compactions_metadata.id
-                    );
-                    continue;
-                }
-                if let Err(e) = self
-                    .compactions_store
-                    .delete_compactions(compactions_metadata.id)
-                    .await
-                {
-                    error!(
-                        "error deleting compactions [id={:?}, error={}]",
-                        compactions_metadata.id, e
-                    );
-                } else {
-                    self.stats.gc_compactions_count.increment(1);
-                }
+        let compactions_to_delete = compactions_metadata_list
+            .into_iter()
+            .filter(|compactions_metadata| {
+                utc_now.signed_duration_since(compactions_metadata.last_modified) > min_age
+            })
+            .collect::<Vec<_>>();
+        if self.compactions_options.dry_run {
+            log::info!(
+                "dry run: skipping compactions deletion [count={}]",
+                compactions_to_delete.len()
+            );
+        }
+        for compactions_metadata in compactions_to_delete {
+            if self.compactions_options.dry_run {
+                log::debug!(
+                    "dry run: would delete compactions but skipped [id={:?}]",
+                    compactions_metadata.id
+                );
+                continue;
+            }
+            if let Err(e) = self
+                .compactions_store
+                .delete_compactions(compactions_metadata.id)
+                .await
+            {
+                error!(
+                    "error deleting compactions [id={:?}, error={}]",
+                    compactions_metadata.id, e
+                );
+            } else {
+                self.stats.gc_compactions_count.increment(1);
             }
         }
 

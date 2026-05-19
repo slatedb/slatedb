@@ -121,9 +121,16 @@ impl GcTask for WalGcTask {
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
+        if self.wal_options.dry_run {
+            log::info!(
+                "dry run: skipping {} deletion [count={}]",
+                self.resource(),
+                sst_ids_to_delete.len()
+            );
+        }
         for id in sst_ids_to_delete {
             if self.wal_options.dry_run {
-                log::info!(
+                log::debug!(
                     "dry run: would delete {} but skipped [id={:?}]",
                     self.resource(),
                     id
