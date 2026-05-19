@@ -368,11 +368,6 @@ impl ObjectStore for RetryingObjectStore {
         }))
     }
 
-    /// Retries each delete individually, mirroring the per-call retry behavior of
-    /// the pre-0.13 `ObjectStore::delete`. Items are processed sequentially via
-    /// `.then` and each one is retried independently; a transient failure on one
-    /// path does not abort the rest of the stream, but a permanent failure stops
-    /// processing of subsequent items (consistent with `try_*` stream combinators).
     fn delete_stream(
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
