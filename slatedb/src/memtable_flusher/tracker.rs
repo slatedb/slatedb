@@ -256,25 +256,20 @@ impl FlushTracker {
 
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         loop {
-            // Find the next pending imm whose touched segments all
-            // have room. Skip blocked imms rather than stalling — the
-            // manifest writer commits in seqno order regardless of
-            // upload dispatch order, so an unrelated later imm can
-            // make progress while an older one waits on its
-            // saturated segment.
+            // Strict seq order: skipping a blocked older imm
+            // deadlocks against the manifest writer's FIFO commit
+            // (#1687).
             let next_idx = self
                 .frontier
                 .tracked
                 .iter()
-                .enumerate()
-                .find(|(_, t)| {
-                    matches!(t.state, TrackedImmState::PendingDispatch)
-                        && self.can_dispatch(&t.imm_memtable)
-                })
-                .map(|(idx, _)| idx);
+                .position(|t| matches!(t.state, TrackedImmState::PendingDispatch));
             let Some(idx) = next_idx else {
                 return Ok(());
             };
+            if !self.can_dispatch(&self.frontier.tracked[idx].imm_memtable) {
+                return Ok(());
+            }
             self.frontier.tracked[idx].state = TrackedImmState::Uploading;
             let tracked = &self.frontier.tracked[idx];
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
