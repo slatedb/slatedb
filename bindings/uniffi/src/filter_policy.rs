@@ -101,15 +101,19 @@ fn adapt_prefix_extractor(
 
 /// A filter policy used to build and read SST filters.
 ///
-/// Construct one with [`FilterPolicy::bloom`] for the built-in bloom filter,
-/// optionally configuring it with [`FilterPolicy::bloom_with_options`].
+/// Construct one with [`FilterPolicy::bloom`] or
+/// [`FilterPolicy::bloom_with_options`] for the built-in bloom filter.
 #[derive(uniffi::Object)]
 pub struct FilterPolicy {
     pub(crate) inner: Arc<dyn slatedb::FilterPolicy>,
 }
 
 /// Options controlling how a bloom filter policy is constructed.
-#[derive(Clone, uniffi::Record)]
+///
+/// Pass an optional prefix extractor as a separate constructor parameter; it
+/// is kept out of this record because uniffi cannot marshal a trait object
+/// inside a record across every target language.
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct BloomFilterOptions {
     /// Average bits stored per inserted key. Higher values lower the false
     /// positive rate at the cost of filter size.
@@ -118,9 +122,6 @@ pub struct BloomFilterOptions {
     /// probe it. Defaults to `true`.
     #[uniffi(default = true)]
     pub whole_key_filtering: bool,
-    /// Optional prefix extractor enabling prefix-based bloom filtering.
-    #[uniffi(default = None)]
-    pub prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
 }
 
 impl Default for BloomFilterOptions {
@@ -128,7 +129,6 @@ impl Default for BloomFilterOptions {
         Self {
             bits_per_key: 10,
             whole_key_filtering: true,
-            prefix_extractor: None,
         }
     }
 }
@@ -139,16 +139,23 @@ impl FilterPolicy {
     /// whole-key filtering enabled, and no prefix extractor.
     #[uniffi::constructor]
     pub fn bloom(bits_per_key: u32) -> Arc<FilterPolicy> {
-        Self::build_bloom(BloomFilterOptions {
-            bits_per_key,
-            ..BloomFilterOptions::default()
-        })
+        Self::build_bloom(
+            BloomFilterOptions {
+                bits_per_key,
+                ..BloomFilterOptions::default()
+            },
+            None,
+        )
     }
 
-    /// Constructs a bloom filter policy from the supplied options.
+    /// Constructs a bloom filter policy from the supplied options, with an
+    /// optional prefix extractor enabling prefix-based bloom filtering.
     #[uniffi::constructor]
-    pub fn bloom_with_options(options: BloomFilterOptions) -> Arc<FilterPolicy> {
-        Self::build_bloom(options)
+    pub fn bloom_with_options(
+        options: BloomFilterOptions,
+        prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
+    ) -> Arc<FilterPolicy> {
+        Self::build_bloom(options, prefix_extractor)
     }
 
     /// Returns the policy name encoded into SSTs that use this policy.
@@ -158,11 +165,13 @@ impl FilterPolicy {
 }
 
 impl FilterPolicy {
-    fn build_bloom(options: BloomFilterOptions) -> Arc<FilterPolicy> {
+    fn build_bloom(
+        options: BloomFilterOptions,
+        prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
+    ) -> Arc<FilterPolicy> {
         let BloomFilterOptions {
             bits_per_key,
             whole_key_filtering,
-            prefix_extractor,
         } = options;
         let mut policy = slatedb::BloomFilterPolicy::new(bits_per_key)
             .with_whole_key_filtering(whole_key_filtering);
@@ -237,11 +246,13 @@ mod tests {
             }
         }
 
-        let policy = FilterPolicy::bloom_with_options(BloomFilterOptions {
-            bits_per_key: 10,
-            whole_key_filtering: true,
-            prefix_extractor: Some(Arc::new(ThreeByteExtractor)),
-        });
+        let policy = FilterPolicy::bloom_with_options(
+            BloomFilterOptions {
+                bits_per_key: 10,
+                whole_key_filtering: true,
+            },
+            Some(Arc::new(ThreeByteExtractor)),
+        );
         assert_eq!(policy.name(), "_bf:p=fixed3");
     }
 }
