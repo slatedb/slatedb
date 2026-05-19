@@ -145,20 +145,14 @@ impl Default for ReadOptions {
     }
 }
 
-impl TryFrom<ReadOptions> for slatedb::config::ReadOptions {
-    type Error = Error;
-
-    fn try_from(value: ReadOptions) -> Result<Self, Self::Error> {
-        let filter_context = value
-            .filter_context
-            .map(slatedb::FilterContext::try_from)
-            .transpose()?;
-        Ok(slatedb::config::ReadOptions {
+impl From<ReadOptions> for slatedb::config::ReadOptions {
+    fn from(value: ReadOptions) -> Self {
+        slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
-            filter_context,
-        })
+            filter_context: value.filter_context.map(Into::into),
+        }
     }
 }
 
@@ -255,10 +249,6 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
     type Error = Error;
 
     fn try_from(value: ScanOptions) -> Result<Self, Self::Error> {
-        let filter_context = value
-            .filter_context
-            .map(slatedb::FilterContext::try_from)
-            .transpose()?;
         Ok(slatedb::config::ScanOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
@@ -274,7 +264,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                 })
             })?,
             order: value.order.unwrap_or_default().into(),
-            filter_context,
+            filter_context: value.filter_context.map(Into::into),
         })
     }
 }

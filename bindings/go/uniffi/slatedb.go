@@ -1,3 +1,4 @@
+
 package slatedb
 
 // #include <slatedb.h>
@@ -5,18 +6,20 @@ import "C"
 
 import (
 	"bytes"
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
+	"unsafe"
+	"encoding/binary"
+	"runtime/cgo"
+	"errors"
 	"math"
 	"reflect"
 	"runtime"
-	"runtime/cgo"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 )
+
+
 
 // This is needed, because as of go 1.24
 // type RustBuffer C.RustBuffer cannot have methods,
@@ -43,25 +46,25 @@ type ExternalCRustBuffer interface {
 }
 
 func RustBufferFromC(b C.RustBuffer) ExternalCRustBuffer {
-	return GoRustBuffer{
+	return GoRustBuffer {
 		inner: b,
 	}
 }
 
 func CFromRustBuffer(b ExternalCRustBuffer) C.RustBuffer {
-	return C.RustBuffer{
+	return C.RustBuffer {
 		capacity: C.uint64_t(b.Capacity()),
-		len:      C.uint64_t(b.Len()),
-		data:     (*C.uchar)(b.Data()),
+		len: C.uint64_t(b.Len()),
+		data: (*C.uchar)(b.Data()),
 	}
 }
 
 func RustBufferFromExternal(b ExternalCRustBuffer) GoRustBuffer {
-	return GoRustBuffer{
-		inner: C.RustBuffer{
+	return GoRustBuffer {
+		inner: C.RustBuffer {
 			capacity: C.uint64_t(b.Capacity()),
-			len:      C.uint64_t(b.Len()),
-			data:     (*C.uchar)(b.Data()),
+			len: C.uint64_t(b.Len()),
+			data: (*C.uchar)(b.Data()),
 		},
 	}
 }
@@ -84,7 +87,7 @@ func (cb GoRustBuffer) AsReader() *bytes.Reader {
 }
 
 func (cb GoRustBuffer) Free() {
-	rustCall(func(status *C.RustCallStatus) bool {
+	rustCall(func( status *C.RustCallStatus) bool {
 		C.ffi_slatedb_uniffi_rustbuffer_free(cb.inner, status)
 		return false
 	})
@@ -93,6 +96,7 @@ func (cb GoRustBuffer) Free() {
 func (cb GoRustBuffer) ToGoBytes() []byte {
 	return C.GoBytes(unsafe.Pointer(cb.inner.data), C.int(cb.inner.len))
 }
+
 
 func stringToRustBuffer(str string) C.RustBuffer {
 	return bytesToRustBuffer([]byte(str))
@@ -104,15 +108,16 @@ func bytesToRustBuffer(b []byte) C.RustBuffer {
 	}
 	// We can pass the pointer along here, as it is pinned
 	// for the duration of this call
-	foreign := C.ForeignBytes{
-		len:  C.int(len(b)),
+	foreign := C.ForeignBytes {
+		len: C.int(len(b)),
 		data: (*C.uchar)(unsafe.Pointer(&b[0])),
 	}
-
-	return rustCall(func(status *C.RustCallStatus) C.RustBuffer {
+	
+	return rustCall(func( status *C.RustCallStatus) C.RustBuffer {
 		return C.ffi_slatedb_uniffi_rustbuffer_from_bytes(foreign, status)
 	})
 }
+
 
 type BufLifter[GoType any] interface {
 	Lift(value RustBufferI) GoType
@@ -155,6 +160,8 @@ func LiftFromRustBuffer[GoType any](bufReader BufReader[GoType], rbuf RustBuffer
 	return item
 }
 
+
+
 func rustCallWithError[E any, U any](converter BufReader[E], callback func(*C.RustCallStatus) U) (U, E) {
 	var status C.RustCallStatus
 	returnValue := callback(&status)
@@ -168,13 +175,13 @@ func checkCallStatus[E any](converter BufReader[E], status C.RustCallStatus) E {
 		var zero E
 		return zero
 	case 1:
-		return LiftFromRustBuffer(converter, GoRustBuffer{inner: status.errorBuf})
+		return LiftFromRustBuffer(converter, GoRustBuffer { inner: status.errorBuf })
 	case 2:
 		// when the rust code sees a panic, it tries to construct a rustBuffer
 		// with the message.  but if that code panics, then it just sends back
 		// an empty buffer.
 		if status.errorBuf.len > 0 {
-			panic(fmt.Errorf("%s", FfiConverterStringINSTANCE.Lift(GoRustBuffer{inner: status.errorBuf})))
+			panic(fmt.Errorf("%s", FfiConverterStringINSTANCE.Lift(GoRustBuffer { inner: status.errorBuf })))
 		} else {
 			panic(fmt.Errorf("Rust panicked while handling Rust panic"))
 		}
@@ -194,7 +201,7 @@ func checkCallStatusUnknown(status C.RustCallStatus) error {
 		// with the message.  but if that code panics, then it just sends back
 		// an empty buffer.
 		if status.errorBuf.len > 0 {
-			panic(fmt.Errorf("%s", FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			panic(fmt.Errorf("%s", FfiConverterStringINSTANCE.Lift(GoRustBuffer {
 				inner: status.errorBuf,
 			})))
 		} else {
@@ -216,6 +223,7 @@ func rustCall[U any](callback func(*C.RustCallStatus) U) U {
 type NativeError interface {
 	AsError() error
 }
+
 
 func writeInt8(writer io.Writer, value int8) {
 	if err := binary.Write(writer, binary.BigEndian, value); err != nil {
@@ -276,6 +284,7 @@ func writeFloat64(writer io.Writer, value float64) {
 		panic(err)
 	}
 }
+
 
 func readInt8(reader io.Reader) int8 {
 	var result int8
@@ -358,16 +367,18 @@ func readFloat64(reader io.Reader) float64 {
 }
 
 func init() {
-
-	FfiConverterCounterINSTANCE.register()
-	FfiConverterGaugeINSTANCE.register()
-	FfiConverterHistogramINSTANCE.register()
-	FfiConverterLogCallbackINSTANCE.register()
-	FfiConverterMergeOperatorINSTANCE.register()
-	FfiConverterMetricsRecorderINSTANCE.register()
-	FfiConverterUpDownCounterINSTANCE.register()
-	uniffiCheckChecksums()
+        
+        FfiConverterCounterINSTANCE.register();
+        FfiConverterGaugeINSTANCE.register();
+        FfiConverterHistogramINSTANCE.register();
+        FfiConverterLogCallbackINSTANCE.register();
+        FfiConverterMergeOperatorINSTANCE.register();
+        FfiConverterMetricsRecorderINSTANCE.register();
+        FfiConverterPrefixExtractorINSTANCE.register();
+        FfiConverterUpDownCounterINSTANCE.register();
+        uniffiCheckChecksums()
 }
+
 
 func uniffiCheckChecksums() {
 	// Get the bindings contract version from our ComponentInterface
@@ -381,1293 +392,1358 @@ func uniffiCheckChecksums() {
 		panic("slatedb: UniFFI contract version mismatch")
 	}
 	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_func_init_logging()
-		})
-		if checksum != 43029 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_func_init_logging: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp()
-		})
-		if checksum != 39670 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_get_timestamp_for_sequence()
-		})
-		if checksum != 10449 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_get_timestamp_for_sequence: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_checkpoints()
-		})
-		if checksum != 43487 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_checkpoints: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_compactions()
-		})
-		if checksum != 9774 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_compactions: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_manifests()
-		})
-		if checksum != 13737 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_manifests: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compaction()
-		})
-		if checksum != 50237 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compaction: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compactions()
-		})
-		if checksum != 53923 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compactions: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compactor_state_view()
-		})
-		if checksum != 22143 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compactor_state_view: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_read_manifest()
-		})
-		if checksum != 1383 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_manifest: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_build()
-		})
-		if checksum != 46255 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_build: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed()
-		})
-		if checksum != 52226 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store()
-		})
-		if checksum != 18899 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_build()
-		})
-		if checksum != 18005 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_build: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache()
-		})
-		if checksum != 61829 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled()
-		})
-		if checksum != 17477 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator()
-		})
-		if checksum != 5839 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_metrics_recorder()
-		})
-		if checksum != 18128 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_metrics_recorder: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed()
-		})
-		if checksum != 58796 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings()
-		})
-		if checksum != 64263 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size()
-		})
-		if checksum != 40009 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store()
-		})
-		if checksum != 4790 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build()
-		})
-		if checksum != 11741 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id()
-		})
-		if checksum != 41016 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator()
-		})
-		if checksum != 63455 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_metrics_recorder()
-		})
-		if checksum != 20032 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_metrics_recorder: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options()
-		})
-		if checksum != 46155 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store()
-		})
-		if checksum != 2290 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_begin()
-		})
-		if checksum != 38869 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_begin: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_delete()
-		})
-		if checksum != 4063 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_delete: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_delete_with_options()
-		})
-		if checksum != 44744 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_delete_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst()
-		})
-		if checksum != 60099 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_flush()
-		})
-		if checksum != 42157 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_flush_with_options()
-		})
-		if checksum != 27835 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_get()
-		})
-		if checksum != 39474 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_get_key_value()
-		})
-		if checksum != 35423 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_key_value: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options()
-		})
-		if checksum != 6898 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_get_with_options()
-		})
-		if checksum != 20708 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_merge()
-		})
-		if checksum != 28366 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_merge: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_merge_with_options()
-		})
-		if checksum != 15865 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_merge_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_put()
-		})
-		if checksum != 53275 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_put: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_put_with_options()
-		})
-		if checksum != 37591 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_put_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_scan()
-		})
-		if checksum != 60557 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix()
-		})
-		if checksum != 44288 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options()
-		})
-		if checksum != 34774 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_scan_with_options()
-		})
-		if checksum != 63326 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_shutdown()
-		})
-		if checksum != 3032 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_shutdown: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_snapshot()
-		})
-		if checksum != 53137 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_snapshot: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_status()
-		})
-		if checksum != 33776 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_status: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_warm_sst()
-		})
-		if checksum != 8802 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_warm_sst: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_write()
-		})
-		if checksum != 29016 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_write: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_write_with_options()
-		})
-		if checksum != 13580 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_write_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst()
-		})
-		if checksum != 31819 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get()
-		})
-		if checksum != 53337 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value()
-		})
-		if checksum != 12260 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value_with_options()
-		})
-		if checksum != 19895 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options()
-		})
-		if checksum != 22247 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan()
-		})
-		if checksum != 19340 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix()
-		})
-		if checksum != 2510 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options()
-		})
-		if checksum != 46251 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options()
-		})
-		if checksum != 27137 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown()
-		})
-		if checksum != 34395 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_status()
-		})
-		if checksum != 4488 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_status: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst()
-		})
-		if checksum != 26897 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get()
-		})
-		if checksum != 52436 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value()
-		})
-		if checksum != 58808 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options()
-		})
-		if checksum != 21706 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options()
-		})
-		if checksum != 58422 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan()
-		})
-		if checksum != 5467 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix()
-		})
-		if checksum != 57746 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options()
-		})
-		if checksum != 4221 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options()
-		})
-		if checksum != 63293 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit()
-		})
-		if checksum != 56467 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options()
-		})
-		if checksum != 62589 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete()
-		})
-		if checksum != 7933 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get()
-		})
-		if checksum != 4279 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value()
-		})
-		if checksum != 51665 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options()
-		})
-		if checksum != 61936 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options()
-		})
-		if checksum != 30800 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_id()
-		})
-		if checksum != 33247 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_id: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read()
-		})
-		if checksum != 33456 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge()
-		})
-		if checksum != 16664 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options()
-		})
-		if checksum != 17753 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put()
-		})
-		if checksum != 56350 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options()
-		})
-		if checksum != 37260 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback()
-		})
-		if checksum != 25213 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan()
-		})
-		if checksum != 2520 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix()
-		})
-		if checksum != 28799 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options()
-		})
-		if checksum != 31002 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options()
-		})
-		if checksum != 5569 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum()
-		})
-		if checksum != 63575 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write()
-		})
-		if checksum != 16990 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_next()
-		})
-		if checksum != 1225 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbiterator_next: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_seek()
-		})
-		if checksum != 61052 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbiterator_seek: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_logcallback_log()
-		})
-		if checksum != 36316 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_logcallback_log: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge()
-		})
-		if checksum != 48409 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_counter_increment()
-		})
-		if checksum != 45426 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_counter_increment: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metric_by_name_and_labels()
-		})
-		if checksum != 45073 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metric_by_name_and_labels: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metrics_by_name()
-		})
-		if checksum != 7602 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metrics_by_name: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter()
-		})
-		if checksum != 51600 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge()
-		})
-		if checksum != 34281 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram()
-		})
-		if checksum != 4383 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter()
-		})
-		if checksum != 19270 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_snapshot()
-		})
-		if checksum != 39221 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_snapshot: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_gauge_set()
-		})
-		if checksum != 19642 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_gauge_set: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_histogram_record()
-		})
-		if checksum != 17863 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_histogram_record: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter()
-		})
-		if checksum != 40366 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge()
-		})
-		if checksum != 30425 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter()
-		})
-		if checksum != 64639 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram()
-		})
-		if checksum != 26503 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_updowncounter_increment()
-		})
-		if checksum != 34440 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_updowncounter_increment: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_settings_set()
-		})
-		if checksum != 34344 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_set: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_settings_to_json_string()
-		})
-		if checksum != 8458 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_to_json_string: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_id()
-		})
-		if checksum != 62512 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_id: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_iterator()
-		})
-		if checksum != 46880 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_iterator: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_metadata()
-		})
-		if checksum != 32912 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_metadata: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_next_file()
-		})
-		if checksum != 56800 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_file: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_next_id()
-		})
-		if checksum != 48353 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_id: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfileiterator_next()
-		})
-		if checksum != 51490 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfileiterator_next: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walreader_get()
-		})
-		if checksum != 11510 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_get: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walreader_list()
-		})
-		if checksum != 43661 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_list: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_delete()
-		})
-		if checksum != 58549 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_delete: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_merge()
-		})
-		if checksum != 62067 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_merge: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options()
-		})
-		if checksum != 24696 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_put()
-		})
-		if checksum != 48246 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options()
-		})
-		if checksum != 31177 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_adminbuilder_new()
-		})
-		if checksum != 41354 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_adminbuilder_new: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new()
-		})
-		if checksum != 60260 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new()
-		})
-		if checksum != 20397 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_foyer_cache()
-		})
-		if checksum != 16480 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_foyer_cache: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_moka_cache()
-		})
-		if checksum != 35589 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_moka_cache: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache()
-		})
-		if checksum != 44755 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new()
-		})
-		if checksum != 31165 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env()
-		})
-		if checksum != 61956 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve()
-		})
-		if checksum != 17196 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_settings_default()
-		})
-		if checksum != 64704 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_default: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env()
-		})
-		if checksum != 28170 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default()
-		})
-		if checksum != 3189 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_file()
-		})
-		if checksum != 38462 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_file: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string()
-		})
-		if checksum != 38360 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_settings_load()
-		})
-		if checksum != 7949 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_load: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_walreader_new()
-		})
-		if checksum != 30537 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_walreader_new: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_writebatch_new()
-		})
-		if checksum != 2056 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_writebatch_new: UniFFI API checksum mismatch")
-		}
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_func_init_logging()
+	})
+	if checksum != 43029 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_func_init_logging: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp()
+	})
+	if checksum != 39670 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_get_timestamp_for_sequence()
+	})
+	if checksum != 10449 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_get_timestamp_for_sequence: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_list_checkpoints()
+	})
+	if checksum != 43487 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_checkpoints: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_list_compactions()
+	})
+	if checksum != 9774 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_compactions: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_list_manifests()
+	})
+	if checksum != 13737 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_manifests: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compaction()
+	})
+	if checksum != 50237 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compaction: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compactions()
+	})
+	if checksum != 53923 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compactions: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_read_compactor_state_view()
+	})
+	if checksum != 22143 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_compactor_state_view: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_admin_read_manifest()
+	})
+	if checksum != 1383 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_manifest: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_build()
+	})
+	if checksum != 46255 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_build: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed()
+	})
+	if checksum != 52226 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store()
+	})
+	if checksum != 18899 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_build()
+	})
+	if checksum != 18005 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_build: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache()
+	})
+	if checksum != 61829 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled()
+	})
+	if checksum != 17477 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_filter_policies()
+	})
+	if checksum != 9193 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_filter_policies: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator()
+	})
+	if checksum != 5839 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_metrics_recorder()
+	})
+	if checksum != 18128 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_metrics_recorder: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed()
+	})
+	if checksum != 58796 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings()
+	})
+	if checksum != 64263 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size()
+	})
+	if checksum != 40009 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store()
+	})
+	if checksum != 4790 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build()
+	})
+	if checksum != 11741 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id()
+	})
+	if checksum != 41016 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies()
+	})
+	if checksum != 12871 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator()
+	})
+	if checksum != 63455 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_metrics_recorder()
+	})
+	if checksum != 20032 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_metrics_recorder: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options()
+	})
+	if checksum != 46155 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store()
+	})
+	if checksum != 2290 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_begin()
+	})
+	if checksum != 38869 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_begin: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_delete()
+	})
+	if checksum != 4063 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_delete: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_delete_with_options()
+	})
+	if checksum != 44744 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_delete_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst()
+	})
+	if checksum != 60099 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_flush()
+	})
+	if checksum != 42157 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_flush_with_options()
+	})
+	if checksum != 27835 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_get()
+	})
+	if checksum != 39474 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_get_key_value()
+	})
+	if checksum != 35423 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_key_value: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options()
+	})
+	if checksum != 6898 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_get_with_options()
+	})
+	if checksum != 20708 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_merge()
+	})
+	if checksum != 28366 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_merge: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_merge_with_options()
+	})
+	if checksum != 15865 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_merge_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_put()
+	})
+	if checksum != 53275 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_put: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_put_with_options()
+	})
+	if checksum != 37591 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_put_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_scan()
+	})
+	if checksum != 60557 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix()
+	})
+	if checksum != 44288 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options()
+	})
+	if checksum != 34774 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_scan_with_options()
+	})
+	if checksum != 63326 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_shutdown()
+	})
+	if checksum != 3032 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_shutdown: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_snapshot()
+	})
+	if checksum != 53137 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_snapshot: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_status()
+	})
+	if checksum != 33776 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_status: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_warm_sst()
+	})
+	if checksum != 8802 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_warm_sst: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_write()
+	})
+	if checksum != 29016 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_write: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_db_write_with_options()
+	})
+	if checksum != 13580 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_write_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst()
+	})
+	if checksum != 31819 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get()
+	})
+	if checksum != 53337 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value()
+	})
+	if checksum != 12260 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value_with_options()
+	})
+	if checksum != 19895 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_key_value_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options()
+	})
+	if checksum != 22247 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan()
+	})
+	if checksum != 19340 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix()
+	})
+	if checksum != 2510 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options()
+	})
+	if checksum != 46251 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options()
+	})
+	if checksum != 27137 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown()
+	})
+	if checksum != 34395 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_status()
+	})
+	if checksum != 4488 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_status: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst()
+	})
+	if checksum != 26897 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get()
+	})
+	if checksum != 52436 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value()
+	})
+	if checksum != 58808 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options()
+	})
+	if checksum != 21706 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options()
+	})
+	if checksum != 58422 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan()
+	})
+	if checksum != 5467 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix()
+	})
+	if checksum != 57746 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options()
+	})
+	if checksum != 4221 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options()
+	})
+	if checksum != 63293 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit()
+	})
+	if checksum != 56467 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options()
+	})
+	if checksum != 62589 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete()
+	})
+	if checksum != 7933 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get()
+	})
+	if checksum != 4279 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value()
+	})
+	if checksum != 51665 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options()
+	})
+	if checksum != 61936 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options()
+	})
+	if checksum != 30800 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_id()
+	})
+	if checksum != 33247 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_id: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read()
+	})
+	if checksum != 33456 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge()
+	})
+	if checksum != 16664 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options()
+	})
+	if checksum != 17753 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put()
+	})
+	if checksum != 56350 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options()
+	})
+	if checksum != 37260 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback()
+	})
+	if checksum != 25213 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan()
+	})
+	if checksum != 2520 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix()
+	})
+	if checksum != 28799 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options()
+	})
+	if checksum != 31002 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options()
+	})
+	if checksum != 5569 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum()
+	})
+	if checksum != 63575 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write()
+	})
+	if checksum != 16990 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_filterpolicy_name()
+	})
+	if checksum != 39457 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_filterpolicy_name: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_prefixextractor_name()
+	})
+	if checksum != 14936 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_prefixextractor_name: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_prefixextractor_prefix_len()
+	})
+	if checksum != 8228 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_prefixextractor_prefix_len: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_next()
+	})
+	if checksum != 1225 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbiterator_next: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_seek()
+	})
+	if checksum != 61052 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbiterator_seek: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_logcallback_log()
+	})
+	if checksum != 36316 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_logcallback_log: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge()
+	})
+	if checksum != 48409 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_counter_increment()
+	})
+	if checksum != 45426 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_counter_increment: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metric_by_name_and_labels()
+	})
+	if checksum != 45073 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metric_by_name_and_labels: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metrics_by_name()
+	})
+	if checksum != 7602 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metrics_by_name: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter()
+	})
+	if checksum != 51600 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge()
+	})
+	if checksum != 34281 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram()
+	})
+	if checksum != 4383 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter()
+	})
+	if checksum != 19270 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_snapshot()
+	})
+	if checksum != 39221 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_snapshot: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_gauge_set()
+	})
+	if checksum != 19642 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_gauge_set: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_histogram_record()
+	})
+	if checksum != 17863 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_histogram_record: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter()
+	})
+	if checksum != 40366 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge()
+	})
+	if checksum != 30425 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter()
+	})
+	if checksum != 64639 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram()
+	})
+	if checksum != 26503 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_updowncounter_increment()
+	})
+	if checksum != 34440 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_updowncounter_increment: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_settings_set()
+	})
+	if checksum != 34344 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_set: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_settings_to_json_string()
+	})
+	if checksum != 8458 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_to_json_string: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walfile_id()
+	})
+	if checksum != 62512 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_id: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walfile_iterator()
+	})
+	if checksum != 46880 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_iterator: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walfile_metadata()
+	})
+	if checksum != 32912 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_metadata: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walfile_next_file()
+	})
+	if checksum != 56800 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_file: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walfile_next_id()
+	})
+	if checksum != 48353 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_id: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walfileiterator_next()
+	})
+	if checksum != 51490 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfileiterator_next: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walreader_get()
+	})
+	if checksum != 11510 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_get: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_walreader_list()
+	})
+	if checksum != 43661 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_list: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_writebatch_delete()
+	})
+	if checksum != 58549 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_delete: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_writebatch_merge()
+	})
+	if checksum != 62067 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_merge: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options()
+	})
+	if checksum != 24696 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_writebatch_put()
+	})
+	if checksum != 48246 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options()
+	})
+	if checksum != 31177 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_adminbuilder_new()
+	})
+	if checksum != 41354 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_adminbuilder_new: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new()
+	})
+	if checksum != 60260 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new()
+	})
+	if checksum != 20397 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_foyer_cache()
+	})
+	if checksum != 16480 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_foyer_cache: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_moka_cache()
+	})
+	if checksum != 35589 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_moka_cache: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache()
+	})
+	if checksum != 44755 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom()
+	})
+	if checksum != 6011 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom_with_options()
+	})
+	if checksum != 47045 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom_with_options: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new()
+	})
+	if checksum != 31165 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env()
+	})
+	if checksum != 61956 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve()
+	})
+	if checksum != 17196 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_settings_default()
+	})
+	if checksum != 64704 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_default: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env()
+	})
+	if checksum != 28170 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default()
+	})
+	if checksum != 3189 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_file()
+	})
+	if checksum != 38462 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_file: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string()
+	})
+	if checksum != 38360 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_settings_load()
+	})
+	if checksum != 7949 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_load: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_walreader_new()
+	})
+	if checksum != 30537 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_walreader_new: UniFFI API checksum mismatch")
+	}
+	}
+	{
+	checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+		return C.uniffi_slatedb_uniffi_checksum_constructor_writebatch_new()
+	})
+	if checksum != 2056 {
+		// If this happens try cleaning and rebuilding your project
+		panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_writebatch_new: UniFFI API checksum mismatch")
+	}
 	}
 }
+
+
 
 type FfiConverterUint32 struct{}
 
@@ -1689,7 +1765,7 @@ func (FfiConverterUint32) Read(reader io.Reader) uint32 {
 	return readUint32(reader)
 }
 
-type FfiDestroyerUint32 struct{}
+type FfiDestroyerUint32 struct {}
 
 func (FfiDestroyerUint32) Destroy(_ uint32) {}
 
@@ -1713,7 +1789,7 @@ func (FfiConverterUint64) Read(reader io.Reader) uint64 {
 	return readUint64(reader)
 }
 
-type FfiDestroyerUint64 struct{}
+type FfiDestroyerUint64 struct {}
 
 func (FfiDestroyerUint64) Destroy(_ uint64) {}
 
@@ -1737,7 +1813,7 @@ func (FfiConverterInt64) Read(reader io.Reader) int64 {
 	return readInt64(reader)
 }
 
-type FfiDestroyerInt64 struct{}
+type FfiDestroyerInt64 struct {}
 
 func (FfiDestroyerInt64) Destroy(_ int64) {}
 
@@ -1761,7 +1837,7 @@ func (FfiConverterFloat64) Read(reader io.Reader) float64 {
 	return readFloat64(reader)
 }
 
-type FfiDestroyerFloat64 struct{}
+type FfiDestroyerFloat64 struct {}
 
 func (FfiDestroyerFloat64) Destroy(_ float64) {}
 
@@ -1792,7 +1868,7 @@ func (FfiConverterBool) Read(reader io.Reader) bool {
 	return readInt8(reader) != 0
 }
 
-type FfiDestroyerBool struct{}
+type FfiDestroyerBool struct {}
 
 func (FfiDestroyerBool) Destroy(_ bool) {}
 
@@ -1846,7 +1922,7 @@ func (FfiConverterString) Write(writer io.Writer, value string) {
 	}
 }
 
-type FfiDestroyerString struct{}
+type FfiDestroyerString struct {}
 
 func (FfiDestroyerString) Destroy(_ string) {}
 
@@ -1894,19 +1970,21 @@ func (c FfiConverterBytes) Read(reader io.Reader) []byte {
 	return buffer
 }
 
-type FfiDestroyerBytes struct{}
+type FfiDestroyerBytes struct {}
 
 func (FfiDestroyerBytes) Destroy(_ []byte) {}
+
+
 
 // Below is an implementation of synchronization requirements outlined in the link.
 // https://github.com/mozilla/uniffi-rs/blob/0dc031132d9493ca812c3af6e7dd60ad2ea95bf0/uniffi_bindgen/src/bindings/kotlin/templates/ObjectRuntime.kt#L31
 
 type FfiObject struct {
-	handle        C.uint64_t
-	callCounter   atomic.Int64
+	handle C.uint64_t
+	callCounter atomic.Int64
 	cloneFunction func(C.uint64_t, *C.RustCallStatus) C.uint64_t
-	freeFunction  func(C.uint64_t, *C.RustCallStatus)
-	destroyed     atomic.Bool
+	freeFunction func(C.uint64_t, *C.RustCallStatus)
+	destroyed atomic.Bool
 }
 
 func newFfiObject(
@@ -1914,14 +1992,14 @@ func newFfiObject(
 	cloneFunction func(C.uint64_t, *C.RustCallStatus) C.uint64_t,
 	freeFunction func(C.uint64_t, *C.RustCallStatus),
 ) FfiObject {
-	return FfiObject{
-		handle:        handle,
+	return FfiObject {
+		handle: handle,
 		cloneFunction: cloneFunction,
-		freeFunction:  freeFunction,
+		freeFunction: freeFunction,
 	}
 }
 
-func (ffiObject *FfiObject) incrementPointer(debugName string) C.uint64_t {
+func (ffiObject *FfiObject)incrementPointer(debugName string) C.uint64_t {
 	for {
 		counter := ffiObject.callCounter.Load()
 		if counter <= -1 {
@@ -1930,7 +2008,7 @@ func (ffiObject *FfiObject) incrementPointer(debugName string) C.uint64_t {
 		if counter == math.MaxInt64 {
 			panic(fmt.Errorf("%v object call counter would overflow", debugName))
 		}
-		if ffiObject.callCounter.CompareAndSwap(counter, counter+1) {
+		if ffiObject.callCounter.CompareAndSwap(counter, counter + 1) {
 			break
 		}
 	}
@@ -1940,13 +2018,13 @@ func (ffiObject *FfiObject) incrementPointer(debugName string) C.uint64_t {
 	})
 }
 
-func (ffiObject *FfiObject) decrementPointer() {
+func (ffiObject *FfiObject)decrementPointer() {
 	if ffiObject.callCounter.Add(-1) == -1 {
 		ffiObject.freeRustArcPtr()
 	}
 }
 
-func (ffiObject *FfiObject) destroy() {
+func (ffiObject *FfiObject)destroy() {
 	if ffiObject.destroyed.CompareAndSwap(false, true) {
 		if ffiObject.callCounter.Add(-1) == -1 {
 			ffiObject.freeRustArcPtr()
@@ -1954,7 +2032,7 @@ func (ffiObject *FfiObject) destroy() {
 	}
 }
 
-func (ffiObject *FfiObject) freeRustArcPtr() {
+func (ffiObject *FfiObject)freeRustArcPtr() {
 	if ffiObject.handle == 0 {
 		return
 	}
@@ -1963,7 +2041,6 @@ func (ffiObject *FfiObject) freeRustArcPtr() {
 		return 0
 	})
 }
-
 // Administrative read/query handle for SlateDB.
 type AdminInterface interface {
 	// Looks up a sequence number for the provided Unix UTC timestamp seconds.
@@ -1985,37 +2062,39 @@ type AdminInterface interface {
 	// Reads a specific manifest by ID, or the latest when `id` is `None`.
 	ReadManifest(id *uint64) (*VersionedManifest, error)
 }
-
 // Administrative read/query handle for SlateDB.
 type Admin struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Looks up a sequence number for the provided Unix UTC timestamp seconds.
 func (_self *Admin) GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (*uint64, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *uint64 {
 			return FfiConverterOptionalUint64INSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_get_sequence_for_timestamp(
-			_pointer, FfiConverterInt64INSTANCE.Lower(timestampSecs), FfiConverterBoolINSTANCE.Lower(roundUp)),
+		_pointer,FfiConverterInt64INSTANCE.Lower(timestampSecs), FfiConverterBoolINSTANCE.Lower(roundUp)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2024,34 +2103,34 @@ func (_self *Admin) GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Looks up a timestamp for the provided sequence number.
 func (_self *Admin) GetTimestampForSequence(seq uint64, roundUp bool) (*int64, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *int64 {
 			return FfiConverterOptionalInt64INSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_get_timestamp_for_sequence(
-			_pointer, FfiConverterUint64INSTANCE.Lower(seq), FfiConverterBoolINSTANCE.Lower(roundUp)),
+		_pointer,FfiConverterUint64INSTANCE.Lower(seq), FfiConverterBoolINSTANCE.Lower(roundUp)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2060,34 +2139,34 @@ func (_self *Admin) GetTimestampForSequence(seq uint64, roundUp bool) (*int64, e
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Lists checkpoints, optionally filtering by exact name.
 func (_self *Admin) ListCheckpoints(nameFilter *string) ([]Checkpoint, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) []Checkpoint {
 			return FfiConverterSequenceCheckpointINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_list_checkpoints(
-			_pointer, FfiConverterOptionalStringINSTANCE.Lower(nameFilter)),
+		_pointer,FfiConverterOptionalStringINSTANCE.Lower(nameFilter)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2096,34 +2175,34 @@ func (_self *Admin) ListCheckpoints(nameFilter *string) ([]Checkpoint, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Lists compactions files inside the half-open ID range `[from, to)`.
 func (_self *Admin) ListCompactions(from *uint64, to *uint64) ([]VersionedCompactions, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) []VersionedCompactions {
 			return FfiConverterSequenceVersionedCompactionsINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_list_compactions(
-			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
+		_pointer,FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2132,34 +2211,34 @@ func (_self *Admin) ListCompactions(from *uint64, to *uint64) ([]VersionedCompac
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Lists manifests inside the half-open ID range `[from, to)`.
 func (_self *Admin) ListManifests(from *uint64, to *uint64) ([]VersionedManifest, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) []VersionedManifest {
 			return FfiConverterSequenceVersionedManifestINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_list_manifests(
-			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
+		_pointer,FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2168,34 +2247,34 @@ func (_self *Admin) ListManifests(from *uint64, to *uint64) ([]VersionedManifest
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads a compaction by ULID string from a specific or latest compactions file.
 func (_self *Admin) ReadCompaction(compactionId string, compactionsId *uint64) (*Compaction, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *Compaction {
 			return FfiConverterOptionalCompactionINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_read_compaction(
-			_pointer, FfiConverterStringINSTANCE.Lower(compactionId), FfiConverterOptionalUint64INSTANCE.Lower(compactionsId)),
+		_pointer,FfiConverterStringINSTANCE.Lower(compactionId), FfiConverterOptionalUint64INSTANCE.Lower(compactionsId)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2204,34 +2283,34 @@ func (_self *Admin) ReadCompaction(compactionId string, compactionsId *uint64) (
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads a specific compactions file by ID, or the latest when `id` is `None`.
 func (_self *Admin) ReadCompactions(id *uint64) (*VersionedCompactions, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *VersionedCompactions {
 			return FfiConverterOptionalVersionedCompactionsINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_read_compactions(
-			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(id)),
+		_pointer,FfiConverterOptionalUint64INSTANCE.Lower(id)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2240,34 +2319,34 @@ func (_self *Admin) ReadCompactions(id *uint64) (*VersionedCompactions, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the latest compactor state view.
 func (_self *Admin) ReadCompactorStateView() (CompactorStateView, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) CompactorStateView {
 			return FfiConverterCompactorStateViewINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_read_compactor_state_view(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2276,34 +2355,34 @@ func (_self *Admin) ReadCompactorStateView() (CompactorStateView, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads a specific manifest by ID, or the latest when `id` is `None`.
 func (_self *Admin) ReadManifest(id *uint64) (*VersionedManifest, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *VersionedManifest {
 			return FfiConverterOptionalVersionedManifestINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_read_manifest(
-			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(id)),
+		_pointer,FfiConverterOptionalUint64INSTANCE.Lower(id)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2312,19 +2391,20 @@ func (_self *Admin) ReadManifest(id *uint64) (*VersionedManifest, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 func (object *Admin) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterAdmin struct{}
+type FfiConverterAdmin struct {}
 
 var FfiConverterAdminINSTANCE = FfiConverterAdmin{}
 
+
 func (c FfiConverterAdmin) Lift(handle C.uint64_t) *Admin {
-	result := &Admin{
+	result := &Admin {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -2364,11 +2444,13 @@ func LowerToExternalAdmin(value *Admin) uint64 {
 	return uint64(FfiConverterAdminINSTANCE.Lower(value))
 }
 
-type FfiDestroyerAdmin struct{}
+type FfiDestroyerAdmin struct {}
 
 func (_ FfiDestroyerAdmin) Destroy(value *Admin) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Builder for opening an administrative [`crate::Admin`] handle.
 //
@@ -2381,71 +2463,73 @@ type AdminBuilderInterface interface {
 	// Uses a separate object store for WAL-backed administrative operations.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
-
 // Builder for opening an administrative [`crate::Admin`] handle.
 //
 // Builders are single-use: calling [`AdminBuilder::build`] consumes the builder.
 type AdminBuilder struct {
 	ffiObject FfiObject
 }
-
 // Creates a new admin builder for `path` in `object_store`.
 func NewAdminBuilder(path string, objectStore *ObjectStore) *AdminBuilder {
 	return FfiConverterAdminBuilderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_adminbuilder_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+		return C.uniffi_slatedb_uniffi_fn_constructor_adminbuilder_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore),_uniffiStatus)
 	}))
 }
+
+
+
 
 // Builds the admin handle and consumes this builder.
 func (_self *AdminBuilder) Build() (*Admin, error) {
 	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_adminbuilder_build(
-			_pointer, _uniffiStatus)
+		_pointer,_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *Admin
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterAdminINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *Admin
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterAdminINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Sets the seed used for SlateDB's internal random number generation.
 func (_self *AdminBuilder) WithSeed(seed uint64) error {
 	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_seed(
-			_pointer, FfiConverterUint64INSTANCE.Lower(seed), _uniffiStatus)
+		_pointer,FfiConverterUint64INSTANCE.Lower(seed),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Uses a separate object store for WAL-backed administrative operations.
 func (_self *AdminBuilder) WithWalObjectStore(walObjectStore *ObjectStore) error {
 	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_wal_object_store(
-			_pointer, FfiConverterObjectStoreINSTANCE.Lower(walObjectStore), _uniffiStatus)
+		_pointer,FfiConverterObjectStoreINSTANCE.Lower(walObjectStore),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 func (object *AdminBuilder) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterAdminBuilder struct{}
+type FfiConverterAdminBuilder struct {}
 
 var FfiConverterAdminBuilderINSTANCE = FfiConverterAdminBuilder{}
 
+
 func (c FfiConverterAdminBuilder) Lift(handle C.uint64_t) *AdminBuilder {
-	result := &AdminBuilder{
+	result := &AdminBuilder {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -2485,30 +2569,34 @@ func LowerToExternalAdminBuilder(value *AdminBuilder) uint64 {
 	return uint64(FfiConverterAdminBuilderINSTANCE.Lower(value))
 }
 
-type FfiDestroyerAdminBuilder struct{}
+type FfiDestroyerAdminBuilder struct {}
 
 func (_ FfiDestroyerAdminBuilder) Destroy(value *AdminBuilder) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Handle for a monotonic counter metric.
 type Counter interface {
 	// Adds `value` to the counter.
-	Increment(value uint64)
+	Increment(value uint64) 
 }
-
 // Handle for a monotonic counter metric.
 type CounterImpl struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Adds `value` to the counter.
-func (_self *CounterImpl) Increment(value uint64) {
+func (_self *CounterImpl) Increment(value uint64)  {
 	_pointer := _self.ffiObject.incrementPointer("Counter")
 	defer _self.ffiObject.decrementPointer()
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_counter_increment(
-			_pointer, FfiConverterUint64INSTANCE.Lower(value), _uniffiStatus)
+		_pointer,FfiConverterUint64INSTANCE.Lower(value),_uniffiStatus)
 		return false
 	})
 }
@@ -2519,16 +2607,17 @@ func (object *CounterImpl) Destroy() {
 
 type FfiConverterCounter struct {
 	handleMap *concurrentHandleMap[Counter]
-}
+	}
 
 var FfiConverterCounterINSTANCE = FfiConverterCounter{
 	handleMap: newConcurrentHandleMap[Counter](),
-}
+	}
+
 
 func (c FfiConverterCounter) Lift(handle C.uint64_t) Counter {
-	if uint64(handle)&1 == 0 {
+	if uint64(handle) & 1 == 0 {
 		// Rust-generated handle (even), construct a new object wrapping the handle
-		result := &CounterImpl{
+		result := &CounterImpl {
 			newFfiObject(
 				handle,
 				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -2583,7 +2672,7 @@ func LowerToExternalCounter(value Counter) uint64 {
 	return uint64(FfiConverterCounterINSTANCE.Lower(value))
 }
 
-type FfiDestroyerCounter struct{}
+type FfiDestroyerCounter struct {}
 
 func (_ FfiDestroyerCounter) Destroy(value Counter) {
 	if val, ok := value.(*CounterImpl); ok {
@@ -2601,6 +2690,7 @@ const (
 	uniffiCallbackCancelled             uniffiCallbackResult = 3
 )
 
+
 type concurrentHandleMap[T any] struct {
 	handles       map[uint64]T
 	currentHandle uint64
@@ -2609,7 +2699,7 @@ type concurrentHandleMap[T any] struct {
 
 func newConcurrentHandleMap[T any]() *concurrentHandleMap[T] {
 	return &concurrentHandleMap[T]{
-		handles:       map[uint64]T{},
+		handles:  map[uint64]T{},
 		currentHandle: 1,
 	}
 }
@@ -2640,23 +2730,30 @@ func (cm *concurrentHandleMap[T]) tryGet(handle uint64) (T, bool) {
 }
 
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0(uniffiHandle C.uint64_t, value C.uint64_t, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0(uniffiHandle C.uint64_t,value C.uint64_t,uniffiOutReturn *C.void,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterCounterINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	uniffiObj.Increment(
-		FfiConverterUint64INSTANCE.Lift(value),
-	)
+	
+    uniffiObj.Increment(
+        FfiConverterUint64INSTANCE.Lift(value),
+    )
+	
+    
 
+
+	
 }
 
-var UniffiVTableCallbackInterfaceCounterINSTANCE = C.UniffiVTableCallbackInterfaceCounter{
-	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterFree),
+var UniffiVTableCallbackInterfaceCounterINSTANCE = C.UniffiVTableCallbackInterfaceCounter {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterFree),
 	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterClone),
-	increment:   (C.UniffiCallbackInterfaceCounterMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0),
+	increment: (C.UniffiCallbackInterfaceCounterMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0),
 }
 
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterFree
@@ -2676,6 +2773,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterClone(handle C.u
 func (c FfiConverterCounter) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_counter(&UniffiVTableCallbackInterfaceCounterINSTANCE)
 }
+
 
 // A writable SlateDB handle.
 type DbInterface interface {
@@ -2741,18 +2839,20 @@ type DbInterface interface {
 	// The provided batch is consumed and cannot be reused afterwards.
 	WriteWithOptions(batch *WriteBatch, options WriteOptions) (WriteHandle, error)
 }
-
 // A writable SlateDB handle.
 type Db struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Starts a transaction at the requested isolation level.
 func (_self *Db) Begin(isolationLevel IsolationLevel) (*DbTransaction, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -2763,13 +2863,13 @@ func (_self *Db) Begin(isolationLevel IsolationLevel) (*DbTransaction, error) {
 			return FfiConverterDbTransactionINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_begin(
-			_pointer, FfiConverterIsolationLevelINSTANCE.Lower(isolationLevel)),
+		_pointer,FfiConverterIsolationLevelINSTANCE.Lower(isolationLevel)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -2778,34 +2878,34 @@ func (_self *Db) Begin(isolationLevel IsolationLevel) (*DbTransaction, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Deletes `key` and returns metadata for the write.
 func (_self *Db) Delete(key []byte) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_delete(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2814,34 +2914,34 @@ func (_self *Db) Delete(key []byte) (WriteHandle, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Deletes `key` using custom write options.
 func (_self *Db) DeleteWithOptions(key []byte, options WriteOptions) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_delete_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterWriteOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterWriteOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2850,7 +2950,7 @@ func (_self *Db) DeleteWithOptions(key []byte, options WriteOptions) (WriteHandl
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Best-effort eviction of block-cache entries for one SST.
@@ -2859,8 +2959,8 @@ func (_self *Db) DeleteWithOptions(key []byte, options WriteOptions) (WriteHandl
 func (_self *Db) EvictCachedSst(sstId SsTableId) error {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -2869,13 +2969,13 @@ func (_self *Db) EvictCachedSst(sstId SsTableId) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_db_evict_cached_sst(
-			_pointer, FfiConverterSsTableIdINSTANCE.Lower(sstId)),
+		_pointer,FfiConverterSsTableIdINSTANCE.Lower(sstId)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -2884,15 +2984,15 @@ func (_self *Db) EvictCachedSst(sstId SsTableId) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Flushes the default storage layer.
 func (_self *Db) Flush() error {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -2901,13 +3001,13 @@ func (_self *Db) Flush() error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_db_flush(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -2916,15 +3016,15 @@ func (_self *Db) Flush() error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Flushes according to the provided flush options.
 func (_self *Db) FlushWithOptions(options FlushOptions) error {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -2933,13 +3033,13 @@ func (_self *Db) FlushWithOptions(options FlushOptions) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_db_flush_with_options(
-			_pointer, FfiConverterFlushOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterFlushOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -2948,34 +3048,34 @@ func (_self *Db) FlushWithOptions(options FlushOptions) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Reads the current value for `key`.
 func (_self *Db) Get(key []byte) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_get(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -2984,34 +3084,34 @@ func (_self *Db) Get(key []byte) (*[]byte, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the current row version for `key`, including metadata.
 func (_self *Db) GetKeyValue(key []byte) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_get_key_value(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3020,34 +3120,34 @@ func (_self *Db) GetKeyValue(key []byte) (*KeyValue, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the current row version for `key` using custom read options.
 func (_self *Db) GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_get_key_value_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3056,34 +3156,34 @@ func (_self *Db) GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyVa
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the current value for `key` using custom read options.
 func (_self *Db) GetWithOptions(key []byte, options ReadOptions) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_get_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3092,34 +3192,34 @@ func (_self *Db) GetWithOptions(key []byte, options ReadOptions) (*[]byte, error
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Appends a merge operand for `key` and returns metadata for the write.
 func (_self *Db) Merge(key []byte, operand []byte) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_merge(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3128,34 +3228,34 @@ func (_self *Db) Merge(key []byte, operand []byte) (WriteHandle, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Appends a merge operand using custom merge and write options.
 func (_self *Db) MergeWithOptions(key []byte, operand []byte, mergeOptions MergeOptions, writeOptions WriteOptions) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_merge_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterMergeOptionsINSTANCE.Lower(mergeOptions), FfiConverterWriteOptionsINSTANCE.Lower(writeOptions)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterMergeOptionsINSTANCE.Lower(mergeOptions), FfiConverterWriteOptionsINSTANCE.Lower(writeOptions)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3164,7 +3264,7 @@ func (_self *Db) MergeWithOptions(key []byte, operand []byte, mergeOptions Merge
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Inserts or overwrites a value and returns metadata for the write.
@@ -3174,27 +3274,27 @@ func (_self *Db) MergeWithOptions(key []byte, operand []byte, mergeOptions Merge
 func (_self *Db) Put(key []byte, value []byte) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_put(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3203,34 +3303,34 @@ func (_self *Db) Put(key []byte, value []byte) (WriteHandle, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Inserts or overwrites a value using custom put and write options.
 func (_self *Db) PutWithOptions(key []byte, value []byte, putOptions PutOptions, writeOptions WriteOptions) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_put_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterPutOptionsINSTANCE.Lower(putOptions), FfiConverterWriteOptionsINSTANCE.Lower(writeOptions)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterPutOptionsINSTANCE.Lower(putOptions), FfiConverterWriteOptionsINSTANCE.Lower(writeOptions)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3239,15 +3339,15 @@ func (_self *Db) PutWithOptions(key []byte, value []byte, putOptions PutOptions,
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows inside `range`.
 func (_self *Db) Scan(varRange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -3258,13 +3358,13 @@ func (_self *Db) Scan(varRange KeyRange) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_scan(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -3273,15 +3373,15 @@ func (_self *Db) Scan(varRange KeyRange) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix`.
 func (_self *Db) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -3292,13 +3392,13 @@ func (_self *Db) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -3307,15 +3407,15 @@ func (_self *Db) ScanPrefix(prefix []byte) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix` using custom scan options.
 func (_self *Db) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -3326,13 +3426,13 @@ func (_self *Db) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbI
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -3341,15 +3441,15 @@ func (_self *Db) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbI
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows inside `range` using custom scan options.
 func (_self *Db) ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -3360,13 +3460,13 @@ func (_self *Db) ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIte
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_scan_with_options(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -3375,15 +3475,15 @@ func (_self *Db) ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIte
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Flushes outstanding work and closes the database.
 func (_self *Db) Shutdown() error {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -3392,13 +3492,13 @@ func (_self *Db) Shutdown() error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_db_shutdown(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -3407,15 +3507,15 @@ func (_self *Db) Shutdown() error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Creates a read-only snapshot representing a consistent point in time.
 func (_self *Db) Snapshot() (*DbSnapshot, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -3426,13 +3526,13 @@ func (_self *Db) Snapshot() (*DbSnapshot, error) {
 			return FfiConverterDbSnapshotINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_snapshot(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -3441,7 +3541,7 @@ func (_self *Db) Snapshot() (*DbSnapshot, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Returns the latest database status snapshot.
@@ -3449,10 +3549,10 @@ func (_self *Db) Status() DbStatus {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterDbStatusINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_db_status(
-				_pointer, _uniffiStatus),
-		}
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_db_status(
+		_pointer,_uniffiStatus),
+	}
 	}))
 }
 
@@ -3464,8 +3564,8 @@ func (_self *Db) Status() DbStatus {
 func (_self *Db) WarmSst(sstId SsTableId, targets []CacheTarget) error {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -3474,13 +3574,13 @@ func (_self *Db) WarmSst(sstId SsTableId, targets []CacheTarget) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_db_warm_sst(
-			_pointer, FfiConverterSsTableIdINSTANCE.Lower(sstId), FfiConverterSequenceCacheTargetINSTANCE.Lower(targets)),
+		_pointer,FfiConverterSsTableIdINSTANCE.Lower(sstId), FfiConverterSequenceCacheTargetINSTANCE.Lower(targets)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -3489,7 +3589,7 @@ func (_self *Db) WarmSst(sstId SsTableId, targets []CacheTarget) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Applies all operations in `batch` atomically.
@@ -3498,27 +3598,27 @@ func (_self *Db) WarmSst(sstId SsTableId, targets []CacheTarget) error {
 func (_self *Db) Write(batch *WriteBatch) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_write(
-			_pointer, FfiConverterWriteBatchINSTANCE.Lower(batch)),
+		_pointer,FfiConverterWriteBatchINSTANCE.Lower(batch)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3527,7 +3627,7 @@ func (_self *Db) Write(batch *WriteBatch) (WriteHandle, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Applies all operations in `batch` atomically using custom write options.
@@ -3536,27 +3636,27 @@ func (_self *Db) Write(batch *WriteBatch) (WriteHandle, error) {
 func (_self *Db) WriteWithOptions(batch *WriteBatch, options WriteOptions) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WriteHandle {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_write_with_options(
-			_pointer, FfiConverterWriteBatchINSTANCE.Lower(batch), FfiConverterWriteOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterWriteBatchINSTANCE.Lower(batch), FfiConverterWriteOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3565,19 +3665,20 @@ func (_self *Db) WriteWithOptions(batch *WriteBatch, options WriteOptions) (Writ
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 func (object *Db) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDb struct{}
+type FfiConverterDb struct {}
 
 var FfiConverterDbINSTANCE = FfiConverterDb{}
 
+
 func (c FfiConverterDb) Lift(handle C.uint64_t) *Db {
-	result := &Db{
+	result := &Db {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -3617,11 +3718,13 @@ func LowerToExternalDb(value *Db) uint64 {
 	return uint64(FfiConverterDbINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDb struct{}
+type FfiDestroyerDb struct {}
 
 func (_ FfiDestroyerDb) Destroy(value *Db) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Builder for opening a writable [`crate::Db`].
 //
@@ -3633,6 +3736,11 @@ type DbBuilderInterface interface {
 	WithDbCache(dbCache *DbCache) error
 	// Disables the SST block and metadata cache.
 	WithDbCacheDisabled() error
+	// Sets the filter policies used for SST filter construction and evaluation.
+	//
+	// Pass an empty vec to disable filters entirely. When unset, the default
+	// is a single bloom filter with 10 bits per key.
+	WithFilterPolicies(policies []*FilterPolicy) error
 	// Installs an application-defined merge operator.
 	WithMergeOperator(mergeOperator MergeOperator) error
 	// Installs an application-defined metrics recorder.
@@ -3646,27 +3754,28 @@ type DbBuilderInterface interface {
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
-
 // Builder for opening a writable [`crate::Db`].
 //
 // Builders are single-use: calling [`DbBuilder::build`] consumes the builder.
 type DbBuilder struct {
 	ffiObject FfiObject
 }
-
 // Creates a new database builder for `path` in `object_store`.
 func NewDbBuilder(path string, objectStore *ObjectStore) *DbBuilder {
 	return FfiConverterDbBuilderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore),_uniffiStatus)
 	}))
 }
+
+
+
 
 // Opens the database and consumes this builder.
 func (_self *DbBuilder) Build() (*Db, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -3677,13 +3786,13 @@ func (_self *DbBuilder) Build() (*Db, error) {
 			return FfiConverterDbINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_build(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -3692,115 +3801,131 @@ func (_self *DbBuilder) Build() (*Db, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Sets DB cache.
 func (_self *DbBuilder) WithDbCache(dbCache *DbCache) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(
-			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), _uniffiStatus)
+		_pointer,FfiConverterDbCacheINSTANCE.Lower(dbCache),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Disables the SST block and metadata cache.
 func (_self *DbBuilder) WithDbCacheDisabled() error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled(
-			_pointer, _uniffiStatus)
+		_pointer,_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
+}
+
+// Sets the filter policies used for SST filter construction and evaluation.
+//
+// Pass an empty vec to disable filters entirely. When unset, the default
+// is a single bloom filter with 10 bits per key.
+func (_self *DbBuilder) WithFilterPolicies(policies []*FilterPolicy) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_filter_policies(
+		_pointer,FfiConverterSequenceFilterPolicyINSTANCE.Lower(policies),_uniffiStatus)
+		return false
+	})
+		return _uniffiErr.AsError()
 }
 
 // Installs an application-defined merge operator.
 func (_self *DbBuilder) WithMergeOperator(mergeOperator MergeOperator) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator(
-			_pointer, FfiConverterMergeOperatorINSTANCE.Lower(mergeOperator), _uniffiStatus)
+		_pointer,FfiConverterMergeOperatorINSTANCE.Lower(mergeOperator),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Installs an application-defined metrics recorder.
 func (_self *DbBuilder) WithMetricsRecorder(metricsRecorder MetricsRecorder) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_metrics_recorder(
-			_pointer, FfiConverterMetricsRecorderINSTANCE.Lower(metricsRecorder), _uniffiStatus)
+		_pointer,FfiConverterMetricsRecorderINSTANCE.Lower(metricsRecorder),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Sets the seed used for SlateDB's internal random number generation.
 func (_self *DbBuilder) WithSeed(seed uint64) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_seed(
-			_pointer, FfiConverterUint64INSTANCE.Lower(seed), _uniffiStatus)
+		_pointer,FfiConverterUint64INSTANCE.Lower(seed),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Applies a [`crate::Settings`] object to the builder.
 func (_self *DbBuilder) WithSettings(settings *Settings) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings(
-			_pointer, FfiConverterSettingsINSTANCE.Lower(settings), _uniffiStatus)
+		_pointer,FfiConverterSettingsINSTANCE.Lower(settings),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Sets the SSTable block size used for newly written tables.
 func (_self *DbBuilder) WithSstBlockSize(sstBlockSize SstBlockSize) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size(
-			_pointer, FfiConverterSstBlockSizeINSTANCE.Lower(sstBlockSize), _uniffiStatus)
+		_pointer,FfiConverterSstBlockSizeINSTANCE.Lower(sstBlockSize),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Uses a separate object store for WAL files.
 func (_self *DbBuilder) WithWalObjectStore(walObjectStore *ObjectStore) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_wal_object_store(
-			_pointer, FfiConverterObjectStoreINSTANCE.Lower(walObjectStore), _uniffiStatus)
+		_pointer,FfiConverterObjectStoreINSTANCE.Lower(walObjectStore),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 func (object *DbBuilder) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDbBuilder struct{}
+type FfiConverterDbBuilder struct {}
 
 var FfiConverterDbBuilderINSTANCE = FfiConverterDbBuilder{}
 
+
 func (c FfiConverterDbBuilder) Lift(handle C.uint64_t) *DbBuilder {
-	result := &DbBuilder{
+	result := &DbBuilder {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -3840,71 +3965,75 @@ func LowerToExternalDbBuilder(value *DbBuilder) uint64 {
 	return uint64(FfiConverterDbBuilderINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDbBuilder struct{}
+type FfiDestroyerDbBuilder struct {}
 
 func (_ FfiDestroyerDbBuilder) Destroy(value *DbBuilder) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Database cache used to store blocks in memory.
 type DbCacheInterface interface {
 }
-
 // Database cache used to store blocks in memory.
 type DbCache struct {
 	ffiObject FfiObject
 }
 
+
 // Creates a new Foyer based DB cache.
 func DbCacheNewFoyerCache(options FoyerCacheOptions) (*DbCache, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_foyer_cache(FfiConverterFoyerCacheOptionsINSTANCE.Lower(options), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_foyer_cache(FfiConverterFoyerCacheOptionsINSTANCE.Lower(options),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *DbCache
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *DbCache
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Creates a new Moka based DB cache.
 func DbCacheNewMokaCache(options MokaCacheOptions) (*DbCache, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_moka_cache(FfiConverterMokaCacheOptionsINSTANCE.Lower(options), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_moka_cache(FfiConverterMokaCacheOptionsINSTANCE.Lower(options),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *DbCache
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *DbCache
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Creates a new split cache with separate block and metadata capacities.
 func DbCacheNewSplitCache(blockCache *DbCache, metaCache *DbCache) (*DbCache, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_split_cache(FfiConverterDbCacheINSTANCE.Lower(blockCache), FfiConverterDbCacheINSTANCE.Lower(metaCache), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_split_cache(FfiConverterDbCacheINSTANCE.Lower(blockCache), FfiConverterDbCacheINSTANCE.Lower(metaCache),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *DbCache
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *DbCache
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
+		}
 }
+
 
 func (object *DbCache) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDbCache struct{}
+type FfiConverterDbCache struct {}
 
 var FfiConverterDbCacheINSTANCE = FfiConverterDbCache{}
 
+
 func (c FfiConverterDbCache) Lift(handle C.uint64_t) *DbCache {
-	result := &DbCache{
+	result := &DbCache {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -3944,11 +4073,13 @@ func LowerToExternalDbCache(value *DbCache) uint64 {
 	return uint64(FfiConverterDbCacheINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDbCache struct{}
+type FfiDestroyerDbCache struct {}
 
 func (_ FfiDestroyerDbCache) Destroy(value *DbCache) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Async iterator returned by scan APIs.
 type DbIteratorInterface interface {
@@ -3957,37 +4088,39 @@ type DbIteratorInterface interface {
 	// Seeks the iterator to the first entry at or after `key`.
 	Seek(key []byte) error
 }
-
 // Async iterator returned by scan APIs.
 type DbIterator struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Returns the next key/value pair from the iterator.
 func (_self *DbIterator) Next() (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbIterator")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbiterator_next(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -3996,15 +4129,15 @@ func (_self *DbIterator) Next() (*KeyValue, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Seeks the iterator to the first entry at or after `key`.
 func (_self *DbIterator) Seek(key []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbIterator")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -4013,13 +4146,13 @@ func (_self *DbIterator) Seek(key []byte) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbiterator_seek(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -4028,19 +4161,20 @@ func (_self *DbIterator) Seek(key []byte) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 func (object *DbIterator) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDbIterator struct{}
+type FfiConverterDbIterator struct {}
 
 var FfiConverterDbIteratorINSTANCE = FfiConverterDbIterator{}
 
+
 func (c FfiConverterDbIterator) Lift(handle C.uint64_t) *DbIterator {
-	result := &DbIterator{
+	result := &DbIterator {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -4080,11 +4214,13 @@ func LowerToExternalDbIterator(value *DbIterator) uint64 {
 	return uint64(FfiConverterDbIteratorINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDbIterator struct{}
+type FfiDestroyerDbIterator struct {}
 
 func (_ FfiDestroyerDbIterator) Destroy(value *DbIterator) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Read-only database handle opened by [`crate::DbReaderBuilder`].
 type DbReaderInterface interface {
@@ -4119,11 +4255,13 @@ type DbReaderInterface interface {
 	// the call is a no-op that returns `Ok(())`.
 	WarmSst(sstId SsTableId, targets []CacheTarget) error
 }
-
 // Read-only database handle opened by [`crate::DbReaderBuilder`].
 type DbReader struct {
 	ffiObject FfiObject
 }
+
+
+
 
 // Best-effort eviction of block-cache entries for one SST.
 //
@@ -4131,8 +4269,8 @@ type DbReader struct {
 func (_self *DbReader) EvictCachedSst(sstId SsTableId) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -4141,13 +4279,13 @@ func (_self *DbReader) EvictCachedSst(sstId SsTableId) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_evict_cached_sst(
-			_pointer, FfiConverterSsTableIdINSTANCE.Lower(sstId)),
+		_pointer,FfiConverterSsTableIdINSTANCE.Lower(sstId)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -4156,34 +4294,34 @@ func (_self *DbReader) EvictCachedSst(sstId SsTableId) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Reads the current value for `key`.
 func (_self *DbReader) Get(key []byte) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_get(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4192,34 +4330,34 @@ func (_self *DbReader) Get(key []byte) (*[]byte, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the current row version for `key`, including metadata.
 func (_self *DbReader) GetKeyValue(key []byte) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_get_key_value(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4228,34 +4366,34 @@ func (_self *DbReader) GetKeyValue(key []byte) (*KeyValue, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the current row version for `key` using custom read options.
 func (_self *DbReader) GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_get_key_value_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4264,34 +4402,34 @@ func (_self *DbReader) GetKeyValueWithOptions(key []byte, options ReadOptions) (
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the current value for `key` using custom read options.
 func (_self *DbReader) GetWithOptions(key []byte, options ReadOptions) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_get_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4300,15 +4438,15 @@ func (_self *DbReader) GetWithOptions(key []byte, options ReadOptions) (*[]byte,
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows inside `range`.
 func (_self *DbReader) Scan(varRange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -4319,13 +4457,13 @@ func (_self *DbReader) Scan(varRange KeyRange) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_scan(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -4334,15 +4472,15 @@ func (_self *DbReader) Scan(varRange KeyRange) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix`.
 func (_self *DbReader) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -4353,13 +4491,13 @@ func (_self *DbReader) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -4368,15 +4506,15 @@ func (_self *DbReader) ScanPrefix(prefix []byte) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix` using custom scan options.
 func (_self *DbReader) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -4387,13 +4525,13 @@ func (_self *DbReader) ScanPrefixWithOptions(prefix []byte, options ScanOptions)
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -4402,15 +4540,15 @@ func (_self *DbReader) ScanPrefixWithOptions(prefix []byte, options ScanOptions)
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows inside `range` using custom scan options.
 func (_self *DbReader) ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -4421,13 +4559,13 @@ func (_self *DbReader) ScanWithOptions(varRange KeyRange, options ScanOptions) (
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_scan_with_options(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -4436,15 +4574,15 @@ func (_self *DbReader) ScanWithOptions(varRange KeyRange, options ScanOptions) (
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Closes the reader.
 func (_self *DbReader) Shutdown() error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -4453,13 +4591,13 @@ func (_self *DbReader) Shutdown() error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_shutdown(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -4468,7 +4606,7 @@ func (_self *DbReader) Shutdown() error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Returns the latest reader status snapshot.
@@ -4476,10 +4614,10 @@ func (_self *DbReader) Status() DbStatus {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterDbStatusINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_dbreader_status(
-				_pointer, _uniffiStatus),
-		}
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_dbreader_status(
+		_pointer,_uniffiStatus),
+	}
 	}))
 }
 
@@ -4491,8 +4629,8 @@ func (_self *DbReader) Status() DbStatus {
 func (_self *DbReader) WarmSst(sstId SsTableId, targets []CacheTarget) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -4501,13 +4639,13 @@ func (_self *DbReader) WarmSst(sstId SsTableId, targets []CacheTarget) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_warm_sst(
-			_pointer, FfiConverterSsTableIdINSTANCE.Lower(sstId), FfiConverterSequenceCacheTargetINSTANCE.Lower(targets)),
+		_pointer,FfiConverterSsTableIdINSTANCE.Lower(sstId), FfiConverterSequenceCacheTargetINSTANCE.Lower(targets)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -4516,19 +4654,20 @@ func (_self *DbReader) WarmSst(sstId SsTableId, targets []CacheTarget) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 func (object *DbReader) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDbReader struct{}
+type FfiConverterDbReader struct {}
 
 var FfiConverterDbReaderINSTANCE = FfiConverterDbReader{}
 
+
 func (c FfiConverterDbReader) Lift(handle C.uint64_t) *DbReader {
-	result := &DbReader{
+	result := &DbReader {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -4568,11 +4707,13 @@ func LowerToExternalDbReader(value *DbReader) uint64 {
 	return uint64(FfiConverterDbReaderINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDbReader struct{}
+type FfiDestroyerDbReader struct {}
 
 func (_ FfiDestroyerDbReader) Destroy(value *DbReader) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Builder for opening a read-only [`crate::DbReader`].
 //
@@ -4582,6 +4723,12 @@ type DbReaderBuilderInterface interface {
 	Build() (*DbReader, error)
 	// Pins the reader to an existing checkpoint UUID string.
 	WithCheckpointId(checkpointId string) error
+	// Sets the filter policies used when decoding SST filter blocks.
+	//
+	// Must match (or be a superset of) the writer's policies so SST filter
+	// sub-blocks can be decoded; unrecognized policy names are silently
+	// skipped. Defaults to a single bloom filter with 10 bits per key.
+	WithFilterPolicies(policies []*FilterPolicy) error
 	// Installs an application-defined merge operator used while reading merge rows.
 	WithMergeOperator(mergeOperator MergeOperator) error
 	// Installs an application-defined metrics recorder.
@@ -4591,27 +4738,28 @@ type DbReaderBuilderInterface interface {
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
-
 // Builder for opening a read-only [`crate::DbReader`].
 //
 // Builders are single-use: calling [`DbReaderBuilder::build`] consumes the builder.
 type DbReaderBuilder struct {
 	ffiObject FfiObject
 }
-
 // Creates a new reader builder for `path` in `object_store`.
 func NewDbReaderBuilder(path string, objectStore *ObjectStore) *DbReaderBuilder {
 	return FfiConverterDbReaderBuilderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore),_uniffiStatus)
 	}))
 }
+
+
+
 
 // Opens the reader and consumes this builder.
 func (_self *DbReaderBuilder) Build() (*DbReader, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -4622,13 +4770,13 @@ func (_self *DbReaderBuilder) Build() (*DbReader, error) {
 			return FfiConverterDbReaderINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -4637,79 +4785,96 @@ func (_self *DbReaderBuilder) Build() (*DbReader, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Pins the reader to an existing checkpoint UUID string.
 func (_self *DbReaderBuilder) WithCheckpointId(checkpointId string) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(
-			_pointer, FfiConverterStringINSTANCE.Lower(checkpointId), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(checkpointId),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
+}
+
+// Sets the filter policies used when decoding SST filter blocks.
+//
+// Must match (or be a superset of) the writer's policies so SST filter
+// sub-blocks can be decoded; unrecognized policy names are silently
+// skipped. Defaults to a single bloom filter with 10 bits per key.
+func (_self *DbReaderBuilder) WithFilterPolicies(policies []*FilterPolicy) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_filter_policies(
+		_pointer,FfiConverterSequenceFilterPolicyINSTANCE.Lower(policies),_uniffiStatus)
+		return false
+	})
+		return _uniffiErr.AsError()
 }
 
 // Installs an application-defined merge operator used while reading merge rows.
 func (_self *DbReaderBuilder) WithMergeOperator(mergeOperator MergeOperator) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator(
-			_pointer, FfiConverterMergeOperatorINSTANCE.Lower(mergeOperator), _uniffiStatus)
+		_pointer,FfiConverterMergeOperatorINSTANCE.Lower(mergeOperator),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Installs an application-defined metrics recorder.
 func (_self *DbReaderBuilder) WithMetricsRecorder(metricsRecorder MetricsRecorder) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_metrics_recorder(
-			_pointer, FfiConverterMetricsRecorderINSTANCE.Lower(metricsRecorder), _uniffiStatus)
+		_pointer,FfiConverterMetricsRecorderINSTANCE.Lower(metricsRecorder),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Applies custom reader options.
 func (_self *DbReaderBuilder) WithOptions(options ReaderOptions) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options(
-			_pointer, FfiConverterReaderOptionsINSTANCE.Lower(options), _uniffiStatus)
+		_pointer,FfiConverterReaderOptionsINSTANCE.Lower(options),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Uses a separate object store for WAL files.
 func (_self *DbReaderBuilder) WithWalObjectStore(walObjectStore *ObjectStore) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_wal_object_store(
-			_pointer, FfiConverterObjectStoreINSTANCE.Lower(walObjectStore), _uniffiStatus)
+		_pointer,FfiConverterObjectStoreINSTANCE.Lower(walObjectStore),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 func (object *DbReaderBuilder) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDbReaderBuilder struct{}
+type FfiConverterDbReaderBuilder struct {}
 
 var FfiConverterDbReaderBuilderINSTANCE = FfiConverterDbReaderBuilder{}
 
+
 func (c FfiConverterDbReaderBuilder) Lift(handle C.uint64_t) *DbReaderBuilder {
-	result := &DbReaderBuilder{
+	result := &DbReaderBuilder {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -4749,11 +4914,13 @@ func LowerToExternalDbReaderBuilder(value *DbReaderBuilder) uint64 {
 	return uint64(FfiConverterDbReaderBuilderINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDbReaderBuilder struct{}
+type FfiDestroyerDbReaderBuilder struct {}
 
 func (_ FfiDestroyerDbReaderBuilder) Destroy(value *DbReaderBuilder) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Read-only snapshot representing a consistent view of the database.
 type DbSnapshotInterface interface {
@@ -4774,37 +4941,39 @@ type DbSnapshotInterface interface {
 	// Scans rows inside `range` as of this snapshot using custom scan options.
 	ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error)
 }
-
 // Read-only snapshot representing a consistent view of the database.
 type DbSnapshot struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Reads the value visible in this snapshot for `key`.
 func (_self *DbSnapshot) Get(key []byte) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4813,34 +4982,34 @@ func (_self *DbSnapshot) Get(key []byte) (*[]byte, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the row version visible in this snapshot for `key`.
 func (_self *DbSnapshot) GetKeyValue(key []byte) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4849,34 +5018,34 @@ func (_self *DbSnapshot) GetKeyValue(key []byte) (*KeyValue, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the row version visible in this snapshot for `key` using custom read options.
 func (_self *DbSnapshot) GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4885,34 +5054,34 @@ func (_self *DbSnapshot) GetKeyValueWithOptions(key []byte, options ReadOptions)
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the value visible in this snapshot for `key` using custom read options.
 func (_self *DbSnapshot) GetWithOptions(key []byte, options ReadOptions) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -4921,15 +5090,15 @@ func (_self *DbSnapshot) GetWithOptions(key []byte, options ReadOptions) (*[]byt
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows inside `range` as of this snapshot.
 func (_self *DbSnapshot) Scan(varRange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -4940,13 +5109,13 @@ func (_self *DbSnapshot) Scan(varRange KeyRange) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -4955,15 +5124,15 @@ func (_self *DbSnapshot) Scan(varRange KeyRange) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix` as of this snapshot.
 func (_self *DbSnapshot) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -4974,13 +5143,13 @@ func (_self *DbSnapshot) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -4989,15 +5158,15 @@ func (_self *DbSnapshot) ScanPrefix(prefix []byte) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix` as of this snapshot using custom options.
 func (_self *DbSnapshot) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -5008,13 +5177,13 @@ func (_self *DbSnapshot) ScanPrefixWithOptions(prefix []byte, options ScanOption
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -5023,15 +5192,15 @@ func (_self *DbSnapshot) ScanPrefixWithOptions(prefix []byte, options ScanOption
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows inside `range` as of this snapshot using custom scan options.
 func (_self *DbSnapshot) ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -5042,13 +5211,13 @@ func (_self *DbSnapshot) ScanWithOptions(varRange KeyRange, options ScanOptions)
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_with_options(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -5057,19 +5226,20 @@ func (_self *DbSnapshot) ScanWithOptions(varRange KeyRange, options ScanOptions)
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 func (object *DbSnapshot) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDbSnapshot struct{}
+type FfiConverterDbSnapshot struct {}
 
 var FfiConverterDbSnapshotINSTANCE = FfiConverterDbSnapshot{}
 
+
 func (c FfiConverterDbSnapshot) Lift(handle C.uint64_t) *DbSnapshot {
-	result := &DbSnapshot{
+	result := &DbSnapshot {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -5109,11 +5279,13 @@ func LowerToExternalDbSnapshot(value *DbSnapshot) uint64 {
 	return uint64(FfiConverterDbSnapshotINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDbSnapshot struct{}
+type FfiDestroyerDbSnapshot struct {}
 
 func (_ FfiDestroyerDbSnapshot) Destroy(value *DbSnapshot) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Transaction handle returned by [`crate::Db::begin`].
 //
@@ -5165,7 +5337,6 @@ type DbTransactionInterface interface {
 	// Excludes written keys from transaction conflict detection.
 	UnmarkWrite(keys [][]byte) error
 }
-
 // Transaction handle returned by [`crate::Db::begin`].
 //
 // A transaction becomes unusable after `commit`, `commit_with_options`, or
@@ -5174,33 +5345,36 @@ type DbTransaction struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Commits the transaction.
 //
 // Returns `None` when the transaction performed no writes.
 func (_self *DbTransaction) Commit() (*WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *WriteHandle {
 			return FfiConverterOptionalWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -5209,7 +5383,7 @@ func (_self *DbTransaction) Commit() (*WriteHandle, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Commits the transaction using custom write options.
@@ -5218,27 +5392,27 @@ func (_self *DbTransaction) Commit() (*WriteHandle, error) {
 func (_self *DbTransaction) CommitWithOptions(options WriteOptions) (*WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *WriteHandle {
 			return FfiConverterOptionalWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit_with_options(
-			_pointer, FfiConverterWriteOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterWriteOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -5247,15 +5421,15 @@ func (_self *DbTransaction) CommitWithOptions(options WriteOptions) (*WriteHandl
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Buffers a delete inside the transaction.
 func (_self *DbTransaction) Delete(key []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5264,13 +5438,13 @@ func (_self *DbTransaction) Delete(key []byte) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_delete(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5279,34 +5453,34 @@ func (_self *DbTransaction) Delete(key []byte) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Reads the value visible to this transaction for `key`.
 func (_self *DbTransaction) Get(key []byte) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_get(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -5315,34 +5489,34 @@ func (_self *DbTransaction) Get(key []byte) (*[]byte, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the row version visible to this transaction for `key`.
 func (_self *DbTransaction) GetKeyValue(key []byte) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -5351,34 +5525,34 @@ func (_self *DbTransaction) GetKeyValue(key []byte) (*KeyValue, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the row version visible to this transaction for `key` using custom options.
 func (_self *DbTransaction) GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyValue, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *KeyValue {
 			return FfiConverterOptionalKeyValueINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -5387,34 +5561,34 @@ func (_self *DbTransaction) GetKeyValueWithOptions(key []byte, options ReadOptio
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads the value visible to this transaction for `key` using custom read options.
 func (_self *DbTransaction) GetWithOptions(key []byte, options ReadOptions) (*[]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *[]byte {
 			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterReadOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -5423,7 +5597,7 @@ func (_self *DbTransaction) GetWithOptions(key []byte, options ReadOptions) (*[]
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Returns the transaction identifier as a UUID string.
@@ -5431,10 +5605,10 @@ func (_self *DbTransaction) Id() string {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_dbtransaction_id(
-				_pointer, _uniffiStatus),
-		}
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_dbtransaction_id(
+		_pointer,_uniffiStatus),
+	}
 	}))
 }
 
@@ -5442,8 +5616,8 @@ func (_self *DbTransaction) Id() string {
 func (_self *DbTransaction) MarkRead(keys [][]byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5452,13 +5626,13 @@ func (_self *DbTransaction) MarkRead(keys [][]byte) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_mark_read(
-			_pointer, FfiConverterSequenceBytesINSTANCE.Lower(keys)),
+		_pointer,FfiConverterSequenceBytesINSTANCE.Lower(keys)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5467,15 +5641,15 @@ func (_self *DbTransaction) MarkRead(keys [][]byte) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Buffers a merge operand inside the transaction.
 func (_self *DbTransaction) Merge(key []byte, operand []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5484,13 +5658,13 @@ func (_self *DbTransaction) Merge(key []byte, operand []byte) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5499,15 +5673,15 @@ func (_self *DbTransaction) Merge(key []byte, operand []byte) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Buffers a merge operand inside the transaction using custom merge options.
 func (_self *DbTransaction) MergeWithOptions(key []byte, operand []byte, options MergeOptions) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5516,13 +5690,13 @@ func (_self *DbTransaction) MergeWithOptions(key []byte, operand []byte, options
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterMergeOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterMergeOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5531,15 +5705,15 @@ func (_self *DbTransaction) MergeWithOptions(key []byte, operand []byte, options
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Buffers a put inside the transaction.
 func (_self *DbTransaction) Put(key []byte, value []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5548,13 +5722,13 @@ func (_self *DbTransaction) Put(key []byte, value []byte) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_put(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5563,15 +5737,15 @@ func (_self *DbTransaction) Put(key []byte, value []byte) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Buffers a put inside the transaction using custom put options.
 func (_self *DbTransaction) PutWithOptions(key []byte, value []byte, options PutOptions) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5580,13 +5754,13 @@ func (_self *DbTransaction) PutWithOptions(key []byte, value []byte, options Put
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_put_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterPutOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterPutOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5595,15 +5769,15 @@ func (_self *DbTransaction) PutWithOptions(key []byte, value []byte, options Put
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Rolls back the transaction and marks it completed.
 func (_self *DbTransaction) Rollback() error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5612,13 +5786,13 @@ func (_self *DbTransaction) Rollback() error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_rollback(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5627,15 +5801,15 @@ func (_self *DbTransaction) Rollback() error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 
 // Scans rows inside `range` as visible to this transaction.
 func (_self *DbTransaction) Scan(varRange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -5646,13 +5820,13 @@ func (_self *DbTransaction) Scan(varRange KeyRange) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -5661,15 +5835,15 @@ func (_self *DbTransaction) Scan(varRange KeyRange) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix` as visible to this transaction.
 func (_self *DbTransaction) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -5680,13 +5854,13 @@ func (_self *DbTransaction) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -5695,15 +5869,15 @@ func (_self *DbTransaction) ScanPrefix(prefix []byte) (*DbIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows whose keys start with `prefix` as visible to this transaction using custom options.
 func (_self *DbTransaction) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -5714,13 +5888,13 @@ func (_self *DbTransaction) ScanPrefixWithOptions(prefix []byte, options ScanOpt
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -5729,15 +5903,15 @@ func (_self *DbTransaction) ScanPrefixWithOptions(prefix []byte, options ScanOpt
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Scans rows inside `range` as visible to this transaction using custom options.
 func (_self *DbTransaction) ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -5748,13 +5922,13 @@ func (_self *DbTransaction) ScanWithOptions(varRange KeyRange, options ScanOptio
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_with_options(
-			_pointer, FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
+		_pointer,FfiConverterKeyRangeINSTANCE.Lower(varRange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -5763,7 +5937,7 @@ func (_self *DbTransaction) ScanWithOptions(varRange KeyRange, options ScanOptio
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Returns the sequence number assigned when the transaction started.
@@ -5772,7 +5946,7 @@ func (_self *DbTransaction) Seqnum() uint64 {
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_dbtransaction_seqnum(
-			_pointer, _uniffiStatus)
+		_pointer,_uniffiStatus)
 	}))
 }
 
@@ -5780,8 +5954,8 @@ func (_self *DbTransaction) Seqnum() uint64 {
 func (_self *DbTransaction) UnmarkWrite(keys [][]byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 _, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
 			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
@@ -5790,13 +5964,13 @@ func (_self *DbTransaction) UnmarkWrite(keys [][]byte) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_unmark_write(
-			_pointer, FfiConverterSequenceBytesINSTANCE.Lower(keys)),
+		_pointer,FfiConverterSequenceBytesINSTANCE.Lower(keys)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
 		},
 	)
@@ -5805,19 +5979,20 @@ func (_self *DbTransaction) UnmarkWrite(keys [][]byte) error {
 		return nil
 	}
 
-	return err
+	return err 
 }
 func (object *DbTransaction) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDbTransaction struct{}
+type FfiConverterDbTransaction struct {}
 
 var FfiConverterDbTransactionINSTANCE = FfiConverterDbTransaction{}
 
+
 func (c FfiConverterDbTransaction) Lift(handle C.uint64_t) *DbTransaction {
-	result := &DbTransaction{
+	result := &DbTransaction {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -5857,11 +6032,13 @@ func LowerToExternalDbTransaction(value *DbTransaction) uint64 {
 	return uint64(FfiConverterDbTransactionINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDbTransaction struct{}
+type FfiDestroyerDbTransaction struct {}
 
 func (_ FfiDestroyerDbTransaction) Destroy(value *DbTransaction) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Built-in atomic-backed metrics recorder with snapshot access.
 type DefaultMetricsRecorderInterface interface {
@@ -5876,12 +6053,10 @@ type DefaultMetricsRecorderInterface interface {
 	// Returns a point-in-time snapshot of every registered metric.
 	Snapshot() []Metric
 }
-
 // Built-in atomic-backed metrics recorder with snapshot access.
 type DefaultMetricsRecorder struct {
 	ffiObject FfiObject
 }
-
 // Creates an empty default metrics recorder.
 func NewDefaultMetricsRecorder() *DefaultMetricsRecorder {
 	return FfiConverterDefaultMetricsRecorderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
@@ -5889,15 +6064,18 @@ func NewDefaultMetricsRecorder() *DefaultMetricsRecorder {
 	}))
 }
 
+
+
+
 // Returns the metric matching `name` and the exact label set, if present.
 func (_self *DefaultMetricsRecorder) MetricByNameAndLabels(name string, labels []MetricLabel) *Metric {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterOptionalMetricINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metric_by_name_and_labels(
-				_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus),
-		}
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metric_by_name_and_labels(
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels),_uniffiStatus),
+	}
 	}))
 }
 
@@ -5906,10 +6084,10 @@ func (_self *DefaultMetricsRecorder) MetricsByName(name string) []Metric {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterSequenceMetricINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metrics_by_name(
-				_pointer, FfiConverterStringINSTANCE.Lower(name), _uniffiStatus),
-		}
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metrics_by_name(
+		_pointer,FfiConverterStringINSTANCE.Lower(name),_uniffiStatus),
+	}
 	}))
 }
 
@@ -5918,7 +6096,7 @@ func (_self *DefaultMetricsRecorder) RegisterCounter(name string, description st
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels),_uniffiStatus)
 	}))
 }
 
@@ -5927,7 +6105,7 @@ func (_self *DefaultMetricsRecorder) RegisterGauge(name string, description stri
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_gauge(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels),_uniffiStatus)
 	}))
 }
 
@@ -5936,7 +6114,7 @@ func (_self *DefaultMetricsRecorder) RegisterHistogram(name string, description 
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_histogram(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries),_uniffiStatus)
 	}))
 }
 
@@ -5945,7 +6123,7 @@ func (_self *DefaultMetricsRecorder) RegisterUpDownCounter(name string, descript
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_up_down_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels),_uniffiStatus)
 	}))
 }
 
@@ -5954,10 +6132,10 @@ func (_self *DefaultMetricsRecorder) Snapshot() []Metric {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterSequenceMetricINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_snapshot(
-				_pointer, _uniffiStatus),
-		}
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_snapshot(
+		_pointer,_uniffiStatus),
+	}
 	}))
 }
 func (object *DefaultMetricsRecorder) Destroy() {
@@ -5965,12 +6143,13 @@ func (object *DefaultMetricsRecorder) Destroy() {
 	object.ffiObject.destroy()
 }
 
-type FfiConverterDefaultMetricsRecorder struct{}
+type FfiConverterDefaultMetricsRecorder struct {}
 
 var FfiConverterDefaultMetricsRecorderINSTANCE = FfiConverterDefaultMetricsRecorder{}
 
+
 func (c FfiConverterDefaultMetricsRecorder) Lift(handle C.uint64_t) *DefaultMetricsRecorder {
-	result := &DefaultMetricsRecorder{
+	result := &DefaultMetricsRecorder {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -6010,30 +6189,139 @@ func LowerToExternalDefaultMetricsRecorder(value *DefaultMetricsRecorder) uint64
 	return uint64(FfiConverterDefaultMetricsRecorderINSTANCE.Lower(value))
 }
 
-type FfiDestroyerDefaultMetricsRecorder struct{}
+type FfiDestroyerDefaultMetricsRecorder struct {}
 
 func (_ FfiDestroyerDefaultMetricsRecorder) Destroy(value *DefaultMetricsRecorder) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
+
+// A filter policy used to build and read SST filters.
+//
+// Construct one with [`FilterPolicy::bloom`] or
+// [`FilterPolicy::bloom_with_options`] for the built-in bloom filter.
+type FilterPolicyInterface interface {
+	// Returns the policy name encoded into SSTs that use this policy.
+	Name() string
+}
+// A filter policy used to build and read SST filters.
+//
+// Construct one with [`FilterPolicy::bloom`] or
+// [`FilterPolicy::bloom_with_options`] for the built-in bloom filter.
+type FilterPolicy struct {
+	ffiObject FfiObject
+}
+
+
+// Constructs a bloom filter policy with the given bits per key,
+// whole-key filtering enabled, and no prefix extractor.
+func FilterPolicyBloom(bitsPerKey uint32) *FilterPolicy {
+	return FfiConverterFilterPolicyINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_filterpolicy_bloom(FfiConverterUint32INSTANCE.Lower(bitsPerKey),_uniffiStatus)
+	}))
+}
+
+// Constructs a bloom filter policy from the supplied options, with an
+// optional prefix extractor enabling prefix-based bloom filtering.
+func FilterPolicyBloomWithOptions(options BloomFilterOptions, prefixExtractor *PrefixExtractor) *FilterPolicy {
+	return FfiConverterFilterPolicyINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_filterpolicy_bloom_with_options(FfiConverterBloomFilterOptionsINSTANCE.Lower(options), FfiConverterOptionalPrefixExtractorINSTANCE.Lower(prefixExtractor),_uniffiStatus)
+	}))
+}
+
+
+
+// Returns the policy name encoded into SSTs that use this policy.
+func (_self *FilterPolicy) Name() string {
+	_pointer := _self.ffiObject.incrementPointer("*FilterPolicy")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_filterpolicy_name(
+		_pointer,_uniffiStatus),
+	}
+	}))
+}
+func (object *FilterPolicy) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterFilterPolicy struct {}
+
+var FfiConverterFilterPolicyINSTANCE = FfiConverterFilterPolicy{}
+
+
+func (c FfiConverterFilterPolicy) Lift(handle C.uint64_t) *FilterPolicy {
+	result := &FilterPolicy {
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_filterpolicy(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_filterpolicy(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*FilterPolicy).Destroy)
+	return result
+}
+
+func (c FfiConverterFilterPolicy) Read(reader io.Reader) *FilterPolicy {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterFilterPolicy) Lower(value *FilterPolicy) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*FilterPolicy")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterFilterPolicy) Write(writer io.Writer, value *FilterPolicy) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalFilterPolicy(handle uint64) *FilterPolicy {
+	return FfiConverterFilterPolicyINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalFilterPolicy(value *FilterPolicy) uint64 {
+	return uint64(FfiConverterFilterPolicyINSTANCE.Lower(value))
+}
+
+type FfiDestroyerFilterPolicy struct {}
+
+func (_ FfiDestroyerFilterPolicy) Destroy(value *FilterPolicy) {
+		value.Destroy()
+}
+
+
 
 // Handle for a gauge metric.
 type Gauge interface {
 	// Sets the gauge to `value`.
-	Set(value int64)
+	Set(value int64) 
 }
-
 // Handle for a gauge metric.
 type GaugeImpl struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Sets the gauge to `value`.
-func (_self *GaugeImpl) Set(value int64) {
+func (_self *GaugeImpl) Set(value int64)  {
 	_pointer := _self.ffiObject.incrementPointer("Gauge")
 	defer _self.ffiObject.decrementPointer()
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_gauge_set(
-			_pointer, FfiConverterInt64INSTANCE.Lower(value), _uniffiStatus)
+		_pointer,FfiConverterInt64INSTANCE.Lower(value),_uniffiStatus)
 		return false
 	})
 }
@@ -6044,16 +6332,17 @@ func (object *GaugeImpl) Destroy() {
 
 type FfiConverterGauge struct {
 	handleMap *concurrentHandleMap[Gauge]
-}
+	}
 
 var FfiConverterGaugeINSTANCE = FfiConverterGauge{
 	handleMap: newConcurrentHandleMap[Gauge](),
-}
+	}
+
 
 func (c FfiConverterGauge) Lift(handle C.uint64_t) Gauge {
-	if uint64(handle)&1 == 0 {
+	if uint64(handle) & 1 == 0 {
 		// Rust-generated handle (even), construct a new object wrapping the handle
-		result := &GaugeImpl{
+		result := &GaugeImpl {
 			newFfiObject(
 				handle,
 				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -6108,7 +6397,7 @@ func LowerToExternalGauge(value Gauge) uint64 {
 	return uint64(FfiConverterGaugeINSTANCE.Lower(value))
 }
 
-type FfiDestroyerGauge struct{}
+type FfiDestroyerGauge struct {}
 
 func (_ FfiDestroyerGauge) Destroy(value Gauge) {
 	if val, ok := value.(*GaugeImpl); ok {
@@ -6116,24 +6405,33 @@ func (_ FfiDestroyerGauge) Destroy(value Gauge) {
 	}
 }
 
+
+
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0(uniffiHandle C.uint64_t, value C.int64_t, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0(uniffiHandle C.uint64_t,value C.int64_t,uniffiOutReturn *C.void,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterGaugeINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	uniffiObj.Set(
-		FfiConverterInt64INSTANCE.Lift(value),
-	)
+	
+    uniffiObj.Set(
+        FfiConverterInt64INSTANCE.Lift(value),
+    )
+	
+    
 
+
+	
 }
 
-var UniffiVTableCallbackInterfaceGaugeINSTANCE = C.UniffiVTableCallbackInterfaceGauge{
-	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeFree),
+var UniffiVTableCallbackInterfaceGaugeINSTANCE = C.UniffiVTableCallbackInterfaceGauge {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeFree),
 	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeClone),
-	set:         (C.UniffiCallbackInterfaceGaugeMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0),
+	set: (C.UniffiCallbackInterfaceGaugeMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0),
 }
 
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeFree
@@ -6154,24 +6452,27 @@ func (c FfiConverterGauge) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_gauge(&UniffiVTableCallbackInterfaceGaugeINSTANCE)
 }
 
+
 // Handle for a histogram metric.
 type Histogram interface {
 	// Records `value` in the histogram.
-	Record(value float64)
+	Record(value float64) 
 }
-
 // Handle for a histogram metric.
 type HistogramImpl struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Records `value` in the histogram.
-func (_self *HistogramImpl) Record(value float64) {
+func (_self *HistogramImpl) Record(value float64)  {
 	_pointer := _self.ffiObject.incrementPointer("Histogram")
 	defer _self.ffiObject.decrementPointer()
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_histogram_record(
-			_pointer, FfiConverterFloat64INSTANCE.Lower(value), _uniffiStatus)
+		_pointer,FfiConverterFloat64INSTANCE.Lower(value),_uniffiStatus)
 		return false
 	})
 }
@@ -6182,16 +6483,17 @@ func (object *HistogramImpl) Destroy() {
 
 type FfiConverterHistogram struct {
 	handleMap *concurrentHandleMap[Histogram]
-}
+	}
 
 var FfiConverterHistogramINSTANCE = FfiConverterHistogram{
 	handleMap: newConcurrentHandleMap[Histogram](),
-}
+	}
+
 
 func (c FfiConverterHistogram) Lift(handle C.uint64_t) Histogram {
-	if uint64(handle)&1 == 0 {
+	if uint64(handle) & 1 == 0 {
 		// Rust-generated handle (even), construct a new object wrapping the handle
-		result := &HistogramImpl{
+		result := &HistogramImpl {
 			newFfiObject(
 				handle,
 				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -6246,7 +6548,7 @@ func LowerToExternalHistogram(value Histogram) uint64 {
 	return uint64(FfiConverterHistogramINSTANCE.Lower(value))
 }
 
-type FfiDestroyerHistogram struct{}
+type FfiDestroyerHistogram struct {}
 
 func (_ FfiDestroyerHistogram) Destroy(value Histogram) {
 	if val, ok := value.(*HistogramImpl); ok {
@@ -6254,24 +6556,33 @@ func (_ FfiDestroyerHistogram) Destroy(value Histogram) {
 	}
 }
 
+
+
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0(uniffiHandle C.uint64_t, value C.double, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0(uniffiHandle C.uint64_t,value C.double,uniffiOutReturn *C.void,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterHistogramINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	uniffiObj.Record(
-		FfiConverterFloat64INSTANCE.Lift(value),
-	)
+	
+    uniffiObj.Record(
+        FfiConverterFloat64INSTANCE.Lift(value),
+    )
+	
+    
 
+
+	
 }
 
-var UniffiVTableCallbackInterfaceHistogramINSTANCE = C.UniffiVTableCallbackInterfaceHistogram{
-	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramFree),
+var UniffiVTableCallbackInterfaceHistogramINSTANCE = C.UniffiVTableCallbackInterfaceHistogram {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramFree),
 	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramClone),
-	record:      (C.UniffiCallbackInterfaceHistogramMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0),
+	record: (C.UniffiCallbackInterfaceHistogramMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0),
 }
 
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramFree
@@ -6292,24 +6603,27 @@ func (c FfiConverterHistogram) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_histogram(&UniffiVTableCallbackInterfaceHistogramINSTANCE)
 }
 
+
 // Callback invoked for each emitted log record.
 type LogCallback interface {
 	// Handles one log record.
-	Log(record LogRecord)
+	Log(record LogRecord) 
 }
-
 // Callback invoked for each emitted log record.
 type LogCallbackImpl struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Handles one log record.
-func (_self *LogCallbackImpl) Log(record LogRecord) {
+func (_self *LogCallbackImpl) Log(record LogRecord)  {
 	_pointer := _self.ffiObject.incrementPointer("LogCallback")
 	defer _self.ffiObject.decrementPointer()
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_logcallback_log(
-			_pointer, FfiConverterLogRecordINSTANCE.Lower(record), _uniffiStatus)
+		_pointer,FfiConverterLogRecordINSTANCE.Lower(record),_uniffiStatus)
 		return false
 	})
 }
@@ -6320,16 +6634,17 @@ func (object *LogCallbackImpl) Destroy() {
 
 type FfiConverterLogCallback struct {
 	handleMap *concurrentHandleMap[LogCallback]
-}
+	}
 
 var FfiConverterLogCallbackINSTANCE = FfiConverterLogCallback{
 	handleMap: newConcurrentHandleMap[LogCallback](),
-}
+	}
+
 
 func (c FfiConverterLogCallback) Lift(handle C.uint64_t) LogCallback {
-	if uint64(handle)&1 == 0 {
+	if uint64(handle) & 1 == 0 {
 		// Rust-generated handle (even), construct a new object wrapping the handle
-		result := &LogCallbackImpl{
+		result := &LogCallbackImpl {
 			newFfiObject(
 				handle,
 				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -6384,7 +6699,7 @@ func LowerToExternalLogCallback(value LogCallback) uint64 {
 	return uint64(FfiConverterLogCallbackINSTANCE.Lower(value))
 }
 
-type FfiDestroyerLogCallback struct{}
+type FfiDestroyerLogCallback struct {}
 
 func (_ FfiDestroyerLogCallback) Destroy(value LogCallback) {
 	if val, ok := value.(*LogCallbackImpl); ok {
@@ -6392,26 +6707,35 @@ func (_ FfiDestroyerLogCallback) Destroy(value LogCallback) {
 	}
 }
 
+
+
 //export slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0
-func slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0(uniffiHandle C.uint64_t, record C.RustBuffer, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0(uniffiHandle C.uint64_t,record C.RustBuffer,uniffiOutReturn *C.void,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterLogCallbackINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	uniffiObj.Log(
-		FfiConverterLogRecordINSTANCE.Lift(GoRustBuffer{
-			inner: record,
-		}),
-	)
+	
+    uniffiObj.Log(
+        FfiConverterLogRecordINSTANCE.Lift(GoRustBuffer {
+		inner: record,
+	}),
+    )
+	
+    
 
+
+	
 }
 
-var UniffiVTableCallbackInterfaceLogCallbackINSTANCE = C.UniffiVTableCallbackInterfaceLogCallback{
-	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackFree),
+var UniffiVTableCallbackInterfaceLogCallbackINSTANCE = C.UniffiVTableCallbackInterfaceLogCallback {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackFree),
 	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackClone),
-	log:         (C.UniffiCallbackInterfaceLogCallbackMethod0)(C.slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0),
+	log: (C.UniffiCallbackInterfaceLogCallbackMethod0)(C.slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0),
 }
 
 //export slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackFree
@@ -6432,6 +6756,7 @@ func (c FfiConverterLogCallback) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_logcallback(&UniffiVTableCallbackInterfaceLogCallbackINSTANCE)
 }
 
+
 // Application-provided merge operator used by merge-enabled databases.
 type MergeOperator interface {
 	// Combines an existing value and a new merge operand into the next value.
@@ -6439,11 +6764,13 @@ type MergeOperator interface {
 	// `existing_value` is `None` when the key has no visible base value.
 	Merge(key []byte, existingValue *[]byte, operand []byte) ([]byte, error)
 }
-
 // Application-provided merge operator used by merge-enabled databases.
 type MergeOperatorImpl struct {
 	ffiObject FfiObject
 }
+
+
+
 
 // Combines an existing value and a new merge operand into the next value.
 //
@@ -6451,18 +6778,18 @@ type MergeOperatorImpl struct {
 func (_self *MergeOperatorImpl) Merge(key []byte, existingValue *[]byte, operand []byte) ([]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("MergeOperator")
 	defer _self.ffiObject.decrementPointer()
-	_uniffiRV, _uniffiErr := rustCallWithError[*MergeOperatorCallbackError](FfiConverterMergeOperatorCallbackError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_mergeoperator_merge(
-				_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterOptionalBytesINSTANCE.Lower(existingValue), FfiConverterBytesINSTANCE.Lower(operand), _uniffiStatus),
-		}
-	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue []byte
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterBytesINSTANCE.Lift(_uniffiRV), nil
+	_uniffiRV, _uniffiErr := rustCallWithError[*MergeOperatorCallbackError](FfiConverterMergeOperatorCallbackError{},func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_mergeoperator_merge(
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterOptionalBytesINSTANCE.Lower(existingValue), FfiConverterBytesINSTANCE.Lower(operand),_uniffiStatus),
 	}
+	})
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue []byte
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterBytesINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 func (object *MergeOperatorImpl) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -6471,16 +6798,17 @@ func (object *MergeOperatorImpl) Destroy() {
 
 type FfiConverterMergeOperator struct {
 	handleMap *concurrentHandleMap[MergeOperator]
-}
+	}
 
 var FfiConverterMergeOperatorINSTANCE = FfiConverterMergeOperator{
 	handleMap: newConcurrentHandleMap[MergeOperator](),
-}
+	}
+
 
 func (c FfiConverterMergeOperator) Lift(handle C.uint64_t) MergeOperator {
-	if uint64(handle)&1 == 0 {
+	if uint64(handle) & 1 == 0 {
 		// Rust-generated handle (even), construct a new object wrapping the handle
-		result := &MergeOperatorImpl{
+		result := &MergeOperatorImpl {
 			newFfiObject(
 				handle,
 				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -6535,7 +6863,7 @@ func LowerToExternalMergeOperator(value MergeOperator) uint64 {
 	return uint64(FfiConverterMergeOperatorINSTANCE.Lower(value))
 }
 
-type FfiDestroyerMergeOperator struct{}
+type FfiDestroyerMergeOperator struct {}
 
 func (_ FfiDestroyerMergeOperator) Destroy(value MergeOperator) {
 	if val, ok := value.(*MergeOperatorImpl); ok {
@@ -6543,49 +6871,55 @@ func (_ FfiDestroyerMergeOperator) Destroy(value MergeOperator) {
 	}
 }
 
+
+
 //export slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorMethod0
-func slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uniffiHandle C.uint64_t, key C.RustBuffer, existingValue C.RustBuffer, operand C.RustBuffer, uniffiOutReturn *C.RustBuffer, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uniffiHandle C.uint64_t,key C.RustBuffer,existingValue C.RustBuffer,operand C.RustBuffer,uniffiOutReturn *C.RustBuffer,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterMergeOperatorINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	res, err :=
-		uniffiObj.Merge(
-			FfiConverterBytesINSTANCE.Lift(GoRustBuffer{
-				inner: key,
-			}),
-			FfiConverterOptionalBytesINSTANCE.Lift(GoRustBuffer{
-				inner: existingValue,
-			}),
-			FfiConverterBytesINSTANCE.Lift(GoRustBuffer{
-				inner: operand,
-			}),
-		)
-
+	 res, err :=
+    uniffiObj.Merge(
+        FfiConverterBytesINSTANCE.Lift(GoRustBuffer {
+		inner: key,
+	}),
+        FfiConverterOptionalBytesINSTANCE.Lift(GoRustBuffer {
+		inner: existingValue,
+	}),
+        FfiConverterBytesINSTANCE.Lift(GoRustBuffer {
+		inner: operand,
+	}),
+    )
+	
+    
 	if err != nil {
 		var actualError *MergeOperatorCallbackError
 		if errors.As(err, &actualError) {
-			*callStatus = C.RustCallStatus{
-				code:     C.int8_t(uniffiCallbackResultError),
+			*callStatus = C.RustCallStatus {
+				code: C.int8_t(uniffiCallbackResultError),
 				errorBuf: FfiConverterMergeOperatorCallbackErrorINSTANCE.Lower(actualError),
 			}
 		} else {
-			*callStatus = C.RustCallStatus{
+			*callStatus = C.RustCallStatus {
 				code: C.int8_t(uniffiCallbackUnexpectedResultError),
 			}
 		}
 		return
 	}
 
+
 	*uniffiOutReturn = FfiConverterBytesINSTANCE.Lower(res)
 }
 
-var UniffiVTableCallbackInterfaceMergeOperatorINSTANCE = C.UniffiVTableCallbackInterfaceMergeOperator{
-	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorFree),
+var UniffiVTableCallbackInterfaceMergeOperatorINSTANCE = C.UniffiVTableCallbackInterfaceMergeOperator {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorFree),
 	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorClone),
-	merge:       (C.UniffiCallbackInterfaceMergeOperatorMethod0)(C.slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorMethod0),
+	merge: (C.UniffiCallbackInterfaceMergeOperatorMethod0)(C.slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorMethod0),
 }
 
 //export slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorFree
@@ -6606,6 +6940,7 @@ func (c FfiConverterMergeOperator) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator(&UniffiVTableCallbackInterfaceMergeOperatorINSTANCE)
 }
 
+
 // Application-defined metrics recorder used to publish SlateDB metrics.
 type MetricsRecorder interface {
 	// Registers a monotonically increasing counter.
@@ -6617,11 +6952,13 @@ type MetricsRecorder interface {
 	// Registers a histogram with explicit bucket boundaries.
 	RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram
 }
-
 // Application-defined metrics recorder used to publish SlateDB metrics.
 type MetricsRecorderImpl struct {
 	ffiObject FfiObject
 }
+
+
+
 
 // Registers a monotonically increasing counter.
 func (_self *MetricsRecorderImpl) RegisterCounter(name string, description string, labels []MetricLabel) Counter {
@@ -6629,7 +6966,7 @@ func (_self *MetricsRecorderImpl) RegisterCounter(name string, description strin
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels),_uniffiStatus)
 	}))
 }
 
@@ -6639,7 +6976,7 @@ func (_self *MetricsRecorderImpl) RegisterGauge(name string, description string,
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_gauge(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels),_uniffiStatus)
 	}))
 }
 
@@ -6649,7 +6986,7 @@ func (_self *MetricsRecorderImpl) RegisterUpDownCounter(name string, description
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_up_down_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels),_uniffiStatus)
 	}))
 }
 
@@ -6659,7 +6996,7 @@ func (_self *MetricsRecorderImpl) RegisterHistogram(name string, description str
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_histogram(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries),_uniffiStatus)
 	}))
 }
 func (object *MetricsRecorderImpl) Destroy() {
@@ -6669,16 +7006,17 @@ func (object *MetricsRecorderImpl) Destroy() {
 
 type FfiConverterMetricsRecorder struct {
 	handleMap *concurrentHandleMap[MetricsRecorder]
-}
+	}
 
 var FfiConverterMetricsRecorderINSTANCE = FfiConverterMetricsRecorder{
 	handleMap: newConcurrentHandleMap[MetricsRecorder](),
-}
+	}
+
 
 func (c FfiConverterMetricsRecorder) Lift(handle C.uint64_t) MetricsRecorder {
-	if uint64(handle)&1 == 0 {
+	if uint64(handle) & 1 == 0 {
 		// Rust-generated handle (even), construct a new object wrapping the handle
-		result := &MetricsRecorderImpl{
+		result := &MetricsRecorderImpl {
 			newFfiObject(
 				handle,
 				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -6733,7 +7071,7 @@ func LowerToExternalMetricsRecorder(value MetricsRecorder) uint64 {
 	return uint64(FfiConverterMetricsRecorderINSTANCE.Lower(value))
 }
 
-type FfiDestroyerMetricsRecorder struct{}
+type FfiDestroyerMetricsRecorder struct {}
 
 func (_ FfiDestroyerMetricsRecorder) Destroy(value MetricsRecorder) {
 	if val, ok := value.(*MetricsRecorderImpl); ok {
@@ -6741,112 +7079,140 @@ func (_ FfiDestroyerMetricsRecorder) Destroy(value MetricsRecorder) {
 	}
 }
 
+
+
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0(uniffiHandle C.uint64_t,name C.RustBuffer,description C.RustBuffer,labels C.RustBuffer,uniffiOutReturn *C.uint64_t,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	res :=
-		uniffiObj.RegisterCounter(
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: name,
-			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: description,
-			}),
-			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
-				inner: labels,
-			}),
-		)
+	 res :=
+    uniffiObj.RegisterCounter(
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: name,
+	}),
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: description,
+	}),
+        FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer {
+		inner: labels,
+	}),
+    )
+	
+    
+
 
 	*uniffiOutReturn = FfiConverterCounterINSTANCE.Lower(res)
 }
 
+
+
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1(uniffiHandle C.uint64_t,name C.RustBuffer,description C.RustBuffer,labels C.RustBuffer,uniffiOutReturn *C.uint64_t,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	res :=
-		uniffiObj.RegisterGauge(
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: name,
-			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: description,
-			}),
-			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
-				inner: labels,
-			}),
-		)
+	 res :=
+    uniffiObj.RegisterGauge(
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: name,
+	}),
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: description,
+	}),
+        FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer {
+		inner: labels,
+	}),
+    )
+	
+    
+
 
 	*uniffiOutReturn = FfiConverterGaugeINSTANCE.Lower(res)
 }
 
+
+
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2(uniffiHandle C.uint64_t,name C.RustBuffer,description C.RustBuffer,labels C.RustBuffer,uniffiOutReturn *C.uint64_t,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	res :=
-		uniffiObj.RegisterUpDownCounter(
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: name,
-			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: description,
-			}),
-			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
-				inner: labels,
-			}),
-		)
+	 res :=
+    uniffiObj.RegisterUpDownCounter(
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: name,
+	}),
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: description,
+	}),
+        FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer {
+		inner: labels,
+	}),
+    )
+	
+    
+
 
 	*uniffiOutReturn = FfiConverterUpDownCounterINSTANCE.Lower(res)
 }
 
+
+
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, boundaries C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3(uniffiHandle C.uint64_t,name C.RustBuffer,description C.RustBuffer,labels C.RustBuffer,boundaries C.RustBuffer,uniffiOutReturn *C.uint64_t,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	res :=
-		uniffiObj.RegisterHistogram(
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: name,
-			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
-				inner: description,
-			}),
-			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
-				inner: labels,
-			}),
-			FfiConverterSequenceFloat64INSTANCE.Lift(GoRustBuffer{
-				inner: boundaries,
-			}),
-		)
+	 res :=
+    uniffiObj.RegisterHistogram(
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: name,
+	}),
+        FfiConverterStringINSTANCE.Lift(GoRustBuffer {
+		inner: description,
+	}),
+        FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer {
+		inner: labels,
+	}),
+        FfiConverterSequenceFloat64INSTANCE.Lift(GoRustBuffer {
+		inner: boundaries,
+	}),
+    )
+	
+    
+
 
 	*uniffiOutReturn = FfiConverterHistogramINSTANCE.Lower(res)
 }
 
-var UniffiVTableCallbackInterfaceMetricsRecorderINSTANCE = C.UniffiVTableCallbackInterfaceMetricsRecorder{
-	uniffiFree:            (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderFree),
-	uniffiClone:           (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderClone),
-	registerCounter:       (C.UniffiCallbackInterfaceMetricsRecorderMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0),
-	registerGauge:         (C.UniffiCallbackInterfaceMetricsRecorderMethod1)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1),
+var UniffiVTableCallbackInterfaceMetricsRecorderINSTANCE = C.UniffiVTableCallbackInterfaceMetricsRecorder {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderClone),
+	registerCounter: (C.UniffiCallbackInterfaceMetricsRecorderMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0),
+	registerGauge: (C.UniffiCallbackInterfaceMetricsRecorderMethod1)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1),
 	registerUpDownCounter: (C.UniffiCallbackInterfaceMetricsRecorderMethod2)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2),
-	registerHistogram:     (C.UniffiCallbackInterfaceMetricsRecorderMethod3)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3),
+	registerHistogram: (C.UniffiCallbackInterfaceMetricsRecorderMethod3)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3),
 }
 
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderFree
@@ -6867,55 +7233,58 @@ func (c FfiConverterMetricsRecorder) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_metricsrecorder(&UniffiVTableCallbackInterfaceMetricsRecorderINSTANCE)
 }
 
+
 // Object store handle used when opening databases, readers, and WAL readers.
 type ObjectStoreInterface interface {
 }
-
 // Object store handle used when opening databases, readers, and WAL readers.
 type ObjectStore struct {
 	ffiObject FfiObject
 }
+
 
 // Builds an object store from environment configuration.
 //
 // When `env_file` is provided, environment variables are loaded from that
 // file before constructing the store.
 func ObjectStoreFromEnv(envFile *string) (*ObjectStore, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env(FfiConverterOptionalStringINSTANCE.Lower(envFile), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env(FfiConverterOptionalStringINSTANCE.Lower(envFile),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *ObjectStore
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterObjectStoreINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *ObjectStore
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterObjectStoreINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Resolves an object store from a URL understood by SlateDB.
 func ObjectStoreResolve(url string) (*ObjectStore, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve(FfiConverterStringINSTANCE.Lower(url), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve(FfiConverterStringINSTANCE.Lower(url),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *ObjectStore
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterObjectStoreINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *ObjectStore
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterObjectStoreINSTANCE.Lift(_uniffiRV), nil
+		}
 }
+
 
 func (object *ObjectStore) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterObjectStore struct{}
+type FfiConverterObjectStore struct {}
 
 var FfiConverterObjectStoreINSTANCE = FfiConverterObjectStore{}
 
+
 func (c FfiConverterObjectStore) Lift(handle C.uint64_t) *ObjectStore {
-	result := &ObjectStore{
+	result := &ObjectStore {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -6955,11 +7324,212 @@ func LowerToExternalObjectStore(value *ObjectStore) uint64 {
 	return uint64(FfiConverterObjectStoreINSTANCE.Lower(value))
 }
 
-type FfiDestroyerObjectStore struct{}
+type FfiDestroyerObjectStore struct {}
 
 func (_ FfiDestroyerObjectStore) Destroy(value *ObjectStore) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
+
+// Application-provided prefix extractor used to configure prefix-based
+// bloom filters.
+type PrefixExtractor interface {
+	// Stable identifier for this extractor's configuration. Included in the
+	// bloom filter policy name so filters built with different extractors
+	// are never mismatched.
+	Name() string
+	// Returns the prefix length to use for `target`, or `None` when no
+	// prefix is extractable.
+	PrefixLen(target PrefixTarget) *uint64
+}
+// Application-provided prefix extractor used to configure prefix-based
+// bloom filters.
+type PrefixExtractorImpl struct {
+	ffiObject FfiObject
+}
+
+
+
+
+// Stable identifier for this extractor's configuration. Included in the
+// bloom filter policy name so filters built with different extractors
+// are never mismatched.
+func (_self *PrefixExtractorImpl) Name() string {
+	_pointer := _self.ffiObject.incrementPointer("PrefixExtractor")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_prefixextractor_name(
+		_pointer,_uniffiStatus),
+	}
+	}))
+}
+
+// Returns the prefix length to use for `target`, or `None` when no
+// prefix is extractable.
+func (_self *PrefixExtractorImpl) PrefixLen(target PrefixTarget) *uint64 {
+	_pointer := _self.ffiObject.incrementPointer("PrefixExtractor")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_prefixextractor_prefix_len(
+		_pointer,FfiConverterPrefixTargetINSTANCE.Lower(target),_uniffiStatus),
+	}
+	}))
+}
+func (object *PrefixExtractorImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterPrefixExtractor struct {
+	handleMap *concurrentHandleMap[PrefixExtractor]
+	}
+
+var FfiConverterPrefixExtractorINSTANCE = FfiConverterPrefixExtractor{
+	handleMap: newConcurrentHandleMap[PrefixExtractor](),
+	}
+
+
+func (c FfiConverterPrefixExtractor) Lift(handle C.uint64_t) PrefixExtractor {
+	if uint64(handle) & 1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &PrefixExtractorImpl {
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_prefixextractor(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_prefixextractor(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*PrefixExtractorImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterPrefixExtractor) Read(reader io.Reader) PrefixExtractor {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterPrefixExtractor) Lower(value PrefixExtractor) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*PrefixExtractorImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("PrefixExtractor")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterPrefixExtractor) Write(writer io.Writer, value PrefixExtractor) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalPrefixExtractor(handle uint64) PrefixExtractor {
+	return FfiConverterPrefixExtractorINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalPrefixExtractor(value PrefixExtractor) uint64 {
+	return uint64(FfiConverterPrefixExtractorINSTANCE.Lower(value))
+}
+
+type FfiDestroyerPrefixExtractor struct {}
+
+func (_ FfiDestroyerPrefixExtractor) Destroy(value PrefixExtractor) {
+	if val, ok := value.(*PrefixExtractorImpl); ok {
+		val.Destroy()
+	}
+}
+
+
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0(uniffiHandle C.uint64_t,uniffiOutReturn *C.RustBuffer,callStatus *C.RustCallStatus,) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterPrefixExtractorINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	
+	
+
+	 res :=
+    uniffiObj.Name(
+    )
+	
+    
+
+
+	*uniffiOutReturn = FfiConverterStringINSTANCE.Lower(res)
+}
+
+
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1(uniffiHandle C.uint64_t,target C.RustBuffer,uniffiOutReturn *C.RustBuffer,callStatus *C.RustCallStatus,) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterPrefixExtractorINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	
+	
+
+	 res :=
+    uniffiObj.PrefixLen(
+        FfiConverterPrefixTargetINSTANCE.Lift(GoRustBuffer {
+		inner: target,
+	}),
+    )
+	
+    
+
+
+	*uniffiOutReturn = FfiConverterOptionalUint64INSTANCE.Lower(res)
+}
+
+var UniffiVTableCallbackInterfacePrefixExtractorINSTANCE = C.UniffiVTableCallbackInterfacePrefixExtractor {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorClone),
+	name: (C.UniffiCallbackInterfacePrefixExtractorMethod0)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0),
+	prefixLen: (C.UniffiCallbackInterfacePrefixExtractorMethod1)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1),
+}
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree(handle C.uint64_t) {
+	FfiConverterPrefixExtractorINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorClone
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterPrefixExtractorINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterPrefixExtractorINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterPrefixExtractor) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_prefixextractor(&UniffiVTableCallbackInterfacePrefixExtractorINSTANCE)
+}
+
 
 // Mutable database settings object used to configure a [`crate::DbBuilder`].
 type SettingsInterface interface {
@@ -6990,11 +7560,11 @@ type SettingsInterface interface {
 	// Serializes the current settings value to a JSON string.
 	ToJsonString() (string, error)
 }
-
 // Mutable database settings object used to configure a [`crate::DbBuilder`].
 type Settings struct {
 	ffiObject FfiObject
 }
+
 
 // Creates a settings object populated with SlateDB defaults.
 func SettingsDefault() *Settings {
@@ -7005,68 +7575,70 @@ func SettingsDefault() *Settings {
 
 // Loads settings from environment variables using `prefix`.
 func SettingsFromEnv(prefix string) (*Settings, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_env(FfiConverterStringINSTANCE.Lower(prefix), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_env(FfiConverterStringINSTANCE.Lower(prefix),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *Settings
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *Settings
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Loads settings from environment variables, falling back to `default_settings`.
 func SettingsFromEnvWithDefault(prefix string, defaultSettings *Settings) (*Settings, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default(FfiConverterStringINSTANCE.Lower(prefix), FfiConverterSettingsINSTANCE.Lower(defaultSettings), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default(FfiConverterStringINSTANCE.Lower(prefix), FfiConverterSettingsINSTANCE.Lower(defaultSettings),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *Settings
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *Settings
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Loads settings from a JSON, TOML, or YAML file based on its extension.
 func SettingsFromFile(path string) (*Settings, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_file(FfiConverterStringINSTANCE.Lower(path), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_file(FfiConverterStringINSTANCE.Lower(path),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *Settings
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *Settings
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Parses settings from a JSON string.
 func SettingsFromJsonString(json string) (*Settings, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string(FfiConverterStringINSTANCE.Lower(json), _uniffiStatus)
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string(FfiConverterStringINSTANCE.Lower(json),_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *Settings
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *Settings
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 
 // Loads settings from SlateDB's default file and environment lookup order.
 func SettingsLoad() (*Settings, error) {
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_constructor_settings_load(_uniffiStatus)
 	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue *Settings
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
-	}
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue *Settings
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterSettingsINSTANCE.Lift(_uniffiRV), nil
+		}
 }
+
+
 
 // Sets a settings field by dotted path using a JSON literal value.
 //
@@ -7094,42 +7666,43 @@ func SettingsLoad() (*Settings, error) {
 func (_self *Settings) Set(key string, valueJson string) error {
 	_pointer := _self.ffiObject.incrementPointer("*Settings")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_settings_set(
-			_pointer, FfiConverterStringINSTANCE.Lower(key), FfiConverterStringINSTANCE.Lower(valueJson), _uniffiStatus)
+		_pointer,FfiConverterStringINSTANCE.Lower(key), FfiConverterStringINSTANCE.Lower(valueJson),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Serializes the current settings value to a JSON string.
 func (_self *Settings) ToJsonString() (string, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Settings")
 	defer _self.ffiObject.decrementPointer()
-	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_settings_to_json_string(
-				_pointer, _uniffiStatus),
-		}
-	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue string
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterStringINSTANCE.Lift(_uniffiRV), nil
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer {
+		inner: C.uniffi_slatedb_uniffi_fn_method_settings_to_json_string(
+		_pointer,_uniffiStatus),
 	}
+	})
+		if _uniffiErr != nil {
+			var _uniffiDefaultValue string
+			return _uniffiDefaultValue, _uniffiErr
+		} else {
+			return FfiConverterStringINSTANCE.Lift(_uniffiRV), nil
+		}
 }
 func (object *Settings) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterSettings struct{}
+type FfiConverterSettings struct {}
 
 var FfiConverterSettingsINSTANCE = FfiConverterSettings{}
 
+
 func (c FfiConverterSettings) Lift(handle C.uint64_t) *Settings {
-	result := &Settings{
+	result := &Settings {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -7169,30 +7742,34 @@ func LowerToExternalSettings(value *Settings) uint64 {
 	return uint64(FfiConverterSettingsINSTANCE.Lower(value))
 }
 
-type FfiDestroyerSettings struct{}
+type FfiDestroyerSettings struct {}
 
 func (_ FfiDestroyerSettings) Destroy(value *Settings) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Handle for an up/down counter metric.
 type UpDownCounter interface {
 	// Adds `value` to the counter.
-	Increment(value int64)
+	Increment(value int64) 
 }
-
 // Handle for an up/down counter metric.
 type UpDownCounterImpl struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Adds `value` to the counter.
-func (_self *UpDownCounterImpl) Increment(value int64) {
+func (_self *UpDownCounterImpl) Increment(value int64)  {
 	_pointer := _self.ffiObject.incrementPointer("UpDownCounter")
 	defer _self.ffiObject.decrementPointer()
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_updowncounter_increment(
-			_pointer, FfiConverterInt64INSTANCE.Lower(value), _uniffiStatus)
+		_pointer,FfiConverterInt64INSTANCE.Lower(value),_uniffiStatus)
 		return false
 	})
 }
@@ -7203,16 +7780,17 @@ func (object *UpDownCounterImpl) Destroy() {
 
 type FfiConverterUpDownCounter struct {
 	handleMap *concurrentHandleMap[UpDownCounter]
-}
+	}
 
 var FfiConverterUpDownCounterINSTANCE = FfiConverterUpDownCounter{
 	handleMap: newConcurrentHandleMap[UpDownCounter](),
-}
+	}
+
 
 func (c FfiConverterUpDownCounter) Lift(handle C.uint64_t) UpDownCounter {
-	if uint64(handle)&1 == 0 {
+	if uint64(handle) & 1 == 0 {
 		// Rust-generated handle (even), construct a new object wrapping the handle
-		result := &UpDownCounterImpl{
+		result := &UpDownCounterImpl {
 			newFfiObject(
 				handle,
 				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -7267,7 +7845,7 @@ func LowerToExternalUpDownCounter(value UpDownCounter) uint64 {
 	return uint64(FfiConverterUpDownCounterINSTANCE.Lower(value))
 }
 
-type FfiDestroyerUpDownCounter struct{}
+type FfiDestroyerUpDownCounter struct {}
 
 func (_ FfiDestroyerUpDownCounter) Destroy(value UpDownCounter) {
 	if val, ok := value.(*UpDownCounterImpl); ok {
@@ -7275,24 +7853,33 @@ func (_ FfiDestroyerUpDownCounter) Destroy(value UpDownCounter) {
 	}
 }
 
+
+
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0
-func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0(uniffiHandle C.uint64_t, value C.int64_t, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0(uniffiHandle C.uint64_t,value C.int64_t,uniffiOutReturn *C.void,callStatus *C.RustCallStatus,) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterUpDownCounterINSTANCE.handleMap.tryGet(handle)
 	if !ok {
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
+	
+	
 
-	uniffiObj.Increment(
-		FfiConverterInt64INSTANCE.Lift(value),
-	)
+	
+    uniffiObj.Increment(
+        FfiConverterInt64INSTANCE.Lift(value),
+    )
+	
+    
 
+
+	
 }
 
-var UniffiVTableCallbackInterfaceUpDownCounterINSTANCE = C.UniffiVTableCallbackInterfaceUpDownCounter{
-	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree),
+var UniffiVTableCallbackInterfaceUpDownCounterINSTANCE = C.UniffiVTableCallbackInterfaceUpDownCounter {
+	uniffiFree: (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree),
 	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterClone),
-	increment:   (C.UniffiCallbackInterfaceUpDownCounterMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0),
+	increment: (C.UniffiCallbackInterfaceUpDownCounterMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0),
 }
 
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree
@@ -7313,6 +7900,7 @@ func (c FfiConverterUpDownCounter) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_updowncounter(&UniffiVTableCallbackInterfaceUpDownCounterINSTANCE)
 }
 
+
 // Handle for a single WAL file.
 type WalFileInterface interface {
 	// Returns the WAL file ID.
@@ -7326,11 +7914,13 @@ type WalFileInterface interface {
 	// Returns the WAL ID immediately after this file.
 	NextId() uint64
 }
-
 // Handle for a single WAL file.
 type WalFile struct {
 	ffiObject FfiObject
 }
+
+
+
 
 // Returns the WAL file ID.
 func (_self *WalFile) Id() uint64 {
@@ -7338,7 +7928,7 @@ func (_self *WalFile) Id() uint64 {
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_walfile_id(
-			_pointer, _uniffiStatus)
+		_pointer,_uniffiStatus)
 	}))
 }
 
@@ -7346,8 +7936,8 @@ func (_self *WalFile) Id() uint64 {
 func (_self *WalFile) Iterator() (*WalFileIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*WalFile")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
@@ -7358,13 +7948,13 @@ func (_self *WalFile) Iterator() (*WalFileIterator, error) {
 			return FfiConverterWalFileIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_walfile_iterator(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
 		},
 	)
@@ -7373,34 +7963,34 @@ func (_self *WalFile) Iterator() (*WalFileIterator, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Reads object-store metadata for this WAL file.
 func (_self *WalFile) Metadata() (WalFileMetadata, error) {
 	_pointer := _self.ffiObject.incrementPointer("*WalFile")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) WalFileMetadata {
 			return FfiConverterWalFileMetadataINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_walfile_metadata(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -7409,7 +7999,7 @@ func (_self *WalFile) Metadata() (WalFileMetadata, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 
 // Returns a handle for the next WAL file ID without checking existence.
@@ -7418,7 +8008,7 @@ func (_self *WalFile) NextFile() *WalFile {
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterWalFileINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_walfile_next_file(
-			_pointer, _uniffiStatus)
+		_pointer,_uniffiStatus)
 	}))
 }
 
@@ -7428,7 +8018,7 @@ func (_self *WalFile) NextId() uint64 {
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_walfile_next_id(
-			_pointer, _uniffiStatus)
+		_pointer,_uniffiStatus)
 	}))
 }
 func (object *WalFile) Destroy() {
@@ -7436,12 +8026,13 @@ func (object *WalFile) Destroy() {
 	object.ffiObject.destroy()
 }
 
-type FfiConverterWalFile struct{}
+type FfiConverterWalFile struct {}
 
 var FfiConverterWalFileINSTANCE = FfiConverterWalFile{}
 
+
 func (c FfiConverterWalFile) Lift(handle C.uint64_t) *WalFile {
-	result := &WalFile{
+	result := &WalFile {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -7481,48 +8072,52 @@ func LowerToExternalWalFile(value *WalFile) uint64 {
 	return uint64(FfiConverterWalFileINSTANCE.Lower(value))
 }
 
-type FfiDestroyerWalFile struct{}
+type FfiDestroyerWalFile struct {}
 
 func (_ FfiDestroyerWalFile) Destroy(value *WalFile) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Iterator over raw row entries stored in a WAL file.
 type WalFileIteratorInterface interface {
 	// Returns the next raw row entry from the WAL file.
 	Next() (*RowEntry, error)
 }
-
 // Iterator over raw row entries stored in a WAL file.
 type WalFileIterator struct {
 	ffiObject FfiObject
 }
 
+
+
+
 // Returns the next raw row entry from the WAL file.
 func (_self *WalFileIterator) Next() (*RowEntry, error) {
 	_pointer := _self.ffiObject.incrementPointer("*WalFileIterator")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) *RowEntry {
 			return FfiConverterOptionalRowEntryINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_walfileiterator_next(
-			_pointer),
+		_pointer,),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -7531,19 +8126,20 @@ func (_self *WalFileIterator) Next() (*RowEntry, error) {
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 func (object *WalFileIterator) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterWalFileIterator struct{}
+type FfiConverterWalFileIterator struct {}
 
 var FfiConverterWalFileIteratorINSTANCE = FfiConverterWalFileIterator{}
 
+
 func (c FfiConverterWalFileIterator) Lift(handle C.uint64_t) *WalFileIterator {
-	result := &WalFileIterator{
+	result := &WalFileIterator {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -7583,11 +8179,13 @@ func LowerToExternalWalFileIterator(value *WalFileIterator) uint64 {
 	return uint64(FfiConverterWalFileIteratorINSTANCE.Lower(value))
 }
 
-type FfiDestroyerWalFileIterator struct{}
+type FfiDestroyerWalFileIterator struct {}
 
 func (_ FfiDestroyerWalFileIterator) Destroy(value *WalFileIterator) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Reader for WAL files stored under a database path.
 type WalReaderInterface interface {
@@ -7598,18 +8196,19 @@ type WalReaderInterface interface {
 	// `start_id` is inclusive and `end_id` is exclusive when provided.
 	List(startId *uint64, endId *uint64) ([]*WalFile, error)
 }
-
 // Reader for WAL files stored under a database path.
 type WalReader struct {
 	ffiObject FfiObject
 }
-
 // Creates a WAL reader for `path` in `object_store`.
 func NewWalReader(path string, objectStore *ObjectStore) *WalReader {
 	return FfiConverterWalReaderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_walreader_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+		return C.uniffi_slatedb_uniffi_fn_constructor_walreader_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore),_uniffiStatus)
 	}))
 }
+
+
+
 
 // Returns a handle for the WAL file with the given ID.
 func (_self *WalReader) Get(id uint64) *WalFile {
@@ -7617,7 +8216,7 @@ func (_self *WalReader) Get(id uint64) *WalFile {
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterWalFileINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_walreader_get(
-			_pointer, FfiConverterUint64INSTANCE.Lower(id), _uniffiStatus)
+		_pointer,FfiConverterUint64INSTANCE.Lower(id),_uniffiStatus)
 	}))
 }
 
@@ -7627,27 +8226,27 @@ func (_self *WalReader) Get(id uint64) *WalFile {
 func (_self *WalReader) List(startId *uint64, endId *uint64) ([]*WalFile, error) {
 	_pointer := _self.ffiObject.incrementPointer("*WalReader")
 	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
+	 res, err :=uniffiRustCallAsync[*Error](
+        FfiConverterErrorINSTANCE,
 		// completeFn
 		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
 			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
+			return GoRustBuffer {
+		inner: res,
+	}
 		},
 		// liftFn
 		func(ffi RustBufferI) []*WalFile {
 			return FfiConverterSequenceWalFileINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_walreader_list(
-			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(startId), FfiConverterOptionalUint64INSTANCE.Lower(endId)),
+		_pointer,FfiConverterOptionalUint64INSTANCE.Lower(startId), FfiConverterOptionalUint64INSTANCE.Lower(endId)),
 		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+		func (handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
 		},
 		// freeFn
-		func(handle C.uint64_t) {
+		func (handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
@@ -7656,19 +8255,20 @@ func (_self *WalReader) List(startId *uint64, endId *uint64) ([]*WalFile, error)
 		return res, nil
 	}
 
-	return res, err
+	return res, err 
 }
 func (object *WalReader) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterWalReader struct{}
+type FfiConverterWalReader struct {}
 
 var FfiConverterWalReaderINSTANCE = FfiConverterWalReader{}
 
+
 func (c FfiConverterWalReader) Lift(handle C.uint64_t) *WalReader {
-	result := &WalReader{
+	result := &WalReader {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -7708,11 +8308,13 @@ func LowerToExternalWalReader(value *WalReader) uint64 {
 	return uint64(FfiConverterWalReaderINSTANCE.Lower(value))
 }
 
-type FfiDestroyerWalReader struct{}
+type FfiDestroyerWalReader struct {}
 
 func (_ FfiDestroyerWalReader) Destroy(value *WalReader) {
-	value.Destroy()
+		value.Destroy()
 }
+
+
 
 // Mutable batch of write operations applied atomically by [`crate::Db::write`].
 //
@@ -7729,14 +8331,12 @@ type WriteBatchInterface interface {
 	// Appends a put operation with custom put options.
 	PutWithOptions(key []byte, value []byte, options PutOptions) error
 }
-
 // Mutable batch of write operations applied atomically by [`crate::Db::write`].
 //
 // A batch is single-use once submitted to the database.
 type WriteBatch struct {
 	ffiObject FfiObject
 }
-
 // Creates an empty write batch.
 func NewWriteBatch() *WriteBatch {
 	return FfiConverterWriteBatchINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
@@ -7744,76 +8344,80 @@ func NewWriteBatch() *WriteBatch {
 	}))
 }
 
+
+
+
 // Appends a delete operation to the batch.
 func (_self *WriteBatch) Delete(key []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*WriteBatch")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_writebatch_delete(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), _uniffiStatus)
+		_pointer,FfiConverterBytesINSTANCE.Lower(key),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Appends a merge operation to the batch.
 func (_self *WriteBatch) Merge(key []byte, operand []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*WriteBatch")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_writebatch_merge(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), _uniffiStatus)
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Appends a merge operation with custom merge options.
 func (_self *WriteBatch) MergeWithOptions(key []byte, operand []byte, options MergeOptions) error {
 	_pointer := _self.ffiObject.incrementPointer("*WriteBatch")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterMergeOptionsINSTANCE.Lower(options), _uniffiStatus)
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterMergeOptionsINSTANCE.Lower(options),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Appends a put operation to the batch.
 func (_self *WriteBatch) Put(key []byte, value []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*WriteBatch")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_writebatch_put(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), _uniffiStatus)
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 
 // Appends a put operation with custom put options.
 func (_self *WriteBatch) PutWithOptions(key []byte, value []byte, options PutOptions) error {
 	_pointer := _self.ffiObject.incrementPointer("*WriteBatch")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterPutOptionsINSTANCE.Lower(options), _uniffiStatus)
+		_pointer,FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterPutOptionsINSTANCE.Lower(options),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
 func (object *WriteBatch) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
 }
 
-type FfiConverterWriteBatch struct{}
+type FfiConverterWriteBatch struct {}
 
 var FfiConverterWriteBatchINSTANCE = FfiConverterWriteBatch{}
 
+
 func (c FfiConverterWriteBatch) Lift(handle C.uint64_t) *WriteBatch {
-	result := &WriteBatch{
+	result := &WriteBatch {
 		newFfiObject(
 			handle,
 			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
@@ -7853,9 +8457,64 @@ func LowerToExternalWriteBatch(value *WriteBatch) uint64 {
 	return uint64(FfiConverterWriteBatchINSTANCE.Lower(value))
 }
 
-type FfiDestroyerWriteBatch struct{}
+type FfiDestroyerWriteBatch struct {}
 
 func (_ FfiDestroyerWriteBatch) Destroy(value *WriteBatch) {
+		value.Destroy()
+}
+
+
+
+// Options controlling how a bloom filter policy is constructed.
+//
+// Pass an optional prefix extractor as a separate constructor parameter; it
+// is kept out of this record because uniffi cannot marshal a trait object
+// inside a record across every target language.
+type BloomFilterOptions struct {
+	// Average bits stored per inserted key. Higher values lower the false
+	// positive rate at the cost of filter size.
+	BitsPerKey uint32
+	// When `true`, hashes the full key into the filter so point lookups can
+	// probe it. Defaults to `true`.
+	WholeKeyFiltering bool
+}
+
+func (r *BloomFilterOptions) Destroy() {
+		FfiDestroyerUint32{}.Destroy(r.BitsPerKey);
+		FfiDestroyerBool{}.Destroy(r.WholeKeyFiltering);
+}
+
+type FfiConverterBloomFilterOptions struct {}
+
+var FfiConverterBloomFilterOptionsINSTANCE = FfiConverterBloomFilterOptions{}
+
+func (c FfiConverterBloomFilterOptions) Lift(rb RustBufferI) BloomFilterOptions {
+	return LiftFromRustBuffer[BloomFilterOptions](c, rb)
+}
+
+func (c FfiConverterBloomFilterOptions) Read(reader io.Reader) BloomFilterOptions {
+	return BloomFilterOptions {
+			FfiConverterUint32INSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterBloomFilterOptions) Lower(value BloomFilterOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[BloomFilterOptions](c, value)
+}
+
+func (c FfiConverterBloomFilterOptions) LowerExternal(value BloomFilterOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[BloomFilterOptions](c, value))
+}
+
+func (c FfiConverterBloomFilterOptions) Write(writer io.Writer, value BloomFilterOptions) {
+		FfiConverterUint32INSTANCE.Write(writer, value.BitsPerKey);
+		FfiConverterBoolINSTANCE.Write(writer, value.WholeKeyFiltering);
+}
+
+type FfiDestroyerBloomFilterOptions struct {}
+
+func (_ FfiDestroyerBloomFilterOptions) Destroy(value BloomFilterOptions) {
 	value.Destroy()
 }
 
@@ -7874,14 +8533,14 @@ type Checkpoint struct {
 }
 
 func (r *Checkpoint) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Id)
-	FfiDestroyerUint64{}.Destroy(r.ManifestId)
-	FfiDestroyerOptionalInt64{}.Destroy(r.ExpireTimeSecs)
-	FfiDestroyerInt64{}.Destroy(r.CreateTimeSecs)
-	FfiDestroyerOptionalString{}.Destroy(r.Name)
+		FfiDestroyerString{}.Destroy(r.Id);
+		FfiDestroyerUint64{}.Destroy(r.ManifestId);
+		FfiDestroyerOptionalInt64{}.Destroy(r.ExpireTimeSecs);
+		FfiDestroyerInt64{}.Destroy(r.CreateTimeSecs);
+		FfiDestroyerOptionalString{}.Destroy(r.Name);
 }
 
-type FfiConverterCheckpoint struct{}
+type FfiConverterCheckpoint struct {}
 
 var FfiConverterCheckpointINSTANCE = FfiConverterCheckpoint{}
 
@@ -7890,12 +8549,12 @@ func (c FfiConverterCheckpoint) Lift(rb RustBufferI) Checkpoint {
 }
 
 func (c FfiConverterCheckpoint) Read(reader io.Reader) Checkpoint {
-	return Checkpoint{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
+	return Checkpoint {
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterOptionalInt64INSTANCE.Read(reader),
+			FfiConverterInt64INSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
 	}
 }
 
@@ -7908,14 +8567,14 @@ func (c FfiConverterCheckpoint) LowerExternal(value Checkpoint) ExternalCRustBuf
 }
 
 func (c FfiConverterCheckpoint) Write(writer io.Writer, value Checkpoint) {
-	FfiConverterStringINSTANCE.Write(writer, value.Id)
-	FfiConverterUint64INSTANCE.Write(writer, value.ManifestId)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.ExpireTimeSecs)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreateTimeSecs)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.Name)
+		FfiConverterStringINSTANCE.Write(writer, value.Id);
+		FfiConverterUint64INSTANCE.Write(writer, value.ManifestId);
+		FfiConverterOptionalInt64INSTANCE.Write(writer, value.ExpireTimeSecs);
+		FfiConverterInt64INSTANCE.Write(writer, value.CreateTimeSecs);
+		FfiConverterOptionalStringINSTANCE.Write(writer, value.Name);
 }
 
-type FfiDestroyerCheckpoint struct{}
+type FfiDestroyerCheckpoint struct {}
 
 func (_ FfiDestroyerCheckpoint) Destroy(value Checkpoint) {
 	value.Destroy()
@@ -7938,15 +8597,15 @@ type Compaction struct {
 }
 
 func (r *Compaction) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Id)
-	FfiDestroyerCompactionSpec{}.Destroy(r.Spec)
-	FfiDestroyerUint64{}.Destroy(r.BytesProcessed)
-	FfiDestroyerCompactionStatus{}.Destroy(r.Status)
-	FfiDestroyerSequenceSsTableHandle{}.Destroy(r.OutputSsts)
-	FfiDestroyerBool{}.Destroy(r.Active)
+		FfiDestroyerString{}.Destroy(r.Id);
+		FfiDestroyerCompactionSpec{}.Destroy(r.Spec);
+		FfiDestroyerUint64{}.Destroy(r.BytesProcessed);
+		FfiDestroyerCompactionStatus{}.Destroy(r.Status);
+		FfiDestroyerSequenceSsTableHandle{}.Destroy(r.OutputSsts);
+		FfiDestroyerBool{}.Destroy(r.Active);
 }
 
-type FfiConverterCompaction struct{}
+type FfiConverterCompaction struct {}
 
 var FfiConverterCompactionINSTANCE = FfiConverterCompaction{}
 
@@ -7955,13 +8614,13 @@ func (c FfiConverterCompaction) Lift(rb RustBufferI) Compaction {
 }
 
 func (c FfiConverterCompaction) Read(reader io.Reader) Compaction {
-	return Compaction{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterCompactionSpecINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterCompactionStatusINSTANCE.Read(reader),
-		FfiConverterSequenceSsTableHandleINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
+	return Compaction {
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterCompactionSpecINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterCompactionStatusINSTANCE.Read(reader),
+			FfiConverterSequenceSsTableHandleINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -7974,15 +8633,15 @@ func (c FfiConverterCompaction) LowerExternal(value Compaction) ExternalCRustBuf
 }
 
 func (c FfiConverterCompaction) Write(writer io.Writer, value Compaction) {
-	FfiConverterStringINSTANCE.Write(writer, value.Id)
-	FfiConverterCompactionSpecINSTANCE.Write(writer, value.Spec)
-	FfiConverterUint64INSTANCE.Write(writer, value.BytesProcessed)
-	FfiConverterCompactionStatusINSTANCE.Write(writer, value.Status)
-	FfiConverterSequenceSsTableHandleINSTANCE.Write(writer, value.OutputSsts)
-	FfiConverterBoolINSTANCE.Write(writer, value.Active)
+		FfiConverterStringINSTANCE.Write(writer, value.Id);
+		FfiConverterCompactionSpecINSTANCE.Write(writer, value.Spec);
+		FfiConverterUint64INSTANCE.Write(writer, value.BytesProcessed);
+		FfiConverterCompactionStatusINSTANCE.Write(writer, value.Status);
+		FfiConverterSequenceSsTableHandleINSTANCE.Write(writer, value.OutputSsts);
+		FfiConverterBoolINSTANCE.Write(writer, value.Active);
 }
 
-type FfiDestroyerCompaction struct{}
+type FfiDestroyerCompaction struct {}
 
 func (_ FfiDestroyerCompaction) Destroy(value Compaction) {
 	value.Destroy()
@@ -8002,13 +8661,13 @@ type CompactionSpec struct {
 }
 
 func (r *CompactionSpec) Destroy() {
-	FfiDestroyerSequenceSourceId{}.Destroy(r.Sources)
-	FfiDestroyerOptionalUint32{}.Destroy(r.Destination)
-	FfiDestroyerBool{}.Destroy(r.HasL0Sources)
-	FfiDestroyerBool{}.Destroy(r.HasSrSources)
+		FfiDestroyerSequenceSourceId{}.Destroy(r.Sources);
+		FfiDestroyerOptionalUint32{}.Destroy(r.Destination);
+		FfiDestroyerBool{}.Destroy(r.HasL0Sources);
+		FfiDestroyerBool{}.Destroy(r.HasSrSources);
 }
 
-type FfiConverterCompactionSpec struct{}
+type FfiConverterCompactionSpec struct {}
 
 var FfiConverterCompactionSpecINSTANCE = FfiConverterCompactionSpec{}
 
@@ -8017,11 +8676,11 @@ func (c FfiConverterCompactionSpec) Lift(rb RustBufferI) CompactionSpec {
 }
 
 func (c FfiConverterCompactionSpec) Read(reader io.Reader) CompactionSpec {
-	return CompactionSpec{
-		FfiConverterSequenceSourceIdINSTANCE.Read(reader),
-		FfiConverterOptionalUint32INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
+	return CompactionSpec {
+			FfiConverterSequenceSourceIdINSTANCE.Read(reader),
+			FfiConverterOptionalUint32INSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -8034,13 +8693,13 @@ func (c FfiConverterCompactionSpec) LowerExternal(value CompactionSpec) External
 }
 
 func (c FfiConverterCompactionSpec) Write(writer io.Writer, value CompactionSpec) {
-	FfiConverterSequenceSourceIdINSTANCE.Write(writer, value.Sources)
-	FfiConverterOptionalUint32INSTANCE.Write(writer, value.Destination)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasL0Sources)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasSrSources)
+		FfiConverterSequenceSourceIdINSTANCE.Write(writer, value.Sources);
+		FfiConverterOptionalUint32INSTANCE.Write(writer, value.Destination);
+		FfiConverterBoolINSTANCE.Write(writer, value.HasL0Sources);
+		FfiConverterBoolINSTANCE.Write(writer, value.HasSrSources);
 }
 
-type FfiDestroyerCompactionSpec struct{}
+type FfiDestroyerCompactionSpec struct {}
 
 func (_ FfiDestroyerCompactionSpec) Destroy(value CompactionSpec) {
 	value.Destroy()
@@ -8055,11 +8714,11 @@ type CompactorStateView struct {
 }
 
 func (r *CompactorStateView) Destroy() {
-	FfiDestroyerOptionalVersionedCompactions{}.Destroy(r.Compactions)
-	FfiDestroyerVersionedManifest{}.Destroy(r.Manifest)
+		FfiDestroyerOptionalVersionedCompactions{}.Destroy(r.Compactions);
+		FfiDestroyerVersionedManifest{}.Destroy(r.Manifest);
 }
 
-type FfiConverterCompactorStateView struct{}
+type FfiConverterCompactorStateView struct {}
 
 var FfiConverterCompactorStateViewINSTANCE = FfiConverterCompactorStateView{}
 
@@ -8068,9 +8727,9 @@ func (c FfiConverterCompactorStateView) Lift(rb RustBufferI) CompactorStateView 
 }
 
 func (c FfiConverterCompactorStateView) Read(reader io.Reader) CompactorStateView {
-	return CompactorStateView{
-		FfiConverterOptionalVersionedCompactionsINSTANCE.Read(reader),
-		FfiConverterVersionedManifestINSTANCE.Read(reader),
+	return CompactorStateView {
+			FfiConverterOptionalVersionedCompactionsINSTANCE.Read(reader),
+			FfiConverterVersionedManifestINSTANCE.Read(reader),
 	}
 }
 
@@ -8083,11 +8742,11 @@ func (c FfiConverterCompactorStateView) LowerExternal(value CompactorStateView) 
 }
 
 func (c FfiConverterCompactorStateView) Write(writer io.Writer, value CompactorStateView) {
-	FfiConverterOptionalVersionedCompactionsINSTANCE.Write(writer, value.Compactions)
-	FfiConverterVersionedManifestINSTANCE.Write(writer, value.Manifest)
+		FfiConverterOptionalVersionedCompactionsINSTANCE.Write(writer, value.Compactions);
+		FfiConverterVersionedManifestINSTANCE.Write(writer, value.Manifest);
 }
 
-type FfiDestroyerCompactorStateView struct{}
+type FfiDestroyerCompactorStateView struct {}
 
 func (_ FfiDestroyerCompactorStateView) Destroy(value CompactorStateView) {
 	value.Destroy()
@@ -8102,11 +8761,11 @@ type DbStatus struct {
 }
 
 func (r *DbStatus) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.DurableSeq)
-	FfiDestroyerOptionalCloseReason{}.Destroy(r.CloseReason)
+		FfiDestroyerUint64{}.Destroy(r.DurableSeq);
+		FfiDestroyerOptionalCloseReason{}.Destroy(r.CloseReason);
 }
 
-type FfiConverterDbStatus struct{}
+type FfiConverterDbStatus struct {}
 
 var FfiConverterDbStatusINSTANCE = FfiConverterDbStatus{}
 
@@ -8115,9 +8774,9 @@ func (c FfiConverterDbStatus) Lift(rb RustBufferI) DbStatus {
 }
 
 func (c FfiConverterDbStatus) Read(reader io.Reader) DbStatus {
-	return DbStatus{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterOptionalCloseReasonINSTANCE.Read(reader),
+	return DbStatus {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterOptionalCloseReasonINSTANCE.Read(reader),
 	}
 }
 
@@ -8130,11 +8789,11 @@ func (c FfiConverterDbStatus) LowerExternal(value DbStatus) ExternalCRustBuffer 
 }
 
 func (c FfiConverterDbStatus) Write(writer io.Writer, value DbStatus) {
-	FfiConverterUint64INSTANCE.Write(writer, value.DurableSeq)
-	FfiConverterOptionalCloseReasonINSTANCE.Write(writer, value.CloseReason)
+		FfiConverterUint64INSTANCE.Write(writer, value.DurableSeq);
+		FfiConverterOptionalCloseReasonINSTANCE.Write(writer, value.CloseReason);
 }
 
-type FfiDestroyerDbStatus struct{}
+type FfiDestroyerDbStatus struct {}
 
 func (_ FfiDestroyerDbStatus) Destroy(value DbStatus) {
 	value.Destroy()
@@ -8153,13 +8812,13 @@ type ExternalDb struct {
 }
 
 func (r *ExternalDb) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Path)
-	FfiDestroyerString{}.Destroy(r.SourceCheckpointId)
-	FfiDestroyerOptionalString{}.Destroy(r.FinalCheckpointId)
-	FfiDestroyerSequenceSsTableId{}.Destroy(r.SstIds)
+		FfiDestroyerString{}.Destroy(r.Path);
+		FfiDestroyerString{}.Destroy(r.SourceCheckpointId);
+		FfiDestroyerOptionalString{}.Destroy(r.FinalCheckpointId);
+		FfiDestroyerSequenceSsTableId{}.Destroy(r.SstIds);
 }
 
-type FfiConverterExternalDb struct{}
+type FfiConverterExternalDb struct {}
 
 var FfiConverterExternalDbINSTANCE = FfiConverterExternalDb{}
 
@@ -8168,11 +8827,11 @@ func (c FfiConverterExternalDb) Lift(rb RustBufferI) ExternalDb {
 }
 
 func (c FfiConverterExternalDb) Read(reader io.Reader) ExternalDb {
-	return ExternalDb{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterSequenceSsTableIdINSTANCE.Read(reader),
+	return ExternalDb {
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
+			FfiConverterSequenceSsTableIdINSTANCE.Read(reader),
 	}
 }
 
@@ -8185,13 +8844,13 @@ func (c FfiConverterExternalDb) LowerExternal(value ExternalDb) ExternalCRustBuf
 }
 
 func (c FfiConverterExternalDb) Write(writer io.Writer, value ExternalDb) {
-	FfiConverterStringINSTANCE.Write(writer, value.Path)
-	FfiConverterStringINSTANCE.Write(writer, value.SourceCheckpointId)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.FinalCheckpointId)
-	FfiConverterSequenceSsTableIdINSTANCE.Write(writer, value.SstIds)
+		FfiConverterStringINSTANCE.Write(writer, value.Path);
+		FfiConverterStringINSTANCE.Write(writer, value.SourceCheckpointId);
+		FfiConverterOptionalStringINSTANCE.Write(writer, value.FinalCheckpointId);
+		FfiConverterSequenceSsTableIdINSTANCE.Write(writer, value.SstIds);
 }
 
-type FfiDestroyerExternalDb struct{}
+type FfiDestroyerExternalDb struct {}
 
 func (_ FfiDestroyerExternalDb) Destroy(value ExternalDb) {
 	value.Destroy()
@@ -8204,10 +8863,10 @@ type FlushOptions struct {
 }
 
 func (r *FlushOptions) Destroy() {
-	FfiDestroyerFlushType{}.Destroy(r.FlushType)
+		FfiDestroyerFlushType{}.Destroy(r.FlushType);
 }
 
-type FfiConverterFlushOptions struct{}
+type FfiConverterFlushOptions struct {}
 
 var FfiConverterFlushOptionsINSTANCE = FfiConverterFlushOptions{}
 
@@ -8216,8 +8875,8 @@ func (c FfiConverterFlushOptions) Lift(rb RustBufferI) FlushOptions {
 }
 
 func (c FfiConverterFlushOptions) Read(reader io.Reader) FlushOptions {
-	return FlushOptions{
-		FfiConverterFlushTypeINSTANCE.Read(reader),
+	return FlushOptions {
+			FfiConverterFlushTypeINSTANCE.Read(reader),
 	}
 }
 
@@ -8230,10 +8889,10 @@ func (c FfiConverterFlushOptions) LowerExternal(value FlushOptions) ExternalCRus
 }
 
 func (c FfiConverterFlushOptions) Write(writer io.Writer, value FlushOptions) {
-	FfiConverterFlushTypeINSTANCE.Write(writer, value.FlushType)
+		FfiConverterFlushTypeINSTANCE.Write(writer, value.FlushType);
 }
 
-type FfiDestroyerFlushOptions struct{}
+type FfiDestroyerFlushOptions struct {}
 
 func (_ FfiDestroyerFlushOptions) Destroy(value FlushOptions) {
 	value.Destroy()
@@ -8242,15 +8901,15 @@ func (_ FfiDestroyerFlushOptions) Destroy(value FlushOptions) {
 // Options for configuring Foyer DB cache.
 type FoyerCacheOptions struct {
 	MaxCapacity uint64
-	Shards      uint64
+	Shards uint64
 }
 
 func (r *FoyerCacheOptions) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.MaxCapacity)
-	FfiDestroyerUint64{}.Destroy(r.Shards)
+		FfiDestroyerUint64{}.Destroy(r.MaxCapacity);
+		FfiDestroyerUint64{}.Destroy(r.Shards);
 }
 
-type FfiConverterFoyerCacheOptions struct{}
+type FfiConverterFoyerCacheOptions struct {}
 
 var FfiConverterFoyerCacheOptionsINSTANCE = FfiConverterFoyerCacheOptions{}
 
@@ -8259,9 +8918,9 @@ func (c FfiConverterFoyerCacheOptions) Lift(rb RustBufferI) FoyerCacheOptions {
 }
 
 func (c FfiConverterFoyerCacheOptions) Read(reader io.Reader) FoyerCacheOptions {
-	return FoyerCacheOptions{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
+	return FoyerCacheOptions {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -8274,11 +8933,11 @@ func (c FfiConverterFoyerCacheOptions) LowerExternal(value FoyerCacheOptions) Ex
 }
 
 func (c FfiConverterFoyerCacheOptions) Write(writer io.Writer, value FoyerCacheOptions) {
-	FfiConverterUint64INSTANCE.Write(writer, value.MaxCapacity)
-	FfiConverterUint64INSTANCE.Write(writer, value.Shards)
+		FfiConverterUint64INSTANCE.Write(writer, value.MaxCapacity);
+		FfiConverterUint64INSTANCE.Write(writer, value.Shards);
 }
 
-type FfiDestroyerFoyerCacheOptions struct{}
+type FfiDestroyerFoyerCacheOptions struct {}
 
 func (_ FfiDestroyerFoyerCacheOptions) Destroy(value FoyerCacheOptions) {
 	value.Destroy()
@@ -8301,15 +8960,15 @@ type HistogramMetricValue struct {
 }
 
 func (r *HistogramMetricValue) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.Count)
-	FfiDestroyerFloat64{}.Destroy(r.Sum)
-	FfiDestroyerFloat64{}.Destroy(r.Min)
-	FfiDestroyerFloat64{}.Destroy(r.Max)
-	FfiDestroyerSequenceFloat64{}.Destroy(r.Boundaries)
-	FfiDestroyerSequenceUint64{}.Destroy(r.BucketCounts)
+		FfiDestroyerUint64{}.Destroy(r.Count);
+		FfiDestroyerFloat64{}.Destroy(r.Sum);
+		FfiDestroyerFloat64{}.Destroy(r.Min);
+		FfiDestroyerFloat64{}.Destroy(r.Max);
+		FfiDestroyerSequenceFloat64{}.Destroy(r.Boundaries);
+		FfiDestroyerSequenceUint64{}.Destroy(r.BucketCounts);
 }
 
-type FfiConverterHistogramMetricValue struct{}
+type FfiConverterHistogramMetricValue struct {}
 
 var FfiConverterHistogramMetricValueINSTANCE = FfiConverterHistogramMetricValue{}
 
@@ -8318,13 +8977,13 @@ func (c FfiConverterHistogramMetricValue) Lift(rb RustBufferI) HistogramMetricVa
 }
 
 func (c FfiConverterHistogramMetricValue) Read(reader io.Reader) HistogramMetricValue {
-	return HistogramMetricValue{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterFloat64INSTANCE.Read(reader),
-		FfiConverterFloat64INSTANCE.Read(reader),
-		FfiConverterFloat64INSTANCE.Read(reader),
-		FfiConverterSequenceFloat64INSTANCE.Read(reader),
-		FfiConverterSequenceUint64INSTANCE.Read(reader),
+	return HistogramMetricValue {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterFloat64INSTANCE.Read(reader),
+			FfiConverterFloat64INSTANCE.Read(reader),
+			FfiConverterFloat64INSTANCE.Read(reader),
+			FfiConverterSequenceFloat64INSTANCE.Read(reader),
+			FfiConverterSequenceUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -8337,15 +8996,15 @@ func (c FfiConverterHistogramMetricValue) LowerExternal(value HistogramMetricVal
 }
 
 func (c FfiConverterHistogramMetricValue) Write(writer io.Writer, value HistogramMetricValue) {
-	FfiConverterUint64INSTANCE.Write(writer, value.Count)
-	FfiConverterFloat64INSTANCE.Write(writer, value.Sum)
-	FfiConverterFloat64INSTANCE.Write(writer, value.Min)
-	FfiConverterFloat64INSTANCE.Write(writer, value.Max)
-	FfiConverterSequenceFloat64INSTANCE.Write(writer, value.Boundaries)
-	FfiConverterSequenceUint64INSTANCE.Write(writer, value.BucketCounts)
+		FfiConverterUint64INSTANCE.Write(writer, value.Count);
+		FfiConverterFloat64INSTANCE.Write(writer, value.Sum);
+		FfiConverterFloat64INSTANCE.Write(writer, value.Min);
+		FfiConverterFloat64INSTANCE.Write(writer, value.Max);
+		FfiConverterSequenceFloat64INSTANCE.Write(writer, value.Boundaries);
+		FfiConverterSequenceUint64INSTANCE.Write(writer, value.BucketCounts);
 }
 
-type FfiDestroyerHistogramMetricValue struct{}
+type FfiDestroyerHistogramMetricValue struct {}
 
 func (_ FfiDestroyerHistogramMetricValue) Destroy(value HistogramMetricValue) {
 	value.Destroy()
@@ -8364,13 +9023,13 @@ type KeyRange struct {
 }
 
 func (r *KeyRange) Destroy() {
-	FfiDestroyerOptionalBytes{}.Destroy(r.Start)
-	FfiDestroyerBool{}.Destroy(r.StartInclusive)
-	FfiDestroyerOptionalBytes{}.Destroy(r.End)
-	FfiDestroyerBool{}.Destroy(r.EndInclusive)
+		FfiDestroyerOptionalBytes{}.Destroy(r.Start);
+		FfiDestroyerBool{}.Destroy(r.StartInclusive);
+		FfiDestroyerOptionalBytes{}.Destroy(r.End);
+		FfiDestroyerBool{}.Destroy(r.EndInclusive);
 }
 
-type FfiConverterKeyRange struct{}
+type FfiConverterKeyRange struct {}
 
 var FfiConverterKeyRangeINSTANCE = FfiConverterKeyRange{}
 
@@ -8379,11 +9038,11 @@ func (c FfiConverterKeyRange) Lift(rb RustBufferI) KeyRange {
 }
 
 func (c FfiConverterKeyRange) Read(reader io.Reader) KeyRange {
-	return KeyRange{
-		FfiConverterOptionalBytesINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterOptionalBytesINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
+	return KeyRange {
+			FfiConverterOptionalBytesINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterOptionalBytesINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -8396,13 +9055,13 @@ func (c FfiConverterKeyRange) LowerExternal(value KeyRange) ExternalCRustBuffer 
 }
 
 func (c FfiConverterKeyRange) Write(writer io.Writer, value KeyRange) {
-	FfiConverterOptionalBytesINSTANCE.Write(writer, value.Start)
-	FfiConverterBoolINSTANCE.Write(writer, value.StartInclusive)
-	FfiConverterOptionalBytesINSTANCE.Write(writer, value.End)
-	FfiConverterBoolINSTANCE.Write(writer, value.EndInclusive)
+		FfiConverterOptionalBytesINSTANCE.Write(writer, value.Start);
+		FfiConverterBoolINSTANCE.Write(writer, value.StartInclusive);
+		FfiConverterOptionalBytesINSTANCE.Write(writer, value.End);
+		FfiConverterBoolINSTANCE.Write(writer, value.EndInclusive);
 }
 
-type FfiDestroyerKeyRange struct{}
+type FfiDestroyerKeyRange struct {}
 
 func (_ FfiDestroyerKeyRange) Destroy(value KeyRange) {
 	value.Destroy()
@@ -8423,14 +9082,14 @@ type KeyValue struct {
 }
 
 func (r *KeyValue) Destroy() {
-	FfiDestroyerBytes{}.Destroy(r.Key)
-	FfiDestroyerBytes{}.Destroy(r.Value)
-	FfiDestroyerUint64{}.Destroy(r.Seq)
-	FfiDestroyerInt64{}.Destroy(r.CreateTs)
-	FfiDestroyerOptionalInt64{}.Destroy(r.ExpireTs)
+		FfiDestroyerBytes{}.Destroy(r.Key);
+		FfiDestroyerBytes{}.Destroy(r.Value);
+		FfiDestroyerUint64{}.Destroy(r.Seq);
+		FfiDestroyerInt64{}.Destroy(r.CreateTs);
+		FfiDestroyerOptionalInt64{}.Destroy(r.ExpireTs);
 }
 
-type FfiConverterKeyValue struct{}
+type FfiConverterKeyValue struct {}
 
 var FfiConverterKeyValueINSTANCE = FfiConverterKeyValue{}
 
@@ -8439,12 +9098,12 @@ func (c FfiConverterKeyValue) Lift(rb RustBufferI) KeyValue {
 }
 
 func (c FfiConverterKeyValue) Read(reader io.Reader) KeyValue {
-	return KeyValue{
-		FfiConverterBytesINSTANCE.Read(reader),
-		FfiConverterBytesINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
+	return KeyValue {
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterInt64INSTANCE.Read(reader),
+			FfiConverterOptionalInt64INSTANCE.Read(reader),
 	}
 }
 
@@ -8457,14 +9116,14 @@ func (c FfiConverterKeyValue) LowerExternal(value KeyValue) ExternalCRustBuffer 
 }
 
 func (c FfiConverterKeyValue) Write(writer io.Writer, value KeyValue) {
-	FfiConverterBytesINSTANCE.Write(writer, value.Key)
-	FfiConverterBytesINSTANCE.Write(writer, value.Value)
-	FfiConverterUint64INSTANCE.Write(writer, value.Seq)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreateTs)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.ExpireTs)
+		FfiConverterBytesINSTANCE.Write(writer, value.Key);
+		FfiConverterBytesINSTANCE.Write(writer, value.Value);
+		FfiConverterUint64INSTANCE.Write(writer, value.Seq);
+		FfiConverterInt64INSTANCE.Write(writer, value.CreateTs);
+		FfiConverterOptionalInt64INSTANCE.Write(writer, value.ExpireTs);
 }
 
-type FfiDestroyerKeyValue struct{}
+type FfiDestroyerKeyValue struct {}
 
 func (_ FfiDestroyerKeyValue) Destroy(value KeyValue) {
 	value.Destroy()
@@ -8487,15 +9146,15 @@ type LogRecord struct {
 }
 
 func (r *LogRecord) Destroy() {
-	FfiDestroyerLogLevel{}.Destroy(r.Level)
-	FfiDestroyerString{}.Destroy(r.Target)
-	FfiDestroyerString{}.Destroy(r.Message)
-	FfiDestroyerOptionalString{}.Destroy(r.ModulePath)
-	FfiDestroyerOptionalString{}.Destroy(r.File)
-	FfiDestroyerOptionalUint32{}.Destroy(r.Line)
+		FfiDestroyerLogLevel{}.Destroy(r.Level);
+		FfiDestroyerString{}.Destroy(r.Target);
+		FfiDestroyerString{}.Destroy(r.Message);
+		FfiDestroyerOptionalString{}.Destroy(r.ModulePath);
+		FfiDestroyerOptionalString{}.Destroy(r.File);
+		FfiDestroyerOptionalUint32{}.Destroy(r.Line);
 }
 
-type FfiConverterLogRecord struct{}
+type FfiConverterLogRecord struct {}
 
 var FfiConverterLogRecordINSTANCE = FfiConverterLogRecord{}
 
@@ -8504,13 +9163,13 @@ func (c FfiConverterLogRecord) Lift(rb RustBufferI) LogRecord {
 }
 
 func (c FfiConverterLogRecord) Read(reader io.Reader) LogRecord {
-	return LogRecord{
-		FfiConverterLogLevelINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalUint32INSTANCE.Read(reader),
+	return LogRecord {
+			FfiConverterLogLevelINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
+			FfiConverterOptionalUint32INSTANCE.Read(reader),
 	}
 }
 
@@ -8523,15 +9182,15 @@ func (c FfiConverterLogRecord) LowerExternal(value LogRecord) ExternalCRustBuffe
 }
 
 func (c FfiConverterLogRecord) Write(writer io.Writer, value LogRecord) {
-	FfiConverterLogLevelINSTANCE.Write(writer, value.Level)
-	FfiConverterStringINSTANCE.Write(writer, value.Target)
-	FfiConverterStringINSTANCE.Write(writer, value.Message)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.ModulePath)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.File)
-	FfiConverterOptionalUint32INSTANCE.Write(writer, value.Line)
+		FfiConverterLogLevelINSTANCE.Write(writer, value.Level);
+		FfiConverterStringINSTANCE.Write(writer, value.Target);
+		FfiConverterStringINSTANCE.Write(writer, value.Message);
+		FfiConverterOptionalStringINSTANCE.Write(writer, value.ModulePath);
+		FfiConverterOptionalStringINSTANCE.Write(writer, value.File);
+		FfiConverterOptionalUint32INSTANCE.Write(writer, value.Line);
 }
 
-type FfiDestroyerLogRecord struct{}
+type FfiDestroyerLogRecord struct {}
 
 func (_ FfiDestroyerLogRecord) Destroy(value LogRecord) {
 	value.Destroy()
@@ -8544,10 +9203,10 @@ type MergeOptions struct {
 }
 
 func (r *MergeOptions) Destroy() {
-	FfiDestroyerTtl{}.Destroy(r.Ttl)
+		FfiDestroyerTtl{}.Destroy(r.Ttl);
 }
 
-type FfiConverterMergeOptions struct{}
+type FfiConverterMergeOptions struct {}
 
 var FfiConverterMergeOptionsINSTANCE = FfiConverterMergeOptions{}
 
@@ -8556,8 +9215,8 @@ func (c FfiConverterMergeOptions) Lift(rb RustBufferI) MergeOptions {
 }
 
 func (c FfiConverterMergeOptions) Read(reader io.Reader) MergeOptions {
-	return MergeOptions{
-		FfiConverterTtlINSTANCE.Read(reader),
+	return MergeOptions {
+			FfiConverterTtlINSTANCE.Read(reader),
 	}
 }
 
@@ -8570,10 +9229,10 @@ func (c FfiConverterMergeOptions) LowerExternal(value MergeOptions) ExternalCRus
 }
 
 func (c FfiConverterMergeOptions) Write(writer io.Writer, value MergeOptions) {
-	FfiConverterTtlINSTANCE.Write(writer, value.Ttl)
+		FfiConverterTtlINSTANCE.Write(writer, value.Ttl);
 }
 
-type FfiDestroyerMergeOptions struct{}
+type FfiDestroyerMergeOptions struct {}
 
 func (_ FfiDestroyerMergeOptions) Destroy(value MergeOptions) {
 	value.Destroy()
@@ -8592,13 +9251,13 @@ type Metric struct {
 }
 
 func (r *Metric) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Name)
-	FfiDestroyerSequenceMetricLabel{}.Destroy(r.Labels)
-	FfiDestroyerString{}.Destroy(r.Description)
-	FfiDestroyerMetricValue{}.Destroy(r.Value)
+		FfiDestroyerString{}.Destroy(r.Name);
+		FfiDestroyerSequenceMetricLabel{}.Destroy(r.Labels);
+		FfiDestroyerString{}.Destroy(r.Description);
+		FfiDestroyerMetricValue{}.Destroy(r.Value);
 }
 
-type FfiConverterMetric struct{}
+type FfiConverterMetric struct {}
 
 var FfiConverterMetricINSTANCE = FfiConverterMetric{}
 
@@ -8607,11 +9266,11 @@ func (c FfiConverterMetric) Lift(rb RustBufferI) Metric {
 }
 
 func (c FfiConverterMetric) Read(reader io.Reader) Metric {
-	return Metric{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterSequenceMetricLabelINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterMetricValueINSTANCE.Read(reader),
+	return Metric {
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterSequenceMetricLabelINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterMetricValueINSTANCE.Read(reader),
 	}
 }
 
@@ -8624,13 +9283,13 @@ func (c FfiConverterMetric) LowerExternal(value Metric) ExternalCRustBuffer {
 }
 
 func (c FfiConverterMetric) Write(writer io.Writer, value Metric) {
-	FfiConverterStringINSTANCE.Write(writer, value.Name)
-	FfiConverterSequenceMetricLabelINSTANCE.Write(writer, value.Labels)
-	FfiConverterStringINSTANCE.Write(writer, value.Description)
-	FfiConverterMetricValueINSTANCE.Write(writer, value.Value)
+		FfiConverterStringINSTANCE.Write(writer, value.Name);
+		FfiConverterSequenceMetricLabelINSTANCE.Write(writer, value.Labels);
+		FfiConverterStringINSTANCE.Write(writer, value.Description);
+		FfiConverterMetricValueINSTANCE.Write(writer, value.Value);
 }
 
-type FfiDestroyerMetric struct{}
+type FfiDestroyerMetric struct {}
 
 func (_ FfiDestroyerMetric) Destroy(value Metric) {
 	value.Destroy()
@@ -8645,11 +9304,11 @@ type MetricLabel struct {
 }
 
 func (r *MetricLabel) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Key)
-	FfiDestroyerString{}.Destroy(r.Value)
+		FfiDestroyerString{}.Destroy(r.Key);
+		FfiDestroyerString{}.Destroy(r.Value);
 }
 
-type FfiConverterMetricLabel struct{}
+type FfiConverterMetricLabel struct {}
 
 var FfiConverterMetricLabelINSTANCE = FfiConverterMetricLabel{}
 
@@ -8658,9 +9317,9 @@ func (c FfiConverterMetricLabel) Lift(rb RustBufferI) MetricLabel {
 }
 
 func (c FfiConverterMetricLabel) Read(reader io.Reader) MetricLabel {
-	return MetricLabel{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
+	return MetricLabel {
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
 	}
 }
 
@@ -8673,11 +9332,11 @@ func (c FfiConverterMetricLabel) LowerExternal(value MetricLabel) ExternalCRustB
 }
 
 func (c FfiConverterMetricLabel) Write(writer io.Writer, value MetricLabel) {
-	FfiConverterStringINSTANCE.Write(writer, value.Key)
-	FfiConverterStringINSTANCE.Write(writer, value.Value)
+		FfiConverterStringINSTANCE.Write(writer, value.Key);
+		FfiConverterStringINSTANCE.Write(writer, value.Value);
 }
 
-type FfiDestroyerMetricLabel struct{}
+type FfiDestroyerMetricLabel struct {}
 
 func (_ FfiDestroyerMetricLabel) Destroy(value MetricLabel) {
 	value.Destroy()
@@ -8686,17 +9345,17 @@ func (_ FfiDestroyerMetricLabel) Destroy(value MetricLabel) {
 // Options for configuring Moka DB cache.
 type MokaCacheOptions struct {
 	MaxCapacity uint64
-	TimeToLive  *uint64
-	TimeToIdle  *uint64
+	TimeToLive *uint64
+	TimeToIdle *uint64
 }
 
 func (r *MokaCacheOptions) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.MaxCapacity)
-	FfiDestroyerOptionalUint64{}.Destroy(r.TimeToLive)
-	FfiDestroyerOptionalUint64{}.Destroy(r.TimeToIdle)
+		FfiDestroyerUint64{}.Destroy(r.MaxCapacity);
+		FfiDestroyerOptionalUint64{}.Destroy(r.TimeToLive);
+		FfiDestroyerOptionalUint64{}.Destroy(r.TimeToIdle);
 }
 
-type FfiConverterMokaCacheOptions struct{}
+type FfiConverterMokaCacheOptions struct {}
 
 var FfiConverterMokaCacheOptionsINSTANCE = FfiConverterMokaCacheOptions{}
 
@@ -8705,10 +9364,10 @@ func (c FfiConverterMokaCacheOptions) Lift(rb RustBufferI) MokaCacheOptions {
 }
 
 func (c FfiConverterMokaCacheOptions) Read(reader io.Reader) MokaCacheOptions {
-	return MokaCacheOptions{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterOptionalUint64INSTANCE.Read(reader),
-		FfiConverterOptionalUint64INSTANCE.Read(reader),
+	return MokaCacheOptions {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterOptionalUint64INSTANCE.Read(reader),
+			FfiConverterOptionalUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -8721,12 +9380,12 @@ func (c FfiConverterMokaCacheOptions) LowerExternal(value MokaCacheOptions) Exte
 }
 
 func (c FfiConverterMokaCacheOptions) Write(writer io.Writer, value MokaCacheOptions) {
-	FfiConverterUint64INSTANCE.Write(writer, value.MaxCapacity)
-	FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeToLive)
-	FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeToIdle)
+		FfiConverterUint64INSTANCE.Write(writer, value.MaxCapacity);
+		FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeToLive);
+		FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeToIdle);
 }
 
-type FfiDestroyerMokaCacheOptions struct{}
+type FfiDestroyerMokaCacheOptions struct {}
 
 func (_ FfiDestroyerMokaCacheOptions) Destroy(value MokaCacheOptions) {
 	value.Destroy()
@@ -8739,10 +9398,10 @@ type PutOptions struct {
 }
 
 func (r *PutOptions) Destroy() {
-	FfiDestroyerTtl{}.Destroy(r.Ttl)
+		FfiDestroyerTtl{}.Destroy(r.Ttl);
 }
 
-type FfiConverterPutOptions struct{}
+type FfiConverterPutOptions struct {}
 
 var FfiConverterPutOptionsINSTANCE = FfiConverterPutOptions{}
 
@@ -8751,8 +9410,8 @@ func (c FfiConverterPutOptions) Lift(rb RustBufferI) PutOptions {
 }
 
 func (c FfiConverterPutOptions) Read(reader io.Reader) PutOptions {
-	return PutOptions{
-		FfiConverterTtlINSTANCE.Read(reader),
+	return PutOptions {
+			FfiConverterTtlINSTANCE.Read(reader),
 	}
 }
 
@@ -8765,10 +9424,10 @@ func (c FfiConverterPutOptions) LowerExternal(value PutOptions) ExternalCRustBuf
 }
 
 func (c FfiConverterPutOptions) Write(writer io.Writer, value PutOptions) {
-	FfiConverterTtlINSTANCE.Write(writer, value.Ttl)
+		FfiConverterTtlINSTANCE.Write(writer, value.Ttl);
 }
 
-type FfiDestroyerPutOptions struct{}
+type FfiDestroyerPutOptions struct {}
 
 func (_ FfiDestroyerPutOptions) Destroy(value PutOptions) {
 	value.Destroy()
@@ -8782,15 +9441,19 @@ type ReadOptions struct {
 	Dirty bool
 	// Whether fetched blocks should be inserted into the block cache.
 	CacheBlocks bool
+	// Optional context forwarded to custom filter policies; ignored by
+	// built-in filters.
+	FilterContext *FilterContext
 }
 
 func (r *ReadOptions) Destroy() {
-	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
-	FfiDestroyerBool{}.Destroy(r.Dirty)
-	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
+		FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter);
+		FfiDestroyerBool{}.Destroy(r.Dirty);
+		FfiDestroyerBool{}.Destroy(r.CacheBlocks);
+		FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext);
 }
 
-type FfiConverterReadOptions struct{}
+type FfiConverterReadOptions struct {}
 
 var FfiConverterReadOptionsINSTANCE = FfiConverterReadOptions{}
 
@@ -8799,10 +9462,11 @@ func (c FfiConverterReadOptions) Lift(rb RustBufferI) ReadOptions {
 }
 
 func (c FfiConverterReadOptions) Read(reader io.Reader) ReadOptions {
-	return ReadOptions{
-		FfiConverterDurabilityLevelINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
+	return ReadOptions {
+			FfiConverterDurabilityLevelINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterOptionalFilterContextINSTANCE.Read(reader),
 	}
 }
 
@@ -8815,12 +9479,13 @@ func (c FfiConverterReadOptions) LowerExternal(value ReadOptions) ExternalCRustB
 }
 
 func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
-	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
-	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
-	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
+		FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter);
+		FfiConverterBoolINSTANCE.Write(writer, value.Dirty);
+		FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks);
+		FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext);
 }
 
-type FfiDestroyerReadOptions struct{}
+type FfiDestroyerReadOptions struct {}
 
 func (_ FfiDestroyerReadOptions) Destroy(value ReadOptions) {
 	value.Destroy()
@@ -8839,13 +9504,13 @@ type ReaderOptions struct {
 }
 
 func (r *ReaderOptions) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.ManifestPollIntervalMs)
-	FfiDestroyerUint64{}.Destroy(r.CheckpointLifetimeMs)
-	FfiDestroyerUint64{}.Destroy(r.MaxMemtableBytes)
-	FfiDestroyerBool{}.Destroy(r.SkipWalReplay)
+		FfiDestroyerUint64{}.Destroy(r.ManifestPollIntervalMs);
+		FfiDestroyerUint64{}.Destroy(r.CheckpointLifetimeMs);
+		FfiDestroyerUint64{}.Destroy(r.MaxMemtableBytes);
+		FfiDestroyerBool{}.Destroy(r.SkipWalReplay);
 }
 
-type FfiConverterReaderOptions struct{}
+type FfiConverterReaderOptions struct {}
 
 var FfiConverterReaderOptionsINSTANCE = FfiConverterReaderOptions{}
 
@@ -8854,11 +9519,11 @@ func (c FfiConverterReaderOptions) Lift(rb RustBufferI) ReaderOptions {
 }
 
 func (c FfiConverterReaderOptions) Read(reader io.Reader) ReaderOptions {
-	return ReaderOptions{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
+	return ReaderOptions {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -8871,13 +9536,13 @@ func (c FfiConverterReaderOptions) LowerExternal(value ReaderOptions) ExternalCR
 }
 
 func (c FfiConverterReaderOptions) Write(writer io.Writer, value ReaderOptions) {
-	FfiConverterUint64INSTANCE.Write(writer, value.ManifestPollIntervalMs)
-	FfiConverterUint64INSTANCE.Write(writer, value.CheckpointLifetimeMs)
-	FfiConverterUint64INSTANCE.Write(writer, value.MaxMemtableBytes)
-	FfiConverterBoolINSTANCE.Write(writer, value.SkipWalReplay)
+		FfiConverterUint64INSTANCE.Write(writer, value.ManifestPollIntervalMs);
+		FfiConverterUint64INSTANCE.Write(writer, value.CheckpointLifetimeMs);
+		FfiConverterUint64INSTANCE.Write(writer, value.MaxMemtableBytes);
+		FfiConverterBoolINSTANCE.Write(writer, value.SkipWalReplay);
 }
 
-type FfiDestroyerReaderOptions struct{}
+type FfiDestroyerReaderOptions struct {}
 
 func (_ FfiDestroyerReaderOptions) Destroy(value ReaderOptions) {
 	value.Destroy()
@@ -8900,15 +9565,15 @@ type RowEntry struct {
 }
 
 func (r *RowEntry) Destroy() {
-	FfiDestroyerRowEntryKind{}.Destroy(r.Kind)
-	FfiDestroyerBytes{}.Destroy(r.Key)
-	FfiDestroyerOptionalBytes{}.Destroy(r.Value)
-	FfiDestroyerUint64{}.Destroy(r.Seq)
-	FfiDestroyerOptionalInt64{}.Destroy(r.CreateTs)
-	FfiDestroyerOptionalInt64{}.Destroy(r.ExpireTs)
+		FfiDestroyerRowEntryKind{}.Destroy(r.Kind);
+		FfiDestroyerBytes{}.Destroy(r.Key);
+		FfiDestroyerOptionalBytes{}.Destroy(r.Value);
+		FfiDestroyerUint64{}.Destroy(r.Seq);
+		FfiDestroyerOptionalInt64{}.Destroy(r.CreateTs);
+		FfiDestroyerOptionalInt64{}.Destroy(r.ExpireTs);
 }
 
-type FfiConverterRowEntry struct{}
+type FfiConverterRowEntry struct {}
 
 var FfiConverterRowEntryINSTANCE = FfiConverterRowEntry{}
 
@@ -8917,13 +9582,13 @@ func (c FfiConverterRowEntry) Lift(rb RustBufferI) RowEntry {
 }
 
 func (c FfiConverterRowEntry) Read(reader io.Reader) RowEntry {
-	return RowEntry{
-		FfiConverterRowEntryKindINSTANCE.Read(reader),
-		FfiConverterBytesINSTANCE.Read(reader),
-		FfiConverterOptionalBytesINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
-		FfiConverterOptionalInt64INSTANCE.Read(reader),
+	return RowEntry {
+			FfiConverterRowEntryKindINSTANCE.Read(reader),
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterOptionalBytesINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterOptionalInt64INSTANCE.Read(reader),
+			FfiConverterOptionalInt64INSTANCE.Read(reader),
 	}
 }
 
@@ -8936,15 +9601,15 @@ func (c FfiConverterRowEntry) LowerExternal(value RowEntry) ExternalCRustBuffer 
 }
 
 func (c FfiConverterRowEntry) Write(writer io.Writer, value RowEntry) {
-	FfiConverterRowEntryKindINSTANCE.Write(writer, value.Kind)
-	FfiConverterBytesINSTANCE.Write(writer, value.Key)
-	FfiConverterOptionalBytesINSTANCE.Write(writer, value.Value)
-	FfiConverterUint64INSTANCE.Write(writer, value.Seq)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.CreateTs)
-	FfiConverterOptionalInt64INSTANCE.Write(writer, value.ExpireTs)
+		FfiConverterRowEntryKindINSTANCE.Write(writer, value.Kind);
+		FfiConverterBytesINSTANCE.Write(writer, value.Key);
+		FfiConverterOptionalBytesINSTANCE.Write(writer, value.Value);
+		FfiConverterUint64INSTANCE.Write(writer, value.Seq);
+		FfiConverterOptionalInt64INSTANCE.Write(writer, value.CreateTs);
+		FfiConverterOptionalInt64INSTANCE.Write(writer, value.ExpireTs);
 }
 
-type FfiDestroyerRowEntry struct{}
+type FfiDestroyerRowEntry struct {}
 
 func (_ FfiDestroyerRowEntry) Destroy(value RowEntry) {
 	value.Destroy()
@@ -8964,18 +9629,22 @@ type ScanOptions struct {
 	MaxFetchTasks uint64
 	// The iteration order for the scan. Defaults to ascending when not set.
 	Order *IterationOrder
+	// Optional context forwarded to custom filter policies; ignored by
+	// built-in filters. Only consulted for prefix scans.
+	FilterContext *FilterContext
 }
 
 func (r *ScanOptions) Destroy() {
-	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
-	FfiDestroyerBool{}.Destroy(r.Dirty)
-	FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes)
-	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
-	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
-	FfiDestroyerOptionalIterationOrder{}.Destroy(r.Order)
+		FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter);
+		FfiDestroyerBool{}.Destroy(r.Dirty);
+		FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes);
+		FfiDestroyerBool{}.Destroy(r.CacheBlocks);
+		FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks);
+		FfiDestroyerOptionalIterationOrder{}.Destroy(r.Order);
+		FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext);
 }
 
-type FfiConverterScanOptions struct{}
+type FfiConverterScanOptions struct {}
 
 var FfiConverterScanOptionsINSTANCE = FfiConverterScanOptions{}
 
@@ -8984,13 +9653,14 @@ func (c FfiConverterScanOptions) Lift(rb RustBufferI) ScanOptions {
 }
 
 func (c FfiConverterScanOptions) Read(reader io.Reader) ScanOptions {
-	return ScanOptions{
-		FfiConverterDurabilityLevelINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterOptionalIterationOrderINSTANCE.Read(reader),
+	return ScanOptions {
+			FfiConverterDurabilityLevelINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterOptionalIterationOrderINSTANCE.Read(reader),
+			FfiConverterOptionalFilterContextINSTANCE.Read(reader),
 	}
 }
 
@@ -9003,15 +9673,16 @@ func (c FfiConverterScanOptions) LowerExternal(value ScanOptions) ExternalCRustB
 }
 
 func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
-	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
-	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
-	FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes)
-	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
-	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
-	FfiConverterOptionalIterationOrderINSTANCE.Write(writer, value.Order)
+		FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter);
+		FfiConverterBoolINSTANCE.Write(writer, value.Dirty);
+		FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes);
+		FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks);
+		FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks);
+		FfiConverterOptionalIterationOrderINSTANCE.Write(writer, value.Order);
+		FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext);
 }
 
-type FfiDestroyerScanOptions struct{}
+type FfiDestroyerScanOptions struct {}
 
 func (_ FfiDestroyerScanOptions) Destroy(value ScanOptions) {
 	value.Destroy()
@@ -9028,12 +9699,12 @@ type SortedRun struct {
 }
 
 func (r *SortedRun) Destroy() {
-	FfiDestroyerUint32{}.Destroy(r.Id)
-	FfiDestroyerSequenceSsTableView{}.Destroy(r.SstViews)
-	FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes)
+		FfiDestroyerUint32{}.Destroy(r.Id);
+		FfiDestroyerSequenceSsTableView{}.Destroy(r.SstViews);
+		FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes);
 }
 
-type FfiConverterSortedRun struct{}
+type FfiConverterSortedRun struct {}
 
 var FfiConverterSortedRunINSTANCE = FfiConverterSortedRun{}
 
@@ -9042,10 +9713,10 @@ func (c FfiConverterSortedRun) Lift(rb RustBufferI) SortedRun {
 }
 
 func (c FfiConverterSortedRun) Read(reader io.Reader) SortedRun {
-	return SortedRun{
-		FfiConverterUint32INSTANCE.Read(reader),
-		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
+	return SortedRun {
+			FfiConverterUint32INSTANCE.Read(reader),
+			FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -9058,12 +9729,12 @@ func (c FfiConverterSortedRun) LowerExternal(value SortedRun) ExternalCRustBuffe
 }
 
 func (c FfiConverterSortedRun) Write(writer io.Writer, value SortedRun) {
-	FfiConverterUint32INSTANCE.Write(writer, value.Id)
-	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.SstViews)
-	FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes)
+		FfiConverterUint32INSTANCE.Write(writer, value.Id);
+		FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.SstViews);
+		FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes);
 }
 
-type FfiDestroyerSortedRun struct{}
+type FfiDestroyerSortedRun struct {}
 
 func (_ FfiDestroyerSortedRun) Destroy(value SortedRun) {
 	value.Destroy()
@@ -9080,12 +9751,12 @@ type SsTableHandle struct {
 }
 
 func (r *SsTableHandle) Destroy() {
-	FfiDestroyerSsTableId{}.Destroy(r.Id)
-	FfiDestroyerSsTableInfo{}.Destroy(r.Info)
-	FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes)
+		FfiDestroyerSsTableId{}.Destroy(r.Id);
+		FfiDestroyerSsTableInfo{}.Destroy(r.Info);
+		FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes);
 }
 
-type FfiConverterSsTableHandle struct{}
+type FfiConverterSsTableHandle struct {}
 
 var FfiConverterSsTableHandleINSTANCE = FfiConverterSsTableHandle{}
 
@@ -9094,10 +9765,10 @@ func (c FfiConverterSsTableHandle) Lift(rb RustBufferI) SsTableHandle {
 }
 
 func (c FfiConverterSsTableHandle) Read(reader io.Reader) SsTableHandle {
-	return SsTableHandle{
-		FfiConverterSsTableIdINSTANCE.Read(reader),
-		FfiConverterSsTableInfoINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
+	return SsTableHandle {
+			FfiConverterSsTableIdINSTANCE.Read(reader),
+			FfiConverterSsTableInfoINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -9110,12 +9781,12 @@ func (c FfiConverterSsTableHandle) LowerExternal(value SsTableHandle) ExternalCR
 }
 
 func (c FfiConverterSsTableHandle) Write(writer io.Writer, value SsTableHandle) {
-	FfiConverterSsTableIdINSTANCE.Write(writer, value.Id)
-	FfiConverterSsTableInfoINSTANCE.Write(writer, value.Info)
-	FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes)
+		FfiConverterSsTableIdINSTANCE.Write(writer, value.Id);
+		FfiConverterSsTableInfoINSTANCE.Write(writer, value.Info);
+		FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes);
 }
 
-type FfiDestroyerSsTableHandle struct{}
+type FfiDestroyerSsTableHandle struct {}
 
 func (_ FfiDestroyerSsTableHandle) Destroy(value SsTableHandle) {
 	value.Destroy()
@@ -9148,20 +9819,20 @@ type SsTableInfo struct {
 }
 
 func (r *SsTableInfo) Destroy() {
-	FfiDestroyerOptionalBytes{}.Destroy(r.FirstEntry)
-	FfiDestroyerOptionalBytes{}.Destroy(r.LastEntry)
-	FfiDestroyerUint64{}.Destroy(r.IndexOffset)
-	FfiDestroyerUint64{}.Destroy(r.IndexLen)
-	FfiDestroyerUint64{}.Destroy(r.FilterOffset)
-	FfiDestroyerUint64{}.Destroy(r.FilterLen)
-	FfiDestroyerOptionalCompressionCodec{}.Destroy(r.CompressionCodec)
-	FfiDestroyerSstType{}.Destroy(r.SstType)
-	FfiDestroyerUint64{}.Destroy(r.StatsOffset)
-	FfiDestroyerUint64{}.Destroy(r.StatsLen)
-	FfiDestroyerFilterFormat{}.Destroy(r.FilterFormat)
+		FfiDestroyerOptionalBytes{}.Destroy(r.FirstEntry);
+		FfiDestroyerOptionalBytes{}.Destroy(r.LastEntry);
+		FfiDestroyerUint64{}.Destroy(r.IndexOffset);
+		FfiDestroyerUint64{}.Destroy(r.IndexLen);
+		FfiDestroyerUint64{}.Destroy(r.FilterOffset);
+		FfiDestroyerUint64{}.Destroy(r.FilterLen);
+		FfiDestroyerOptionalCompressionCodec{}.Destroy(r.CompressionCodec);
+		FfiDestroyerSstType{}.Destroy(r.SstType);
+		FfiDestroyerUint64{}.Destroy(r.StatsOffset);
+		FfiDestroyerUint64{}.Destroy(r.StatsLen);
+		FfiDestroyerFilterFormat{}.Destroy(r.FilterFormat);
 }
 
-type FfiConverterSsTableInfo struct{}
+type FfiConverterSsTableInfo struct {}
 
 var FfiConverterSsTableInfoINSTANCE = FfiConverterSsTableInfo{}
 
@@ -9170,18 +9841,18 @@ func (c FfiConverterSsTableInfo) Lift(rb RustBufferI) SsTableInfo {
 }
 
 func (c FfiConverterSsTableInfo) Read(reader io.Reader) SsTableInfo {
-	return SsTableInfo{
-		FfiConverterOptionalBytesINSTANCE.Read(reader),
-		FfiConverterOptionalBytesINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterOptionalCompressionCodecINSTANCE.Read(reader),
-		FfiConverterSstTypeINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterFilterFormatINSTANCE.Read(reader),
+	return SsTableInfo {
+			FfiConverterOptionalBytesINSTANCE.Read(reader),
+			FfiConverterOptionalBytesINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterOptionalCompressionCodecINSTANCE.Read(reader),
+			FfiConverterSstTypeINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterFilterFormatINSTANCE.Read(reader),
 	}
 }
 
@@ -9194,20 +9865,20 @@ func (c FfiConverterSsTableInfo) LowerExternal(value SsTableInfo) ExternalCRustB
 }
 
 func (c FfiConverterSsTableInfo) Write(writer io.Writer, value SsTableInfo) {
-	FfiConverterOptionalBytesINSTANCE.Write(writer, value.FirstEntry)
-	FfiConverterOptionalBytesINSTANCE.Write(writer, value.LastEntry)
-	FfiConverterUint64INSTANCE.Write(writer, value.IndexOffset)
-	FfiConverterUint64INSTANCE.Write(writer, value.IndexLen)
-	FfiConverterUint64INSTANCE.Write(writer, value.FilterOffset)
-	FfiConverterUint64INSTANCE.Write(writer, value.FilterLen)
-	FfiConverterOptionalCompressionCodecINSTANCE.Write(writer, value.CompressionCodec)
-	FfiConverterSstTypeINSTANCE.Write(writer, value.SstType)
-	FfiConverterUint64INSTANCE.Write(writer, value.StatsOffset)
-	FfiConverterUint64INSTANCE.Write(writer, value.StatsLen)
-	FfiConverterFilterFormatINSTANCE.Write(writer, value.FilterFormat)
+		FfiConverterOptionalBytesINSTANCE.Write(writer, value.FirstEntry);
+		FfiConverterOptionalBytesINSTANCE.Write(writer, value.LastEntry);
+		FfiConverterUint64INSTANCE.Write(writer, value.IndexOffset);
+		FfiConverterUint64INSTANCE.Write(writer, value.IndexLen);
+		FfiConverterUint64INSTANCE.Write(writer, value.FilterOffset);
+		FfiConverterUint64INSTANCE.Write(writer, value.FilterLen);
+		FfiConverterOptionalCompressionCodecINSTANCE.Write(writer, value.CompressionCodec);
+		FfiConverterSstTypeINSTANCE.Write(writer, value.SstType);
+		FfiConverterUint64INSTANCE.Write(writer, value.StatsOffset);
+		FfiConverterUint64INSTANCE.Write(writer, value.StatsLen);
+		FfiConverterFilterFormatINSTANCE.Write(writer, value.FilterFormat);
 }
 
-type FfiDestroyerSsTableInfo struct{}
+type FfiDestroyerSsTableInfo struct {}
 
 func (_ FfiDestroyerSsTableInfo) Destroy(value SsTableInfo) {
 	value.Destroy()
@@ -9226,13 +9897,13 @@ type SsTableView struct {
 }
 
 func (r *SsTableView) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Id)
-	FfiDestroyerSsTableHandle{}.Destroy(r.Sst)
-	FfiDestroyerOptionalKeyRange{}.Destroy(r.VisibleRange)
-	FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes)
+		FfiDestroyerString{}.Destroy(r.Id);
+		FfiDestroyerSsTableHandle{}.Destroy(r.Sst);
+		FfiDestroyerOptionalKeyRange{}.Destroy(r.VisibleRange);
+		FfiDestroyerUint64{}.Destroy(r.EstimatedSizeBytes);
 }
 
-type FfiConverterSsTableView struct{}
+type FfiConverterSsTableView struct {}
 
 var FfiConverterSsTableViewINSTANCE = FfiConverterSsTableView{}
 
@@ -9241,11 +9912,11 @@ func (c FfiConverterSsTableView) Lift(rb RustBufferI) SsTableView {
 }
 
 func (c FfiConverterSsTableView) Read(reader io.Reader) SsTableView {
-	return SsTableView{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterSsTableHandleINSTANCE.Read(reader),
-		FfiConverterOptionalKeyRangeINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
+	return SsTableView {
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterSsTableHandleINSTANCE.Read(reader),
+			FfiConverterOptionalKeyRangeINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -9258,13 +9929,13 @@ func (c FfiConverterSsTableView) LowerExternal(value SsTableView) ExternalCRustB
 }
 
 func (c FfiConverterSsTableView) Write(writer io.Writer, value SsTableView) {
-	FfiConverterStringINSTANCE.Write(writer, value.Id)
-	FfiConverterSsTableHandleINSTANCE.Write(writer, value.Sst)
-	FfiConverterOptionalKeyRangeINSTANCE.Write(writer, value.VisibleRange)
-	FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes)
+		FfiConverterStringINSTANCE.Write(writer, value.Id);
+		FfiConverterSsTableHandleINSTANCE.Write(writer, value.Sst);
+		FfiConverterOptionalKeyRangeINSTANCE.Write(writer, value.VisibleRange);
+		FfiConverterUint64INSTANCE.Write(writer, value.EstimatedSizeBytes);
 }
 
-type FfiDestroyerSsTableView struct{}
+type FfiDestroyerSsTableView struct {}
 
 func (_ FfiDestroyerSsTableView) Destroy(value SsTableView) {
 	value.Destroy()
@@ -9281,12 +9952,12 @@ type VersionedCompactions struct {
 }
 
 func (r *VersionedCompactions) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.Id)
-	FfiDestroyerUint64{}.Destroy(r.CompactorEpoch)
-	FfiDestroyerSequenceCompaction{}.Destroy(r.RecentCompactions)
+		FfiDestroyerUint64{}.Destroy(r.Id);
+		FfiDestroyerUint64{}.Destroy(r.CompactorEpoch);
+		FfiDestroyerSequenceCompaction{}.Destroy(r.RecentCompactions);
 }
 
-type FfiConverterVersionedCompactions struct{}
+type FfiConverterVersionedCompactions struct {}
 
 var FfiConverterVersionedCompactionsINSTANCE = FfiConverterVersionedCompactions{}
 
@@ -9295,10 +9966,10 @@ func (c FfiConverterVersionedCompactions) Lift(rb RustBufferI) VersionedCompacti
 }
 
 func (c FfiConverterVersionedCompactions) Read(reader io.Reader) VersionedCompactions {
-	return VersionedCompactions{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterSequenceCompactionINSTANCE.Read(reader),
+	return VersionedCompactions {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterSequenceCompactionINSTANCE.Read(reader),
 	}
 }
 
@@ -9311,12 +9982,12 @@ func (c FfiConverterVersionedCompactions) LowerExternal(value VersionedCompactio
 }
 
 func (c FfiConverterVersionedCompactions) Write(writer io.Writer, value VersionedCompactions) {
-	FfiConverterUint64INSTANCE.Write(writer, value.Id)
-	FfiConverterUint64INSTANCE.Write(writer, value.CompactorEpoch)
-	FfiConverterSequenceCompactionINSTANCE.Write(writer, value.RecentCompactions)
+		FfiConverterUint64INSTANCE.Write(writer, value.Id);
+		FfiConverterUint64INSTANCE.Write(writer, value.CompactorEpoch);
+		FfiConverterSequenceCompactionINSTANCE.Write(writer, value.RecentCompactions);
 }
 
-type FfiDestroyerVersionedCompactions struct{}
+type FfiDestroyerVersionedCompactions struct {}
 
 func (_ FfiDestroyerVersionedCompactions) Destroy(value VersionedCompactions) {
 	value.Destroy()
@@ -9359,25 +10030,25 @@ type VersionedManifest struct {
 }
 
 func (r *VersionedManifest) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.Id)
-	FfiDestroyerUint64{}.Destroy(r.WriterEpoch)
-	FfiDestroyerUint64{}.Destroy(r.CompactorEpoch)
-	FfiDestroyerSequenceExternalDb{}.Destroy(r.ExternalDbs)
-	FfiDestroyerBool{}.Destroy(r.Initialized)
-	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstViewId)
-	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstId)
-	FfiDestroyerSequenceSsTableView{}.Destroy(r.L0)
-	FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted)
-	FfiDestroyerUint64{}.Destroy(r.NextWalSstId)
-	FfiDestroyerUint64{}.Destroy(r.ReplayAfterWalId)
-	FfiDestroyerInt64{}.Destroy(r.LastL0ClockTick)
-	FfiDestroyerUint64{}.Destroy(r.LastL0Seq)
-	FfiDestroyerUint64{}.Destroy(r.RecentSnapshotMinSeq)
-	FfiDestroyerSequenceCheckpoint{}.Destroy(r.Checkpoints)
-	FfiDestroyerOptionalString{}.Destroy(r.WalObjectStoreUri)
+		FfiDestroyerUint64{}.Destroy(r.Id);
+		FfiDestroyerUint64{}.Destroy(r.WriterEpoch);
+		FfiDestroyerUint64{}.Destroy(r.CompactorEpoch);
+		FfiDestroyerSequenceExternalDb{}.Destroy(r.ExternalDbs);
+		FfiDestroyerBool{}.Destroy(r.Initialized);
+		FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstViewId);
+		FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstId);
+		FfiDestroyerSequenceSsTableView{}.Destroy(r.L0);
+		FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted);
+		FfiDestroyerUint64{}.Destroy(r.NextWalSstId);
+		FfiDestroyerUint64{}.Destroy(r.ReplayAfterWalId);
+		FfiDestroyerInt64{}.Destroy(r.LastL0ClockTick);
+		FfiDestroyerUint64{}.Destroy(r.LastL0Seq);
+		FfiDestroyerUint64{}.Destroy(r.RecentSnapshotMinSeq);
+		FfiDestroyerSequenceCheckpoint{}.Destroy(r.Checkpoints);
+		FfiDestroyerOptionalString{}.Destroy(r.WalObjectStoreUri);
 }
 
-type FfiConverterVersionedManifest struct{}
+type FfiConverterVersionedManifest struct {}
 
 var FfiConverterVersionedManifestINSTANCE = FfiConverterVersionedManifest{}
 
@@ -9386,23 +10057,23 @@ func (c FfiConverterVersionedManifest) Lift(rb RustBufferI) VersionedManifest {
 }
 
 func (c FfiConverterVersionedManifest) Read(reader io.Reader) VersionedManifest {
-	return VersionedManifest{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterSequenceExternalDbINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
-		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
-		FfiConverterSequenceSortedRunINSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterSequenceCheckpointINSTANCE.Read(reader),
-		FfiConverterOptionalStringINSTANCE.Read(reader),
+	return VersionedManifest {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterSequenceExternalDbINSTANCE.Read(reader),
+			FfiConverterBoolINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
+			FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
+			FfiConverterSequenceSortedRunINSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterInt64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterSequenceCheckpointINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
 	}
 }
 
@@ -9415,25 +10086,25 @@ func (c FfiConverterVersionedManifest) LowerExternal(value VersionedManifest) Ex
 }
 
 func (c FfiConverterVersionedManifest) Write(writer io.Writer, value VersionedManifest) {
-	FfiConverterUint64INSTANCE.Write(writer, value.Id)
-	FfiConverterUint64INSTANCE.Write(writer, value.WriterEpoch)
-	FfiConverterUint64INSTANCE.Write(writer, value.CompactorEpoch)
-	FfiConverterSequenceExternalDbINSTANCE.Write(writer, value.ExternalDbs)
-	FfiConverterBoolINSTANCE.Write(writer, value.Initialized)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstViewId)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstId)
-	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0)
-	FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted)
-	FfiConverterUint64INSTANCE.Write(writer, value.NextWalSstId)
-	FfiConverterUint64INSTANCE.Write(writer, value.ReplayAfterWalId)
-	FfiConverterInt64INSTANCE.Write(writer, value.LastL0ClockTick)
-	FfiConverterUint64INSTANCE.Write(writer, value.LastL0Seq)
-	FfiConverterUint64INSTANCE.Write(writer, value.RecentSnapshotMinSeq)
-	FfiConverterSequenceCheckpointINSTANCE.Write(writer, value.Checkpoints)
-	FfiConverterOptionalStringINSTANCE.Write(writer, value.WalObjectStoreUri)
+		FfiConverterUint64INSTANCE.Write(writer, value.Id);
+		FfiConverterUint64INSTANCE.Write(writer, value.WriterEpoch);
+		FfiConverterUint64INSTANCE.Write(writer, value.CompactorEpoch);
+		FfiConverterSequenceExternalDbINSTANCE.Write(writer, value.ExternalDbs);
+		FfiConverterBoolINSTANCE.Write(writer, value.Initialized);
+		FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstViewId);
+		FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstId);
+		FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0);
+		FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted);
+		FfiConverterUint64INSTANCE.Write(writer, value.NextWalSstId);
+		FfiConverterUint64INSTANCE.Write(writer, value.ReplayAfterWalId);
+		FfiConverterInt64INSTANCE.Write(writer, value.LastL0ClockTick);
+		FfiConverterUint64INSTANCE.Write(writer, value.LastL0Seq);
+		FfiConverterUint64INSTANCE.Write(writer, value.RecentSnapshotMinSeq);
+		FfiConverterSequenceCheckpointINSTANCE.Write(writer, value.Checkpoints);
+		FfiConverterOptionalStringINSTANCE.Write(writer, value.WalObjectStoreUri);
 }
 
-type FfiDestroyerVersionedManifest struct{}
+type FfiDestroyerVersionedManifest struct {}
 
 func (_ FfiDestroyerVersionedManifest) Destroy(value VersionedManifest) {
 	value.Destroy()
@@ -9452,13 +10123,13 @@ type WalFileMetadata struct {
 }
 
 func (r *WalFileMetadata) Destroy() {
-	FfiDestroyerInt64{}.Destroy(r.LastModifiedSeconds)
-	FfiDestroyerUint32{}.Destroy(r.LastModifiedNanos)
-	FfiDestroyerUint64{}.Destroy(r.SizeBytes)
-	FfiDestroyerString{}.Destroy(r.Location)
+		FfiDestroyerInt64{}.Destroy(r.LastModifiedSeconds);
+		FfiDestroyerUint32{}.Destroy(r.LastModifiedNanos);
+		FfiDestroyerUint64{}.Destroy(r.SizeBytes);
+		FfiDestroyerString{}.Destroy(r.Location);
 }
 
-type FfiConverterWalFileMetadata struct{}
+type FfiConverterWalFileMetadata struct {}
 
 var FfiConverterWalFileMetadataINSTANCE = FfiConverterWalFileMetadata{}
 
@@ -9467,11 +10138,11 @@ func (c FfiConverterWalFileMetadata) Lift(rb RustBufferI) WalFileMetadata {
 }
 
 func (c FfiConverterWalFileMetadata) Read(reader io.Reader) WalFileMetadata {
-	return WalFileMetadata{
-		FfiConverterInt64INSTANCE.Read(reader),
-		FfiConverterUint32INSTANCE.Read(reader),
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
+	return WalFileMetadata {
+			FfiConverterInt64INSTANCE.Read(reader),
+			FfiConverterUint32INSTANCE.Read(reader),
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
 	}
 }
 
@@ -9484,13 +10155,13 @@ func (c FfiConverterWalFileMetadata) LowerExternal(value WalFileMetadata) Extern
 }
 
 func (c FfiConverterWalFileMetadata) Write(writer io.Writer, value WalFileMetadata) {
-	FfiConverterInt64INSTANCE.Write(writer, value.LastModifiedSeconds)
-	FfiConverterUint32INSTANCE.Write(writer, value.LastModifiedNanos)
-	FfiConverterUint64INSTANCE.Write(writer, value.SizeBytes)
-	FfiConverterStringINSTANCE.Write(writer, value.Location)
+		FfiConverterInt64INSTANCE.Write(writer, value.LastModifiedSeconds);
+		FfiConverterUint32INSTANCE.Write(writer, value.LastModifiedNanos);
+		FfiConverterUint64INSTANCE.Write(writer, value.SizeBytes);
+		FfiConverterStringINSTANCE.Write(writer, value.Location);
 }
 
-type FfiDestroyerWalFileMetadata struct{}
+type FfiDestroyerWalFileMetadata struct {}
 
 func (_ FfiDestroyerWalFileMetadata) Destroy(value WalFileMetadata) {
 	value.Destroy()
@@ -9505,11 +10176,11 @@ type WriteHandle struct {
 }
 
 func (r *WriteHandle) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.Seqnum)
-	FfiDestroyerInt64{}.Destroy(r.CreateTs)
+		FfiDestroyerUint64{}.Destroy(r.Seqnum);
+		FfiDestroyerInt64{}.Destroy(r.CreateTs);
 }
 
-type FfiConverterWriteHandle struct{}
+type FfiConverterWriteHandle struct {}
 
 var FfiConverterWriteHandleINSTANCE = FfiConverterWriteHandle{}
 
@@ -9518,9 +10189,9 @@ func (c FfiConverterWriteHandle) Lift(rb RustBufferI) WriteHandle {
 }
 
 func (c FfiConverterWriteHandle) Read(reader io.Reader) WriteHandle {
-	return WriteHandle{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
+	return WriteHandle {
+			FfiConverterUint64INSTANCE.Read(reader),
+			FfiConverterInt64INSTANCE.Read(reader),
 	}
 }
 
@@ -9533,11 +10204,11 @@ func (c FfiConverterWriteHandle) LowerExternal(value WriteHandle) ExternalCRustB
 }
 
 func (c FfiConverterWriteHandle) Write(writer io.Writer, value WriteHandle) {
-	FfiConverterUint64INSTANCE.Write(writer, value.Seqnum)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreateTs)
+		FfiConverterUint64INSTANCE.Write(writer, value.Seqnum);
+		FfiConverterInt64INSTANCE.Write(writer, value.CreateTs);
 }
 
-type FfiDestroyerWriteHandle struct{}
+type FfiDestroyerWriteHandle struct {}
 
 func (_ FfiDestroyerWriteHandle) Destroy(value WriteHandle) {
 	value.Destroy()
@@ -9550,10 +10221,10 @@ type WriteOptions struct {
 }
 
 func (r *WriteOptions) Destroy() {
-	FfiDestroyerBool{}.Destroy(r.AwaitDurable)
+		FfiDestroyerBool{}.Destroy(r.AwaitDurable);
 }
 
-type FfiConverterWriteOptions struct{}
+type FfiConverterWriteOptions struct {}
 
 var FfiConverterWriteOptionsINSTANCE = FfiConverterWriteOptions{}
 
@@ -9562,8 +10233,8 @@ func (c FfiConverterWriteOptions) Lift(rb RustBufferI) WriteOptions {
 }
 
 func (c FfiConverterWriteOptions) Read(reader io.Reader) WriteOptions {
-	return WriteOptions{
-		FfiConverterBoolINSTANCE.Read(reader),
+	return WriteOptions {
+			FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -9576,41 +10247,38 @@ func (c FfiConverterWriteOptions) LowerExternal(value WriteOptions) ExternalCRus
 }
 
 func (c FfiConverterWriteOptions) Write(writer io.Writer, value WriteOptions) {
-	FfiConverterBoolINSTANCE.Write(writer, value.AwaitDurable)
+		FfiConverterBoolINSTANCE.Write(writer, value.AwaitDurable);
 }
 
-type FfiDestroyerWriteOptions struct{}
+type FfiDestroyerWriteOptions struct {}
 
 func (_ FfiDestroyerWriteOptions) Destroy(value WriteOptions) {
 	value.Destroy()
 }
 
+
 // Cache content that [`crate::Db::warm_sst`] should populate.
 type CacheTarget interface {
 	Destroy()
 }
-
 // Warm all filters on the SST, if any exist.
 type CacheTargetFilters struct {
 }
 
 func (e CacheTargetFilters) Destroy() {
 }
-
 // Warm the SST index.
 type CacheTargetIndex struct {
 }
 
 func (e CacheTargetIndex) Destroy() {
 }
-
 // Warm the SST stats block, if one exists.
 type CacheTargetStats struct {
 }
 
 func (e CacheTargetStats) Destroy() {
 }
-
 // Warm the SST data blocks that overlap `range`. Also warms the index,
 // since block planning depends on it.
 type CacheTargetData struct {
@@ -9618,10 +10286,10 @@ type CacheTargetData struct {
 }
 
 func (e CacheTargetData) Destroy() {
-	FfiDestroyerKeyRange{}.Destroy(e.Range)
+		FfiDestroyerKeyRange{}.Destroy(e.Range);
 }
 
-type FfiConverterCacheTarget struct{}
+type FfiConverterCacheTarget struct {}
 
 var FfiConverterCacheTargetINSTANCE = FfiConverterCacheTarget{}
 
@@ -9638,44 +10306,49 @@ func (c FfiConverterCacheTarget) LowerExternal(value CacheTarget) ExternalCRustB
 }
 func (FfiConverterCacheTarget) Read(reader io.Reader) CacheTarget {
 	id := readInt32(reader)
-	switch id {
-	case 1:
-		return CacheTargetFilters{}
-	case 2:
-		return CacheTargetIndex{}
-	case 3:
-		return CacheTargetStats{}
-	case 4:
-		return CacheTargetData{
-			FfiConverterKeyRangeINSTANCE.Read(reader),
-		}
-	default:
-		panic(fmt.Sprintf("invalid enum value %v in FfiConverterCacheTarget.Read()", id))
+	switch (id) {
+		case 1:
+			return CacheTargetFilters{
+			};
+		case 2:
+			return CacheTargetIndex{
+			};
+		case 3:
+			return CacheTargetStats{
+			};
+		case 4:
+			return CacheTargetData{
+				FfiConverterKeyRangeINSTANCE.Read(reader),
+			};
+		default:
+			panic(fmt.Sprintf("invalid enum value %v in FfiConverterCacheTarget.Read()", id));
 	}
 }
 
 func (FfiConverterCacheTarget) Write(writer io.Writer, value CacheTarget) {
 	switch variant_value := value.(type) {
-	case CacheTargetFilters:
-		writeInt32(writer, 1)
-	case CacheTargetIndex:
-		writeInt32(writer, 2)
-	case CacheTargetStats:
-		writeInt32(writer, 3)
-	case CacheTargetData:
-		writeInt32(writer, 4)
-		FfiConverterKeyRangeINSTANCE.Write(writer, variant_value.Range)
-	default:
-		_ = variant_value
-		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterCacheTarget.Write", value))
+		case CacheTargetFilters:
+			writeInt32(writer, 1)
+		case CacheTargetIndex:
+			writeInt32(writer, 2)
+		case CacheTargetStats:
+			writeInt32(writer, 3)
+		case CacheTargetData:
+			writeInt32(writer, 4)
+			FfiConverterKeyRangeINSTANCE.Write(writer, variant_value.Range)
+		default:
+			_ = variant_value
+			panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterCacheTarget.Write", value))
 	}
 }
 
-type FfiDestroyerCacheTarget struct{}
+type FfiDestroyerCacheTarget struct {}
 
 func (_ FfiDestroyerCacheTarget) Destroy(value CacheTarget) {
 	value.Destroy()
 }
+
+
 
 // Reason a database or reader reports itself as closed.
 type CloseReason uint
@@ -9691,7 +10364,7 @@ const (
 	CloseReasonUnknown CloseReason = 4
 )
 
-type FfiConverterCloseReason struct{}
+type FfiConverterCloseReason struct {}
 
 var FfiConverterCloseReasonINSTANCE = FfiConverterCloseReason{}
 
@@ -9715,22 +10388,24 @@ func (FfiConverterCloseReason) Write(writer io.Writer, value CloseReason) {
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerCloseReason struct{}
+type FfiDestroyerCloseReason struct {}
 
 func (_ FfiDestroyerCloseReason) Destroy(value CloseReason) {
 }
+
+
 
 // Compaction lifecycle state.
 type CompactionStatus uint
 
 const (
 	CompactionStatusSubmitted CompactionStatus = 1
-	CompactionStatusRunning   CompactionStatus = 2
+	CompactionStatusRunning CompactionStatus = 2
 	CompactionStatusCompleted CompactionStatus = 3
-	CompactionStatusFailed    CompactionStatus = 4
+	CompactionStatusFailed CompactionStatus = 4
 )
 
-type FfiConverterCompactionStatus struct{}
+type FfiConverterCompactionStatus struct {}
 
 var FfiConverterCompactionStatusINSTANCE = FfiConverterCompactionStatus{}
 
@@ -9754,22 +10429,24 @@ func (FfiConverterCompactionStatus) Write(writer io.Writer, value CompactionStat
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerCompactionStatus struct{}
+type FfiDestroyerCompactionStatus struct {}
 
 func (_ FfiDestroyerCompactionStatus) Destroy(value CompactionStatus) {
 }
+
+
 
 // Compression codec used for an SSTable.
 type CompressionCodec uint
 
 const (
 	CompressionCodecSnappy CompressionCodec = 1
-	CompressionCodecZlib   CompressionCodec = 2
-	CompressionCodecLz4    CompressionCodec = 3
-	CompressionCodecZstd   CompressionCodec = 4
+	CompressionCodecZlib CompressionCodec = 2
+	CompressionCodecLz4 CompressionCodec = 3
+	CompressionCodecZstd CompressionCodec = 4
 )
 
-type FfiConverterCompressionCodec struct{}
+type FfiConverterCompressionCodec struct {}
 
 var FfiConverterCompressionCodecINSTANCE = FfiConverterCompressionCodec{}
 
@@ -9793,10 +10470,12 @@ func (FfiConverterCompressionCodec) Write(writer io.Writer, value CompressionCod
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerCompressionCodec struct{}
+type FfiDestroyerCompressionCodec struct {}
 
 func (_ FfiDestroyerCompressionCodec) Destroy(value CompressionCodec) {
 }
+
+
 
 // Minimum durability level required for data returned by reads and scans.
 type DurabilityLevel uint
@@ -9808,7 +10487,7 @@ const (
 	DurabilityLevelMemory DurabilityLevel = 2
 )
 
-type FfiConverterDurabilityLevel struct{}
+type FfiConverterDurabilityLevel struct {}
 
 var FfiConverterDurabilityLevelINSTANCE = FfiConverterDurabilityLevel{}
 
@@ -9832,7 +10511,7 @@ func (FfiConverterDurabilityLevel) Write(writer io.Writer, value DurabilityLevel
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerDurabilityLevel struct{}
+type FfiDestroyerDurabilityLevel struct {}
 
 func (_ FfiDestroyerDurabilityLevel) Destroy(value DurabilityLevel) {
 }
@@ -9873,23 +10552,23 @@ var ErrErrorInternal = fmt.Errorf("ErrorInternal")
 type ErrorTransaction struct {
 	Message string
 }
-
 // Transaction-specific failure.
 func NewErrorTransaction(
 	message string,
 ) *Error {
-	return &Error{err: &ErrorTransaction{
-		Message: message}}
+	return &Error { err: &ErrorTransaction {
+			Message: message,} }
 }
 
 func (e ErrorTransaction) destroy() {
-	FfiDestroyerString{}.Destroy(e.Message)
+		FfiDestroyerString{}.Destroy(e.Message)
 }
+
 
 func (err ErrorTransaction) Error() string {
 	return fmt.Sprint("Transaction",
 		": ",
-
+		
 		"Message=",
 		err.Message,
 	)
@@ -9898,32 +10577,31 @@ func (err ErrorTransaction) Error() string {
 func (self ErrorTransaction) Is(target error) bool {
 	return target == ErrErrorTransaction
 }
-
 // Operation attempted on a closed handle.
 type ErrorClosed struct {
-	Reason  CloseReason
+	Reason CloseReason
 	Message string
 }
-
 // Operation attempted on a closed handle.
 func NewErrorClosed(
 	reason CloseReason,
 	message string,
 ) *Error {
-	return &Error{err: &ErrorClosed{
-		Reason:  reason,
-		Message: message}}
+	return &Error { err: &ErrorClosed {
+			Reason: reason,
+			Message: message,} }
 }
 
 func (e ErrorClosed) destroy() {
-	FfiDestroyerCloseReason{}.Destroy(e.Reason)
-	FfiDestroyerString{}.Destroy(e.Message)
+		FfiDestroyerCloseReason{}.Destroy(e.Reason)
+		FfiDestroyerString{}.Destroy(e.Message)
 }
+
 
 func (err ErrorClosed) Error() string {
 	return fmt.Sprint("Closed",
 		": ",
-
+		
 		"Reason=",
 		err.Reason,
 		", ",
@@ -9935,28 +10613,27 @@ func (err ErrorClosed) Error() string {
 func (self ErrorClosed) Is(target error) bool {
 	return target == ErrErrorClosed
 }
-
 // Temporary unavailability, such as an unavailable dependency.
 type ErrorUnavailable struct {
 	Message string
 }
-
 // Temporary unavailability, such as an unavailable dependency.
 func NewErrorUnavailable(
 	message string,
 ) *Error {
-	return &Error{err: &ErrorUnavailable{
-		Message: message}}
+	return &Error { err: &ErrorUnavailable {
+			Message: message,} }
 }
 
 func (e ErrorUnavailable) destroy() {
-	FfiDestroyerString{}.Destroy(e.Message)
+		FfiDestroyerString{}.Destroy(e.Message)
 }
+
 
 func (err ErrorUnavailable) Error() string {
 	return fmt.Sprint("Unavailable",
 		": ",
-
+		
 		"Message=",
 		err.Message,
 	)
@@ -9965,28 +10642,27 @@ func (err ErrorUnavailable) Error() string {
 func (self ErrorUnavailable) Is(target error) bool {
 	return target == ErrErrorUnavailable
 }
-
 // Invalid input or invalid API usage.
 type ErrorInvalid struct {
 	Message string
 }
-
 // Invalid input or invalid API usage.
 func NewErrorInvalid(
 	message string,
 ) *Error {
-	return &Error{err: &ErrorInvalid{
-		Message: message}}
+	return &Error { err: &ErrorInvalid {
+			Message: message,} }
 }
 
 func (e ErrorInvalid) destroy() {
-	FfiDestroyerString{}.Destroy(e.Message)
+		FfiDestroyerString{}.Destroy(e.Message)
 }
+
 
 func (err ErrorInvalid) Error() string {
 	return fmt.Sprint("Invalid",
 		": ",
-
+		
 		"Message=",
 		err.Message,
 	)
@@ -9995,28 +10671,27 @@ func (err ErrorInvalid) Error() string {
 func (self ErrorInvalid) Is(target error) bool {
 	return target == ErrErrorInvalid
 }
-
 // Corrupt, missing, or otherwise invalid data was encountered.
 type ErrorData struct {
 	Message string
 }
-
 // Corrupt, missing, or otherwise invalid data was encountered.
 func NewErrorData(
 	message string,
 ) *Error {
-	return &Error{err: &ErrorData{
-		Message: message}}
+	return &Error { err: &ErrorData {
+			Message: message,} }
 }
 
 func (e ErrorData) destroy() {
-	FfiDestroyerString{}.Destroy(e.Message)
+		FfiDestroyerString{}.Destroy(e.Message)
 }
+
 
 func (err ErrorData) Error() string {
 	return fmt.Sprint("Data",
 		": ",
-
+		
 		"Message=",
 		err.Message,
 	)
@@ -10025,28 +10700,27 @@ func (err ErrorData) Error() string {
 func (self ErrorData) Is(target error) bool {
 	return target == ErrErrorData
 }
-
 // Internal failure inside SlateDB or the binding layer.
 type ErrorInternal struct {
 	Message string
 }
-
 // Internal failure inside SlateDB or the binding layer.
 func NewErrorInternal(
 	message string,
 ) *Error {
-	return &Error{err: &ErrorInternal{
-		Message: message}}
+	return &Error { err: &ErrorInternal {
+			Message: message,} }
 }
 
 func (e ErrorInternal) destroy() {
-	FfiDestroyerString{}.Destroy(e.Message)
+		FfiDestroyerString{}.Destroy(e.Message)
 }
+
 
 func (err ErrorInternal) Error() string {
 	return fmt.Sprint("Internal",
 		": ",
-
+		
 		"Message=",
 		err.Message,
 	)
@@ -10077,28 +10751,28 @@ func (c FfiConverterError) Read(reader io.Reader) *Error {
 
 	switch errorID {
 	case 1:
-		return &Error{&ErrorTransaction{
+		return &Error{ &ErrorTransaction{
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
 	case 2:
-		return &Error{&ErrorClosed{
-			Reason:  FfiConverterCloseReasonINSTANCE.Read(reader),
+		return &Error{ &ErrorClosed{
+			Reason: FfiConverterCloseReasonINSTANCE.Read(reader),
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
 	case 3:
-		return &Error{&ErrorUnavailable{
+		return &Error{ &ErrorUnavailable{
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
 	case 4:
-		return &Error{&ErrorInvalid{
+		return &Error{ &ErrorInvalid{
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
 	case 5:
-		return &Error{&ErrorData{
+		return &Error{ &ErrorData{
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
 	case 6:
-		return &Error{&ErrorInternal{
+		return &Error{ &ErrorInternal{
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
 	default:
@@ -10108,62 +10782,128 @@ func (c FfiConverterError) Read(reader io.Reader) *Error {
 
 func (c FfiConverterError) Write(writer io.Writer, value *Error) {
 	switch variantValue := value.err.(type) {
-	case *ErrorTransaction:
-		writeInt32(writer, 1)
-		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
-	case *ErrorClosed:
-		writeInt32(writer, 2)
-		FfiConverterCloseReasonINSTANCE.Write(writer, variantValue.Reason)
-		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
-	case *ErrorUnavailable:
-		writeInt32(writer, 3)
-		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
-	case *ErrorInvalid:
-		writeInt32(writer, 4)
-		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
-	case *ErrorData:
-		writeInt32(writer, 5)
-		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
-	case *ErrorInternal:
-		writeInt32(writer, 6)
-		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
-	default:
-		_ = variantValue
-		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterError.Write", value))
+		case *ErrorTransaction:
+			writeInt32(writer, 1)
+			FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+		case *ErrorClosed:
+			writeInt32(writer, 2)
+			FfiConverterCloseReasonINSTANCE.Write(writer, variantValue.Reason)
+			FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+		case *ErrorUnavailable:
+			writeInt32(writer, 3)
+			FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+		case *ErrorInvalid:
+			writeInt32(writer, 4)
+			FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+		case *ErrorData:
+			writeInt32(writer, 5)
+			FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+		case *ErrorInternal:
+			writeInt32(writer, 6)
+			FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+		default:
+			_ = variantValue
+			panic(fmt.Sprintf("invalid error value `%v` in FfiConverterError.Write", value))
 	}
 }
 
-type FfiDestroyerError struct{}
+type FfiDestroyerError struct {}
 
 func (_ FfiDestroyerError) Destroy(value *Error) {
 	switch variantValue := value.err.(type) {
-	case ErrorTransaction:
-		variantValue.destroy()
-	case ErrorClosed:
-		variantValue.destroy()
-	case ErrorUnavailable:
-		variantValue.destroy()
-	case ErrorInvalid:
-		variantValue.destroy()
-	case ErrorData:
-		variantValue.destroy()
-	case ErrorInternal:
-		variantValue.destroy()
-	default:
-		_ = variantValue
-		panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerError.Destroy", value))
+		case ErrorTransaction:
+			variantValue.destroy()
+		case ErrorClosed:
+			variantValue.destroy()
+		case ErrorUnavailable:
+			variantValue.destroy()
+		case ErrorInvalid:
+			variantValue.destroy()
+		case ErrorData:
+			variantValue.destroy()
+		case ErrorInternal:
+			variantValue.destroy()
+		default:
+			_ = variantValue
+			panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerError.Destroy", value))
 	}
 }
+
+
+
+// Opaque caller-supplied context forwarded to custom filter policies at
+// query time.
+//
+// Custom filter policies read this to parametrize their evaluation; built-in
+// policies (including the bloom filter) ignore it. The payload is opaque to
+// SlateDB; the receiving policy is responsible for any decoding.
+type FilterContext interface {
+	Destroy()
+}
+// Variable-length payload. Maps to [`slatedb::FilterContext::Bytes`].
+type FilterContextBytes struct {
+	Payload []byte
+}
+
+func (e FilterContextBytes) Destroy() {
+		FfiDestroyerBytes{}.Destroy(e.Payload);
+}
+
+type FfiConverterFilterContext struct {}
+
+var FfiConverterFilterContextINSTANCE = FfiConverterFilterContext{}
+
+func (c FfiConverterFilterContext) Lift(rb RustBufferI) FilterContext {
+	return LiftFromRustBuffer[FilterContext](c, rb)
+}
+
+func (c FfiConverterFilterContext) Lower(value FilterContext) C.RustBuffer {
+	return LowerIntoRustBuffer[FilterContext](c, value)
+}
+
+func (c FfiConverterFilterContext) LowerExternal(value FilterContext) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FilterContext](c, value))
+}
+func (FfiConverterFilterContext) Read(reader io.Reader) FilterContext {
+	id := readInt32(reader)
+	switch (id) {
+		case 1:
+			return FilterContextBytes{
+				FfiConverterBytesINSTANCE.Read(reader),
+			};
+		default:
+			panic(fmt.Sprintf("invalid enum value %v in FfiConverterFilterContext.Read()", id));
+	}
+}
+
+func (FfiConverterFilterContext) Write(writer io.Writer, value FilterContext) {
+	switch variant_value := value.(type) {
+		case FilterContextBytes:
+			writeInt32(writer, 1)
+			FfiConverterBytesINSTANCE.Write(writer, variant_value.Payload)
+		default:
+			_ = variant_value
+			panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterFilterContext.Write", value))
+	}
+}
+
+type FfiDestroyerFilterContext struct {}
+
+func (_ FfiDestroyerFilterContext) Destroy(value FilterContext) {
+	value.Destroy()
+}
+
+
 
 // Filter block format stored in SST metadata.
 type FilterFormat uint
 
 const (
-	FilterFormatLegacy    FilterFormat = 1
+	FilterFormatLegacy FilterFormat = 1
 	FilterFormatComposite FilterFormat = 2
 )
 
-type FfiConverterFilterFormat struct{}
+type FfiConverterFilterFormat struct {}
 
 var FfiConverterFilterFormatINSTANCE = FfiConverterFilterFormat{}
 
@@ -10187,10 +10927,12 @@ func (FfiConverterFilterFormat) Write(writer io.Writer, value FilterFormat) {
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerFilterFormat struct{}
+type FfiDestroyerFilterFormat struct {}
 
 func (_ FfiDestroyerFilterFormat) Destroy(value FilterFormat) {
 }
+
+
 
 // Storage layer targeted by an explicit flush.
 type FlushType uint
@@ -10202,7 +10944,7 @@ const (
 	FlushTypeWal FlushType = 2
 )
 
-type FfiConverterFlushType struct{}
+type FfiConverterFlushType struct {}
 
 var FfiConverterFlushTypeINSTANCE = FfiConverterFlushType{}
 
@@ -10226,10 +10968,12 @@ func (FfiConverterFlushType) Write(writer io.Writer, value FlushType) {
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerFlushType struct{}
+type FfiDestroyerFlushType struct {}
 
 func (_ FfiDestroyerFlushType) Destroy(value FlushType) {
 }
+
+
 
 // Isolation level used when starting a transaction.
 type IsolationLevel uint
@@ -10241,7 +10985,7 @@ const (
 	IsolationLevelSerializableSnapshot IsolationLevel = 2
 )
 
-type FfiConverterIsolationLevel struct{}
+type FfiConverterIsolationLevel struct {}
 
 var FfiConverterIsolationLevelINSTANCE = FfiConverterIsolationLevel{}
 
@@ -10265,20 +11009,22 @@ func (FfiConverterIsolationLevel) Write(writer io.Writer, value IsolationLevel) 
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerIsolationLevel struct{}
+type FfiDestroyerIsolationLevel struct {}
 
 func (_ FfiDestroyerIsolationLevel) Destroy(value IsolationLevel) {
 }
+
+
 
 // The iteration order for a scan.
 type IterationOrder uint
 
 const (
-	IterationOrderAscending  IterationOrder = 1
+	IterationOrderAscending IterationOrder = 1
 	IterationOrderDescending IterationOrder = 2
 )
 
-type FfiConverterIterationOrder struct{}
+type FfiConverterIterationOrder struct {}
 
 var FfiConverterIterationOrderINSTANCE = FfiConverterIterationOrder{}
 
@@ -10302,10 +11048,12 @@ func (FfiConverterIterationOrder) Write(writer io.Writer, value IterationOrder) 
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerIterationOrder struct{}
+type FfiDestroyerIterationOrder struct {}
 
 func (_ FfiDestroyerIterationOrder) Destroy(value IterationOrder) {
 }
+
+
 
 // Log level used by [`init_logging`].
 type LogLevel uint
@@ -10325,7 +11073,7 @@ const (
 	LogLevelTrace LogLevel = 6
 )
 
-type FfiConverterLogLevel struct{}
+type FfiConverterLogLevel struct {}
 
 var FfiConverterLogLevelINSTANCE = FfiConverterLogLevel{}
 
@@ -10349,7 +11097,7 @@ func (FfiConverterLogLevel) Write(writer io.Writer, value LogLevel) {
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerLogLevel struct{}
+type FfiDestroyerLogLevel struct {}
 
 func (_ FfiDestroyerLogLevel) Destroy(value LogLevel) {
 }
@@ -10385,23 +11133,23 @@ var ErrMergeOperatorCallbackErrorFailed = fmt.Errorf("MergeOperatorCallbackError
 type MergeOperatorCallbackErrorFailed struct {
 	Message string
 }
-
 // The merge callback failed with an application-defined message.
 func NewMergeOperatorCallbackErrorFailed(
 	message string,
 ) *MergeOperatorCallbackError {
-	return &MergeOperatorCallbackError{err: &MergeOperatorCallbackErrorFailed{
-		Message: message}}
+	return &MergeOperatorCallbackError { err: &MergeOperatorCallbackErrorFailed {
+			Message: message,} }
 }
 
 func (e MergeOperatorCallbackErrorFailed) destroy() {
-	FfiDestroyerString{}.Destroy(e.Message)
+		FfiDestroyerString{}.Destroy(e.Message)
 }
+
 
 func (err MergeOperatorCallbackErrorFailed) Error() string {
 	return fmt.Sprint("Failed",
 		": ",
-
+		
 		"Message=",
 		err.Message,
 	)
@@ -10432,7 +11180,7 @@ func (c FfiConverterMergeOperatorCallbackError) Read(reader io.Reader) *MergeOpe
 
 	switch errorID {
 	case 1:
-		return &MergeOperatorCallbackError{&MergeOperatorCallbackErrorFailed{
+		return &MergeOperatorCallbackError{ &MergeOperatorCallbackErrorFailed{
 			Message: FfiConverterStringINSTANCE.Read(reader),
 		}}
 	default:
@@ -10442,69 +11190,67 @@ func (c FfiConverterMergeOperatorCallbackError) Read(reader io.Reader) *MergeOpe
 
 func (c FfiConverterMergeOperatorCallbackError) Write(writer io.Writer, value *MergeOperatorCallbackError) {
 	switch variantValue := value.err.(type) {
-	case *MergeOperatorCallbackErrorFailed:
-		writeInt32(writer, 1)
-		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
-	default:
-		_ = variantValue
-		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterMergeOperatorCallbackError.Write", value))
+		case *MergeOperatorCallbackErrorFailed:
+			writeInt32(writer, 1)
+			FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+		default:
+			_ = variantValue
+			panic(fmt.Sprintf("invalid error value `%v` in FfiConverterMergeOperatorCallbackError.Write", value))
 	}
 }
 
-type FfiDestroyerMergeOperatorCallbackError struct{}
+type FfiDestroyerMergeOperatorCallbackError struct {}
 
 func (_ FfiDestroyerMergeOperatorCallbackError) Destroy(value *MergeOperatorCallbackError) {
 	switch variantValue := value.err.(type) {
-	case MergeOperatorCallbackErrorFailed:
-		variantValue.destroy()
-	default:
-		_ = variantValue
-		panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerMergeOperatorCallbackError.Destroy", value))
+		case MergeOperatorCallbackErrorFailed:
+			variantValue.destroy()
+		default:
+			_ = variantValue
+			panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerMergeOperatorCallbackError.Destroy", value))
 	}
 }
+
+
 
 // Value stored in a metric snapshot.
 type MetricValue interface {
 	Destroy()
 }
-
 // Monotonic counter value.
 type MetricValueCounter struct {
 	Field0 uint64
 }
 
 func (e MetricValueCounter) Destroy() {
-	FfiDestroyerUint64{}.Destroy(e.Field0)
+		FfiDestroyerUint64{}.Destroy(e.Field0);
 }
-
 // Gauge value.
 type MetricValueGauge struct {
 	Field0 int64
 }
 
 func (e MetricValueGauge) Destroy() {
-	FfiDestroyerInt64{}.Destroy(e.Field0)
+		FfiDestroyerInt64{}.Destroy(e.Field0);
 }
-
 // Up/down counter value.
 type MetricValueUpDownCounter struct {
 	Field0 int64
 }
 
 func (e MetricValueUpDownCounter) Destroy() {
-	FfiDestroyerInt64{}.Destroy(e.Field0)
+		FfiDestroyerInt64{}.Destroy(e.Field0);
 }
-
 // Histogram summary and buckets.
 type MetricValueHistogram struct {
 	Field0 HistogramMetricValue
 }
 
 func (e MetricValueHistogram) Destroy() {
-	FfiDestroyerHistogramMetricValue{}.Destroy(e.Field0)
+		FfiDestroyerHistogramMetricValue{}.Destroy(e.Field0);
 }
 
-type FfiConverterMetricValue struct{}
+type FfiConverterMetricValue struct {}
 
 var FfiConverterMetricValueINSTANCE = FfiConverterMetricValue{}
 
@@ -10521,53 +11267,129 @@ func (c FfiConverterMetricValue) LowerExternal(value MetricValue) ExternalCRustB
 }
 func (FfiConverterMetricValue) Read(reader io.Reader) MetricValue {
 	id := readInt32(reader)
-	switch id {
-	case 1:
-		return MetricValueCounter{
-			FfiConverterUint64INSTANCE.Read(reader),
-		}
-	case 2:
-		return MetricValueGauge{
-			FfiConverterInt64INSTANCE.Read(reader),
-		}
-	case 3:
-		return MetricValueUpDownCounter{
-			FfiConverterInt64INSTANCE.Read(reader),
-		}
-	case 4:
-		return MetricValueHistogram{
-			FfiConverterHistogramMetricValueINSTANCE.Read(reader),
-		}
-	default:
-		panic(fmt.Sprintf("invalid enum value %v in FfiConverterMetricValue.Read()", id))
+	switch (id) {
+		case 1:
+			return MetricValueCounter{
+				FfiConverterUint64INSTANCE.Read(reader),
+			};
+		case 2:
+			return MetricValueGauge{
+				FfiConverterInt64INSTANCE.Read(reader),
+			};
+		case 3:
+			return MetricValueUpDownCounter{
+				FfiConverterInt64INSTANCE.Read(reader),
+			};
+		case 4:
+			return MetricValueHistogram{
+				FfiConverterHistogramMetricValueINSTANCE.Read(reader),
+			};
+		default:
+			panic(fmt.Sprintf("invalid enum value %v in FfiConverterMetricValue.Read()", id));
 	}
 }
 
 func (FfiConverterMetricValue) Write(writer io.Writer, value MetricValue) {
 	switch variant_value := value.(type) {
-	case MetricValueCounter:
-		writeInt32(writer, 1)
-		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
-	case MetricValueGauge:
-		writeInt32(writer, 2)
-		FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
-	case MetricValueUpDownCounter:
-		writeInt32(writer, 3)
-		FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
-	case MetricValueHistogram:
-		writeInt32(writer, 4)
-		FfiConverterHistogramMetricValueINSTANCE.Write(writer, variant_value.Field0)
-	default:
-		_ = variant_value
-		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterMetricValue.Write", value))
+		case MetricValueCounter:
+			writeInt32(writer, 1)
+			FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
+		case MetricValueGauge:
+			writeInt32(writer, 2)
+			FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
+		case MetricValueUpDownCounter:
+			writeInt32(writer, 3)
+			FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
+		case MetricValueHistogram:
+			writeInt32(writer, 4)
+			FfiConverterHistogramMetricValueINSTANCE.Write(writer, variant_value.Field0)
+		default:
+			_ = variant_value
+			panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterMetricValue.Write", value))
 	}
 }
 
-type FfiDestroyerMetricValue struct{}
+type FfiDestroyerMetricValue struct {}
 
 func (_ FfiDestroyerMetricValue) Destroy(value MetricValue) {
 	value.Destroy()
 }
+
+
+
+// Identifies the target of a [`PrefixExtractor::prefix_len`] query.
+type PrefixTarget interface {
+	Destroy()
+}
+// A complete key, supplied either during SST construction or a point lookup.
+type PrefixTargetPoint struct {
+	Key []byte
+}
+
+func (e PrefixTargetPoint) Destroy() {
+		FfiDestroyerBytes{}.Destroy(e.Key);
+}
+// A scan prefix supplied during a prefix scan.
+type PrefixTargetPrefix struct {
+	Prefix []byte
+}
+
+func (e PrefixTargetPrefix) Destroy() {
+		FfiDestroyerBytes{}.Destroy(e.Prefix);
+}
+
+type FfiConverterPrefixTarget struct {}
+
+var FfiConverterPrefixTargetINSTANCE = FfiConverterPrefixTarget{}
+
+func (c FfiConverterPrefixTarget) Lift(rb RustBufferI) PrefixTarget {
+	return LiftFromRustBuffer[PrefixTarget](c, rb)
+}
+
+func (c FfiConverterPrefixTarget) Lower(value PrefixTarget) C.RustBuffer {
+	return LowerIntoRustBuffer[PrefixTarget](c, value)
+}
+
+func (c FfiConverterPrefixTarget) LowerExternal(value PrefixTarget) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[PrefixTarget](c, value))
+}
+func (FfiConverterPrefixTarget) Read(reader io.Reader) PrefixTarget {
+	id := readInt32(reader)
+	switch (id) {
+		case 1:
+			return PrefixTargetPoint{
+				FfiConverterBytesINSTANCE.Read(reader),
+			};
+		case 2:
+			return PrefixTargetPrefix{
+				FfiConverterBytesINSTANCE.Read(reader),
+			};
+		default:
+			panic(fmt.Sprintf("invalid enum value %v in FfiConverterPrefixTarget.Read()", id));
+	}
+}
+
+func (FfiConverterPrefixTarget) Write(writer io.Writer, value PrefixTarget) {
+	switch variant_value := value.(type) {
+		case PrefixTargetPoint:
+			writeInt32(writer, 1)
+			FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
+		case PrefixTargetPrefix:
+			writeInt32(writer, 2)
+			FfiConverterBytesINSTANCE.Write(writer, variant_value.Prefix)
+		default:
+			_ = variant_value
+			panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterPrefixTarget.Write", value))
+	}
+}
+
+type FfiDestroyerPrefixTarget struct {}
+
+func (_ FfiDestroyerPrefixTarget) Destroy(value PrefixTarget) {
+	value.Destroy()
+}
+
+
 
 // Kind of row entry stored in WAL iteration results.
 type RowEntryKind uint
@@ -10581,7 +11403,7 @@ const (
 	RowEntryKindMerge RowEntryKind = 3
 )
 
-type FfiConverterRowEntryKind struct{}
+type FfiConverterRowEntryKind struct {}
 
 var FfiConverterRowEntryKindINSTANCE = FfiConverterRowEntryKind{}
 
@@ -10605,35 +11427,35 @@ func (FfiConverterRowEntryKind) Write(writer io.Writer, value RowEntryKind) {
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerRowEntryKind struct{}
+type FfiDestroyerRowEntryKind struct {}
 
 func (_ FfiDestroyerRowEntryKind) Destroy(value RowEntryKind) {
 }
+
+
 
 // Compaction input source identifier.
 type SourceId interface {
 	Destroy()
 }
-
 // Existing sorted run ID.
 type SourceIdSortedRun struct {
 	Field0 uint32
 }
 
 func (e SourceIdSortedRun) Destroy() {
-	FfiDestroyerUint32{}.Destroy(e.Field0)
+		FfiDestroyerUint32{}.Destroy(e.Field0);
 }
-
 // L0 SST view ULID string.
 type SourceIdSstView struct {
 	Field0 string
 }
 
 func (e SourceIdSstView) Destroy() {
-	FfiDestroyerString{}.Destroy(e.Field0)
+		FfiDestroyerString{}.Destroy(e.Field0);
 }
 
-type FfiConverterSourceId struct{}
+type FfiConverterSourceId struct {}
 
 var FfiConverterSourceIdINSTANCE = FfiConverterSourceId{}
 
@@ -10650,64 +11472,64 @@ func (c FfiConverterSourceId) LowerExternal(value SourceId) ExternalCRustBuffer 
 }
 func (FfiConverterSourceId) Read(reader io.Reader) SourceId {
 	id := readInt32(reader)
-	switch id {
-	case 1:
-		return SourceIdSortedRun{
-			FfiConverterUint32INSTANCE.Read(reader),
-		}
-	case 2:
-		return SourceIdSstView{
-			FfiConverterStringINSTANCE.Read(reader),
-		}
-	default:
-		panic(fmt.Sprintf("invalid enum value %v in FfiConverterSourceId.Read()", id))
+	switch (id) {
+		case 1:
+			return SourceIdSortedRun{
+				FfiConverterUint32INSTANCE.Read(reader),
+			};
+		case 2:
+			return SourceIdSstView{
+				FfiConverterStringINSTANCE.Read(reader),
+			};
+		default:
+			panic(fmt.Sprintf("invalid enum value %v in FfiConverterSourceId.Read()", id));
 	}
 }
 
 func (FfiConverterSourceId) Write(writer io.Writer, value SourceId) {
 	switch variant_value := value.(type) {
-	case SourceIdSortedRun:
-		writeInt32(writer, 1)
-		FfiConverterUint32INSTANCE.Write(writer, variant_value.Field0)
-	case SourceIdSstView:
-		writeInt32(writer, 2)
-		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
-	default:
-		_ = variant_value
-		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterSourceId.Write", value))
+		case SourceIdSortedRun:
+			writeInt32(writer, 1)
+			FfiConverterUint32INSTANCE.Write(writer, variant_value.Field0)
+		case SourceIdSstView:
+			writeInt32(writer, 2)
+			FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
+		default:
+			_ = variant_value
+			panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterSourceId.Write", value))
 	}
 }
 
-type FfiDestroyerSourceId struct{}
+type FfiDestroyerSourceId struct {}
 
 func (_ FfiDestroyerSourceId) Destroy(value SourceId) {
 	value.Destroy()
 }
 
+
+
 // SSTable identifier.
 type SsTableId interface {
 	Destroy()
 }
-
 // WAL SST identified by numeric WAL ID.
 type SsTableIdWal struct {
 	Field0 uint64
 }
 
 func (e SsTableIdWal) Destroy() {
-	FfiDestroyerUint64{}.Destroy(e.Field0)
+		FfiDestroyerUint64{}.Destroy(e.Field0);
 }
-
 // Compacted SST identified by ULID string.
 type SsTableIdCompacted struct {
 	Field0 string
 }
 
 func (e SsTableIdCompacted) Destroy() {
-	FfiDestroyerString{}.Destroy(e.Field0)
+		FfiDestroyerString{}.Destroy(e.Field0);
 }
 
-type FfiConverterSsTableId struct{}
+type FfiConverterSsTableId struct {}
 
 var FfiConverterSsTableIdINSTANCE = FfiConverterSsTableId{}
 
@@ -10724,39 +11546,41 @@ func (c FfiConverterSsTableId) LowerExternal(value SsTableId) ExternalCRustBuffe
 }
 func (FfiConverterSsTableId) Read(reader io.Reader) SsTableId {
 	id := readInt32(reader)
-	switch id {
-	case 1:
-		return SsTableIdWal{
-			FfiConverterUint64INSTANCE.Read(reader),
-		}
-	case 2:
-		return SsTableIdCompacted{
-			FfiConverterStringINSTANCE.Read(reader),
-		}
-	default:
-		panic(fmt.Sprintf("invalid enum value %v in FfiConverterSsTableId.Read()", id))
+	switch (id) {
+		case 1:
+			return SsTableIdWal{
+				FfiConverterUint64INSTANCE.Read(reader),
+			};
+		case 2:
+			return SsTableIdCompacted{
+				FfiConverterStringINSTANCE.Read(reader),
+			};
+		default:
+			panic(fmt.Sprintf("invalid enum value %v in FfiConverterSsTableId.Read()", id));
 	}
 }
 
 func (FfiConverterSsTableId) Write(writer io.Writer, value SsTableId) {
 	switch variant_value := value.(type) {
-	case SsTableIdWal:
-		writeInt32(writer, 1)
-		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
-	case SsTableIdCompacted:
-		writeInt32(writer, 2)
-		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
-	default:
-		_ = variant_value
-		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterSsTableId.Write", value))
+		case SsTableIdWal:
+			writeInt32(writer, 1)
+			FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
+		case SsTableIdCompacted:
+			writeInt32(writer, 2)
+			FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
+		default:
+			_ = variant_value
+			panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterSsTableId.Write", value))
 	}
 }
 
-type FfiDestroyerSsTableId struct{}
+type FfiDestroyerSsTableId struct {}
 
 func (_ FfiDestroyerSsTableId) Destroy(value SsTableId) {
 	value.Destroy()
 }
+
+
 
 // Block size used for newly written SSTable blocks.
 type SstBlockSize uint
@@ -10778,7 +11602,7 @@ const (
 	SstBlockSizeBlock64Kib SstBlockSize = 7
 )
 
-type FfiConverterSstBlockSize struct{}
+type FfiConverterSstBlockSize struct {}
 
 var FfiConverterSstBlockSizeINSTANCE = FfiConverterSstBlockSize{}
 
@@ -10802,20 +11626,22 @@ func (FfiConverterSstBlockSize) Write(writer io.Writer, value SstBlockSize) {
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerSstBlockSize struct{}
+type FfiDestroyerSstBlockSize struct {}
 
 func (_ FfiDestroyerSstBlockSize) Destroy(value SstBlockSize) {
 }
+
+
 
 // Physical SSTable type.
 type SstType uint
 
 const (
 	SstTypeCompacted SstType = 1
-	SstTypeWal       SstType = 2
+	SstTypeWal SstType = 2
 )
 
-type FfiConverterSstType struct{}
+type FfiConverterSstType struct {}
 
 var FfiConverterSstTypeINSTANCE = FfiConverterSstType{}
 
@@ -10839,49 +11665,47 @@ func (FfiConverterSstType) Write(writer io.Writer, value SstType) {
 	writeInt32(writer, int32(value))
 }
 
-type FfiDestroyerSstType struct{}
+type FfiDestroyerSstType struct {}
 
 func (_ FfiDestroyerSstType) Destroy(value SstType) {
 }
+
+
 
 // Time-to-live policy applied to an inserted value or merge operand.
 type Ttl interface {
 	Destroy()
 }
-
 // Use the database default TTL.
 type TtlDefault struct {
 }
 
 func (e TtlDefault) Destroy() {
 }
-
 // Store the value without expiration.
 type TtlNoExpiry struct {
 }
 
 func (e TtlNoExpiry) Destroy() {
 }
-
 // Expire the value after the given number of clock ticks.
 type TtlExpireAfterTicks struct {
 	Field0 uint64
 }
 
 func (e TtlExpireAfterTicks) Destroy() {
-	FfiDestroyerUint64{}.Destroy(e.Field0)
+		FfiDestroyerUint64{}.Destroy(e.Field0);
 }
-
 // Expire the value at the given absolute timestamp (clock ticks).
 type TtlExpireAt struct {
 	Field0 int64
 }
 
 func (e TtlExpireAt) Destroy() {
-	FfiDestroyerInt64{}.Destroy(e.Field0)
+		FfiDestroyerInt64{}.Destroy(e.Field0);
 }
 
-type FfiConverterTtl struct{}
+type FfiConverterTtl struct {}
 
 var FfiConverterTtlINSTANCE = FfiConverterTtl{}
 
@@ -10898,47 +11722,51 @@ func (c FfiConverterTtl) LowerExternal(value Ttl) ExternalCRustBuffer {
 }
 func (FfiConverterTtl) Read(reader io.Reader) Ttl {
 	id := readInt32(reader)
-	switch id {
-	case 1:
-		return TtlDefault{}
-	case 2:
-		return TtlNoExpiry{}
-	case 3:
-		return TtlExpireAfterTicks{
-			FfiConverterUint64INSTANCE.Read(reader),
-		}
-	case 4:
-		return TtlExpireAt{
-			FfiConverterInt64INSTANCE.Read(reader),
-		}
-	default:
-		panic(fmt.Sprintf("invalid enum value %v in FfiConverterTtl.Read()", id))
+	switch (id) {
+		case 1:
+			return TtlDefault{
+			};
+		case 2:
+			return TtlNoExpiry{
+			};
+		case 3:
+			return TtlExpireAfterTicks{
+				FfiConverterUint64INSTANCE.Read(reader),
+			};
+		case 4:
+			return TtlExpireAt{
+				FfiConverterInt64INSTANCE.Read(reader),
+			};
+		default:
+			panic(fmt.Sprintf("invalid enum value %v in FfiConverterTtl.Read()", id));
 	}
 }
 
 func (FfiConverterTtl) Write(writer io.Writer, value Ttl) {
 	switch variant_value := value.(type) {
-	case TtlDefault:
-		writeInt32(writer, 1)
-	case TtlNoExpiry:
-		writeInt32(writer, 2)
-	case TtlExpireAfterTicks:
-		writeInt32(writer, 3)
-		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
-	case TtlExpireAt:
-		writeInt32(writer, 4)
-		FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
-	default:
-		_ = variant_value
-		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterTtl.Write", value))
+		case TtlDefault:
+			writeInt32(writer, 1)
+		case TtlNoExpiry:
+			writeInt32(writer, 2)
+		case TtlExpireAfterTicks:
+			writeInt32(writer, 3)
+			FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
+		case TtlExpireAt:
+			writeInt32(writer, 4)
+			FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
+		default:
+			_ = variant_value
+			panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterTtl.Write", value))
 	}
 }
 
-type FfiDestroyerTtl struct{}
+type FfiDestroyerTtl struct {}
 
 func (_ FfiDestroyerTtl) Destroy(value Ttl) {
 	value.Destroy()
 }
+
+
 
 type FfiConverterOptionalUint32 struct{}
 
@@ -10973,13 +11801,14 @@ func (_ FfiConverterOptionalUint32) Write(writer io.Writer, value *uint32) {
 	}
 }
 
-type FfiDestroyerOptionalUint32 struct{}
+type FfiDestroyerOptionalUint32 struct {}
 
 func (_ FfiDestroyerOptionalUint32) Destroy(value *uint32) {
 	if value != nil {
 		FfiDestroyerUint32{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalUint64 struct{}
 
@@ -11014,13 +11843,14 @@ func (_ FfiConverterOptionalUint64) Write(writer io.Writer, value *uint64) {
 	}
 }
 
-type FfiDestroyerOptionalUint64 struct{}
+type FfiDestroyerOptionalUint64 struct {}
 
 func (_ FfiDestroyerOptionalUint64) Destroy(value *uint64) {
 	if value != nil {
 		FfiDestroyerUint64{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalInt64 struct{}
 
@@ -11055,13 +11885,14 @@ func (_ FfiConverterOptionalInt64) Write(writer io.Writer, value *int64) {
 	}
 }
 
-type FfiDestroyerOptionalInt64 struct{}
+type FfiDestroyerOptionalInt64 struct {}
 
 func (_ FfiDestroyerOptionalInt64) Destroy(value *int64) {
 	if value != nil {
 		FfiDestroyerInt64{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalString struct{}
 
@@ -11096,13 +11927,14 @@ func (_ FfiConverterOptionalString) Write(writer io.Writer, value *string) {
 	}
 }
 
-type FfiDestroyerOptionalString struct{}
+type FfiDestroyerOptionalString struct {}
 
 func (_ FfiDestroyerOptionalString) Destroy(value *string) {
 	if value != nil {
 		FfiDestroyerString{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalBytes struct{}
 
@@ -11137,13 +11969,14 @@ func (_ FfiConverterOptionalBytes) Write(writer io.Writer, value *[]byte) {
 	}
 }
 
-type FfiDestroyerOptionalBytes struct{}
+type FfiDestroyerOptionalBytes struct {}
 
 func (_ FfiDestroyerOptionalBytes) Destroy(value *[]byte) {
 	if value != nil {
 		FfiDestroyerBytes{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalLogCallback struct{}
 
@@ -11178,13 +12011,56 @@ func (_ FfiConverterOptionalLogCallback) Write(writer io.Writer, value *LogCallb
 	}
 }
 
-type FfiDestroyerOptionalLogCallback struct{}
+type FfiDestroyerOptionalLogCallback struct {}
 
 func (_ FfiDestroyerOptionalLogCallback) Destroy(value *LogCallback) {
 	if value != nil {
 		FfiDestroyerLogCallback{}.Destroy(*value)
 	}
 }
+
+
+type FfiConverterOptionalPrefixExtractor struct{}
+
+var FfiConverterOptionalPrefixExtractorINSTANCE = FfiConverterOptionalPrefixExtractor{}
+
+func (c FfiConverterOptionalPrefixExtractor) Lift(rb RustBufferI) *PrefixExtractor {
+	return LiftFromRustBuffer[*PrefixExtractor](c, rb)
+}
+
+func (_ FfiConverterOptionalPrefixExtractor) Read(reader io.Reader) *PrefixExtractor {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterPrefixExtractorINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalPrefixExtractor) Lower(value *PrefixExtractor) C.RustBuffer {
+	return LowerIntoRustBuffer[*PrefixExtractor](c, value)
+}
+
+func (c FfiConverterOptionalPrefixExtractor) LowerExternal(value *PrefixExtractor) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*PrefixExtractor](c, value))
+}
+
+func (_ FfiConverterOptionalPrefixExtractor) Write(writer io.Writer, value *PrefixExtractor) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterPrefixExtractorINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalPrefixExtractor struct {}
+
+func (_ FfiDestroyerOptionalPrefixExtractor) Destroy(value *PrefixExtractor) {
+	if value != nil {
+		FfiDestroyerPrefixExtractor{}.Destroy(*value)
+	}
+}
+
 
 type FfiConverterOptionalCompaction struct{}
 
@@ -11219,13 +12095,14 @@ func (_ FfiConverterOptionalCompaction) Write(writer io.Writer, value *Compactio
 	}
 }
 
-type FfiDestroyerOptionalCompaction struct{}
+type FfiDestroyerOptionalCompaction struct {}
 
 func (_ FfiDestroyerOptionalCompaction) Destroy(value *Compaction) {
 	if value != nil {
 		FfiDestroyerCompaction{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalKeyRange struct{}
 
@@ -11260,13 +12137,14 @@ func (_ FfiConverterOptionalKeyRange) Write(writer io.Writer, value *KeyRange) {
 	}
 }
 
-type FfiDestroyerOptionalKeyRange struct{}
+type FfiDestroyerOptionalKeyRange struct {}
 
 func (_ FfiDestroyerOptionalKeyRange) Destroy(value *KeyRange) {
 	if value != nil {
 		FfiDestroyerKeyRange{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalKeyValue struct{}
 
@@ -11301,13 +12179,14 @@ func (_ FfiConverterOptionalKeyValue) Write(writer io.Writer, value *KeyValue) {
 	}
 }
 
-type FfiDestroyerOptionalKeyValue struct{}
+type FfiDestroyerOptionalKeyValue struct {}
 
 func (_ FfiDestroyerOptionalKeyValue) Destroy(value *KeyValue) {
 	if value != nil {
 		FfiDestroyerKeyValue{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalMetric struct{}
 
@@ -11342,13 +12221,14 @@ func (_ FfiConverterOptionalMetric) Write(writer io.Writer, value *Metric) {
 	}
 }
 
-type FfiDestroyerOptionalMetric struct{}
+type FfiDestroyerOptionalMetric struct {}
 
 func (_ FfiDestroyerOptionalMetric) Destroy(value *Metric) {
 	if value != nil {
 		FfiDestroyerMetric{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalRowEntry struct{}
 
@@ -11383,13 +12263,14 @@ func (_ FfiConverterOptionalRowEntry) Write(writer io.Writer, value *RowEntry) {
 	}
 }
 
-type FfiDestroyerOptionalRowEntry struct{}
+type FfiDestroyerOptionalRowEntry struct {}
 
 func (_ FfiDestroyerOptionalRowEntry) Destroy(value *RowEntry) {
 	if value != nil {
 		FfiDestroyerRowEntry{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalVersionedCompactions struct{}
 
@@ -11424,13 +12305,14 @@ func (_ FfiConverterOptionalVersionedCompactions) Write(writer io.Writer, value 
 	}
 }
 
-type FfiDestroyerOptionalVersionedCompactions struct{}
+type FfiDestroyerOptionalVersionedCompactions struct {}
 
 func (_ FfiDestroyerOptionalVersionedCompactions) Destroy(value *VersionedCompactions) {
 	if value != nil {
 		FfiDestroyerVersionedCompactions{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalVersionedManifest struct{}
 
@@ -11465,13 +12347,14 @@ func (_ FfiConverterOptionalVersionedManifest) Write(writer io.Writer, value *Ve
 	}
 }
 
-type FfiDestroyerOptionalVersionedManifest struct{}
+type FfiDestroyerOptionalVersionedManifest struct {}
 
 func (_ FfiDestroyerOptionalVersionedManifest) Destroy(value *VersionedManifest) {
 	if value != nil {
 		FfiDestroyerVersionedManifest{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalWriteHandle struct{}
 
@@ -11506,13 +12389,14 @@ func (_ FfiConverterOptionalWriteHandle) Write(writer io.Writer, value *WriteHan
 	}
 }
 
-type FfiDestroyerOptionalWriteHandle struct{}
+type FfiDestroyerOptionalWriteHandle struct {}
 
 func (_ FfiDestroyerOptionalWriteHandle) Destroy(value *WriteHandle) {
 	if value != nil {
 		FfiDestroyerWriteHandle{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalCloseReason struct{}
 
@@ -11547,13 +12431,14 @@ func (_ FfiConverterOptionalCloseReason) Write(writer io.Writer, value *CloseRea
 	}
 }
 
-type FfiDestroyerOptionalCloseReason struct{}
+type FfiDestroyerOptionalCloseReason struct {}
 
 func (_ FfiDestroyerOptionalCloseReason) Destroy(value *CloseReason) {
 	if value != nil {
 		FfiDestroyerCloseReason{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterOptionalCompressionCodec struct{}
 
@@ -11588,13 +12473,56 @@ func (_ FfiConverterOptionalCompressionCodec) Write(writer io.Writer, value *Com
 	}
 }
 
-type FfiDestroyerOptionalCompressionCodec struct{}
+type FfiDestroyerOptionalCompressionCodec struct {}
 
 func (_ FfiDestroyerOptionalCompressionCodec) Destroy(value *CompressionCodec) {
 	if value != nil {
 		FfiDestroyerCompressionCodec{}.Destroy(*value)
 	}
 }
+
+
+type FfiConverterOptionalFilterContext struct{}
+
+var FfiConverterOptionalFilterContextINSTANCE = FfiConverterOptionalFilterContext{}
+
+func (c FfiConverterOptionalFilterContext) Lift(rb RustBufferI) *FilterContext {
+	return LiftFromRustBuffer[*FilterContext](c, rb)
+}
+
+func (_ FfiConverterOptionalFilterContext) Read(reader io.Reader) *FilterContext {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterFilterContextINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalFilterContext) Lower(value *FilterContext) C.RustBuffer {
+	return LowerIntoRustBuffer[*FilterContext](c, value)
+}
+
+func (c FfiConverterOptionalFilterContext) LowerExternal(value *FilterContext) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*FilterContext](c, value))
+}
+
+func (_ FfiConverterOptionalFilterContext) Write(writer io.Writer, value *FilterContext) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterFilterContextINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalFilterContext struct {}
+
+func (_ FfiDestroyerOptionalFilterContext) Destroy(value *FilterContext) {
+	if value != nil {
+		FfiDestroyerFilterContext{}.Destroy(*value)
+	}
+}
+
 
 type FfiConverterOptionalIterationOrder struct{}
 
@@ -11629,13 +12557,14 @@ func (_ FfiConverterOptionalIterationOrder) Write(writer io.Writer, value *Itera
 	}
 }
 
-type FfiDestroyerOptionalIterationOrder struct{}
+type FfiDestroyerOptionalIterationOrder struct {}
 
 func (_ FfiDestroyerOptionalIterationOrder) Destroy(value *IterationOrder) {
 	if value != nil {
 		FfiDestroyerIterationOrder{}.Destroy(*value)
 	}
 }
+
 
 type FfiConverterSequenceUint64 struct{}
 
@@ -11676,13 +12605,14 @@ func (c FfiConverterSequenceUint64) Write(writer io.Writer, value []uint64) {
 	}
 }
 
-type FfiDestroyerSequenceUint64 struct{}
+type FfiDestroyerSequenceUint64 struct {}
 
 func (FfiDestroyerSequenceUint64) Destroy(sequence []uint64) {
 	for _, value := range sequence {
-		FfiDestroyerUint64{}.Destroy(value)
+		FfiDestroyerUint64{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceFloat64 struct{}
 
@@ -11723,13 +12653,14 @@ func (c FfiConverterSequenceFloat64) Write(writer io.Writer, value []float64) {
 	}
 }
 
-type FfiDestroyerSequenceFloat64 struct{}
+type FfiDestroyerSequenceFloat64 struct {}
 
 func (FfiDestroyerSequenceFloat64) Destroy(sequence []float64) {
 	for _, value := range sequence {
-		FfiDestroyerFloat64{}.Destroy(value)
+		FfiDestroyerFloat64{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceBytes struct{}
 
@@ -11770,13 +12701,62 @@ func (c FfiConverterSequenceBytes) Write(writer io.Writer, value [][]byte) {
 	}
 }
 
-type FfiDestroyerSequenceBytes struct{}
+type FfiDestroyerSequenceBytes struct {}
 
 func (FfiDestroyerSequenceBytes) Destroy(sequence [][]byte) {
 	for _, value := range sequence {
-		FfiDestroyerBytes{}.Destroy(value)
+		FfiDestroyerBytes{}.Destroy(value)	
 	}
 }
+
+
+type FfiConverterSequenceFilterPolicy struct{}
+
+var FfiConverterSequenceFilterPolicyINSTANCE = FfiConverterSequenceFilterPolicy{}
+
+func (c FfiConverterSequenceFilterPolicy) Lift(rb RustBufferI) []*FilterPolicy {
+	return LiftFromRustBuffer[[]*FilterPolicy](c, rb)
+}
+
+func (c FfiConverterSequenceFilterPolicy) Read(reader io.Reader) []*FilterPolicy {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]*FilterPolicy, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterFilterPolicyINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceFilterPolicy) Lower(value []*FilterPolicy) C.RustBuffer {
+	return LowerIntoRustBuffer[[]*FilterPolicy](c, value)
+}
+
+func (c FfiConverterSequenceFilterPolicy) LowerExternal(value []*FilterPolicy) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]*FilterPolicy](c, value))
+}
+
+func (c FfiConverterSequenceFilterPolicy) Write(writer io.Writer, value []*FilterPolicy) {
+	if len(value) > math.MaxInt32 {
+		panic("[]*FilterPolicy is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterFilterPolicyINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceFilterPolicy struct {}
+
+func (FfiDestroyerSequenceFilterPolicy) Destroy(sequence []*FilterPolicy) {
+	for _, value := range sequence {
+		FfiDestroyerFilterPolicy{}.Destroy(value)	
+	}
+}
+
 
 type FfiConverterSequenceWalFile struct{}
 
@@ -11817,13 +12797,14 @@ func (c FfiConverterSequenceWalFile) Write(writer io.Writer, value []*WalFile) {
 	}
 }
 
-type FfiDestroyerSequenceWalFile struct{}
+type FfiDestroyerSequenceWalFile struct {}
 
 func (FfiDestroyerSequenceWalFile) Destroy(sequence []*WalFile) {
 	for _, value := range sequence {
-		FfiDestroyerWalFile{}.Destroy(value)
+		FfiDestroyerWalFile{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceCheckpoint struct{}
 
@@ -11864,13 +12845,14 @@ func (c FfiConverterSequenceCheckpoint) Write(writer io.Writer, value []Checkpoi
 	}
 }
 
-type FfiDestroyerSequenceCheckpoint struct{}
+type FfiDestroyerSequenceCheckpoint struct {}
 
 func (FfiDestroyerSequenceCheckpoint) Destroy(sequence []Checkpoint) {
 	for _, value := range sequence {
-		FfiDestroyerCheckpoint{}.Destroy(value)
+		FfiDestroyerCheckpoint{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceCompaction struct{}
 
@@ -11911,13 +12893,14 @@ func (c FfiConverterSequenceCompaction) Write(writer io.Writer, value []Compacti
 	}
 }
 
-type FfiDestroyerSequenceCompaction struct{}
+type FfiDestroyerSequenceCompaction struct {}
 
 func (FfiDestroyerSequenceCompaction) Destroy(sequence []Compaction) {
 	for _, value := range sequence {
-		FfiDestroyerCompaction{}.Destroy(value)
+		FfiDestroyerCompaction{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceExternalDb struct{}
 
@@ -11958,13 +12941,14 @@ func (c FfiConverterSequenceExternalDb) Write(writer io.Writer, value []External
 	}
 }
 
-type FfiDestroyerSequenceExternalDb struct{}
+type FfiDestroyerSequenceExternalDb struct {}
 
 func (FfiDestroyerSequenceExternalDb) Destroy(sequence []ExternalDb) {
 	for _, value := range sequence {
-		FfiDestroyerExternalDb{}.Destroy(value)
+		FfiDestroyerExternalDb{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceMetric struct{}
 
@@ -12005,13 +12989,14 @@ func (c FfiConverterSequenceMetric) Write(writer io.Writer, value []Metric) {
 	}
 }
 
-type FfiDestroyerSequenceMetric struct{}
+type FfiDestroyerSequenceMetric struct {}
 
 func (FfiDestroyerSequenceMetric) Destroy(sequence []Metric) {
 	for _, value := range sequence {
-		FfiDestroyerMetric{}.Destroy(value)
+		FfiDestroyerMetric{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceMetricLabel struct{}
 
@@ -12052,13 +13037,14 @@ func (c FfiConverterSequenceMetricLabel) Write(writer io.Writer, value []MetricL
 	}
 }
 
-type FfiDestroyerSequenceMetricLabel struct{}
+type FfiDestroyerSequenceMetricLabel struct {}
 
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
-		FfiDestroyerMetricLabel{}.Destroy(value)
+		FfiDestroyerMetricLabel{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceSortedRun struct{}
 
@@ -12099,13 +13085,14 @@ func (c FfiConverterSequenceSortedRun) Write(writer io.Writer, value []SortedRun
 	}
 }
 
-type FfiDestroyerSequenceSortedRun struct{}
+type FfiDestroyerSequenceSortedRun struct {}
 
 func (FfiDestroyerSequenceSortedRun) Destroy(sequence []SortedRun) {
 	for _, value := range sequence {
-		FfiDestroyerSortedRun{}.Destroy(value)
+		FfiDestroyerSortedRun{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceSsTableHandle struct{}
 
@@ -12146,13 +13133,14 @@ func (c FfiConverterSequenceSsTableHandle) Write(writer io.Writer, value []SsTab
 	}
 }
 
-type FfiDestroyerSequenceSsTableHandle struct{}
+type FfiDestroyerSequenceSsTableHandle struct {}
 
 func (FfiDestroyerSequenceSsTableHandle) Destroy(sequence []SsTableHandle) {
 	for _, value := range sequence {
-		FfiDestroyerSsTableHandle{}.Destroy(value)
+		FfiDestroyerSsTableHandle{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceSsTableView struct{}
 
@@ -12193,13 +13181,14 @@ func (c FfiConverterSequenceSsTableView) Write(writer io.Writer, value []SsTable
 	}
 }
 
-type FfiDestroyerSequenceSsTableView struct{}
+type FfiDestroyerSequenceSsTableView struct {}
 
 func (FfiDestroyerSequenceSsTableView) Destroy(sequence []SsTableView) {
 	for _, value := range sequence {
-		FfiDestroyerSsTableView{}.Destroy(value)
+		FfiDestroyerSsTableView{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceVersionedCompactions struct{}
 
@@ -12240,13 +13229,14 @@ func (c FfiConverterSequenceVersionedCompactions) Write(writer io.Writer, value 
 	}
 }
 
-type FfiDestroyerSequenceVersionedCompactions struct{}
+type FfiDestroyerSequenceVersionedCompactions struct {}
 
 func (FfiDestroyerSequenceVersionedCompactions) Destroy(sequence []VersionedCompactions) {
 	for _, value := range sequence {
-		FfiDestroyerVersionedCompactions{}.Destroy(value)
+		FfiDestroyerVersionedCompactions{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceVersionedManifest struct{}
 
@@ -12287,13 +13277,14 @@ func (c FfiConverterSequenceVersionedManifest) Write(writer io.Writer, value []V
 	}
 }
 
-type FfiDestroyerSequenceVersionedManifest struct{}
+type FfiDestroyerSequenceVersionedManifest struct {}
 
 func (FfiDestroyerSequenceVersionedManifest) Destroy(sequence []VersionedManifest) {
 	for _, value := range sequence {
-		FfiDestroyerVersionedManifest{}.Destroy(value)
+		FfiDestroyerVersionedManifest{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceCacheTarget struct{}
 
@@ -12334,13 +13325,14 @@ func (c FfiConverterSequenceCacheTarget) Write(writer io.Writer, value []CacheTa
 	}
 }
 
-type FfiDestroyerSequenceCacheTarget struct{}
+type FfiDestroyerSequenceCacheTarget struct {}
 
 func (FfiDestroyerSequenceCacheTarget) Destroy(sequence []CacheTarget) {
 	for _, value := range sequence {
-		FfiDestroyerCacheTarget{}.Destroy(value)
+		FfiDestroyerCacheTarget{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceSourceId struct{}
 
@@ -12381,13 +13373,14 @@ func (c FfiConverterSequenceSourceId) Write(writer io.Writer, value []SourceId) 
 	}
 }
 
-type FfiDestroyerSequenceSourceId struct{}
+type FfiDestroyerSequenceSourceId struct {}
 
 func (FfiDestroyerSequenceSourceId) Destroy(sequence []SourceId) {
 	for _, value := range sequence {
-		FfiDestroyerSourceId{}.Destroy(value)
+		FfiDestroyerSourceId{}.Destroy(value)	
 	}
 }
+
 
 type FfiConverterSequenceSsTableId struct{}
 
@@ -12428,13 +13421,14 @@ func (c FfiConverterSequenceSsTableId) Write(writer io.Writer, value []SsTableId
 	}
 }
 
-type FfiDestroyerSequenceSsTableId struct{}
+type FfiDestroyerSequenceSsTableId struct {}
 
 func (FfiDestroyerSequenceSsTableId) Destroy(sequence []SsTableId) {
 	for _, value := range sequence {
-		FfiDestroyerSsTableId{}.Destroy(value)
+		FfiDestroyerSsTableId{}.Destroy(value)	
 	}
 }
+
 
 const (
 	uniffiRustFuturePollReady      int8 = 0
@@ -12501,9 +13495,10 @@ func slatedb_uniffiFreeGorutine(data C.uint64_t) {
 // If `callback` is provided, log records are forwarded to it. Otherwise logs
 // are written to standard error using the default tracing formatter.
 func InitLogging(level LogLevel, callback *LogCallback) error {
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_func_init_logging(FfiConverterLogLevelINSTANCE.Lower(level), FfiConverterOptionalLogCallbackINSTANCE.Lower(callback), _uniffiStatus)
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{},func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_func_init_logging(FfiConverterLogLevelINSTANCE.Lower(level), FfiConverterOptionalLogCallbackINSTANCE.Lower(callback),_uniffiStatus)
 		return false
 	})
-	return _uniffiErr.AsError()
+		return _uniffiErr.AsError()
 }
+

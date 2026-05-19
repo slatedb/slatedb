@@ -58,9 +58,6 @@ pub(crate) enum SlateDbError {
 
     #[error("settings update produced invalid settings: {source}")]
     InvalidSettingsUpdate { source: serde_json::Error },
-
-    #[error("invalid FilterContext::Inline payload: expected {expected} bytes, got {actual}")]
-    InvalidFilterContextPayload { expected: usize, actual: usize },
 }
 
 /// Error returned by a foreign [`crate::MergeOperator`] implementation.

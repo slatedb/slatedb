@@ -1,37 +1,21 @@
 use std::sync::Arc;
 
-use crate::error::{Error, SlateDbError};
-
-/// Expected length of the `FilterContext::Inline` payload.
-pub(crate) const FILTER_CONTEXT_INLINE_LEN: usize = 64;
-
 /// Opaque caller-supplied context forwarded to custom filter policies at
 /// query time.
 ///
 /// Custom filter policies read this to parametrize their evaluation; built-in
-/// policies (including the bloom filter) ignore it.
+/// policies (including the bloom filter) ignore it. The payload is opaque to
+/// SlateDB; the receiving policy is responsible for any decoding.
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum FilterContext {
-    /// Inline payload. The byte vector must be exactly 64 bytes long. Smaller
-    /// or larger payloads are rejected when the context is converted for use.
-    Inline { payload: Vec<u8> },
+    /// Variable-length payload. Maps to [`slatedb::FilterContext::Bytes`].
+    Bytes { payload: Vec<u8> },
 }
 
-impl TryFrom<FilterContext> for slatedb::FilterContext {
-    type Error = Error;
-
-    fn try_from(value: FilterContext) -> Result<Self, Self::Error> {
+impl From<FilterContext> for slatedb::FilterContext {
+    fn from(value: FilterContext) -> Self {
         match value {
-            FilterContext::Inline { payload } => {
-                let bytes: [u8; FILTER_CONTEXT_INLINE_LEN] =
-                    payload.as_slice().try_into().map_err(|_| {
-                        Error::from(SlateDbError::InvalidFilterContextPayload {
-                            expected: FILTER_CONTEXT_INLINE_LEN,
-                            actual: payload.len(),
-                        })
-                    })?;
-                Ok(slatedb::FilterContext::Inline(bytes))
-            }
+            FilterContext::Bytes { payload } => slatedb::FilterContext::Bytes(payload.into()),
         }
     }
 }
@@ -195,33 +179,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn filter_context_inline_round_trips_64_bytes() {
-        let payload = (0u8..64).collect::<Vec<_>>();
-        let ctx = FilterContext::Inline {
-            payload: payload.clone(),
-        };
-        let core: slatedb::FilterContext = ctx.try_into().expect("64-byte payload must convert");
-        match core {
-            slatedb::FilterContext::Inline(bytes) => {
-                assert_eq!(bytes.as_slice(), payload.as_slice())
+    fn filter_context_bytes_round_trips_arbitrary_payload() {
+        for len in [0usize, 1, 32, 64, 1024] {
+            let payload: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let ctx = FilterContext::Bytes {
+                payload: payload.clone(),
+            };
+            let core: slatedb::FilterContext = ctx.into();
+            match core {
+                slatedb::FilterContext::Bytes(bytes) => {
+                    assert_eq!(bytes.as_ref(), payload.as_slice())
+                }
+                _ => panic!("expected Bytes variant"),
             }
-            _ => panic!("expected Inline variant"),
         }
-    }
-
-    #[test]
-    fn filter_context_inline_rejects_wrong_size() {
-        let short = FilterContext::Inline {
-            payload: vec![0u8; 32],
-        };
-        let err = slatedb::FilterContext::try_from(short).expect_err("short payload must fail");
-        assert!(matches!(err, Error::Invalid { .. }));
-
-        let long = FilterContext::Inline {
-            payload: vec![0u8; 128],
-        };
-        let err = slatedb::FilterContext::try_from(long).expect_err("long payload must fail");
-        assert!(matches!(err, Error::Invalid { .. }));
     }
 
     #[test]
