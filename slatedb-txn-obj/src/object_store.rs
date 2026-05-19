@@ -100,7 +100,7 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
 ///
 /// The boundary is stored as a single ASCII-encoded `u64` at
 /// `<root_path>/gc/<name>.boundary`. A missing boundary file is treated as `0`
-/// until this process has observed the boundary file at least once.
+/// even if this process already has a cached boundary observation.
 ///
 /// Successful reads cache the boundary value along with object-store version
 /// metadata. Later reads pass the cached ETag as `if-none-match`, allowing stores
@@ -196,26 +196,12 @@ impl ObjectStoreBoundaryObject {
                     Err(TransactionalObjectError::InvalidObjectState)
                 }
             },
-            Err(Error::NotFound { .. }) => match (cached, self.cache.lock().clone()) {
-                // This read began before this boundary object had observed a
-                // boundary, and another task advanced/read the boundary while
-                // the GET was in flight. Use the newer local observation rather
-                // than treating the racing GET as a durable disappearance.
-                (None, Some((boundary, version))) => Ok((boundary, Some(version))),
-                // Once this read starts with an observed boundary, the boundary
-                // file disappearing means durable state regressed; do not treat
-                // it as an initial zero boundary.
-                (Some(_), _) => {
-                    error!(
-                        "received NotFound after observing boundary [path={}]",
-                        self.filepath
-                    );
-                    Err(TransactionalObjectError::InvalidObjectState)
-                }
-                // Default to zero boundary if file is missing and we've never
-                // observed it before.
-                (None, None) => Ok((MonotonicId::new(0), None)),
-            },
+            // A missing boundary is treated as zero. Don't use cache because
+            // a write that occurred before a boundary file exists is valid even if
+            // we later have a cached boundary above it. Assume the object store is
+            // infallible here; if the object store loses data, this will return 0
+            // when it should panic. But object stores should never lose data.
+            Err(Error::NotFound { .. }) => Ok((MonotonicId::new(0), None)),
             Err(e) => Err(TransactionalObjectError::from(e)),
         }
     }
@@ -816,7 +802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_boundary_read_uses_cache_populated_while_initial_missing_read_is_in_flight() {
+    async fn test_boundary_read_returns_zero_when_not_found_get_has_cached_boundary() {
         let counting_store = Arc::new(CountingGetStore::new());
         let (started, release) = counting_store.block_next_get_opts_with_not_found();
         let object_store: Arc<dyn ObjectStore> = counting_store;
@@ -842,28 +828,8 @@ mod tests {
         release.notify_one();
 
         let (observed_boundary, observed_version) = read.await.unwrap().unwrap();
-        assert_eq!(MonotonicId::new(2), observed_boundary);
-        assert_eq!(
-            Some("\"etag\""),
-            observed_version.as_ref().and_then(|v| v.e_tag.as_deref())
-        );
-    }
-
-    #[tokio::test]
-    async fn test_boundary_check_returns_invalid_state_when_observed_boundary_disappears() {
-        let object_store = Arc::new(InMemory::new());
-        let boundary =
-            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
-
-        boundary.advance(MonotonicId::new(2)).await.unwrap();
-        object_store
-            .delete(&Path::from("/root/gc/manifest.boundary"))
-            .await
-            .unwrap();
-
-        let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
-
-        assert!(matches!(err, TransactionalObjectError::InvalidObjectState));
+        assert_eq!(MonotonicId::new(0), observed_boundary);
+        assert!(observed_version.is_none());
     }
 
     #[tokio::test]
