@@ -305,24 +305,42 @@ impl DbInner {
         let mut empty_wal_id = next_wal_id;
 
         loop {
-            match self.flush_empty_wal(empty_wal_id).await {
-                Ok(()) => {
+            let wrote_fence = match self.flush_empty_wal(empty_wal_id).await {
+                Ok(()) => true,
+                Err(SlateDBError::Fenced) => false,
+                Err(err) => return Err(err),
+            };
+
+            // Refresh validates that we own the latest epoch still.
+            manifest.refresh().await?;
+            let remote_dirty = manifest.prepare_dirty()?;
+            let replay_after_wal_id = remote_dirty.value.core.replay_after_wal_id;
+            let dirty_manifest = {
+                let mut state = self.state.write();
+                state.merge_remote_manifest(remote_dirty);
+                state.state().manifest.clone()
+            };
+            self.status_manager.report_manifest(dirty_manifest.into());
+
+            if wrote_fence {
+                // Our fence write might be behind replay_after_wal_id since we're racing with
+                // older writers that can advance replay_after_wal_id by flushing data to L0.
+                // We need to make sure the fence write falls above this barrier so it's visible
+                // to all other active writers.
+                if empty_wal_id > replay_after_wal_id {
                     return Ok(());
+                } else {
+                    // If we're behind the barrier, reset to the next WAL slot.
+                    empty_wal_id = self
+                        .table_store
+                        .next_wal_sst_id(replay_after_wal_id)
+                        .await?;
                 }
-                Err(SlateDBError::Fenced) => {
-                    manifest.refresh().await?;
-                    let remote_dirty = manifest.prepare_dirty()?;
-                    let dirty_manifest = {
-                        let mut state = self.state.write();
-                        state.merge_remote_manifest(remote_dirty);
-                        state.state().manifest.clone()
-                    };
-                    self.status_manager.report_manifest(dirty_manifest.into());
-                    empty_wal_id += 1;
-                }
-                Err(e) => {
-                    return Err(e);
-                }
+            } else {
+                // We're (probably) ahead of the barrier, but we hit a race with another writer.
+                // Instead of paying for the LIST (API cost and latency), just try the next ID.
+                // This is an optimization: we could always advance with next_wal_sst_id.
+                empty_wal_id += 1;
             }
         }
     }
@@ -3559,7 +3577,8 @@ mod tests {
         let expected_cache_parts =
             vec![
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
-            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 0),
+            // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 1),
             // The startup fence WAL is zero bytes, so replay does not cache any object parts.
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 0),
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
@@ -3579,10 +3598,11 @@ mod tests {
     async fn test_get_with_object_store_cache_put_caching_enabled() {
         let expected_cache_parts =
             vec![
-            // not cached because manifests are put before the root is resolved, which is when
+            // not cached because this manifest is put before the root is resolved, which is when
             // `cache_puts_enabled` starts taking effect.
             ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 0),
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 0),
+            // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 1),
             // The startup fence WAL is zero bytes, so replay does not cache any object parts.
             ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 0),
             // 1 part is cached because the put with cache_puts enabled should cache the test_key put
@@ -6149,6 +6169,130 @@ mod tests {
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+    }
+
+    #[tokio::test]
+    async fn test_fence_writers_retries_successful_fence_behind_replay_boundary() {
+        // Race:
+        // - t0: W2 computes stale next_wal_id=2 while W1 is still active.
+        // - t1: W1 writes WAL 2 and WAL 3, flushes them to L0, and advances
+        //   the replay boundary to 3.
+        // - t2: WAL GC deletes WAL 2, so a future create at stale WAL 2 can
+        //   succeed, but it leaves WAL 3 because replay_after_wal_id is not
+        //   eligible for deletion.
+        // - t3: W2 claims the writer epoch from that manifest.
+        // - t4: W2 builds the DbInner needed to run fence_writers.
+        // - t5: W2 writes a fence at stale WAL 2; current code accepts it.
+        // - t6: W1 can still create live WAL 4 unless W2 retried the fence
+        //   above the replay boundary.
+        // - t7: ValidateFence should make t6 fail with Fenced.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_fence_writers_retries_successful_fence_behind_replay_boundary";
+        let mut settings = test_db_options(0, 128, None);
+        settings.flush_interval = None;
+
+        // - t0: W2 computes stale next_wal_id=2 while W1 is still active.
+        let stale_next_wal_id = 2;
+        let replay_after_wal_id = stale_next_wal_id + 1; // 3
+        let live_wal_id = replay_after_wal_id + 1; // 4
+
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        ));
+
+        // - t1: W1 writes WAL 2 and WAL 3, flushes them to L0, and advances
+        //   the replay boundary to 3.
+        for wal_id in [stale_next_wal_id, replay_after_wal_id] {
+            let mut w1_wal = table_store.table_builder();
+            w1_wal
+                .add(RowEntry::new_value(b"w1", b"write", wal_id))
+                .await
+                .unwrap();
+            let w1_wal = w1_wal.build().await.unwrap();
+            table_store
+                .write_sst(&SsTableId::Wal(wal_id), &w1_wal, false)
+                .await
+                .unwrap();
+        }
+        let mut core = ManifestCore::new();
+        core.replay_after_wal_id = replay_after_wal_id;
+        core.next_wal_sst_id = live_wal_id;
+
+        // - t2: WAL GC deletes WAL 2, so a future create at stale WAL 2 can
+        //   succeed, but it leaves WAL 3 because replay_after_wal_id is not
+        //   eligible for deletion.
+        table_store
+            .delete_sst(&SsTableId::Wal(stale_next_wal_id))
+            .await
+            .unwrap();
+
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let stored_manifest =
+            StoredManifest::create_new_db(manifest_store, core, system_clock.clone())
+                .await
+                .unwrap();
+
+        // - t3: W2 claims the writer epoch from that manifest.
+        let mut manifest = FenceableManifest::init_writer(
+            stored_manifest,
+            settings.manifest_update_timeout,
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let manifest_dirty = manifest.prepare_dirty().unwrap();
+
+        // - t4: Build the minimal DbInner needed to run W2's fence_writers.
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest_dirty.value.core.last_l0_seq,
+            manifest_dirty.clone().into(),
+        );
+        let (write_tx, _write_rx) = SafeSender::unbounded_channel(status_manager.result_reader());
+        let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
+        let inner = DbInner::new(
+            settings,
+            system_clock,
+            Arc::new(DbRand::new(0)),
+            table_store.clone(),
+            manifest_dirty,
+            memtable_flusher,
+            write_tx,
+            MetricsRecorderHelper::noop(),
+            Arc::new(FailPointRegistry::new()),
+            None,
+            status_manager,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // - t5: W2 writes a fence at stale WAL 2; current code accepts it.
+        inner
+            .fence_writers(&mut manifest, stale_next_wal_id)
+            .await
+            .unwrap();
+
+        // - t6: W1 can still create live WAL 4 unless W2 retried the fence
+        //   above the replay boundary.
+        let mut stale_writer_wal = table_store.table_builder();
+        stale_writer_wal
+            .add(RowEntry::new_value(b"stale", b"write", 0))
+            .await
+            .unwrap();
+        let stale_writer_wal = stale_writer_wal.build().await.unwrap();
+        let stale_write_result = table_store
+            .write_sst(&SsTableId::Wal(live_wal_id), &stale_writer_wal, false)
+            .await;
+
+        // - t7: ValidateFence should make t6 fail with Fenced.
+        assert!(
+            matches!(stale_write_result, Err(SlateDBError::Fenced)),
+            "expected fence_writers to retry from stale WAL {stale_next_wal_id} and fence live WAL {live_wal_id}"
+        );
     }
 
     #[tokio::test]
