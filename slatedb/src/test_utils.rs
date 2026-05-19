@@ -898,6 +898,10 @@ pub(crate) struct GatedObjectStore {
     pub(crate) put_multipart_opts_gate: Gate,
     pub(crate) copy_gate: Gate,
     pub(crate) rename_gate: Gate,
+    /// Gates each path emitted by `delete_stream`. Per-item gating preserves
+    /// the pre-0.13 single-call `delete` semantics now that callers go through
+    /// `ObjectStoreExt::delete`, which fans out into `delete_stream`.
+    pub(crate) delete_stream_gate: Arc<Gate>,
 }
 
 impl GatedObjectStore {
@@ -910,6 +914,7 @@ impl GatedObjectStore {
             put_multipart_opts_gate: Gate::default(),
             copy_gate: Gate::default(),
             rename_gate: Gate::default(),
+            delete_stream_gate: Arc::new(Gate::default()),
         }
     }
 }
@@ -958,7 +963,18 @@ impl ObjectStore for GatedObjectStore {
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        self.inner.delete_stream(locations)
+        let gate = Arc::clone(&self.delete_stream_gate);
+        let gated = locations
+            .then(move |loc| {
+                let gate = Arc::clone(&gate);
+                async move {
+                    let loc = loc?;
+                    gate.wait().await?;
+                    Ok(loc)
+                }
+            })
+            .boxed();
+        self.inner.delete_stream(gated)
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
