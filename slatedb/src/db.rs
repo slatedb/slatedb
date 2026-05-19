@@ -7423,19 +7423,23 @@ mod tests {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             wal_fence_options: None,
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             detach_options: None,
         };

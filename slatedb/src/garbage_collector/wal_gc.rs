@@ -121,7 +121,29 @@ impl GcTask for WalGcTask {
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
+        if self.wal_options.dry_run && !sst_ids_to_delete.is_empty() {
+            log::info!(
+                "dry run: skipping {} deletion [count={}]",
+                self.resource(),
+                sst_ids_to_delete.len()
+            );
+            if matches!(self.mode, WalGcMode::Fence) {
+                log::info!(
+                    "WAL fence GC is dry-run by default. This is a conservative setting. \
+                    Set wal_fence_options.dry_run=false and use a conservative min_age to enable. \
+                    Silence this log with wal_fence_options=None. See #352 for details."
+                );
+            }
+        }
         for id in sst_ids_to_delete {
+            if self.wal_options.dry_run {
+                log::debug!(
+                    "dry run: would delete {} but skipped [id={:?}]",
+                    self.resource(),
+                    id
+                );
+                continue;
+            }
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting WAL SST [id={:?}, error={}]", id, e);
             } else {
