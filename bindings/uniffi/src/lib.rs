@@ -30,7 +30,9 @@ pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, MergeOperatorCallbackError};
-pub use filter_policy::{BloomFilterOptions, FilterContext, FilterPolicy, PrefixExtractor, PrefixTarget};
+pub use filter_policy::{
+    BloomFilterOptions, FilterContext, FilterPolicy, PrefixExtractor, PrefixTarget,
+};
 pub use iterator::DbIterator;
 pub use logging::{init_logging, LogCallback, LogLevel, LogRecord};
 pub use merge_operator::MergeOperator;

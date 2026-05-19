@@ -49,9 +49,7 @@ impl From<&slatedb::PrefixTarget> for PrefixTarget {
     fn from(value: &slatedb::PrefixTarget) -> Self {
         match value {
             slatedb::PrefixTarget::Point(k) => PrefixTarget::Point { key: k.to_vec() },
-            slatedb::PrefixTarget::Prefix(p) => PrefixTarget::Prefix {
-                prefix: p.to_vec(),
-            },
+            slatedb::PrefixTarget::Prefix(p) => PrefixTarget::Prefix { prefix: p.to_vec() },
         }
     }
 }
@@ -166,8 +164,8 @@ impl FilterPolicy {
             whole_key_filtering,
             prefix_extractor,
         } = options;
-        let mut policy =
-            slatedb::BloomFilterPolicy::new(bits_per_key).with_whole_key_filtering(whole_key_filtering);
+        let mut policy = slatedb::BloomFilterPolicy::new(bits_per_key)
+            .with_whole_key_filtering(whole_key_filtering);
         if let Some(extractor) = prefix_extractor {
             policy = policy.with_prefix_extractor(adapt_prefix_extractor(extractor));
         }
