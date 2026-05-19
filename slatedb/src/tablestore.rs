@@ -214,9 +214,20 @@ impl TableStore {
         );
 
         let object_store = self.object_stores.store_for(id);
-        let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        write_sst_in_object_store(object_store.clone(), id, &path, &data).await?;
+        match id {
+            SsTableId::Compacted(_) => {
+                write_sst_streaming_in_object_store(object_store.clone(), &path, encoded_sst)
+                    .await?;
+            }
+            // WAL SSTs rely on PutMode::Create for fencing. The generic
+            // object_store multipart API cannot express that condition, so WALs
+            // stay on the conditional single-PUT path for now.
+            SsTableId::Wal(_) => {
+                let data = encoded_sst.remaining_as_bytes();
+                write_sst_in_object_store(object_store.clone(), id, &path, &data).await?;
+            }
+        }
 
         if let Some(ref cache) = self.cache {
             if write_cache {
@@ -782,6 +793,20 @@ async fn write_sst_in_object_store(
     Ok(())
 }
 
+async fn write_sst_streaming_in_object_store(
+    object_store: Arc<dyn ObjectStore>,
+    path: &Path,
+    encoded_sst: &EncodedSsTable,
+) -> Result<(), SlateDBError> {
+    let mut writer = BufWriter::new(object_store, path.clone());
+    for block in &encoded_sst.unconsumed_blocks {
+        writer.put(block.encoded_bytes.clone()).await?;
+    }
+    writer.put(encoded_sst.footer.clone()).await?;
+    writer.shutdown().await?;
+    Ok(())
+}
+
 pub(crate) struct EncodedSsTableWriter<'a> {
     id: SsTableId,
     builder: EncodedSsTableBuilder<'a>,
@@ -1133,6 +1158,95 @@ mod tests {
         let table = sst.build().await.unwrap();
         let result = ts.write_sst(&SsTableId::Wal(1), &table, false).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn should_use_streaming_upload_for_large_compacted_sst() {
+        // given:
+        let value_size = 11 * 1024 * 1024;
+        let os = Arc::new(
+            FlakyObjectStore::new(Arc::new(InMemory::new()), 0)
+                .with_single_put_size_limit(1024 * 1024),
+        );
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from(ROOT),
+            None,
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+
+        let mut builder = ts.table_builder();
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from(vec![b'x'; value_size])),
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let sst = builder.build().await.unwrap();
+
+        // when:
+        ts.write_sst(&id, &sst, false).await.unwrap();
+
+        // then:
+        assert_eq!(os.put_attempts(), 0);
+        assert_eq!(os.multipart_attempts(), 1);
+        ts.open_sst(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_keep_conditional_single_put_for_large_wal_sst() {
+        // given:
+        let value_size = 11 * 1024 * 1024;
+        let os = Arc::new(
+            FlakyObjectStore::new(Arc::new(InMemory::new()), 0)
+                .with_single_put_size_limit(1024 * 1024),
+        );
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from(ROOT),
+            None,
+        ));
+        let wal_id = SsTableId::Wal(1);
+
+        let mut builder = ts.table_builder();
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from(vec![b'x'; value_size])),
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let sst = builder.build().await.unwrap();
+
+        // when:
+        let result = ts.write_sst(&wal_id, &sst, false).await;
+
+        // then:
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::ObjectStoreError(_))
+        ));
+        assert_eq!(os.put_attempts(), 1);
+        assert_eq!(os.multipart_attempts(), 0);
     }
 
     #[tokio::test]
