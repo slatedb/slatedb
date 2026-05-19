@@ -36,7 +36,7 @@ pub(crate) struct CachedObjectStore {
     resolved_root: Arc<OnceCell<Path>>,
     stats: Arc<CachedObjectStoreStats>,
     // Deduplicates concurrent HEAD requests for the same path after a cache miss.
-    head_flights: SingleFlight<Path, ObjectMeta>,
+    head_flights: SingleFlight<Path, (ObjectMeta, Attributes)>,
     // Deduplicates concurrent prefetch/GET requests for the same path after a cache miss.
     prefetch_flights: SingleFlight<(Path, Option<GetRangeKey>), (ObjectMeta, Attributes)>,
     // Deduplicates concurrent fetches of the same part after a cache miss.
@@ -259,18 +259,19 @@ impl CachedObjectStore {
         Some(Path::from(prefix.trim_end_matches('/')))
     }
 
-    pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+    pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<GetResult> {
         if let Some(cache_location) = self.cache_location_for(location) {
             let entry = self
                 .cache_storage
                 .entry(&cache_location, self.part_size_bytes);
-            if let Ok(Some((meta, _))) = entry.read_head().await {
-                return Ok(meta);
+            if let Ok(Some((meta, attributes))) = entry.read_head().await {
+                return Ok(head_only_get_result(meta, attributes));
             }
         }
 
         // Cache miss — deduplicate concurrent HEAD requests for the same path.
-        self.head_flights
+        let (meta, attributes) = self
+            .head_flights
             .call(location.clone(), || async {
                 let result = self
                     .object_store
@@ -284,12 +285,14 @@ impl CachedObjectStore {
                     )
                     .await?;
                 let meta = result.meta.clone();
+                let attributes = result.attributes.clone();
                 if self.resolve_root(location, &meta.location) {
                     self.save_get_result(result).await.ok();
                 }
-                Ok(meta)
+                Ok::<_, object_store::Error>((meta, attributes))
             })
-            .await
+            .await?;
+        Ok(head_only_get_result(meta, attributes))
     }
 
     pub(crate) async fn cached_get_opts(
@@ -680,6 +683,15 @@ impl CachedObjectStore {
     }
 }
 
+fn head_only_get_result(meta: ObjectMeta, attributes: Attributes) -> GetResult {
+    GetResult {
+        payload: GetResultPayload::Stream(stream::empty().boxed()),
+        range: 0..0,
+        meta,
+        attributes,
+    }
+}
+
 impl std::fmt::Display for CachedObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -698,13 +710,7 @@ impl ObjectStore for CachedObjectStore {
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
         if options.head {
-            let meta = self.cached_head(location).await?;
-            return Ok(GetResult {
-                payload: GetResultPayload::Stream(stream::empty().boxed()),
-                range: 0..0,
-                meta,
-                attributes: Attributes::new(),
-            });
+            return self.cached_head(location).await;
         }
         self.cached_get_opts(location, options).await
     }
