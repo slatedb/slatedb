@@ -1,6 +1,6 @@
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
-use crate::iter::RowEntryIterator;
+use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::manifest::ManifestCore;
 use crate::manifest::SsTableView;
 use crate::mem_table::WritableKVTable;
@@ -49,6 +49,11 @@ pub(crate) struct ReplayedMemtable {
     pub(crate) last_wal_id: u64,
 }
 
+struct WalIdAndIter {
+    wal_id: u64,
+    iter: Box<dyn RowEntryIterator + 'static>,
+}
+
 struct IteratorHolder<T> {
     initialized: bool,
     current_iter: Option<T>,
@@ -77,19 +82,19 @@ impl<T> IteratorHolder<T> {
     }
 }
 
-pub(crate) struct WalReplayIterator<'a> {
+pub(crate) struct WalReplayIterator {
     options: WalReplayOptions,
     wal_id_range: Range<u64>,
     table_store: Arc<TableStore>,
-    current_iter: IteratorHolder<SstIterator<'a>>,
-    next_iters: VecDeque<JoinHandle<Result<Option<SstIterator<'a>>, SlateDBError>>>,
+    current_iter: IteratorHolder<WalIdAndIter>,
+    next_iters: VecDeque<JoinHandle<Result<Option<WalIdAndIter>, SlateDBError>>>,
     last_tick: i64,
     last_seq: u64,
     min_seq: u64,
     next_wal_id: u64,
 }
 
-impl WalReplayIterator<'_> {
+impl WalReplayIterator {
     pub(crate) async fn range(
         wal_id_range: Range<u64>,
         db_state: &ManifestCore,
@@ -152,27 +157,34 @@ impl WalReplayIterator<'_> {
         let next_wal_id = self.next_wal_id;
         self.next_wal_id += 1;
 
-        async fn load_iter<'a>(
+        async fn load_iter(
             wal_id: u64,
             sst_iter_options: SstIteratorOptions,
             table_store: Arc<TableStore>,
-        ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
+        ) -> Result<Option<WalIdAndIter>, SlateDBError> {
             let sst = match table_store.open_sst(&SsTableId::Wal(wal_id)).await {
                 Ok(sst) => sst,
                 Err(SlateDBError::EmptySSTable) => {
                     // Zero-byte WAL files are fence markers; replay them as empty WALs
                     // so the last replayed WAL ID still advances past the marker.
-                    return Ok(Some(SstIterator::new_empty(SsTableId::Wal(wal_id))));
+                    return Ok(Some(WalIdAndIter {
+                        wal_id,
+                        iter: Box::new(EmptyIterator::new()),
+                    }));
                 }
                 Err(err) => return Err(err),
             };
-            SstIterator::new_owned_initialized(
+            let iter = SstIterator::new_owned_initialized(
                 ..,
                 SsTableView::identity(sst),
                 Arc::clone(&table_store),
                 sst_iter_options,
             )
-            .await
+            .await?;
+            Ok(iter.map(|iter| WalIdAndIter {
+                wal_id,
+                iter: Box::new(iter) as Box<dyn RowEntryIterator + 'static>,
+            }))
         }
 
         let handle = task::spawn(load_iter(
@@ -228,9 +240,8 @@ impl WalReplayIterator<'_> {
         let mut last_wal_id = 0;
 
         while !self.current_iter.is_finished() {
-            if let Some(sst_iter) = &mut self.current_iter.current_iter {
-                let wal_id = sst_iter.table_id().unwrap_wal_id();
-                while let Some(row_entry) = sst_iter.next().await? {
+            if let Some(wal_id_and_iter) = &mut self.current_iter.current_iter {
+                while let Some(row_entry) = wal_id_and_iter.iter.next().await? {
                     // skip the entries that are already in the L0 SST.
                     if row_entry.seq <= self.min_seq {
                         continue;
@@ -243,7 +254,7 @@ impl WalReplayIterator<'_> {
                     table.put(row_entry);
                 }
 
-                last_wal_id = wal_id;
+                last_wal_id = wal_id_and_iter.wal_id;
 
                 let meta = table.metadata();
                 let estimated_bytes = self
