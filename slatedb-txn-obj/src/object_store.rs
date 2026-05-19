@@ -5,7 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::StreamExt;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{
@@ -100,7 +100,7 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
 ///
 /// The boundary is stored as a single ASCII-encoded `u64` at
 /// `<root_path>/gc/<name>.boundary`. A missing boundary file is treated as `0`
-/// until this process has observed the boundary file at least once.
+/// even if this process already has a cached boundary observation.
 ///
 /// Successful reads cache the boundary value along with object-store version
 /// metadata. Later reads pass the cached ETag as `if-none-match`, allowing stores
@@ -188,16 +188,20 @@ impl ObjectStoreBoundaryObject {
                 // NotModified implies we have a cache, since we need the
                 // version's ETag for the conditional GET. If cache is missing,
                 // treat as invalid state.
-                None => Err(TransactionalObjectError::InvalidObjectState),
+                None => {
+                    error!(
+                        "received NotModified without cache [path={}]",
+                        self.filepath
+                    );
+                    Err(TransactionalObjectError::InvalidObjectState)
+                }
             },
-            Err(Error::NotFound { .. }) => match self.cache.lock().clone() {
-                // Once observed, the boundary file disappearing means durable state
-                // regressed; do not treat it as an initial zero boundary.
-                Some(_) => Err(TransactionalObjectError::InvalidObjectState),
-                // Default to zero boundary if file is missing and we've never
-                // observed it before.
-                None => Ok((MonotonicId::new(0), None)),
-            },
+            // A missing boundary is treated as zero. Don't use cache because
+            // a write that occurred before a boundary file exists is valid even if
+            // we later have a cached boundary above it. Assume the object store is
+            // infallible here; if the object store loses data, this will return 0
+            // when it should panic. But object stores should never lose data.
+            Err(Error::NotFound { .. }) => Ok((MonotonicId::new(0), None)),
             Err(e) => Err(TransactionalObjectError::from(e)),
         }
     }
@@ -441,13 +445,15 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
+        Error as ObjectStoreError, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        Result as ObjectStoreResult, UpdateVersion,
     };
     use std::collections::Bound::{Excluded, Included, Unbounded};
     use std::fmt;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Notify;
 
     /// A flaky object store that simulates a missing file on the first list() call.
     /// On the first call to list(), it returns a file with `missing_id`. On subsequent
@@ -558,10 +564,17 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct BlockingNotFoundGet {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[derive(Debug)]
     struct CountingGetStore {
         inner: InMemory,
         get_opts_calls: AtomicUsize,
         if_none_match_gets: AtomicUsize,
+        blocking_not_found: StdMutex<Option<BlockingNotFoundGet>>,
     }
 
     impl CountingGetStore {
@@ -570,7 +583,18 @@ mod tests {
                 inner: InMemory::new(),
                 get_opts_calls: AtomicUsize::new(0),
                 if_none_match_gets: AtomicUsize::new(0),
+                blocking_not_found: StdMutex::new(None),
             }
+        }
+
+        fn block_next_get_opts_with_not_found(&self) -> (Arc<Notify>, Arc<Notify>) {
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            *self.blocking_not_found.lock().unwrap() = Some(BlockingNotFoundGet {
+                started: started.clone(),
+                release: release.clone(),
+            });
+            (started, release)
         }
     }
 
@@ -607,6 +631,18 @@ mod tests {
             self.get_opts_calls.fetch_add(1, Ordering::SeqCst);
             if options.if_none_match.is_some() {
                 self.if_none_match_gets.fetch_add(1, Ordering::SeqCst);
+            }
+            let blocking = self.blocking_not_found.lock().unwrap().take();
+            if let Some(blocking) = blocking {
+                blocking.started.notify_one();
+                blocking.release.notified().await;
+                return Err(ObjectStoreError::NotFound {
+                    path: location.to_string(),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "injected missing boundary",
+                    )),
+                });
             }
             self.inner.get_opts(location, options).await
         }
@@ -766,20 +802,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_boundary_check_returns_invalid_state_when_observed_boundary_disappears() {
-        let object_store = Arc::new(InMemory::new());
-        let boundary =
-            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+    async fn test_boundary_read_returns_zero_when_not_found_get_has_cached_boundary() {
+        let counting_store = Arc::new(CountingGetStore::new());
+        let (started, release) = counting_store.block_next_get_opts_with_not_found();
+        let object_store: Arc<dyn ObjectStore> = counting_store;
+        let boundary = Arc::new(ObjectStoreBoundaryObject::new(
+            &Path::from("/root"),
+            object_store,
+            "manifest",
+        ));
 
-        boundary.advance(MonotonicId::new(2)).await.unwrap();
-        object_store
-            .delete(&Path::from("/root/gc/manifest.boundary"))
-            .await
-            .unwrap();
+        let read = tokio::spawn({
+            let boundary = boundary.clone();
+            async move { boundary.read_boundary().await }
+        });
 
-        let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
+        started.notified().await;
+        *boundary.cache.lock() = Some((
+            MonotonicId::new(2),
+            UpdateVersion {
+                e_tag: Some("\"etag\"".to_string()),
+                version: None,
+            },
+        ));
+        release.notify_one();
 
-        assert!(matches!(err, TransactionalObjectError::InvalidObjectState));
+        let (observed_boundary, observed_version) = read.await.unwrap().unwrap();
+        assert_eq!(MonotonicId::new(0), observed_boundary);
+        assert!(observed_version.is_none());
     }
 
     #[tokio::test]
