@@ -12,6 +12,8 @@ mod clocked_object_store;
 mod deterministic_local_filesystem;
 pub mod failing_object_store;
 mod harness;
+mod prefix_extractor;
+mod scenarios;
 pub mod utils;
 
 pub use self::deterministic_local_filesystem::DeterministicLocalFilesystem;
@@ -20,3 +22,5 @@ pub use self::failing_object_store::{
     StreamDirection, Toxic, ToxicKind,
 };
 pub use self::harness::*;
+pub use self::prefix_extractor::FirstDelimiterPrefixExtractor;
+pub use self::scenarios::DeterministicScenario;
