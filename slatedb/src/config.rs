@@ -1346,9 +1346,16 @@ impl Default for GarbageCollectorScheduleOptions {
 /// Default options for the garbage collector.
 ///
 /// By default, garbage collection is enabled for all managed directories
-/// (manifest, WAL, compacted SSTs, and compactions) using
+/// (manifest, WAL, WAL fence, compacted SSTs, and compactions) using
 /// [`GarbageCollectorDirectoryOptions::default()`].
-/// WAL fence garbage collection is disabled by default.
+/// WAL fence garbage collection runs in dry-run mode by default.
+///
+/// WAL fence GC is visible by default but does not delete until users
+/// explicitly disable `dry_run`. This is a very conservative setting.
+/// Users can enable fence GC with a high `min_age` if they want to
+/// clean up old fences. Alternatively, this log can be silenced entirely
+/// by setting `wal_fence_options` to `None`. See
+/// [`GarbageCollectorOptions::wal_fence_options`] for more details.
 ///
 /// To disable garbage collection for a specific file type, set that
 /// directory option to `None`.
@@ -1357,10 +1364,10 @@ impl Default for GarbageCollectorOptions {
         Self {
             manifest_options: Some(GarbageCollectorDirectoryOptions::default()),
             wal_options: Some(GarbageCollectorDirectoryOptions::default()),
-            // Disable WAL fence garbage collection by default to prevent accidental
-            // data loss. This is a very conservative setting. Users can enable it
-            // with a high `min_age` if they want to clean up old fences.
-            wal_fence_options: None,
+            wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                dry_run: true,
+                ..GarbageCollectorDirectoryOptions::default()
+            }),
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
             detach_options: Some(GarbageCollectorScheduleOptions::default()),
