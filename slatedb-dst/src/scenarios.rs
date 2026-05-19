@@ -1,4 +1,4 @@
-//! Reusable shape for "determinism" scenario tests in the DST suite.
+//! Shared structures and execution logic for running DST scenarios.
 //!
 //! Each simulation run:
 //! - starts from a fresh harness root [`DbRand`] initialized with the same seed
