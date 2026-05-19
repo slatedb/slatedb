@@ -1616,7 +1616,10 @@ mod tests {
 
     #[test]
     fn has_not_found_object_store_error_should_ignore_non_not_found_errors() {
-        let err = SlateDBError::from(object_store::Error::NotImplemented);
+        let err = SlateDBError::from(object_store::Error::NotImplemented {
+            operation: "test".to_string(),
+            implementer: "test".to_string(),
+        });
 
         assert!(!super::has_not_found_object_store_error(&err));
     }

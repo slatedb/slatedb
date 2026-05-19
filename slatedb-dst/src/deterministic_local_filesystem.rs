@@ -18,8 +18,9 @@ use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
-    Attributes, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
-    ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
+    Attributes, CopyMode, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult,
+    MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
+    PutResult, RenameOptions, RenameTargetMode, UploadPart,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::task::yield_now;
@@ -420,14 +421,6 @@ impl ObjectStore for DeterministicLocalFilesystem {
         })
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.put_multipart_opts(location, PutMultipartOptions::default())
-            .await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -487,11 +480,6 @@ impl ObjectStore for DeterministicLocalFilesystem {
         })
     }
 
-    async fn get_range(&self, location: &Path, range: Range<u64>) -> object_store::Result<Bytes> {
-        let path = self.path_to_filesystem(location)?;
-        read_range_with_yields(&path, range).await
-    }
-
     async fn get_ranges(
         &self,
         location: &Path,
@@ -506,41 +494,21 @@ impl ObjectStore for DeterministicLocalFilesystem {
         Ok(results)
     }
 
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        yield_now().await;
-        let path = self.path_to_filesystem(location)?;
-        let (_, metadata) = open_file(&path)?;
-        yield_now().await;
-        Ok(self.object_meta(metadata, location.clone()))
-    }
-
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        yield_now().await;
-        let path = self.path_to_filesystem(location)?;
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                self.attribute_state.remove(location);
-                self.metadata_state.remove(location);
-            }
-            Err(source) if source.kind() == ErrorKind::NotFound => {
-                return Err(not_found_error(&path, source));
-            }
-            Err(source) => return Err(generic_error(source)),
-        }
-
-        if self.automatic_cleanup {
-            let mut parent = path.parent();
-            while let Some(candidate) = parent {
-                yield_now().await;
-                if candidate != self.root && std::fs::remove_dir(candidate).is_ok() {
-                    parent = candidate.parent();
-                } else {
-                    break;
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let this = self.clone();
+        locations
+            .then(move |loc| {
+                let this = this.clone();
+                async move {
+                    let location = loc?;
+                    this.delete_one(&location).await?;
+                    Ok(location)
                 }
-            }
-        }
-
-        Ok(())
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -592,7 +560,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
             drop(parts);
 
             if is_directory {
-                common_prefixes.insert(prefix.child(common_prefix));
+                common_prefixes.insert(prefix.clone().join(common_prefix));
             } else if let Some(metadata) = self.convert_entry(entry, entry_location)? {
                 objects.push(metadata);
             }
@@ -605,7 +573,83 @@ impl ObjectStore for DeterministicLocalFilesystem {
         })
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        match options.mode {
+            CopyMode::Overwrite => self.copy_overwrite(from, to).await,
+            CopyMode::Create => self.copy_create(from, to).await,
+        }
+    }
+
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        match options.target_mode {
+            RenameTargetMode::Overwrite => self.rename_overwrite(from, to).await,
+            RenameTargetMode::Create => {
+                let head_result = self.head_one(to).await;
+                match head_result {
+                    Ok(_) => {
+                        return Err(already_exists_error(
+                            &self.path_to_filesystem(to)?,
+                            io::Error::new(ErrorKind::AlreadyExists, "destination already exists"),
+                        ));
+                    }
+                    Err(object_store::Error::NotFound { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+                self.rename_overwrite(from, to).await
+            }
+        }
+    }
+}
+
+impl DeterministicLocalFilesystem {
+    async fn delete_one(&self, location: &Path) -> object_store::Result<()> {
+        yield_now().await;
+        let path = self.path_to_filesystem(location)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                self.attribute_state.remove(location);
+                self.metadata_state.remove(location);
+            }
+            Err(source) if source.kind() == ErrorKind::NotFound => {
+                return Err(not_found_error(&path, source));
+            }
+            Err(source) => return Err(generic_error(source)),
+        }
+
+        if self.automatic_cleanup {
+            let mut parent = path.parent();
+            while let Some(candidate) = parent {
+                yield_now().await;
+                if candidate != self.root && std::fs::remove_dir(candidate).is_ok() {
+                    parent = candidate.parent();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn head_one(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        yield_now().await;
+        let path = self.path_to_filesystem(location)?;
+        let (_, metadata) = open_file(&path)?;
+        yield_now().await;
+        Ok(self.object_meta(metadata, location.clone()))
+    }
+
+    async fn copy_overwrite(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         let from_path = self.path_to_filesystem(from)?;
         let to_path = self.path_to_filesystem(to)?;
         let mut suffix = 0_u64;
@@ -634,32 +678,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         }
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        let from_path = self.path_to_filesystem(from)?;
-        let to_path = self.path_to_filesystem(to)?;
-
-        loop {
-            yield_now().await;
-            match std::fs::rename(&from_path, &to_path) {
-                Ok(()) => {
-                    self.attribute_state.rename(from, to);
-                    self.metadata_state.remove(from);
-                    self.metadata_state.record_modified(to);
-                    return Ok(());
-                }
-                Err(source) if source.kind() == ErrorKind::NotFound => {
-                    if from_path.exists() {
-                        create_parent_dirs(&to_path, source)?;
-                    } else {
-                        return Err(not_found_error(&from_path, source));
-                    }
-                }
-                Err(source) => return Err(generic_error(source)),
-            }
-        }
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+    async fn copy_create(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         let from_path = self.path_to_filesystem(from)?;
         let to_path = self.path_to_filesystem(to)?;
 
@@ -686,20 +705,29 @@ impl ObjectStore for DeterministicLocalFilesystem {
         }
     }
 
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        let head_result = self.head(to).await;
-        match head_result {
-            Ok(_) => {
-                return Err(already_exists_error(
-                    &self.path_to_filesystem(to)?,
-                    io::Error::new(ErrorKind::AlreadyExists, "destination already exists"),
-                ));
-            }
-            Err(object_store::Error::NotFound { .. }) => {}
-            Err(error) => return Err(error),
-        }
+    async fn rename_overwrite(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        let from_path = self.path_to_filesystem(from)?;
+        let to_path = self.path_to_filesystem(to)?;
 
-        self.rename(from, to).await
+        loop {
+            yield_now().await;
+            match std::fs::rename(&from_path, &to_path) {
+                Ok(()) => {
+                    self.attribute_state.rename(from, to);
+                    self.metadata_state.remove(from);
+                    self.metadata_state.record_modified(to);
+                    return Ok(());
+                }
+                Err(source) if source.kind() == ErrorKind::NotFound => {
+                    if from_path.exists() {
+                        create_parent_dirs(&to_path, source)?;
+                    } else {
+                        return Err(not_found_error(&from_path, source));
+                    }
+                }
+                Err(source) => return Err(generic_error(source)),
+            }
+        }
     }
 }
 
@@ -1023,7 +1051,8 @@ mod tests {
 
     use futures::TryStreamExt;
     use object_store::{
-        Attribute, AttributeValue, Attributes, GetResultPayload, PutMultipartOptions, PutOptions,
+        Attribute, AttributeValue, Attributes, GetResultPayload, ObjectStoreExt,
+        PutMultipartOptions, PutOptions,
     };
     use slatedb_common::clock::SystemClock;
     use slatedb_common::MockSystemClock;

@@ -11,8 +11,8 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use parking_lot::RwLock;
 use slatedb_common::clock::SystemClock;
@@ -85,10 +85,6 @@ impl ObjectStore for ClockedObjectStore {
         Ok(result)
     }
 
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        Ok(self.with_recorded_times(self.inner.head(location).await?))
-    }
-
     async fn put_opts(
         &self,
         location: &Path,
@@ -100,14 +96,6 @@ impl ObjectStore for ClockedObjectStore {
         Ok(result)
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.record_modified(location);
-        self.inner.put_multipart(location).await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -117,10 +105,20 @@ impl ObjectStore for ClockedObjectStore {
         self.inner.put_multipart_opts(location, opts).await
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        self.inner.delete(location).await?;
-        self.remove(location);
-        Ok(())
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let times = Arc::clone(&self.times);
+        self.inner
+            .delete_stream(locations)
+            .map(move |result| {
+                if let Ok(ref loc) = result {
+                    times.write().remove(loc);
+                }
+                result
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -176,8 +174,13 @@ impl ObjectStore for ClockedObjectStore {
         Ok(result)
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy(from, to).await?;
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await?;
         self.record_modified(to);
         self.times
             .write()
@@ -186,25 +189,13 @@ impl ObjectStore for ClockedObjectStore {
         Ok(())
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.rename(from, to).await?;
-        self.remove(from);
-        self.record_modified(to);
-        Ok(())
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await?;
-        self.record_modified(to);
-        self.times
-            .write()
-            .entry(from.clone())
-            .or_insert_with(|| self.clock.now());
-        Ok(())
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.rename_if_not_exists(from, to).await?;
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        self.inner.rename_opts(from, to, options).await?;
         self.remove(from);
         self.record_modified(to);
         Ok(())

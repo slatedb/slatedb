@@ -1,6 +1,7 @@
 disallowed-types   = [
     # Safety checks to keep SlateDB safe for deterministic simulation testing (DST)
-    { path = "rand::rngs::OsRng", reason = "Use crate::rand::DbRand instead" },
+    # OsRng is allow-invalid because rand 0.10 (transitive via object_store 0.13) no longer re-exports it at this path
+    { path = "rand::rngs::OsRng", reason = "Use crate::rand::DbRand instead", allow-invalid = true },
     { path = "rand::rngs::ThreadRng", reason = "Use crate::rand::DbRand instead" },
     { path = "rand::rngs::StdRng", reason = "Use crate::rand::DbRand instead" },
     { path = "rand::rngs::SmallRng", reason = "Use crate::rand::DbRand instead" },
@@ -46,7 +47,8 @@ disallowed-types   = [
 disallowed-methods = [
     # Safety checks to keep SlateDB safe for deterministic simulation testing (DST)
     { path = "rand::random", reason = "Use crate::rand::DbRand instead" },
-    { path = "rand::thread_rng", reason = "Use crate::rand::DbRand instead" },
+    # thread_rng is allow-invalid because rand 0.10 (transitive via object_store 0.13) no longer re-exports it at this path
+    { path = "rand::thread_rng", reason = "Use crate::rand::DbRand instead", allow-invalid = true },
     # prelude versions are allow-invalid since they may not be in scope
     { path = "rand::prelude::random", reason = "Use crate::rand::DbRand instead", allow-invalid = true  },
     { path = "rand::prelude::thread_rng", reason = "Use crate::rand::DbRand instead", allow-invalid = true  },

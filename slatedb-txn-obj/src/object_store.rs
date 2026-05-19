@@ -9,7 +9,7 @@ use log::{debug, error, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{
-    Error, GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
+    Error, GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
 use parking_lot::Mutex;
 use std::collections::Bound;
@@ -68,7 +68,7 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
         Self {
             object_store: Box::new(::object_store::prefix::PrefixStore::new(
                 object_store,
-                root_path.child(subdir),
+                root_path.clone().join(subdir),
             )),
             codec,
             file_suffix,
@@ -119,7 +119,7 @@ impl ObjectStoreBoundaryObject {
         Self {
             object_store: Box::new(::object_store::prefix::PrefixStore::new(
                 object_store,
-                root_path.child("gc"),
+                root_path.clone().join("gc"),
             )),
             filepath: Path::from(format!("{name}.boundary")),
             cache: Mutex::new(None),
@@ -445,9 +445,9 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{
-        Error as ObjectStoreError, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-        ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-        Result as ObjectStoreResult, UpdateVersion,
+        CopyOptions, Error as ObjectStoreError, GetOptions, GetResult, ListResult, MultipartUpload,
+        ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload,
+        PutResult, Result as ObjectStoreResult, UpdateVersion,
     };
     use std::collections::Bound::{Excluded, Included, Unbounded};
     use std::fmt;
@@ -523,8 +523,11 @@ mod tests {
             self.inner.get_opts(location, options).await
         }
 
-        async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
-            self.inner.delete(location).await
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, ObjectStoreResult<Path>>,
+        ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+            self.inner.delete_stream(locations)
         }
 
         fn list(
@@ -554,12 +557,13 @@ mod tests {
             self.inner.list_with_delimiter(prefix).await
         }
 
-        async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy_if_not_exists(from, to).await
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> ObjectStoreResult<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 
@@ -647,8 +651,11 @@ mod tests {
             self.inner.get_opts(location, options).await
         }
 
-        async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
-            self.inner.delete(location).await
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, ObjectStoreResult<Path>>,
+        ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+            self.inner.delete_stream(locations)
         }
 
         fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
@@ -662,12 +669,13 @@ mod tests {
             self.inner.list_with_delimiter(prefix).await
         }
 
-        async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-            self.inner.copy_if_not_exists(from, to).await
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> ObjectStoreResult<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 
