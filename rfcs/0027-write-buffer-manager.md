@@ -61,24 +61,14 @@ the database state.
 SlateDB's existing backpressure mechanism does a good job of keeping memory
 usage in check under most workloads: it polls the aggregate size of WAL +
 immutable memtables against `max_unflushed_bytes` and stalls writers when the
-threshold is exceeded. As write concurrency and burst intensity grow, there are
-two areas where a tighter feedback loop would help:
-
-1. **Reservation before writing.** Today the check is a point-in-time snapshot
-   of memory already consumed. Between the check passing and the write landing
-   in the memtable, concurrent writers can collectively overshoot the intended
-   budget. A proactive reservation step would let us bound memory *before* the
-   write is dispatched.
-
-2. **Release tied to flush.** The budget is recalculated by re-reading live
-   memtable and WAL buffer sizes. Adding a direct signal that releases tracked
-   memory at the exact moment a memtable is flushed to L0 would make the
-   feedback loop tighter and more responsive.
+threshold is exceeded. Today the check is a point-in-time snapshot
+of memory already consumed. Between the check passing and the write landing
+in the memtable, concurrent writers can collectively overshoot the intended
+budget. A proactive reservation step would let us bound memory *before* the
+write is dispatched.
 
 Separately, the current backpressure check reads the database state under a lock
-to aggregate sizes. This works well today, but extending the same approach to
-additional resource pools (SST block cache memory, WAL buffer memory) would mean
-more work under that lock. A lock-free tracking primitive would scale more
+to aggregate sizes. A lock-free tracking primitive would scale more
 naturally as we add new pools.
 
 The `WriteBufferManager` addresses these opportunities by:
@@ -100,7 +90,6 @@ The `WriteBufferManager` addresses these opportunities by:
   drop.
 - Complement (not replace) the existing `max_unflushed_bytes` backpressure.
 - Avoid locking the database state for budget tracking.
-- Support WAL replay without deadlocking.
 - Allow callers to share a budget across multiple DB instances or inject a
   custom size via the builder API.
 - (Phase 2) Establish a pattern that can be reused for SST and WAL capacity
@@ -113,7 +102,7 @@ The `WriteBufferManager` addresses these opportunities by:
 - Providing per-writer or per-key granularity on budget allocation.
 - Guaranteeing exact byte-level accounting (estimates are conservative
   approximations).
-- (Phase 2) Full implementation of SST/WAL tracking — this RFC only outlines
+- (Phase 2) Per instance tracking — this RFC only outlines
   the direction.
 
 ## Design
@@ -144,14 +133,21 @@ requiring the reservation to fit within remaining headroom. A custom
 `ByteBudgetSemaphore` gives us full control over this soft-cap behavior, which
 `tokio::sync::Semaphore` does not support.
 
-The semaphore supports one acquisition mode:
+The semaphore exposes two operations:
 
-- **`acquire(num_bytes)`** — async, spins on a CAS loop. When `allocated_bytes
-  >= capacity`, the caller awaits a `Notify` signal that fires when any permit
-  is released. On success, `allocated_bytes` is incremented by `num_bytes`.
+```slatedb/src/write_buffer_manager.rs#L1-L10
+impl ByteBudgetSemaphore {
+    fn new(capacity: usize) -> Self;
+    async fn acquire(&self, num_bytes: usize);
+    fn release(&self, num_bytes: usize);
+}
+```
 
-Release subtracts `num_bytes` from `allocated_bytes` via CAS and notifies
-waiters if the budget drops below capacity.
+- **`acquire`** — spins on a CAS loop. When `allocated_bytes >= capacity`, the
+  caller awaits a `Notify` signal that fires when any permit is released. On
+  success, `allocated_bytes` is incremented by `num_bytes`.
+- **`release`** — subtracts `num_bytes` from `allocated_bytes` via CAS and
+  notifies waiters if the budget drops below capacity.
 
 #### WriteBufferManager
 
@@ -167,10 +163,17 @@ pub struct WriteBufferManager {
 
 Methods:
 
-| Method | Blocking | Description |
-|--------|----------|-------------|
-| `acquire(num_bytes)` | async | Reserves bytes, blocks until budget available |
-| `available()` | no | Returns unreserved bytes remaining |
+```slatedb/src/write_buffer_manager.rs#L11-L20
+impl WriteBufferManager {
+    pub fn new(capacity: usize) -> Self;
+    pub async fn acquire(&self, num_bytes: usize) -> WriteBufferPermit;
+    pub fn available(&self) -> usize;
+}
+```
+
+- **`acquire`** — blocks (async) until `allocated_bytes < capacity`, then
+  atomically increments `allocated_bytes` by `num_bytes` and returns a permit.
+- **`available`** — returns `capacity - allocated_bytes` (saturating).
 
 #### WriteBufferPermit
 
@@ -181,6 +184,15 @@ be consolidated via `merge()` to combine reservations into a single guard.
 pub struct WriteBufferPermit {
     semaphore: Arc<ByteBudgetSemaphore>,
     reserved_bytes: AtomicUsize,
+}
+
+impl WriteBufferPermit {
+    pub fn merge(&self, other: &WriteBufferPermit);
+    pub fn size(&self) -> usize;
+}
+
+impl Drop for WriteBufferPermit {
+    fn drop(&mut self); // calls semaphore.release(reserved_bytes)
 }
 ```
 
