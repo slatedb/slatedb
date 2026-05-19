@@ -86,6 +86,13 @@ impl GcTask for CompactionsGcTask {
         // Delete compactions files older than min_age
         for compactions_metadata in compactions_metadata_list {
             if utc_now.signed_duration_since(compactions_metadata.last_modified) > min_age {
+                if self.compactions_options.dry_run {
+                    log::info!(
+                        "dry run: would delete compactions but skipped [id={:?}]",
+                        compactions_metadata.id
+                    );
+                    continue;
+                }
                 if let Err(e) = self
                     .compactions_store
                     .delete_compactions(compactions_metadata.id)
@@ -144,6 +151,7 @@ mod tests {
             GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(1),
                 interval: None,
+                dry_run: false,
             },
         );
         task.collect(Utc::now() + TimeDelta::hours(1))

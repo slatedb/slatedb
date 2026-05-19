@@ -82,6 +82,13 @@ impl GcTask for ManifestGcTask {
             if !is_active
                 && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
             {
+                if self.manifest_options.dry_run {
+                    log::info!(
+                        "dry run: would delete manifest but skipped [id={:?}]",
+                        manifest_metadata.id
+                    );
+                    continue;
+                }
                 if let Err(e) = self
                     .manifest_store
                     .delete_manifest(manifest_metadata.id)
@@ -148,6 +155,7 @@ mod tests {
             GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(1),
                 interval: None,
+                dry_run: false,
             },
         );
         task.collect(Utc::now() + TimeDelta::hours(1))

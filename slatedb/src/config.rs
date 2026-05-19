@@ -1294,6 +1294,7 @@ impl Default for GarbageCollectorDirectoryOptions {
         Self {
             interval: Some(DEFAULT_INTERVAL),
             min_age: DEFAULT_MIN_AGE,
+            dry_run: false,
         }
     }
 }
@@ -1315,6 +1316,10 @@ pub struct GarbageCollectorDirectoryOptions {
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub min_age: Duration,
+
+    /// If true, log files that would be deleted without deleting them.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// Schedule options for a GC task that has no file-age threshold.

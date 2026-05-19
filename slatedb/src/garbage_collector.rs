@@ -1068,6 +1068,7 @@ mod tests {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: None,
@@ -1132,6 +1133,7 @@ mod tests {
             wal_fence_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             compacted_options: None,
             compactions_options: None,
@@ -1194,6 +1196,7 @@ mod tests {
             wal_fence_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             compacted_options: None,
             compactions_options: None,
@@ -1264,10 +1267,12 @@ mod tests {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             wal_fence_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             compacted_options: None,
             compactions_options: None,
@@ -1703,19 +1708,23 @@ mod tests {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             detach_options: None,
         };
@@ -1772,19 +1781,23 @@ mod tests {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             detach_options: None,
         };
@@ -1841,15 +1854,18 @@ mod tests {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
+                dry_run: false,
             }),
             detach_options: None,
         };
@@ -1885,15 +1901,18 @@ mod tests {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(11)),
+                dry_run: false,
             }),
             wal_fence_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(13)),
+                dry_run: false,
             }),
             compacted_options: None,
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(17)),
+                dry_run: false,
             }),
             detach_options: None,
         };
@@ -1932,19 +1951,23 @@ mod tests {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
+                dry_run: false,
             }),
             wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
+                dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
+                dry_run: false,
             }),
             compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
+                dry_run: false,
             }),
             detach_options: None,
         };
@@ -2191,6 +2214,144 @@ mod tests {
                 &[("resource", "compactions")]
             ),
             Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_skips_directory_gc_deletes() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+        let now = DefaultSystemClock::default().now();
+        let expired_ms = (now - TimeDelta::seconds(7200)).timestamp_millis() as u64;
+        let unexpired_ms = (now - TimeDelta::seconds(1800)).timestamp_millis() as u64;
+
+        let old_wal_id = SsTableId::Wal(1);
+        write_sst(table_store.clone(), &old_wal_id).await.unwrap();
+        let recent_wal_id = SsTableId::Wal(2);
+        write_sst(table_store.clone(), &recent_wal_id)
+            .await
+            .unwrap();
+        let old_fence_id = SsTableId::Wal(3);
+        table_store.write_wal_fence(3).await.unwrap();
+
+        set_modified(
+            local_object_store.clone(),
+            &path_resolver.table_path(&old_wal_id),
+            86400,
+        );
+        set_modified(
+            local_object_store.clone(),
+            &path_resolver.table_path(&old_fence_id),
+            86400,
+        );
+
+        let inactive_expired_handle = create_sst(table_store.clone(), expired_ms).await;
+        let active_l0_handle = create_sst(table_store.clone(), unexpired_ms).await;
+
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = 4;
+        state.next_wal_sst_id = 5;
+        state
+            .tree
+            .l0
+            .push_back(SsTableView::identity(active_l0_handle));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("manifest/{:020}.manifest", 1)),
+            86400,
+        );
+
+        let mut stored_compactions = StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+        let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
+        compactions_dirty.value.insert(Compaction::new(
+            ulid::Ulid::from_parts(now.timestamp_millis() as u64, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        ));
+        stored_compactions.update(compactions_dirty).await.unwrap();
+
+        let compaction_ids = compactions_store
+            .list_compactions(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id)
+            .collect::<Vec<_>>();
+        for id in &compaction_ids {
+            set_modified(
+                local_object_store.clone(),
+                &Path::from(format!("compactions/{id:020}.compactions")),
+                86400,
+            );
+        }
+
+        let dry_run_options = GarbageCollectorDirectoryOptions {
+            min_age: Duration::from_secs(3600),
+            interval: None,
+            dry_run: true,
+        };
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: Some(dry_run_options),
+            wal_options: Some(dry_run_options),
+            wal_fence_options: Some(dry_run_options),
+            compacted_options: Some(dry_run_options),
+            compactions_options: Some(dry_run_options),
+            detach_options: None,
+        };
+        let recorder = MetricsRecorderHelper::noop();
+        let gc = GarbageCollector::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
+            gc_opts,
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+        );
+
+        gc.run_gc_once().await;
+
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+
+        let wal_ids = table_store
+            .list_wal_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id)
+            .collect::<HashSet<_>>();
+        assert!(wal_ids.contains(&old_wal_id));
+        assert!(wal_ids.contains(&recent_wal_id));
+        assert!(wal_ids.contains(&old_fence_id));
+
+        let compacted_ids = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id)
+            .collect::<HashSet<_>>();
+        assert!(compacted_ids.contains(&inactive_expired_handle.id));
+
+        assert_eq!(
+            compactions_store.list_compactions(..).await.unwrap().len(),
+            compaction_ids.len()
         );
     }
 }

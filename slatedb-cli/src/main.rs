@@ -247,6 +247,7 @@ async fn exec_gc_once(
         Some(GarbageCollectorDirectoryOptions {
             interval: None,
             min_age,
+            dry_run: false,
         })
     }
     let gc_opts = match resource {
@@ -307,6 +308,7 @@ async fn schedule_gc(
         Some(GarbageCollectorDirectoryOptions {
             interval: Some(schedule.period),
             min_age: schedule.min_age,
+            dry_run: false,
         })
     }
     let gc_opts = GarbageCollectorOptions {

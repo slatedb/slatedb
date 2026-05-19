@@ -219,6 +219,10 @@ impl GcTask for CompactedGcTask {
             .collect::<Vec<_>>();
 
         for id in sst_ids_to_delete {
+            if self.compacted_options.dry_run {
+                log::info!("dry run: would delete SST but skipped [id={:?}]", id);
+                continue;
+            }
             log::info!("deleting SST [id={:?}]", id);
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting SST [id={:?}, error={}]", id, e);
@@ -333,6 +337,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(5),
+            dry_run: false,
         };
         let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
@@ -440,6 +445,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(0),
+            dry_run: false,
         };
         let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
@@ -542,6 +548,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(0),
+            dry_run: false,
         };
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let stats = Arc::new(GcStats::new(&recorder));
@@ -637,6 +644,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(2),
+            dry_run: false,
         };
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let stats = Arc::new(GcStats::new(&recorder));

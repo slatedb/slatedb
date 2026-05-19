@@ -122,6 +122,14 @@ impl GcTask for WalGcTask {
             .collect::<Vec<_>>();
 
         for id in sst_ids_to_delete {
+            if self.wal_options.dry_run {
+                log::info!(
+                    "dry run: would delete {} but skipped [id={:?}]",
+                    self.resource(),
+                    id
+                );
+                continue;
+            }
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting WAL SST [id={:?}, error={}]", id, e);
             } else {
