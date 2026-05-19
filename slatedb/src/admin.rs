@@ -751,7 +751,7 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// |--------------|-----|----------|
 /// | OPENDAL_SCHEME | The OpenDAL scheme to use | Yes |
 /// | OPENDAL_* | The OpenDAL configuration | Yes |
-/// full list of schemes: https://docs.rs/opendal/latest/opendal/enum.Scheme.html
+/// full list of schemes: https://docs.rs/opendal/latest/opendal/services/index.html
 /// for example, to use s3-compatible storage, you can set:
 /// ```bash
 /// OPENDAL_SCHEME=s3
@@ -775,32 +775,26 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// full list of config: https://docs.rs/opendal/latest/opendal/services/oss/config/struct.OssConfig.html
 #[cfg(feature = "opendal")]
 pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    use opendal::{Operator, Scheme};
+    use opendal::Operator;
     use std::collections::HashMap;
-    use std::str::FromStr;
 
     let scheme_value = get_env_variable("OPENDAL_SCHEME")?;
-    let scheme =
-        Scheme::from_str(&scheme_value).map_err(|_| SlateDBError::InvalidEnvironmentVariable {
-            key: "OPENDAL_SCHEME".to_string(),
-            value: Some(scheme_value.clone()),
-        })?;
-    if !Scheme::enabled().contains(&scheme) {
-        return Err(SlateDBError::InvalidEnvironmentVariable {
-            key: "OPENDAL_SCHEME".to_string(),
-            value: Some(scheme_value),
-        }
-        .into());
-    }
     let iter = env::vars()
         .filter_map(|(k, v)| k.strip_prefix("OPENDAL_").map(|k| (k.to_lowercase(), v)))
         .collect::<HashMap<String, String>>();
 
-    let op = Operator::via_iter(scheme, iter).map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
-            store: "OpenDAL",
-            source: Box::new(error),
-        }))
+    let op = Operator::via_iter(&scheme_value, iter).map_err(|error| {
+        if error.kind() == opendal::ErrorKind::Unsupported {
+            SlateDBError::InvalidEnvironmentVariable {
+                key: "OPENDAL_SCHEME".to_string(),
+                value: Some(scheme_value.clone()),
+            }
+        } else {
+            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+                store: "OpenDAL",
+                source: Box::new(error),
+            }))
+        }
     })?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }

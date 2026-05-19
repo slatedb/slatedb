@@ -13,6 +13,7 @@ use futures::TryStreamExt;
 use object_store::path::Path;
 use object_store::Error as ObjectStoreError;
 use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
 use object_store::PutPayload;
 use object_store::PutResult;
 use slatedb::admin;
@@ -198,7 +199,7 @@ async fn create_cleanup_lock(
         });
     }
 
-    let temp_path = path.child(CLEANUP_NAME);
+    let temp_path = path.clone().join(CLEANUP_NAME);
     info!("creating cleanup lock file [path={}]", temp_path);
     object_store
         .put(
@@ -213,7 +214,7 @@ async fn cleanup_data(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let temp_path = path.child(CLEANUP_NAME);
+    let temp_path = path.clone().join(CLEANUP_NAME);
     if object_store.head(&temp_path).await.is_ok() {
         info!("cleaning up test data [path={}]", path);
         if let Err(e) = delete_objects_with_prefix(object_store.clone(), Some(path)).await {
