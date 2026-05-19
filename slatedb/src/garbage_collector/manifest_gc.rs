@@ -85,7 +85,7 @@ impl GcTask for ManifestGcTask {
                     && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
             })
             .collect::<Vec<_>>();
-        if self.manifest_options.dry_run {
+        if self.manifest_options.dry_run && !manifests_to_delete.is_empty() {
             log::info!(
                 "dry run: skipping manifest deletion [count={}]",
                 manifests_to_delete.len()

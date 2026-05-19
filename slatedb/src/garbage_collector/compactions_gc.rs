@@ -90,7 +90,7 @@ impl GcTask for CompactionsGcTask {
                 utc_now.signed_duration_since(compactions_metadata.last_modified) > min_age
             })
             .collect::<Vec<_>>();
-        if self.compactions_options.dry_run {
+        if self.compactions_options.dry_run && !compactions_to_delete.is_empty() {
             log::info!(
                 "dry run: skipping compactions deletion [count={}]",
                 compactions_to_delete.len()
