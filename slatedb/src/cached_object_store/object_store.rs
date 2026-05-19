@@ -4,7 +4,7 @@ use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
 use crate::rand::DbRand;
 use bytes::{Bytes, BytesMut};
-use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use futures::{stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
 use object_store::{
     Attributes, CopyOptions, GetRange, GetResultPayload, PutMultipartOptions, PutResult,
@@ -353,10 +353,13 @@ impl CachedObjectStore {
         if self.admission_picker.pick(entry.as_ref()).admitted() {
             // Convert PutPayload to stream and save parts to cache.
             // Note: cached_head() already saved the head, so we only need to save parts
+            let payload_len = payload.content_length() as u64;
             let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
 
             // Save parts only, ignoring errors (cache failures shouldn't fail the PUT operation)
-            self.save_parts_stream(entry, stream, 0).await.ok();
+            self.save_parts_stream(entry.as_ref(), stream, 0, 0..payload_len)
+                .await
+                .ok();
         }
 
         Ok(result)
@@ -421,11 +424,9 @@ impl CachedObjectStore {
     /// aligned with the part size.
     async fn save_get_result(&self, result: GetResult) -> object_store::Result<u64> {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
-        assert!(result.range.start.is_multiple_of(part_size_bytes_u64));
-        assert!(
-            result.range.end.is_multiple_of(part_size_bytes_u64)
-                || result.range.end == result.meta.size
-        );
+        let range = result.range.clone();
+        assert!(range.start.is_multiple_of(part_size_bytes_u64));
+        assert!(range.end.is_multiple_of(part_size_bytes_u64) || range.end == result.meta.size);
 
         let entry = self
             .cache_storage
@@ -435,13 +436,24 @@ impl CachedObjectStore {
         if self.admission_picker.pick(entry.as_ref()).admitted() {
             entry.save_head((&result.meta, &result.attributes)).await?;
 
-            let start_part_number = usize::try_from(result.range.start / part_size_bytes_u64)
-                .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
+            let start_part_number = usize::try_from(range.start / part_size_bytes_u64)
+                .expect("Part number exceeds usize on this system. Try increasing part size.");
 
             let stream = result.into_stream();
 
-            self.save_parts_stream(entry, stream, start_part_number)
-                .await?;
+            if let Err(e) = self
+                .save_parts_stream(entry.as_ref(), stream, start_part_number, range.clone())
+                .await
+            {
+                // Clean up any parts that were written before the error
+                let end_part_number =
+                    usize::try_from((range.end + part_size_bytes_u64 - 1) / part_size_bytes_u64)
+                        .unwrap_or(start_part_number);
+                for part_number in start_part_number..end_part_number {
+                    let _ = entry.delete_part(part_number).await;
+                }
+                return Err(e);
+            }
         }
 
         Ok(object_size)
@@ -452,9 +464,10 @@ impl CachedObjectStore {
     /// This method only saves the data parts - the head should be saved separately.
     async fn save_parts_stream<S>(
         &self,
-        entry: Box<dyn LocalCacheEntry>,
+        entry: &dyn LocalCacheEntry,
         mut stream: S,
         start_part_number: usize,
+        range: Range<u64>,
     ) -> object_store::Result<usize>
     where
         S: stream::Stream<Item = Result<Bytes, object_store::Error>> + Unpin,
@@ -463,9 +476,23 @@ impl CachedObjectStore {
         let mut part_number = start_part_number;
         let mut total_bytes: usize = 0;
 
+        let range_len = (range.end - range.start) as usize;
+
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             total_bytes += chunk.len();
+
+            if total_bytes > range_len {
+                return Err(object_store::Error::Generic {
+                    store: "cached_object_store",
+                    source: format!(
+                        "Stream exceeded range bounds: {} bytes read, but range is {}..{} ({} bytes)",
+                        total_bytes, range.start, range.end, range_len
+                    )
+                    .into(),
+                });
+            }
+
             buffer.extend_from_slice(&chunk);
 
             while buffer.len() >= self.part_size_bytes {
