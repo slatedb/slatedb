@@ -5989,14 +5989,13 @@ mod tests {
         );
 
         // and: the manifest now contains the output SR
-        let manifest = fixture
-            .manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap();
+        let manifest = fixture.manifest_store.read_latest_manifest().await.unwrap();
         let core = manifest.core();
         let sr = core.tree.compacted.iter().find(|sr| sr.id == destination);
-        assert!(sr.is_some(), "output SR {destination} not found in manifest");
+        assert!(
+            sr.is_some(),
+            "output SR {destination} not found in manifest"
+        );
         assert_eq!(
             sr.unwrap().sst_views.first().unwrap().sst.id,
             output_sst.id,
