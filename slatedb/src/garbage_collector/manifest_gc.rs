@@ -113,7 +113,7 @@ mod tests {
         ManifestCore,
     };
     use chrono::TimeDelta;
-    use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use object_store::{memory::InMemory, path::Path, ObjectStoreExt};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
     use std::time::Duration;

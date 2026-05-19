@@ -240,6 +240,7 @@ mod tests {
     use crate::types::ValueDeletable;
     use crate::Db;
     use object_store::memory::InMemory;
+    use object_store::ObjectStoreExt;
 
     fn has_not_found_object_store_source(err: &crate::Error) -> bool {
         err.source()
