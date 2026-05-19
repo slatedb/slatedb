@@ -868,13 +868,6 @@ impl Gate {
 /// Each ObjectStore method has its own [`Gate`] that can be independently closed,
 /// released, and configured to inject errors. Gates default to **open** (pass-through).
 ///
-/// Note: object_store 0.13 turned `delete` and `put_multipart` into convenience
-/// methods on `ObjectStoreExt` (routed through `delete_stream` and
-/// `put_multipart_opts`). Per-stream-item gating is not supported by this
-/// harness, so there is no `delete_gate` or `put_multipart_gate`; use
-/// `put_multipart_opts_gate` for multipart uploads and rely on the inner store
-/// for delete sequencing.
-///
 /// # Usage pattern (mirrors `single_flight.rs` tests)
 /// ```ignore
 /// let inner = Arc::new(InMemory::new());
@@ -900,10 +893,6 @@ impl Gate {
 pub(crate) struct GatedObjectStore {
     inner: Arc<dyn ObjectStore>,
     pub(crate) get_opts_gate: Gate,
-    // Retained for source compatibility with tests written before
-    // object_store 0.13 split head() into ObjectStoreExt; head traffic now
-    // flows through get_opts_gate.
-    #[allow(dead_code)]
     pub(crate) head_gate: Gate,
     pub(crate) put_opts_gate: Gate,
     pub(crate) put_multipart_opts_gate: Gate,
@@ -938,11 +927,11 @@ impl ObjectStore for GatedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
-        // object_store 0.13 routes head() through get_opts(head: true) via
-        // ObjectStoreExt, so all read traffic now passes through this single
-        // gate. The pre-0.13 head_gate is retained for source compatibility
-        // but no longer receives traffic.
-        self.get_opts_gate.wait().await?;
+        if options.head {
+            self.head_gate.wait().await?;
+        } else {
+            self.get_opts_gate.wait().await?;
+        }
         self.inner.get_opts(location, options).await
     }
 

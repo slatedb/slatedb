@@ -1662,7 +1662,7 @@ mod tests {
 
         // Wrap with a gate-controlled store so we can block callers deterministically.
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch many concurrent head requests for the same path.
@@ -1674,16 +1674,16 @@ mod tests {
         }
 
         // Wait until exactly 1 caller arrives at the gate (SingleFlight dedup
-        // ensures only one caller reaches get_opts).
-        gated.get_opts_gate.wait_for_arrivals(1).await;
+        // ensures only one caller reaches the head gate).
+        gated.head_gate.wait_for_arrivals(1).await;
         assert_eq!(
-            gated.get_opts_gate.arrivals(),
+            gated.head_gate.arrivals(),
             1,
             "SingleFlight should let only 1 through"
         );
 
         // Release the gate — success path.
-        gated.get_opts_gate.release();
+        gated.head_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1763,7 +1763,7 @@ mod tests {
         }
 
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         let mut handles = Vec::new();
@@ -1774,15 +1774,15 @@ mod tests {
         }
 
         // Each distinct path has its own SingleFlight key, so all 5 should arrive.
-        gated.get_opts_gate.wait_for_arrivals(5).await;
+        gated.head_gate.wait_for_arrivals(5).await;
         assert_eq!(
-            gated.get_opts_gate.arrivals(),
+            gated.head_gate.arrivals(),
             5,
             "different keys should each pass through SingleFlight independently"
         );
 
         // Release all.
-        gated.get_opts_gate.release();
+        gated.head_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
@@ -1863,7 +1863,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (_, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch concurrent head requests.
@@ -1875,19 +1875,17 @@ mod tests {
         }
 
         // Wait for the single winning caller to arrive at the gate.
-        gated.get_opts_gate.wait_for_arrivals(1).await;
+        gated.head_gate.wait_for_arrivals(1).await;
 
         // Inject failure, then release.
-        gated
-            .get_opts_gate
-            .set_error(|| object_store::Error::Generic {
-                store: "test",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "injected test failure",
-                )),
-            });
-        gated.get_opts_gate.release();
+        gated.head_gate.set_error(|| object_store::Error::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected test failure",
+            )),
+        });
+        gated.head_gate.release();
 
         // All callers should see an error.
         for handle in handles {
@@ -1907,7 +1905,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (_, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // First call — configure failure.
@@ -1915,29 +1913,27 @@ mod tests {
         let p = path.clone();
         let handle = tokio::spawn(async move { store.cached_head(&p).await });
 
-        gated.get_opts_gate.wait_for_arrivals(1).await;
-        gated
-            .get_opts_gate
-            .set_error(|| object_store::Error::Generic {
-                store: "test",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "injected test failure",
-                )),
-            });
-        gated.get_opts_gate.release();
+        gated.head_gate.wait_for_arrivals(1).await;
+        gated.head_gate.set_error(|| object_store::Error::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected test failure",
+            )),
+        });
+        gated.head_gate.release();
 
         let result = handle.await.unwrap();
         assert!(result.is_err(), "first call should fail");
 
         // Second call — configure success.
-        gated.get_opts_gate.clear_error();
+        gated.head_gate.clear_error();
         let store = cached_store.clone();
         let p = path.clone();
         let handle = tokio::spawn(async move { store.cached_head(&p).await });
 
-        gated.get_opts_gate.wait_for_arrivals(2).await;
-        gated.get_opts_gate.release();
+        gated.head_gate.wait_for_arrivals(2).await;
+        gated.head_gate.release();
 
         let result = handle.await.unwrap();
         assert!(result.is_ok(), "second call should succeed after retry");
