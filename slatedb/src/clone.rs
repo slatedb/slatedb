@@ -16,7 +16,7 @@ use crate::utils::IdGenerator;
 use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use slatedb_common::clock::SystemClock;
 use std::ops::RangeBounds;
 use std::sync::Arc;

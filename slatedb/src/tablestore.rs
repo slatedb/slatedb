@@ -9,7 +9,7 @@ use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{ObjectStore, PutMode, PutOptions};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
@@ -833,7 +833,7 @@ mod tests {
     use bytes::Bytes;
     use futures::future;
     use futures::StreamExt;
-    use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
     use proptest::prelude::any;
     use proptest::proptest;
     use rstest::rstest;

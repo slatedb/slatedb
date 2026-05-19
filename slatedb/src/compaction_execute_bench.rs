@@ -8,7 +8,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::{error, info};
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
