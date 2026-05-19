@@ -127,6 +127,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether fetched blocks should be inserted into the block cache.
     pub cache_blocks: bool,
+    /// Timeout in milliseconds for the read. Defaults to no timeout.
+    #[uniffi(default = None)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl Default for ReadOptions {
@@ -135,6 +138,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            timeout_ms: None,
         }
     }
 }
@@ -263,12 +267,16 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
 pub struct WriteOptions {
     /// Whether the call waits for the write to become durable before returning.
     pub await_durable: bool,
+    /// Timeout in milliseconds for the write. Defaults to no timeout.
+    #[uniffi(default = None)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             await_durable: true,
+            timeout_ms: None,
         }
     }
 }

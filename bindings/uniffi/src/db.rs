@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::{
     FlushOptions, IsolationLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
@@ -54,12 +55,18 @@ impl Db {
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;
-        let options = options.into();
-        Ok(self
-            .inner
-            .get_with_options(key, &options)
-            .await?
-            .map(|value| value.to_vec()))
+        let timeout_ms = options.timeout_ms;
+        let read_options = options.into();
+        let fut = self.inner.get_with_options(key, &read_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("get timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(|value| value.to_vec()))
     }
 
     /// Reads the current row version for `key`, including metadata.
@@ -75,12 +82,18 @@ impl Db {
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
         validate_key(&key)?;
-        let options = options.into();
-        Ok(self
-            .inner
-            .get_key_value_with_options(key, &options)
-            .await?
-            .map(KeyValue::from))
+        let timeout_ms = options.timeout_ms;
+        let read_options = options.into();
+        let fut = self.inner.get_key_value_with_options(key, &read_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("get_key_value timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(KeyValue::from))
     }
 
     /// Scans rows inside `range`.
@@ -143,13 +156,21 @@ impl Db {
         write_options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &value)?;
+        let timeout_ms = write_options.timeout_ms;
         let put_options = put_options.into();
         let write_options = write_options.into();
-        Ok(self
+        let fut = self
             .inner
-            .put_with_options(key, value, &put_options, &write_options)
-            .await?
-            .into())
+            .put_with_options(key, value, &put_options, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("put timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Deletes `key` and returns metadata for the write.
@@ -165,8 +186,18 @@ impl Db {
         options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key(&key)?;
-        let options = options.into();
-        Ok(self.inner.delete_with_options(key, &options).await?.into())
+        let timeout_ms = options.timeout_ms;
+        let write_options = options.into();
+        let fut = self.inner.delete_with_options(key, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("delete timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Appends a merge operand for `key` and returns metadata for the write.
@@ -184,13 +215,21 @@ impl Db {
         write_options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &operand)?;
+        let timeout_ms = write_options.timeout_ms;
         let merge_options = merge_options.into();
         let write_options = write_options.into();
-        Ok(self
+        let fut = self
             .inner
-            .merge_with_options(key, operand, &merge_options, &write_options)
-            .await?
-            .into())
+            .merge_with_options(key, operand, &merge_options, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("merge timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Applies all operations in `batch` atomically.
@@ -210,8 +249,18 @@ impl Db {
         options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         let batch = batch.take_for_write()?;
-        let options = options.into();
-        Ok(self.inner.write_with_options(batch, &options).await?.into())
+        let timeout_ms = options.timeout_ms;
+        let write_options = options.into();
+        let fut = self.inner.write_with_options(batch, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("write timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Flushes the default storage layer.
