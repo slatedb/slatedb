@@ -694,9 +694,79 @@ impl CompactorEventHandler {
     async fn handle_ticker(&mut self) -> Result<(), SlateDBError> {
         if !self.is_executor_stopped() {
             self.state_writer.refresh().await?;
+            self.commit_compacted_entries().await?;
             self.maybe_schedule_compactions().await?;
             self.maybe_start_compactions().await?;
         }
+        Ok(())
+    }
+
+    /// Commits any compactions in the `Compacted` state to the manifest.
+    ///
+    /// `Compacted` is the distributed intermediate state written by a worker after it
+    /// finishes execution. The coordinator is solely responsible for transitioning
+    /// `Compacted → Completed` (or `Compacted → Failed`) by writing the manifest first
+    /// and then updating `.compactions`. See RFC-0025 §Manifest Commit Protocol.
+    ///
+    /// Recovery: on coordinator restart, `Compacted` entries are left intact in
+    /// `.compactions`. The first call to this method after startup retries the manifest
+    /// write. `validate_compaction` will fail if the sources are already absent (meaning
+    /// the manifest was written before the crash), in which case the entry is safely
+    /// marked `Failed`.
+    async fn commit_compacted_entries(&mut self) -> Result<(), SlateDBError> {
+        let compacted = self
+            .state()
+            .compactions_with_status(CompactionStatus::Compacted)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if compacted.is_empty() {
+            return Ok(());
+        }
+
+        let mut any_failed = false;
+        for compaction in compacted {
+            let id = compaction.id();
+            match self.validate_compaction(compaction.spec()) {
+                Ok(()) => {
+                    let destination = compaction
+                        .spec()
+                        .destination()
+                        .expect("Compacted tiered compaction must have a destination SR id");
+                    let output_sr = SortedRun {
+                        id: destination,
+                        sst_views: compaction
+                            .output_ssts()
+                            .iter()
+                            .map(|sst| SsTableView::identity(sst.clone()))
+                            .collect(),
+                    };
+                    self.state_mut().finish_compaction(id, output_sr);
+                    self.log_compaction_state();
+                    self.state_writer.write_state_safely().await?;
+                    self.stats
+                        .last_compaction_ts
+                        .set(self.system_clock.now().timestamp());
+                }
+                Err(_) => {
+                    // Sources are already absent from the manifest: the manifest write
+                    // completed before the last coordinator crash. Mark Failed so the
+                    // entry doesn't get retried on the next tick.
+                    info!(
+                        "compaction sources already absent from manifest, marking Failed [id={}]",
+                        id
+                    );
+                    self.state_mut()
+                        .update_compaction(&id, |c| c.set_status(CompactionStatus::Failed));
+                    any_failed = true;
+                }
+            }
+        }
+
+        if any_failed {
+            self.state_writer.write_compactions_safely().await?;
+        }
+
         Ok(())
     }
 
@@ -5853,5 +5923,134 @@ mod tests {
         fn is_stopped(&self) -> bool {
             false
         }
+    }
+
+    // Builds a fake output SsTableHandle with first_entry set so that
+    // SsTableView::identity can derive a non-empty effective range.
+    fn fake_output_sst() -> SsTableHandle {
+        SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"a")),
+                ..SsTableInfo::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn test_commit_compacted_entries_writes_manifest() {
+        // given: a handler with one L0 in the manifest
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        let db_state = fixture.handler.state().db_state().clone();
+        let sources: Vec<SourceId> = db_state
+            .tree
+            .l0
+            .iter()
+            .map(|view| SourceId::SstView(view.id))
+            .collect();
+        let destination = 0u32;
+        let spec = CompactionSpec::new(sources, destination);
+        let compaction_id = Ulid::new();
+        let output_sst = fake_output_sst();
+        let compaction = Compaction::new(compaction_id, spec)
+            .with_status(CompactionStatus::Compacted)
+            .with_output_ssts(vec![output_sst.clone()]);
+
+        // inject the Compacted compaction into state (bypassing the executor)
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(compaction);
+
+        // when: the coordinator observes and commits the Compacted entry
+        fixture
+            .handler
+            .commit_compacted_entries()
+            .await
+            .expect("commit_compacted_entries failed");
+
+        // then: the compaction is Completed in the stored compactions file
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Completed,
+        );
+
+        // and: the manifest now contains the output SR
+        let manifest = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        let core = manifest.core();
+        let sr = core.tree.compacted.iter().find(|sr| sr.id == destination);
+        assert!(sr.is_some(), "output SR {destination} not found in manifest");
+        assert_eq!(
+            sr.unwrap().sst_views.first().unwrap().sst.id,
+            output_sst.id,
+            "output SR does not contain expected SST"
+        );
+
+        // and: the L0 sources have been removed from the manifest
+        assert!(
+            core.tree.l0.is_empty(),
+            "L0 sources should have been removed after commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_compacted_entries_marks_failed_when_sources_absent() {
+        // given: a handler where the Compacted compaction references a source
+        // that no longer exists in the manifest (simulates a post-crash recovery
+        // where the manifest was already written before the coordinator crashed)
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        // Use a fake view ID that is not present in any L0
+        let ghost_view_id = Ulid::from_parts(u64::MAX, 0);
+        let spec = CompactionSpec::new(vec![SourceId::SstView(ghost_view_id)], 0);
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(compaction_id, spec)
+            .with_status(CompactionStatus::Compacted)
+            .with_output_ssts(vec![fake_output_sst()]);
+
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(compaction);
+
+        // when:
+        fixture
+            .handler
+            .commit_compacted_entries()
+            .await
+            .expect("commit_compacted_entries failed");
+
+        // then: the compaction is marked Failed (not retried)
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Failed,
+        );
     }
 }
