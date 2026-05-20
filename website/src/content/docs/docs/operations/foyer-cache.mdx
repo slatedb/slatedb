@@ -7,6 +7,19 @@ description: Configuration and tuning guide for SlateDB's FoyerHybridCache block
 block cache: a fast in-memory tier backed by a persistent disk tier. For background on how
 it fits into SlateDB's cache layers, see the [Caching](/docs/design/caching) design doc.
 
+## Upgrade note for existing disk caches
+
+SlateDB versions that used Foyer 0.18 wrote the disk tier with Foyer's older large-engine
+layout. Foyer 0.22 uses the block engine, and that engine cannot read all entries from the
+old on-disk layout. After upgrading, startup may log `foyer_storage` `coding error` messages
+while recovering the old cache directory.
+
+These errors are cache misses from SlateDB's point of view. SlateDB falls back to the object
+store, records the cache error in metrics, and reinserts accessed blocks into the new Foyer
+layout. A warm-up pass over the working set should therefore repopulate the cache, but expect
+extra object-store reads and recovery noise during that first pass. To avoid the startup
+noise, clear the Foyer disk cache directory as part of the upgrade and let SlateDB rebuild it.
+
 ## Disk write pipeline
 
 Two mechanisms control whether an in-memory entry reaches disk. Both need configuration for
