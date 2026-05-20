@@ -23,7 +23,7 @@
 pub use crate::db_status::DbStatus;
 
 use crate::db_cache_manager::{self, CacheTarget};
-use std::ops::RangeBounds;
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -296,12 +296,13 @@ impl DbInner {
 
     /// Fences all writers with an older epoch than the provided `manifest` by flushing
     /// an empty WAL file that acts as a barrier. Any parallel old writers will fail with
-    /// `SlateDBError::Fenced` when trying to "re-write" this file.
+    /// `SlateDBError::Fenced` when trying to "re-write" this file. Returns the range that must
+    /// be replayed to recover up to the current epoch
     async fn fence_writers(
         &self,
         manifest: &mut FenceableManifest,
         next_wal_id: u64,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<Range<u64>, SlateDBError> {
         let mut empty_wal_id = next_wal_id;
 
         loop {
@@ -328,7 +329,7 @@ impl DbInner {
                 // We need to make sure the fence write falls above this barrier so it's visible
                 // to all other active writers.
                 if empty_wal_id > replay_after_wal_id {
-                    return Ok(());
+                    return Ok(replay_after_wal_id + 1..empty_wal_id + 1);
                 } else {
                     // If we're behind the barrier, reset to the next WAL slot.
                     empty_wal_id = self
@@ -552,7 +553,7 @@ impl DbInner {
         }
     }
 
-    async fn replay_wal(&self) -> Result<(), SlateDBError> {
+    async fn replay_wal(&self, wal_id_range: Range<u64>) -> Result<(), SlateDBError> {
         // Tests use this fail point to pause replay so the writer that owns
         // this epoch can race with a newer writer's fence + replay.
         let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
@@ -583,7 +584,7 @@ impl DbInner {
 
         let db_state = self.state.read().state().core().clone();
         let mut replay_iter =
-            WalReplayIterator::new(&db_state, replay_options, Arc::clone(&self.table_store))
+            WalReplayIterator::range(wal_id_range, &db_state, replay_options, Arc::clone(&self.table_store))
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
