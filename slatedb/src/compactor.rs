@@ -5973,7 +5973,7 @@ mod tests {
             .await
             .expect("commit_compacted_entries failed");
 
-        // then: the compaction is Completed in the stored compactions file
+        // then: compaction is Completed, L0 sources removed, output SR added
         let stored = fixture
             .compactions_store
             .read_latest_compactions()
@@ -5987,25 +5987,62 @@ mod tests {
                 .status(),
             CompactionStatus::Completed,
         );
-
-        // and: the manifest now contains the output SR
         let manifest = fixture.manifest_store.read_latest_manifest().await.unwrap();
         let core = manifest.core();
+        assert!(core.tree.l0.is_empty(), "L0 sources should be removed");
         let sr = core.tree.compacted.iter().find(|sr| sr.id == destination);
         assert!(
             sr.is_some(),
             "output SR {destination} not found in manifest"
         );
-        assert_eq!(
-            sr.unwrap().sst_views.first().unwrap().sst.id,
-            output_sst.id,
-            "output SR does not contain expected SST"
-        );
+        assert_eq!(sr.unwrap().sst_views.first().unwrap().sst.id, output_sst.id);
 
-        // and: the L0 sources have been removed from the manifest
+        // given: a Compacted SR0→SR1 compaction to validate the SR source path removed when not in L0
+        let sr1_output_sst = fake_output_sst();
+        let sr_compaction_id = Ulid::new();
+        let sr_compaction = Compaction::new(
+            sr_compaction_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 1),
+        )
+        .with_status(CompactionStatus::Compacted)
+        .with_output_ssts(vec![sr1_output_sst.clone()]);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(sr_compaction);
+
+        // when:
+        fixture
+            .handler
+            .commit_compacted_entries()
+            .await
+            .expect("SR commit failed");
+
+        // then: SR 0 removed, SR 1 added with the correct SST
+        let manifest2 = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        let core2 = manifest2.core();
         assert!(
-            core.tree.l0.is_empty(),
-            "L0 sources should have been removed after commit"
+            core2.tree.compacted.iter().all(|sr| sr.id != 0),
+            "SR 0 should be removed after SR compaction"
+        );
+        let sr1 = core2.tree.compacted.iter().find(|sr| sr.id == 1);
+        assert!(sr1.is_some(), "SR 1 should exist");
+        assert_eq!(
+            sr1.unwrap().sst_views.first().unwrap().sst.id,
+            sr1_output_sst.id
+        );
+        let stored2 = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored2
+                .get(&sr_compaction_id)
+                .expect("missing SR compaction")
+                .status(),
+            CompactionStatus::Completed,
         );
     }
 
