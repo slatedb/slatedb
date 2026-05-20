@@ -27,9 +27,9 @@ impl ByteBufferManager {
     /// Reserves `num_bytes` from the write-buffer budget, blocking until
     /// capacity is available. Returns a permit that releases the reservation
     /// on drop.
-    pub async fn acquire(&self, num_bytes: usize) -> BufferPermit {
+    pub async fn acquire(&self, num_bytes: usize) -> ByteBufferPermit {
         if num_bytes == 0 {
-            return BufferPermit {
+            return ByteBufferPermit {
                 reserved_bytes: AtomicUsize::new(0),
                 semaphore: Arc::clone(&self.inner),
             };
@@ -45,9 +45,9 @@ impl ByteBufferManager {
     /// Use this for paths like WAL replay where the data is already in
     /// memory and must be accounted for, but blocking would deadlock
     /// because forward progress is needed to free the budget.
-    pub fn force_acquire(&self, num_bytes: usize) -> BufferPermit {
+    pub fn force_acquire(&self, num_bytes: usize) -> ByteBufferPermit {
         self.inner.force_acquire(num_bytes);
-        BufferPermit {
+        ByteBufferPermit {
             reserved_bytes: AtomicUsize::new(num_bytes),
             semaphore: Arc::clone(&self.inner),
         }
@@ -66,12 +66,12 @@ impl ByteBufferManager {
 /// [`merge`](Self::merge) so that a single drop releases the combined
 /// reservation.
 #[derive(Debug)]
-pub struct BufferPermit {
+pub struct ByteBufferPermit {
     semaphore: Arc<ByteBudgetSemaphore>,
     reserved_bytes: AtomicUsize,
 }
 
-impl BufferPermit {
+impl ByteBufferPermit {
     /// Returns the number of bytes currently reserved by this permit.
     pub fn size(&self) -> usize {
         self.reserved_bytes.load(Ordering::Relaxed)
@@ -113,7 +113,7 @@ impl BufferPermit {
     }
 }
 
-impl Drop for BufferPermit {
+impl Drop for ByteBufferPermit {
     fn drop(&mut self) {
         let reserved = self.reserved_bytes.load(Ordering::Relaxed);
         if reserved > 0 {
@@ -209,9 +209,9 @@ impl ByteBudgetSemaphore {
         }
     }
 
-    async fn acquire_permit(self: Arc<Self>, num_bytes: usize) -> BufferPermit {
+    async fn acquire_permit(self: Arc<Self>, num_bytes: usize) -> ByteBufferPermit {
         self.acquire(num_bytes).await;
-        BufferPermit {
+        ByteBufferPermit {
             reserved_bytes: AtomicUsize::new(num_bytes),
             semaphore: self,
         }

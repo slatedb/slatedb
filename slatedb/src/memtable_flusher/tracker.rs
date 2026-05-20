@@ -451,7 +451,7 @@ enum TrackedImmState {
 #[cfg(test)]
 mod tests {
     use crate::batch_write::WriteBatchMessage;
-    use crate::buffer_manager::ByteBufferManager;
+    use crate::byte_buffer_manager::ByteBufferManager;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{

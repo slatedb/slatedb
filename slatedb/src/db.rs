@@ -22,7 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
-use crate::buffer_manager::{BufferPermit, ByteBufferManager};
+use crate::byte_buffer_manager::{ByteBufferManager, ByteBufferPermit};
 use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -378,7 +378,7 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(
         &self,
         write_buffer_size: usize,
-    ) -> Result<Arc<BufferPermit>, SlateDBError> {
+    ) -> Result<Arc<ByteBufferPermit>, SlateDBError> {
         loop {
             self.check_closed()?;
 

@@ -117,7 +117,7 @@ use tokio::runtime::Handle;
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
-use crate::buffer_manager::ByteBufferManager;
+use crate::byte_buffer_manager::ByteBufferManager;
 use crate::cached_object_store::CachedObjectStore;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;

@@ -4,7 +4,7 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-use crate::buffer_manager::BufferPermit;
+use crate::byte_buffer_manager::ByteBufferPermit;
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
@@ -60,7 +60,7 @@ pub struct WriteBatch {
     /// atomically by the oracle when the batch is committed).
     pub(crate) write_idx: u64,
     pub(crate) merge_op_count: usize,
-    pub(crate) write_buffer_permit: Option<Arc<BufferPermit>>,
+    pub(crate) write_buffer_permit: Option<Arc<ByteBufferPermit>>,
 }
 
 impl Default for WriteBatch {
@@ -400,7 +400,7 @@ impl WriteBatch {
         Ok((entries, touched_segments))
     }
 
-    pub(crate) fn set_write_buffer(&mut self, permit: Arc<BufferPermit>) {
+    pub(crate) fn set_write_buffer(&mut self, permit: Arc<ByteBufferPermit>) {
         self.write_buffer_permit = Some(permit);
     }
 
@@ -425,7 +425,7 @@ impl WriteBatch {
 
     /// Returns a clone of this batch's write-buffer permit, if one
     /// has been acquired.
-    pub(crate) fn write_buffer_permit(&self) -> Option<Arc<BufferPermit>> {
+    pub(crate) fn write_buffer_permit(&self) -> Option<Arc<ByteBufferPermit>> {
         self.write_buffer_permit.as_ref().map(Arc::clone)
     }
 }

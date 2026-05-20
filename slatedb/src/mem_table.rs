@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
-use crate::buffer_manager::BufferPermit;
+use crate::byte_buffer_manager::ByteBufferPermit;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
@@ -109,7 +109,7 @@ pub(crate) struct KVTable {
     /// paths after the antichain check. Empty when no extractor is
     /// configured.
     touched_segments: Mutex<std::collections::BTreeSet<Bytes>>,
-    write_buffer_permit: OnceCell<Arc<BufferPermit>>,
+    write_buffer_permit: OnceCell<Arc<ByteBufferPermit>>,
 }
 
 pub(crate) struct KVTableMetadata {
@@ -163,7 +163,7 @@ impl WritableKVTable {
 
     /// Attaches a write-buffer budget permit to the underlying table.
     /// When the table is dropped, the permit releases its reserved bytes.
-    pub(crate) fn add_write_permit(&self, permit: Arc<BufferPermit>) {
+    pub(crate) fn add_write_permit(&self, permit: Arc<ByteBufferPermit>) {
         self.table.add_write_permit(permit);
     }
 }
@@ -570,7 +570,7 @@ impl KVTable {
     /// Attaches a write-buffer budget permit to this table. If a permit
     /// is already present, the new permit is merged into the existing one
     /// so that a single drop releases the combined reservation.
-    pub(crate) fn add_write_permit(&self, permit: Arc<BufferPermit>) {
+    pub(crate) fn add_write_permit(&self, permit: Arc<ByteBufferPermit>) {
         if let Err(permit) = self.write_buffer_permit.set(permit) {
             self.write_buffer_permit.get().unwrap().merge(&permit);
         }

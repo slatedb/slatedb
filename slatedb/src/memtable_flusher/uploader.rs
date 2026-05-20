@@ -283,7 +283,7 @@ impl MessageHandler<UploadJob> for UploadHandler {
 #[cfg(test)]
 mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
-    use crate::buffer_manager::ByteBufferManager;
+    use crate::byte_buffer_manager::ByteBufferManager;
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_state::SsTableView;
