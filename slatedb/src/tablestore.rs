@@ -133,6 +133,8 @@ impl TableStore {
             Err(SlateDBError::from(std::io::Error::other("oops")))
         });
 
+        // 8 probes per round amortizes tail latency on one RTT while keeping
+        // the concurrent HEAD fan-out bounded against the object store.
         const ROUND_SIZE: u32 = 8;
         // 2^48 ahead is ~280 trillion WALs; far past any plausible gap. Beyond
         // this we give up rather than overflow / loop forever.
@@ -140,17 +142,27 @@ impl TableStore {
 
         let object_store = self.object_stores.store_of(ObjectStoreType::Wal);
 
-        // Phase 1: bracket the frontier using parallel exponential probes.
-        // `lo_offset`: highest probed offset known to exist (None until we see one).
-        // `hi_offset`: lowest probed offset known to NOT exist.
-        let mut lo_offset: Option<u64> = None;
-        let mut hi_offset: Option<u64> = None;
+        // ---- Phase 1: bracket the frontier with exponential probes. ----
+        //
+        // Probe at offsets 2^0, 2^1, ..., 2^MAX_EXP above `start_after`.
+        // Contiguity (existence is monotone-decreasing in id) means the
+        // moment one probe misses, every higher offset is also guaranteed
+        // missing -- so we can stop at the first miss and treat that
+        // offset as the upper bound on the answer. The highest hit so far
+        // is the lower bound.
+        let mut lo_offset: Option<u64> = None; // highest offset known to exist
+        let mut hi_offset: Option<u64> = None; // lowest offset known to NOT exist
         let mut next_exp: u32 = 0;
 
         while hi_offset.is_none() {
             if next_exp >= MAX_EXP {
+                // Object store appears to contain ids past our sanity cap;
+                // bail rather than overflow `start_after + offset`.
                 return Err(SlateDBError::InvalidDBState);
             }
+
+            // Fire ROUND_SIZE probes in parallel at offsets 2^next_exp..2^end_exp.
+            // One round = one network RTT regardless of how many probes it contains.
             let end_exp = (next_exp + ROUND_SIZE).min(MAX_EXP);
             let exps: Vec<u32> = (next_exp..end_exp).collect();
             let probes = exps.iter().map(|&e| {
@@ -160,6 +172,10 @@ impl TableStore {
                 async move { wal_object_exists(&store, &path).await }
             });
             let results = join_all(probes).await;
+
+            // Walk the round in offset order. Track the last hit as `lo_offset`,
+            // then stop at the first miss -- anything past that miss in the
+            // round is wasted info because we're about to switch to binary search.
             for (e, r) in exps.iter().zip(results) {
                 let offset = 1u64 << e;
                 if r? {
@@ -174,23 +190,37 @@ impl TableStore {
 
         let hi = hi_offset.expect("loop only exits when hi is set");
         let lo = match lo_offset {
-            None => return Ok(start_after), // start_after + 1 itself missing
+            // Round 0's smallest offset (1) didn't exist, so no WALs are
+            // visible above the hint -- the frontier IS `start_after`.
+            None => return Ok(start_after),
             Some(o) => o,
         };
 
-        // Phase 2: binary search for the exact frontier in offsets (lo, hi).
-        // Invariant: offset = lo exists, offset = hi does not.
+        // ---- Phase 2: binary search the open interval (lo, hi). ----
+        //
+        // Invariants entering the loop:
+        //   * offset = lo  exists       (highest from Phase 1)
+        //   * offset = hi  does not     (first miss from Phase 1)
+        // So the largest existing offset lives in [lo, hi - 1]. Search
+        // strictly above lo (left = lo + 1) so we never re-probe a slot
+        // whose state we already know.
         let mut left = lo + 1;
         let mut right = hi;
         while left < right {
             let mid = left + (right - left) / 2;
             let path = self.path(&SsTableId::Wal(start_after + mid));
             if wal_object_exists(object_store, &path).await? {
+                // `mid` exists, so the answer is mid or higher; discard
+                // everything at-or-below mid.
                 left = mid + 1;
             } else {
+                // `mid` is missing, so the answer is strictly below mid.
                 right = mid;
             }
         }
+
+        // Loop exits with left == right pointing at the lowest offset known
+        // to not exist; the highest existing offset is one below that.
         Ok(start_after + left - 1)
     }
 
@@ -1916,101 +1946,36 @@ mod tests {
         ))
     }
 
+    // Boundary values picked from the algorithm:
+    //   - ROUND_SIZE=8 -> first round probes offsets 1, 2, 4, ..., 128
+    //   - 2nd round starts at offset 256
+    // The (8, 16, 128, 256) cluster pins answers at probe offsets; the
+    // surrounding values (7/9, 127/129, 255/257) pin binary search inside
+    // each round. start_after=100 with stale ids 1..=100 also catches
+    // regressions where the start_after offset is dropped from the probe path.
+    #[rstest]
     #[tokio::test]
-    async fn should_return_start_after_when_no_wals_exist() {
-        // given: an empty WAL directory
-        let store = make_store();
-        let ts = make_ts(store);
-
-        // when: probing with various start_after values
-        let from_zero = ts.last_seen_wal_id(0).await.unwrap();
-        let from_hint = ts.last_seen_wal_id(42).await.unwrap();
-
-        // then: each call returns its own start_after
-        assert_eq!(from_zero, 0);
-        assert_eq!(from_hint, 42);
-    }
-
-    #[tokio::test]
-    async fn should_find_max_wal_id_when_resolved_in_first_round() {
-        // given: WAL ids 1..=5, all within the first round's probe range (offsets 1..=128)
+    async fn should_find_max_wal_id(
+        #[values(0, 100)] start_after: u64,
+        #[values(0, 1, 5, 7, 8, 9, 16, 127, 128, 129, 200, 255, 256, 257)] n_above: u64,
+    ) {
+        // given: stale ids at/below the hint (must be ignored) and n_above
+        // contiguous ids above the hint.
         let store = make_store();
         let ts = make_ts(store.clone());
-        for id in 1..=5 {
+        for id in 1..=start_after {
+            put_wal_id(&ts, &store, id).await;
+        }
+        for id in (start_after + 1)..=(start_after + n_above) {
             put_wal_id(&ts, &store, id).await;
         }
 
-        // when: probing from 0
-        let result = ts.last_seen_wal_id(0).await.unwrap();
+        // when: probing with start_after as the hint
+        let result = ts.last_seen_wal_id(start_after).await.unwrap();
 
-        // then: the highest id is found
-        assert_eq!(result, 5);
-    }
-
-    #[tokio::test]
-    async fn should_find_max_wal_id_when_answer_at_power_of_two() {
-        // given: exactly 16 WAL ids -- the answer aligns with probe offset 16
-        let store = make_store();
-        let ts = make_ts(store.clone());
-        for id in 1..=16 {
-            put_wal_id(&ts, &store, id).await;
-        }
-
-        // when: probing from 0
-        let result = ts.last_seen_wal_id(0).await.unwrap();
-
-        // then: binary search resolves the exact frontier
-        assert_eq!(result, 16);
-    }
-
-    #[tokio::test]
-    async fn should_find_max_wal_id_when_answer_exceeds_first_round() {
-        // given: 200 WAL ids -- past the first round's largest offset (128),
-        //        forcing a second exponential round at offsets 256..=32768
-        let store = make_store();
-        let ts = make_ts(store.clone());
-        for id in 1..=200 {
-            put_wal_id(&ts, &store, id).await;
-        }
-
-        // when: probing from 0
-        let result = ts.last_seen_wal_id(0).await.unwrap();
-
-        // then: the doubling phase brackets and binsearch finds the frontier
-        assert_eq!(result, 200);
-    }
-
-    #[tokio::test]
-    async fn should_find_max_when_start_after_skips_lower_ids() {
-        // given: WAL ids 101..=103 written, simulating recovery where
-        //        replay_after_wal_id = 100 (ids 1..=100 already replayed/compacted)
-        let store = make_store();
-        let ts = make_ts(store.clone());
-        for id in 101..=103 {
-            put_wal_id(&ts, &store, id).await;
-        }
-
-        // when: probing with start_after = 100
-        let result = ts.last_seen_wal_id(100).await.unwrap();
-
-        // then: probes begin at id 101 and find the high water mark
-        assert_eq!(result, 103);
-    }
-
-    #[tokio::test]
-    async fn should_return_start_after_when_all_ids_are_below_hint() {
-        // given: only old WAL ids exist, all below the hint
-        let store = make_store();
-        let ts = make_ts(store.clone());
-        for id in 1..=5 {
-            put_wal_id(&ts, &store, id).await;
-        }
-
-        // when: probing with start_after = 50
-        let result = ts.last_seen_wal_id(50).await.unwrap();
-
-        // then: the probe ignores ids below the hint and returns start_after
-        assert_eq!(result, 50);
+        // then: the high water mark above the hint is returned; if no ids
+        // exist above the hint, start_after itself is returned.
+        assert_eq!(result, start_after + n_above);
     }
 
     #[tokio::test]

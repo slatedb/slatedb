@@ -1962,14 +1962,14 @@ mod tests {
             .unwrap()
             .id;
 
-        // Inject a failpoint on WAL listing before flushing so it is active
+        // Inject a failpoint on WAL probing before flushing so it is active
         // when the poller fires. With the buggy replay_new_wals=true,
-        // reestablish_checkpoint calls last_seen_wal_id() which lists WAL SSTs
+        // reestablish_checkpoint calls last_seen_wal_id() which probes WAL SSTs
         // and hits this failpoint. With the fix (replay_new_wals=false), the
-        // WAL listing is skipped entirely.
+        // WAL probing is skipped entirely.
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
