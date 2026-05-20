@@ -27,7 +27,7 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
+use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
 use object_store::{parse_url_opts, ObjectStore};
@@ -553,6 +553,17 @@ impl DbInner {
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
+        // Tests use this fail point to pause replay so the writer that owns
+        // this epoch can race with a newer writer's fence + replay.
+        let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
+        let _ = writer_epoch;
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "replay-wal-pause",
+            writer_epoch == 1,
+            |_| -> Result<(), SlateDBError> { Ok(()) }
+        );
+
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
@@ -6169,6 +6180,105 @@ mod tests {
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_writer_paused_in_replay_wal_should_be_fenced_by_concurrent_open() {
+        // Race we're trying to reproduce:
+        // - W1 starts opening: claims writer_epoch=1, writes its fence WAL, then
+        //   enters replay_wal. We pause it inside replay_wal.
+        // - W2 starts opening: claims writer_epoch=2, writes its own fence WAL
+        //   (above W1's), replays, and finishes init.
+        // - W1 unpauses, finishes replay_wal, and returns its Db handle.
+        // - W1 issues a put. This put should fail
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_writer_paused_in_replay_wal_race";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        // Pause replay_wal for any writer that holds writer_epoch == 1
+        // (the condition is enforced inside the fail point body).
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        // Kick off W1 in the background. It will park inside replay_wal.
+        // Use a long manifest poll interval on W1 so its background poller
+        // doesn't independently observe W2's epoch bump and trip the
+        // closed/fenced check while replay is paused.
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        // Wait for W1 to write its fence WAL — at that point W1 has finished
+        // fence_writers and has either entered or is about to enter the paused
+        // replay_wal call.
+        let probe_table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        ));
+        let mut w1_paused = false;
+        for _ in 0..600 {
+            let wals = probe_table_store.list_wal_ssts(..).await.unwrap();
+            if !wals.is_empty() {
+                w1_paused = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(w1_paused, "W1 did not reach replay_wal pause in time");
+        // Small additional wait for W1 to transition from fence_writers into
+        // the paused replay_wal block.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // While W1 is paused, open W2. W2's epoch is 2, so replay_wal is not
+        // paused for W2. W2 writes its own fence WAL above W1's and finishes
+        // init.
+        let db2 = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            db2.inner.state.read().state().manifest.value.writer_epoch,
+            2
+        );
+
+        // Release W1. It finishes replay_wal and returns a Db handle.
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        let db1 = w1_handle.await.unwrap().unwrap();
+        assert_eq!(
+            db1.inner.state.read().state().manifest.value.writer_epoch,
+            1
+        );
+
+        // The race: W1 was fenced by W2 before W1's open returned, but W1's
+        // put currently still succeeds. This assertion documents the bug.
+        let result = db1
+            .put_with_options(
+                b"w1",
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
