@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
-use crate::db_cache::{CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
+use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter_policy::NamedFilter;
@@ -542,17 +542,34 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
-        let cache_key = (handle.id, handle.info.filter_offset).into();
+        // No filter exists for this SST (either no policies configured, or the
+        // SST was built below `min_filter_keys`). Return an empty slice without
+        // touching the cache: there is nothing to load, and caching the empty
+        // answer would mask a future config change that adds filter policies.
+        if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
+            return Ok(Arc::from([]));
+        }
+        let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
         if let Some(ref cache) = self.cache {
-            let entry = cache.get_filter(&cache_key).await.unwrap_or(None);
+            // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
+            // one loader. cache_blocks=false: read-only lookup that won't pollute the
+            // cache on miss. Cache errors are treated as misses — the direct load
+            // below produces the authoritative error if there is one.
+            let entry = if cache_blocks {
+                cache
+                    .fetch_filter(cache_key.clone(), self.read_filters_loader(handle))
+                    .await
+                    .ok()
+            } else {
+                cache.get_filter(&cache_key).await.unwrap_or(None)
+            };
             if let Some(entry) = entry {
                 // Already decoded.
                 if let Some(filters) = entry.filters() {
                     return Ok(filters);
                 }
-
-                // Encoded form from disk-cache deserialize. Decode
-                // and overwrite the cache entry with the decoded form.
+                // Encoded form from disk-cache deserialize. Decode and overwrite
+                // the cache entry with the decoded form.
                 if let Some(encoded) = entry.encoded_filters() {
                     return Ok(self.decode_and_refresh(cache, cache_key, &encoded).await);
                 }
@@ -561,19 +578,30 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let named_filters = self
-            .sst_format
+        self.sst_format
             .read_filters(&handle.info, &obj)
             .await
-            .map_err(|e| e.with_path(&obj.path))?;
-        if cache_blocks && !named_filters.is_empty() {
-            if let Some(ref cache) = self.cache {
-                cache
-                    .insert(cache_key, CachedEntry::with_filters(named_filters.clone()))
-                    .await;
-            }
-        }
-        Ok(named_filters)
+            .map_err(|e| e.with_path(&obj.path))
+    }
+
+    fn read_filters_loader(&self, handle: &SsTableHandle) -> CacheLoader {
+        let info = handle.info.clone();
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let sst_format = self.sst_format.clone();
+        Box::new(move || {
+            Box::pin(async move {
+                let obj = ReadOnlyObject {
+                    object_store,
+                    path: path.clone(),
+                };
+                let named_filters = sst_format
+                    .read_filters(&info, &obj)
+                    .await
+                    .map_err(|e| e.with_path(&obj.path))?;
+                Ok(CachedEntry::with_filters(named_filters))
+            })
+        })
     }
 
     /// Reads the stats block of an SSTable.
@@ -585,37 +613,55 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
     ) -> Result<Option<SstStats>, SlateDBError> {
+        if handle.info.stats_len == 0 {
+            return Ok(None);
+        }
+        let cache_key = (handle.id, handle.info.stats_offset).into();
         if let Some(ref cache) = self.cache {
-            if let Some(stats) = cache
-                .get_stats(&(handle.id, handle.info.stats_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.sst_stats())
-            {
+            let entry = if cache_blocks {
+                cache
+                    .fetch_stats(cache_key, self.read_stats_loader(handle))
+                    .await
+                    .ok()
+            } else {
+                cache.get_stats(&cache_key).await.unwrap_or(None)
+            };
+            if let Some(stats) = entry.and_then(|e| e.sst_stats()) {
                 return Ok(Some(stats.as_ref().clone()));
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let stats = self
-            .sst_format
+        self.sst_format
             .read_stats(&handle.info, &obj)
             .await
-            .map_err(|e| e.with_path(&obj.path))?;
-        if cache_blocks {
-            if let Some(ref cache) = self.cache {
-                if let Some(ref stats) = stats {
-                    cache
-                        .insert(
-                            (handle.id, handle.info.stats_offset).into(),
-                            CachedEntry::with_sst_stats(Arc::new(stats.clone())),
+            .map_err(|e| e.with_path(&obj.path))
+    }
+
+    fn read_stats_loader(&self, handle: &SsTableHandle) -> CacheLoader {
+        let info = handle.info.clone();
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let sst_format = self.sst_format.clone();
+        Box::new(move || {
+            Box::pin(async move {
+                let obj = ReadOnlyObject {
+                    object_store,
+                    path: path.clone(),
+                };
+                let stats = sst_format
+                    .read_stats(&info, &obj)
+                    .await
+                    .map_err(|e| e.with_path(&obj.path))?
+                    .ok_or_else(|| {
+                        crate::Error::data(
+                            "stats_len > 0 but read_stats returned no stats".to_string(),
                         )
-                        .await;
-                }
-            }
-        }
-        Ok(stats)
+                    })?;
+                Ok(CachedEntry::with_sst_stats(Arc::new(stats)))
+            })
+        })
     }
 
     /// Reads the index of an SSTable.
@@ -628,36 +674,53 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        let cache_key = (handle.id, handle.info.index_offset).into();
         if let Some(ref cache) = self.cache {
-            if let Some(index) = cache
-                .get_index(&(handle.id, handle.info.index_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.sst_index())
-            {
+            // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
+            // one loader. cache_blocks=false: read-only lookup that won't pollute the
+            // cache on miss. Cache errors are treated as misses — the direct load
+            // below produces the authoritative error if there is one.
+            let entry = if cache_blocks {
+                cache
+                    .fetch_index(cache_key, self.read_index_loader(handle))
+                    .await
+                    .ok()
+            } else {
+                cache.get_index(&cache_key).await.unwrap_or(None)
+            };
+            if let Some(index) = entry.and_then(|e| e.sst_index()) {
                 return Ok(index);
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let index = Arc::new(
+        Ok(Arc::new(
             self.sst_format
                 .read_index(&handle.info, &obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))?,
-        );
-        if cache_blocks {
-            if let Some(ref cache) = self.cache {
-                cache
-                    .insert(
-                        (handle.id, handle.info.index_offset).into(),
-                        CachedEntry::with_sst_index(index.clone()),
-                    )
-                    .await;
-            }
-        }
-        Ok(index)
+        ))
+    }
+
+    fn read_index_loader(&self, handle: &SsTableHandle) -> CacheLoader {
+        let info = handle.info.clone();
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let sst_format = self.sst_format.clone();
+        Box::new(move || {
+            Box::pin(async move {
+                let obj = ReadOnlyObject {
+                    object_store,
+                    path: path.clone(),
+                };
+                let index = sst_format
+                    .read_index(&info, &obj)
+                    .await
+                    .map_err(|e| e.with_path(&obj.path))?;
+                Ok(CachedEntry::with_sst_index(Arc::new(index)))
+            })
+        })
     }
 
     #[allow(dead_code)]
@@ -2182,5 +2245,198 @@ mod tests {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }
         }
+    }
+
+    /// End-to-end test: concurrent index reads through `TableStore` issue a single
+    /// object-store request to load the index, even when the underlying object store
+    /// is slow.
+    ///
+    /// Determinism is anchored at two points:
+    ///
+    /// 1. The first range-bounded `get_opts` call to the wrapped object store signals
+    ///    `first_read_started` and parks on `release`. Once we see that signal we
+    ///    know task A's load is in flight inside foyer's spawned loader task.
+    /// 2. `tokio::join!(task_b, release_task)` polls members in source order. Task
+    ///    B's first poll synchronously joins foyer's in-flight fetch (no second
+    ///    object-store call); the release fires only after B has registered as a
+    ///    waiter.
+    #[cfg(feature = "foyer")]
+    #[tokio::test]
+    async fn dedups_concurrent_reads_through_object_store() {
+        use crate::db_cache::foyer::FoyerCache;
+        use crate::db_state::SsTableId;
+        use futures::stream::BoxStream;
+        use object_store::{CopyOptions, GetOptions, GetResult, ListResult, ObjectMeta, PutResult};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        // PauseFirstReadStore: counts range-bounded get_opts calls and pauses the first
+        // one until released. Other methods just delegate to the inner store.
+        #[derive(Debug)]
+        struct PauseFirstReadStore {
+            inner: Arc<dyn ObjectStore>,
+            get_range_count: AtomicUsize,
+            paused: AtomicBool,
+            first_read_started: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        impl std::fmt::Display for PauseFirstReadStore {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "PauseFirstReadStore({})", self.inner)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ObjectStore for PauseFirstReadStore {
+            async fn put_opts(
+                &self,
+                location: &Path,
+                payload: object_store::PutPayload,
+                opts: object_store::PutOptions,
+            ) -> object_store::Result<PutResult> {
+                self.inner.put_opts(location, payload, opts).await
+            }
+
+            async fn put_multipart_opts(
+                &self,
+                location: &Path,
+                opts: object_store::PutMultipartOptions,
+            ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+                self.inner.put_multipart_opts(location, opts).await
+            }
+
+            async fn get_opts(
+                &self,
+                location: &Path,
+                options: GetOptions,
+            ) -> object_store::Result<GetResult> {
+                if options.range.is_some() {
+                    self.get_range_count.fetch_add(1, Ordering::SeqCst);
+                    if self.paused.swap(false, Ordering::SeqCst) {
+                        self.first_read_started.notify_one();
+                        self.release.notified().await;
+                    }
+                }
+                self.inner.get_opts(location, options).await
+            }
+
+            fn list(
+                &self,
+                prefix: Option<&Path>,
+            ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+                self.inner.list(prefix)
+            }
+
+            async fn list_with_delimiter(
+                &self,
+                prefix: Option<&Path>,
+            ) -> object_store::Result<ListResult> {
+                self.inner.list_with_delimiter(prefix).await
+            }
+
+            fn delete_stream(
+                &self,
+                locations: BoxStream<'static, object_store::Result<Path>>,
+            ) -> BoxStream<'static, object_store::Result<Path>> {
+                self.inner.delete_stream(locations)
+            }
+
+            async fn copy_opts(
+                &self,
+                from: &Path,
+                to: &Path,
+                options: CopyOptions,
+            ) -> object_store::Result<()> {
+                self.inner.copy_opts(from, to, options).await
+            }
+        }
+
+        // given: an SST written through a plain in-memory store
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+
+        let writer = TableStore::new(
+            ObjectStores::new(inner.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"k1", b"v1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"k2", b"v2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
+
+        // given: the same store wrapped so the first range read pauses, behind a
+        // real FoyerCache that supports dedup
+        let first_read_started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let counting = Arc::new(PauseFirstReadStore {
+            inner: inner.clone(),
+            get_range_count: AtomicUsize::new(0),
+            paused: AtomicBool::new(true),
+            first_read_started: first_read_started.clone(),
+            release: release.clone(),
+        });
+        let counting_store: Arc<dyn ObjectStore> = counting.clone();
+        let cache: Arc<dyn DbCache> = Arc::new(FoyerCache::new());
+        let reader = Arc::new(TableStore::new(
+            ObjectStores::new(counting_store, None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        ));
+
+        // when: task A starts reading the index; its loader will pause inside the
+        // wrapped object store
+        let handle_a = tokio::spawn({
+            let reader = reader.clone();
+            let handle = handle.clone();
+            async move { reader.read_index(&handle, true).await }
+        });
+
+        // wait until A's read has reached the object store and is paused
+        first_read_started.notified().await;
+        assert_eq!(
+            counting.get_range_count.load(Ordering::SeqCst),
+            1,
+            "exactly one read should have hit the store so far"
+        );
+
+        // when: task B races A for the same index. join! polls B first, so B's
+        // fetch_index reaches foyer's dedup map before release_task fires.
+        let task_b = {
+            let reader = reader.clone();
+            let handle = handle.clone();
+            async move { reader.read_index(&handle, true).await }
+        };
+        let release_task = {
+            let release = release.clone();
+            async move {
+                tokio::task::yield_now().await;
+                release.notify_one();
+            }
+        };
+        let (b_result, _) = tokio::join!(task_b, release_task);
+
+        // then: both callers got an index, and exactly one object-store read happened
+        let a_result = handle_a.await.expect("task A panicked");
+        assert!(a_result.is_ok(), "task A failed: {:?}", a_result.err());
+        assert!(b_result.is_ok(), "task B failed: {:?}", b_result.err());
+        assert_eq!(
+            counting.get_range_count.load(Ordering::SeqCst),
+            1,
+            "concurrent index reads must dedup into a single object-store read"
+        );
     }
 }
