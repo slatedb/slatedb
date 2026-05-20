@@ -136,17 +136,6 @@ impl WalReplayIterator {
         Ok(replay_iter)
     }
 
-    pub(crate) async fn new(
-        db_state: &ManifestCore,
-        options: WalReplayOptions,
-        table_store: Arc<TableStore>,
-    ) -> Result<Self, SlateDBError> {
-        let wal_id_start = db_state.replay_after_wal_id + 1;
-        let wal_id_end = table_store.last_seen_wal_id().await?;
-        let wal_id_range = wal_id_start..(wal_id_end + 1);
-        Self::range(wal_id_range, db_state, options, table_store).await
-    }
-
     fn maybe_load_next_iter(&mut self) -> bool {
         if !self.wal_id_range.contains(&self.next_wal_id)
             || self.next_iters.len() >= self.options.sst_batch_size
@@ -308,11 +297,24 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    impl WalReplayIterator {
+        async fn all_wal_ids(
+            db_state: &ManifestCore,
+            options: WalReplayOptions,
+            table_store: Arc<TableStore>,
+        ) -> Result<Self, SlateDBError> {
+            let wal_id_start = db_state.replay_after_wal_id + 1;
+            let wal_id_end = table_store.last_seen_wal_id().await?;
+            let wal_id_range = wal_id_start..(wal_id_end + 1);
+            Self::range(wal_id_range, db_state, options, table_store).await
+        }
+    }
+
     #[tokio::test]
     async fn should_replay_empty_wal() {
         let table_store = test_table_store();
         write_empty_wal(1, Arc::clone(&table_store)).await.unwrap();
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions::default(),
             Arc::clone(&table_store),
@@ -335,7 +337,7 @@ mod tests {
     async fn should_replay_zero_byte_wal_fence() {
         let table_store = test_table_store();
         table_store.write_wal_fence(1).await.unwrap();
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions::default(),
             Arc::clone(&table_store),
@@ -368,7 +370,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions::default(),
             Arc::clone(&table_store),
@@ -396,7 +398,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions::default(),
             Arc::clone(&table_store),
@@ -431,7 +433,7 @@ mod tests {
             .unwrap();
 
         let max_memtable_bytes = 1024;
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions {
                 max_memtable_bytes,
@@ -501,7 +503,7 @@ mod tests {
                 .unwrap();
         }
 
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions {
                 max_memtable_bytes,
@@ -569,7 +571,7 @@ mod tests {
 
         // Replay the single WAL SST into in-memory tables. If the replay code
         // can split a single commit sequence, it will do so here.
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions {
                 max_memtable_bytes,
@@ -627,7 +629,7 @@ mod tests {
             .unwrap();
 
         // Replay the single WAL SST into in-memory tables.
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions {
                 max_memtable_bytes,
@@ -689,7 +691,7 @@ mod tests {
         db_state.replay_after_wal_id = replay_after_wal_id;
         db_state.next_wal_sst_id = replay_after_wal_id + 1;
 
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &db_state,
             WalReplayOptions::default(),
             Arc::clone(&table_store),
@@ -728,7 +730,7 @@ mod tests {
         db_state.last_l0_seq = min_seq;
         db_state.last_l0_clock_tick = 0;
 
-        let mut replay_iter = WalReplayIterator::new(
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
             &db_state,
             WalReplayOptions::default(),
             Arc::clone(&table_store),

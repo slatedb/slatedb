@@ -606,9 +606,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         );
 
         // Fence writers if WAL is enabled
-        if inner.wal_enabled {
-            inner.fence_writers(&mut manifest, next_wal_id).await?;
-        }
+        let replay_range = inner.fence_writers(&mut manifest, next_wal_id).await?;
 
         // Setup background tasks
         let tokio_handle = Handle::current();
@@ -710,7 +708,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
-        inner.replay_wal().await?;
+        inner.replay_wal(replay_range).await?;
 
         // Preload cache if enabled
         if let Some(cached_obj_store) = cached_object_store {
