@@ -104,8 +104,8 @@ Definitions used below:
 | Counter                        | Description                                                                                             |
 |--------------------------------|---------------------------------------------------------------------------------------------------------|
 | `memtables_consulted`          | Number of accesses to current memtable + immutable memtable                                             |
-| `ssts_consulted_l0`            | Number of L0 SSTs accessed                                                                              |
-| `ssts_consulted_compacted`     | Number of compacted SSTs accessed                                                                       |
+| `l0_ssts_consulted`            | Number of L0 SSTs accessed                                                                              |
+| `compacted_ssts_consulted`     | Number of compacted SSTs accessed                                                                       |
 | `sr_consulted`                 | Number of sorted runs accessed                                                                          |
 | `bloom_filter_positives`       | Number of positive filter results: `might_contain` -> true                                              |
 | `bloom_filter_negatives`       | Number of negative filter results: `might_contain` -> false                                             |
@@ -125,7 +125,7 @@ Definitions used below:
 | `skipped_entries_shadowed`     | Number of entries read, but skipped because they were hidden by a tombstone or newer value              |
 
 Derived counters:
-- `ssts_consulted_total = ssts_consulted_l0 + ssts_consulted_compacted`.
+- `total_ssts_consulted = l0_ssts_consulted + compacted_ssts_consulted`.
 - `bloom_filter_checks = bloom_filter_positives + bloom_filter_negatives`.
 
 ### Aggregate durations
@@ -231,9 +231,9 @@ impl QueryTracingLayer {
 
     // Public: counter accessors
     pub fn memtables_consulted(&self, query_id: &str) -> u64;
-    pub fn ssts_consulted_l0(&self, query_id: &str) -> u64;
-    pub fn ssts_consulted_compacted(&self, query_id: &str) -> u64;
-    pub fn ssts_consulted_total(&self, query_id: &str) -> u64;
+    pub fn l0_ssts_consulted(&self, query_id: &str) -> u64;
+    pub fn compacted_ssts_consulted(&self, query_id: &str) -> u64;
+    pub fn total_ssts_consulted(&self, query_id: &str) -> u64;
 
     pub fn bloom_filter_checks(&self, query_id: &str) -> u64;
     pub fn bloom_filter_positives(&self, query_id: &str) -> u64;
