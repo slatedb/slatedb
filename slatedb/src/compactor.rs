@@ -5966,6 +5966,8 @@ mod tests {
             .state_mut()
             .insert_compaction_for_test(compaction);
 
+        fixture.handler.state_writer.refresh().await.unwrap();
+
         // when: the coordinator observes and commits the Compacted entry
         fixture
             .handler
