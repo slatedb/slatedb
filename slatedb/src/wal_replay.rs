@@ -304,7 +304,9 @@ mod tests {
             table_store: Arc<TableStore>,
         ) -> Result<Self, SlateDBError> {
             let wal_id_start = db_state.replay_after_wal_id + 1;
-            let wal_id_end = table_store.last_seen_wal_id().await?;
+            let wal_id_end = table_store
+                .last_seen_wal_id(db_state.replay_after_wal_id)
+                .await?;
             let wal_id_range = wal_id_start..(wal_id_end + 1);
             Self::range(wal_id_range, db_state, options, table_store).await
         }
