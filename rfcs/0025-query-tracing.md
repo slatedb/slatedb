@@ -202,7 +202,24 @@ tracing_subscriber::registry()
 ```
 
 
-In this RFC, we propose the following `tracing` layer:
+In this RFC, we propose a query tracing `tracing` layer, that can be used for
+- investigating slow queries,
+- write tests that assert query execution characteristics (e.g.
+  "this get should hit the bloom filter and skip the SST")
+
+This query `tracing` layer receives events from spans and other
+events instrumented in the slateDB code. The query `tracing`
+layer processes the received spans and events and updates
+aggregates about read SSTs, cache misses, bloom filter false
+positives and more. Those aggregates can be consulted to
+understand the causes of slow queries and to take actions on
+them.
+In tests, the query `tracing` layer can be used to verify
+intended internal behavior.
+
+The query `tracing` layer is not intended for use in production
+settings. It is a tool to explore behavior in debugging sessions
+and verify behavior in testing setups.
 
 ```rust
 #[derive(Clone, Default)]
@@ -211,7 +228,7 @@ pub struct QueryTracingLayer { ... }
 impl QueryTracingLayer {
     // Construction
     pub fn new() -> Self;
-    
+
     // Public: counter accessors
     pub fn memtables_consulted(&self, query_id: &str) -> u64;
     pub fn ssts_consulted_l0(&self, query_id: &str) -> u64;
@@ -274,7 +291,7 @@ Example output:
 
 ```text
 QueryTracingLayer {
-  query: query1 {   
+  query: query1 {
       sources: memtables=2 ssts_l0=3 ssts_compacted=5 sr=2
       bloom_filter: checks=8 positives=5 negatives=3 false_positives=1
       cache: block=12h/3m index=5h/0m filter=5h/0m
