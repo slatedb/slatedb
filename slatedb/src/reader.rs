@@ -149,8 +149,12 @@ impl Reader {
         let mem_iters = memtables
             .iter()
             .map(|table| {
-                Box::new(table.range(range.clone(), sst_iter_options.order))
-                    as Box<dyn RowEntryIterator + 'static>
+                let inner = table.range(
+                    range.clone(),
+                    sst_iter_options.order,
+                    sst_iter_options.query_id.as_deref(),
+                );
+                Box::new(inner) as Box<dyn RowEntryIterator + 'static>
             })
             .collect::<Vec<_>>();
 
@@ -212,6 +216,7 @@ impl Reader {
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
             filter_context: options.filter_context.clone(),
+            query_id: options.query_id.clone(),
             ..SstIteratorOptions::default()
         };
 
@@ -239,6 +244,7 @@ impl Reader {
             None,
             self.read_merge_operator.clone(),
             sst_iter_options.order,
+            options.query_id.clone(),
         )
         .await?;
 
@@ -286,6 +292,7 @@ impl Reader {
             order: options.order,
             prefix: ctx.prefix,
             filter_context: options.filter_context.clone(),
+            query_id: options.query_id.clone(),
         };
 
         let IteratorSources {
@@ -312,6 +319,7 @@ impl Reader {
             ctx.range_tracker,
             self.read_merge_operator.clone(),
             options.order,
+            options.query_id.clone(),
         )
         .await
     }

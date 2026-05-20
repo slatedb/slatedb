@@ -7,7 +7,8 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-
+use tracing::Instrument;
+use tracing::instrument::WithSubscriber;
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
@@ -38,6 +39,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
     pub(crate) filter_context: Option<FilterContext>,
+    pub(crate) query_id: Option<String>,
 }
 
 impl Default for SstIteratorOptions {
@@ -50,6 +52,7 @@ impl Default for SstIteratorOptions {
             order: IterationOrder::Ascending,
             prefix: None,
             filter_context: None,
+            query_id: None,
         }
     }
 }
@@ -248,6 +251,13 @@ impl FilterEvaluator {
         self.state == FilterState::Negative
     }
 
+    /// Target of the underlying filter query (point key or prefix).
+    /// Exposed so the surrounding `slatedb.query.bloom_filter` span can
+    /// record `key`.
+    fn query_target(&self) -> &PrefixTarget {
+        &self.query.target
+    }
+
     fn notify_key_found(&mut self, key: &[u8]) {
         match &self.query.target {
             PrefixTarget::Point(k) if key == k.as_ref() => self.found_key = true,
@@ -391,17 +401,30 @@ impl<'a> InternalSstIterator<'a> {
                     let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
-                    self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks_start..blocks_end,
-                                    cache_blocks,
-                                )
-                                .await
-                        })));
+                    let span = self.options.query_id.as_ref().map(|id| {
+                        tracing::debug_span!(
+                            "slatedb.query.read_blocks",
+                            query_id = %id,
+                            sst_id = ?table.id,
+                            cache_hits = tracing::field::Empty,
+                            cache_misses = tracing::field::Empty,
+                        )
+                    });
+                    let fut = async move {
+                        table_store
+                            .read_blocks_using_index(
+                                &table,
+                                index,
+                                blocks_start..blocks_end,
+                                cache_blocks,
+                            )
+                            .await
+                    }.with_current_subscriber();
+                    let handle = match span {
+                        Some(span) => tokio::spawn(fut.instrument(span)),
+                        None => tokio::spawn(fut),
+                    };
+                    self.fetch_tasks.push_back(FetchTask::InFlight(handle));
                     self.next_block_idx_to_fetch = blocks_end;
                 }
             }
@@ -420,17 +443,30 @@ impl<'a> InternalSstIterator<'a> {
                     let blocks_start = blocks_end - blocks_to_fetch;
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
-                    self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks_start..blocks_end,
-                                    cache_blocks,
-                                )
-                                .await
-                        })));
+                    let span = self.options.query_id.as_ref().map(|id| {
+                        tracing::debug_span!(
+                            "slatedb.query.read_blocks",
+                            query_id = %id,
+                            sst_id = ?table.id,
+                            cache_hits = tracing::field::Empty,
+                            cache_misses = tracing::field::Empty,
+                        )
+                    });
+                    let fut = async move {
+                        table_store
+                            .read_blocks_using_index(
+                                &table,
+                                index,
+                                blocks_start..blocks_end,
+                                cache_blocks,
+                            )
+                            .await
+                    }.with_current_subscriber();
+                    let handle = match span {
+                        Some(span) => tokio::spawn(fut.instrument(span)),
+                        None => tokio::spawn(fut),
+                    };
+                    self.fetch_tasks.push_back(FetchTask::InFlight(handle));
                     self.next_block_idx_to_fetch = blocks_start;
                 }
             }
@@ -543,10 +579,21 @@ impl<'a> InternalSstIterator<'a> {
 
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
-            let index = self
+            let span = self.options.query_id.as_ref().map(|id| {
+                tracing::debug_span!(
+                    "slatedb.query.read_index",
+                    query_id = %id,
+                    sst_id = ?self.view.table_as_ref().sst.id,
+                    cached = tracing::field::Empty,
+                )
+            });
+            let fut = self
                 .table_store
-                .read_index(&self.view.table_as_ref().sst, self.options.cache_blocks)
-                .await?;
+                .read_index(&self.view.table_as_ref().sst, self.options.cache_blocks);
+            let index = match span {
+                Some(span) => fut.instrument(span).await?,
+                None => fut.await?,
+            };
             let block_idx_range = partitioned_keyspace::partitions_covering_range(
                 &index.borrow(),
                 self.view.start_key(),
@@ -792,15 +839,47 @@ impl<'a> FilterIterator<'a> {
 impl RowEntryIterator for FilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
-            let filters = self
-                .inner
-                .table_store()
-                .read_filters(
-                    &self.inner.view().table_as_ref().sst,
-                    self.inner.options.cache_blocks,
+            let span = self.inner.options.query_id.as_ref().map(|id| {
+                tracing::debug_span!(
+                    "slatedb.query.read_filter",
+                    query_id = %id,
+                    sst_id = ?self.inner.view().table_as_ref().sst.id,
+                    cached = tracing::field::Empty,
                 )
-                .await?;
+            });
+            let fut = self.inner.table_store().read_filters(
+                &self.inner.view().table_as_ref().sst,
+                self.inner.options.cache_blocks,
+            );
+            let filters = match span {
+                Some(span) => fut.instrument(span).await?,
+                None => fut.await?,
+            };
+
+            // `slatedb.query.bloom_filter` covers the `might_contain` check
+            // itself. Only emit when there are filters to evaluate — an SST
+            // with no filter section is not a "check".
+            let bf_span = self
+                .inner
+                .options
+                .query_id
+                .as_ref()
+                .filter(|_| !filters.is_empty())
+                .map(|id| {
+                    tracing::debug_span!(
+                        "slatedb.query.bloom_filter",
+                        query_id = %id,
+                        sst_id = ?self.inner.view().table_as_ref().sst.id,
+                        key = ?self.filter.query_target(),
+                        result = tracing::field::Empty,
+                    )
+                });
+            let bf_enter = bf_span.as_ref().map(|s| s.enter());
             self.filter.evaluate(&filters).await;
+            if let Some(ref s) = bf_span {
+                s.record("result", !self.filter.is_filtered_out());
+            }
+            drop(bf_enter);
 
             if self.is_filtered_out() {
                 return Ok(());
@@ -1782,6 +1861,7 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                query_id: None,
             },
         )
         .await
@@ -1800,6 +1880,7 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                query_id: None,
             },
         )
         .await
@@ -2373,6 +2454,7 @@ mod tests {
             order,
             prefix: None,
             filter_context: None,
+            query_id: None,
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2659,6 +2741,7 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                query_id: None,
             },
         )
         .await

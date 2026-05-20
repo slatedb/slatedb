@@ -1,0 +1,18 @@
+[package]
+name = "slatedb-tracing"
+description = "Tracing layers for aggregating SlateDB query spans."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["registry"] }
+tracing-chrome = "0.7.2"
+
+[dev-dependencies]
+slatedb = { path = "../slatedb" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true, features = ["registry"] }

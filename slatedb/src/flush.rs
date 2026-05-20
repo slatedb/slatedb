@@ -86,6 +86,7 @@ impl DbInner {
                 imm_table.iter(),
                 false,
                 min_retention_seq,
+                None,
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(imm_table.iter()))

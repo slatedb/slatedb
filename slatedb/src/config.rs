@@ -277,6 +277,10 @@ pub struct ReadOptions {
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-supplied identifier attached to the `slatedb.query`
+    /// span as a `query_id` field. Subscribers (e.g. `tracing-chrome`) can
+    /// filter on this to capture spans for a specific query.
+    pub query_id: Option<String>,
 }
 
 impl Default for ReadOptions {
@@ -286,6 +290,7 @@ impl Default for ReadOptions {
             dirty: false,
             cache_blocks: true,
             filter_context: None,
+            query_id: None,
         }
     }
 }
@@ -319,6 +324,13 @@ impl ReadOptions {
             ..self
         }
     }
+
+    pub fn with_query_id(self, query_id: impl Into<String>) -> Self {
+        Self {
+            query_id: Some(query_id.into()),
+            ..self
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -346,6 +358,10 @@ pub struct ScanOptions {
     /// Only consulted for `scan_prefix` today. Plain range scans do not
     /// evaluate SST filters, so this field has no effect on `scan`.
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-supplied identifier attached to the `slatedb.query`
+    /// span as a `query_id` field. Subscribers (e.g. `tracing-chrome`) can
+    /// filter on this to capture spans for a specific query.
+    pub query_id: Option<String>,
 }
 
 impl Default for ScanOptions {
@@ -359,6 +375,7 @@ impl Default for ScanOptions {
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
             filter_context: None,
+            query_id: None,
         }
     }
 }
@@ -407,6 +424,13 @@ impl ScanOptions {
     pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
         Self {
             filter_context,
+            ..self
+        }
+    }
+
+    pub fn with_query_id(self, query_id: impl Into<String>) -> Self {
+        Self {
+            query_id: Some(query_id.into()),
             ..self
         }
     }

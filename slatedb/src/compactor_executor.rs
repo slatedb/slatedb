@@ -284,6 +284,7 @@ impl TokioCompactionExecutorInner {
             order: IterationOrder::Ascending,
             prefix: None,
             filter_context: None,
+            query_id: None,
         };
 
         let max_parallel = compute_max_parallel(job_args.sst_views.len(), &job_args.sorted_runs, 4);
@@ -318,6 +319,7 @@ impl TokioCompactionExecutorInner {
                     merge_iter,
                     false,
                     job_args.retention_min_seq,
+                    None,
                 ))
             } else {
                 Box::new(MergeOperatorRequiredIterator::new(merge_iter))
