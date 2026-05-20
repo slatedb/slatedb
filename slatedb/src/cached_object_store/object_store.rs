@@ -2056,8 +2056,14 @@ mod tests {
             1000,
         ));
 
-        let cached_store =
-            CachedObjectStore::new(object_store, cache_storage, PART_SIZE, false, stats).unwrap();
+        let cached_store = CachedObjectStore::new(
+            object_store,
+            Arc::clone(&cache_storage) as Arc<dyn LocalCacheStorage>,
+            PART_SIZE,
+            false,
+            stats,
+        )
+        .unwrap();
         cached_store.start_evictor().await;
 
         if cached {
@@ -2084,10 +2090,10 @@ mod tests {
         let parts1 = entry1.cached_parts().await.unwrap();
         if cached {
             assert_eq!(parts1.len(), 3, "{parts1:?}");
-            assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 6);
+            assert_eq!(cache_storage.file_handle_cache_population(), 6);
         } else {
             assert_eq!(parts1.len(), 0, "{parts1:?}");
-            assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 3);
+            assert_eq!(cache_storage.file_handle_cache_population(), 3);
         }
 
         let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
@@ -2109,7 +2115,7 @@ mod tests {
             .entry(&cache_location1, PART_SIZE);
         let parts1 = entry1.cached_parts().await.unwrap();
         assert_eq!(parts1.len(), 0, "{parts1:?}");
-        assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 3);
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
 
         let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
         let entry2 = cached_store
@@ -2125,6 +2131,6 @@ mod tests {
             .entry(&cache_location1, PART_SIZE);
         let parts1 = entry1.cached_parts().await.unwrap();
         assert_eq!(parts1.len(), 0, "{parts1:?}");
-        assert_eq!(cached_store.cache_storage.file_handle_cache_population(), 3);
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
     }
 }

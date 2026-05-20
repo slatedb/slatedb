@@ -185,6 +185,11 @@ impl FsCacheStorage {
             file_handle_cache,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn file_handle_cache_population(&self) -> usize {
+        self.file_handle_cache.inner.lock().unwrap().len()
+    }
 }
 
 #[async_trait::async_trait]
@@ -208,11 +213,6 @@ impl LocalCacheStorage for FsCacheStorage {
         if let Some(evictor) = &self.evictor {
             evictor.start().await
         }
-    }
-
-    #[cfg(test)]
-    fn file_handle_cache_population(&self) -> usize {
-        self.file_handle_cache.inner.lock().unwrap().len()
     }
 }
 
