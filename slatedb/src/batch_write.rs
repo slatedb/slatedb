@@ -38,12 +38,12 @@ use std::collections::BTreeSet;
 
 use bytes::Bytes;
 
+use crate::buffer_manager::BufferPermit;
 use crate::config::WriteOptions;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
-use crate::write_buffer_manager::WriteBufferPermit;
 use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
 use slatedb_common::clock::SystemClock;
 
@@ -293,7 +293,7 @@ impl DbInner {
         &self,
         entries: Vec<RowEntry>,
         touched_segments: BTreeSet<Bytes>,
-        write_buffer_permit: Option<Arc<WriteBufferPermit>>,
+        write_buffer_permit: Option<Arc<BufferPermit>>,
     ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         let guard = self.state.read();
         let memtable = guard.memtable();

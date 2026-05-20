@@ -117,6 +117,7 @@ use tokio::runtime::Handle;
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
+use crate::buffer_manager::BufferManager;
 use crate::cached_object_store::CachedObjectStore;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
@@ -158,7 +159,6 @@ use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
-use crate::write_buffer_manager::WriteBufferManager;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricLevel;
@@ -189,7 +189,7 @@ pub struct DbBuilder<P: Into<Path>> {
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
-    write_buffer_manager: Option<WriteBufferManager>,
+    write_buffer_manager: Option<BufferManager>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -232,7 +232,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets a custom [`WriteBufferManager`] for controlling the memory
     /// budget of in-flight writes. If not set, a default manager is
     /// created with a budget equal to `max_unflushed_bytes`.
-    pub fn with_write_buffer_manager(mut self, write_buffer_manager: WriteBufferManager) -> Self {
+    pub fn with_write_buffer_manager(mut self, write_buffer_manager: BufferManager) -> Self {
         self.write_buffer_manager = Some(write_buffer_manager);
         self
     }
@@ -599,7 +599,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create the database inner state
         let write_buffer_manager = self
             .write_buffer_manager
-            .unwrap_or_else(|| WriteBufferManager::new(self.settings.max_unflushed_bytes));
+            .unwrap_or_else(|| BufferManager::new(self.settings.max_unflushed_bytes));
         let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
         let inner = Arc::new(
             DbInner::new(

@@ -810,6 +810,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 #[cfg(test)]
 mod tests {
     use super::{ManifestWriter, ManifestWriterHandler, TrackerMessage};
+    use crate::buffer_manager::BufferManager;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -824,7 +825,6 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
-    use crate::write_buffer_manager::WriteBufferManager;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -999,7 +999,7 @@ mod tests {
                 None,
                 status_manager,
                 segment_extractor,
-                WriteBufferManager::new(settings.max_unflushed_bytes),
+                BufferManager::new(settings.max_unflushed_bytes),
             )
             .await
             .unwrap(),

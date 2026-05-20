@@ -23,7 +23,7 @@
 pub use crate::db_status::DbStatus;
 
 use crate::db_cache_manager::{self, CacheTarget};
-use crate::write_buffer_manager::{WriteBufferManager, WriteBufferPermit};
+use crate::write_buffer_manager::{BufferManager, BufferPermit};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -108,7 +108,7 @@ pub(crate) struct DbInner {
     pub(crate) oracle: Arc<DbOracle>,
     pub(crate) flush_merge_operator: Option<MergeOperatorType>,
     pub(crate) reader: Reader,
-    pub(crate) write_buffer_manager: WriteBufferManager,
+    pub(crate) write_buffer_manager: BufferManager,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
     /// of the WAL buffer to the remote storage.
     pub(crate) wal_buffer: Arc<WalBufferManager>,
@@ -138,7 +138,7 @@ impl DbInner {
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
         status_manager: DbStatusManager,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
-        write_buffer_manager: WriteBufferManager,
+        write_buffer_manager: BufferManager,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -378,7 +378,7 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(
         &self,
         write_buffer_size: usize,
-    ) -> Result<Arc<WriteBufferPermit>, SlateDBError> {
+    ) -> Result<Arc<BufferPermit>, SlateDBError> {
         loop {
             self.check_closed()?;
 
