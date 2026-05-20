@@ -69,12 +69,10 @@ use ulid::Ulid;
 
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
+use crate::compaction_worker::build_handler;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
-use crate::compactor_executor::{
-    CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
-    TokioCompactionExecutorOptions,
-};
+use crate::compactor_executor::{CompactionExecutor, StartCompactionJobArgs};
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableView};
@@ -383,23 +381,13 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
-        let (tx, rx) = async_channel::unbounded();
+        // The coordinator uses a [`RemoteCompactionExecutor`] regardless of
+        // deployment shape. Execution is delegated to a
+        // [`crate::compaction_worker::CompactionWorker`] — either spawned in
+        // this process (`embedded_worker = true`) or running standalone.
+        let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
-        let executor = Arc::new(TokioCompactionExecutor::new(
-            TokioCompactionExecutorOptions {
-                handle: self.compactor_runtime.clone(),
-                options: self.options.clone(),
-                worker_tx: tx,
-                table_store: self.table_store.clone(),
-                rand: self.rand.clone(),
-                stats: self.stats.clone(),
-                clock: self.system_clock.clone(),
-                manifest_store: self.manifest_store.clone(),
-                merge_operator: self.merge_operator.clone(),
-                #[cfg(feature = "compaction_filters")]
-                compaction_filter_supplier: self.compaction_filter_supplier.clone(),
-            },
-        ));
+        let executor = Arc::new(crate::compactor_executor::RemoteCompactionExecutor);
         let handler = CompactorEventHandler::new(
             self.manifest_store.clone(),
             self.compactions_store.clone(),
@@ -419,11 +407,51 @@ impl Compactor {
                 &Handle::current(),
             )
             .expect("failed to spawn compactor task");
+
+        // Spawn an in-process worker if configured. The worker shares the
+        // coordinator's `MessageHandlerExecutor`, so `Compactor::stop` shuts
+        // both down together.
+        if self.options.embedded_worker {
+            let (worker_handler, worker_rx) = build_handler(
+                self.manifest_store.clone(),
+                self.compactions_store.clone(),
+                self.table_store.clone(),
+                Arc::new(self.worker_options()),
+                self.compactor_runtime.clone(),
+                self.rand.clone(),
+                self.stats.clone(),
+                self.system_clock.clone(),
+                self.merge_operator.clone(),
+                #[cfg(feature = "compaction_filters")]
+                self.compaction_filter_supplier.clone(),
+            );
+            self.task_executor
+                .add_handler(
+                    crate::compaction_worker::COMPACTION_WORKER_TASK_NAME.to_string(),
+                    Box::new(worker_handler),
+                    worker_rx,
+                    &Handle::current(),
+                )
+                .expect("failed to spawn embedded compaction worker task");
+        }
+
         self.task_executor.monitor_on(&Handle::current())?;
         self.task_executor
             .join_task(COMPACTOR_TASK_NAME)
             .await
             .map_err(|e| e.into())
+    }
+
+    /// Derives the embedded worker's options from the coordinator's options.
+    /// Phase 2 keeps this implicit — full `CompactionWorkerOptions` on the
+    /// coordinator builder is left for a follow-up.
+    fn worker_options(&self) -> crate::config::CompactionWorkerOptions {
+        crate::config::CompactionWorkerOptions {
+            max_concurrent_compactions: self.options.max_concurrent_compactions,
+            max_sst_size: self.options.max_sst_size,
+            max_fetch_tasks: self.options.max_fetch_tasks,
+            ..crate::config::CompactionWorkerOptions::default()
+        }
     }
 
     /// Gracefully stops the compactor task and waits for it to finish.
@@ -1083,6 +1111,15 @@ impl CompactorEventHandler {
                 "expected submitted compaction, got {:?}",
                 compaction.status()
             );
+
+            // With a remote executor, tiered compactions are executed by
+            // CompactionWorkers. The coordinator leaves them as `Submitted` and
+            // lets workers claim them via the optimistic CAS protocol. Drain
+            // specs are still applied locally because they mutate the manifest
+            // directly without any merge work.
+            if self.executor.is_remote() && !compaction.spec().is_drain() {
+                continue;
+            }
 
             // Capacity gates only tiered compactions, which run on the
             // executor. Drain specs mutate the manifest directly and never

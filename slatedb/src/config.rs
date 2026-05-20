@@ -1092,6 +1092,16 @@ pub struct CompactorOptions {
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
+
+    /// Whether to spawn an in-process [`CompactionWorker`](crate::compaction_worker::CompactionWorker)
+    /// alongside the coordinator. Defaults to true. Set to false when all
+    /// workers run as separate processes.
+    #[serde(default = "default_embedded_worker")]
+    pub embedded_worker: bool,
+}
+
+fn default_embedded_worker() -> bool {
+    true
 }
 
 /// Default options for the compactor. Currently, only a
@@ -1107,6 +1117,7 @@ impl Default for CompactorOptions {
             max_concurrent_compactions: 4,
             max_fetch_tasks: 4,
             scheduler_options: HashMap::new(),
+            embedded_worker: true,
         }
     }
 }
@@ -1124,25 +1135,26 @@ impl std::fmt::Debug for CompactorOptions {
             )
             .field("max_fetch_tasks", &self.max_fetch_tasks)
             .field("scheduler_options", &self.scheduler_options)
+            .field("embedded_worker", &self.embedded_worker)
             .finish()
     }
 }
 
-/// Options for the compactor.
+/// Options for the compaction worker.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CompactionWorkerOptions {
-    // How many jobs a single worker may hold simultaneously.
+    /// How many jobs a single worker may hold simultaneously.
     pub max_concurrent_compactions: usize,
 
-    // How often a worker checks `.compactions` for new jobs.
+    /// How often a worker checks `.compactions` for new jobs.
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub compactions_poll_interval: Duration,
 
-    // How many bytes a worker must process before emitting a heartbeat.
+    /// How many bytes a worker must process before emitting a heartbeat.
     pub heartbeat_bytes: u64,
 
-    // Minimum wall-clock time between heartbeat writes.
+    /// Minimum wall-clock time between heartbeat writes.
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub heartbeat_min_interval: Duration,
