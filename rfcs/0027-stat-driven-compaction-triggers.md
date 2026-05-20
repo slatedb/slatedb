@@ -15,7 +15,6 @@ Table of Contents:
    * [3. `tombstone_ratio` trigger](#3-tombstone_ratio-trigger)
    * [4. `periodic` trigger (file-age)](#4-periodic-trigger-file-age)
    * [5. Trigger ordering](#5-trigger-ordering)
-   * [6. Scheduler safeguards and cooldowns](#6-scheduler-safeguards-and-cooldowns)
 - [Impact Analysis](#impact-analysis)
    * [Core API & Query Semantics](#core-api-query-semantics)
    * [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -242,20 +241,6 @@ Within each `propose()` round-robin pass (per tree), evaluate triggers in order 
 
 **Interaction across triggers.** Single-level rewrites lock only `S` and at most one neighbor SR under `ConflictChecker` (`size_tiered_compaction.rs:25-63`), so overlap with size picks is bounded. The round-robin loop (`size_tiered_compaction.rs:235-250`) continues to drive fairness across trees, and other size picks on the same tree (touching non-overlapping SRs) can still run in parallel up to `max_concurrent_compactions`.
 
-### 6. Scheduler safeguards and cooldowns
-
-The new pickers introduce no operator-facing tuning knob beyond the four trigger configurations themselves. All triggers emit single-level rewrites that compose with existing size-tiered safeguards rather than bypassing them. The following safeguards already live inside the scheduler:
-
-- **`max_compaction_sources` bounds per-spec size.** Every trigger respects `clamp_max`, so no single firing produces a tree-spanning compaction. This is the load-bearing safeguard that lets the design work without subcompaction support.
-- **`BackpressureChecker` still applies.** A single-level rewrite is structurally a normal SR → SR pick, so the existing check naturally guards against pathological output-size patterns.
-- **Size clamping.** `CompactionSpec`s with too little or too many bytes are rejected, except for `tombstone_ratio` targeting the bottom-two SRs.
-- **Per-tree round-robin fairness** unchanged from existing `propose()`. One pick per tree per pass means a single segment cannot monopolize `max_concurrent_compactions`.
-
-These new cooldowns will be added for the triggers:
-
-- **Refire cooldown on `max_age`.** The cooldown will be that the `file_creation_time` is older than `max_age`.
-- **Minimum delete count on `tombstone_ratio`.** For an SR to be eligible, it must have at least N tombstones in it.
-
 ## Impact Analysis
 
 SlateDB features and components that this RFC interacts with.
@@ -315,11 +300,11 @@ SlateDB features and components that this RFC interacts with.
 
 ### Performance & Cost
 
-- **Latency.** A small per-SST write overhead: the new `SstCompactionStats` table adds a fixed handful of bytes (three `ulong` counters, two `ulong` timestamps) to the SST footer / `SsTableInfo`. No WAL write-path impact — `SstCompactionStats` lives in SSTs only, so writes hit the WAL unchanged. Read path unaffected. Compactions themselves run the existing executor unchanged. The three new triggers add compaction frequency in steady state; the alternative — letting expired data and tombstones accumulate — has its own slow-burn costs.
-- **Throughput.** Each `max_age` firing rewrites at most `max_compaction_sources` worth of bytes — bounded per spec. Steady-state write amp scales with `(DB size / max_age) × N` for tree depth `N`, because data must traverse `N` levels to reach the bottom. For a 100 GB database with a 7-day `max_age` and `N` ≈ 5 levels: ~70 GB/day of rewrite work in the worst case. That is similar in order of magnitude to a single-pass bottom-reaching design (same total bytes rewritten) but spread across many smaller compactions, which is the explicit trade for avoiding tree-spanning single jobs. `periodic`'s write amp is bounded by `(DB size / periodic_compaction_interval) × N` by the same argument.
-- **Object-store request / cost.** Mirrors the added write amplification above. Per-spec size is bounded by `max_compaction_sources`; global parallelism by `max_concurrent_compactions`; per-tree fairness by the round-robin loop.
+- **Latency.** A small per-SST write overhead: the new `SstCompactionStats` table adds a fixed handful of bytes (three `ulong` counters, two `ulong` timestamps) to the SST footer / `SsTableInfo`. No WAL write-path impact, `SstCompactionStats` lives in manifest only, so writes hit the WAL unchanged. Read path unaffected.
+- **Throughput.** Each trigger firing rewrites at most `max_compaction_sources` worth of bytes, bounded per spec. Following the clamps and `ConflictChecker` to make smaller `CompactionSpecs` allows more compactions to run.
+- **Object-store request / cost.** Mirrors the added write amplification above. This may be ideal for operators, if it means expiring entries in a timely manner, or dropping tombstones.
 - **Space amplification.** `tombstone_ratio` directly reduces space amp at the level of the firing source. `max_age` reduces it indirectly by migrating expired entries (synthesized as tombstones) toward the bottom over multiple cycles. `periodic` provides a floor on staleness-driven amp by guaranteeing a rewrite cadence on cold data.
-- **Read amplification.** `tombstone_ratio` reduces read fanout for delete-heavy regions by removing shadowed entries one level at a time. `max_age` produces synthesized tombstones that incrementally migrate down — bound on read fanout is "one extra tombstone per level still holding the entry," shrinking by one per `max_age` cycle until the entry is fully reclaimed.
+- **Read amplification.** `tombstone_ratio` eventually reduces read fanout for delete-heavy regions by making effort to compact them away. `max_age` produces synthesized tombstones that incrementally migrate down.
 
 ### Observability
 
@@ -365,6 +350,7 @@ SlateDB features and components that this RFC interacts with.
 ## Rollout
 
 - Flatbuffers change
+- Populate `SstCompactionStats`
 - Scheduler changes to support multiple compaction triggers
 - Priority of triggers defined and testing
 - `max_age` and `periodic` implementation
@@ -389,6 +375,7 @@ SlateDB features and components that this RFC interacts with.
 - **Bypassing `clamp_min`.** Size-based clamp is useful, but it hurts when you want `max_age` and `tombstone_ratio` to kick in more frequently. It's possible that the bottom SR isn't targeted by `tombstone_ratio` at all if `clamp_min=2` is respected. Should `max_age` also have a bypass? It could help enforce expiry more frequently.
 
 - **Preventing `tombstone_ratio` from creating a compaction spec that will take too long.** It may be possible for a bottom SR to be large enough to exhaust the compactor and cause write backpressure.
+
 - **Preventing `tombstone_ratio` from cascading.** A high-delete SR compacting could increase lower-SR tombstone ratios and make them immediately picked for compaction. Some type of safeguard here would be useful.
 
 - **Should the `periodic` trigger be leveraged as a migration tool?** When `SstCompactionStats` is `None`, the `periodic` trigger could act as a migration tool. Right now the proposal is to do nothing.
@@ -401,7 +388,7 @@ SlateDB features and components that this RFC interacts with.
 - [RFC 0024: Segment-Oriented Compaction](./0024-segment-oriented-compaction.md) — per-segment trigger evaluation; new triggers respect segment scoping unchanged.
 - [RFC 0025: Distributed Compaction](./0025-distributed-compaction.md) — distributes whole `CompactionSpec` jobs across workers but does *not* introduce subcompactions. This is the reason all three new triggers emit single-level rewrites rather than RocksDB-style `PickCompactionToOldest` specs; without subcompactions, a tree-spanning compaction is a single-worker serial operation that would lock the lower tree for hours on multi-GB databases.
 - [Issue #1598 — Leveled compaction](https://github.com/slatedb/slatedb/issues/1598) — the future consumer of per-SST `compaction_stats`.
-- RocksDB `periodic_compaction_seconds` (file-age) and `ttl` (data-age) — the two-trigger split this RFC mirrors. RocksDB implements both via `PickCompactionToOldest`, which is safe there because subcompactions split the work across N workers; SlateDB intentionally diverges by using multi-cycle single-level rewrites until subcompactions exist.
+- RocksDB `periodic_compaction_seconds` (file-age) and `ttl` (data-age) — the two-trigger split this RFC mirrors. RocksDB implements both via `PickCompactionToOldest`, which is safe there because subcompactions split the work across N workers; SlateDB intentionally diverges by using multi-cycle SR rewrites until subcompactions exist.
 - `slatedb/src/size_tiered_compaction.rs` — scheduler extension point.
 - `slatedb/src/sst_builder.rs`, `slatedb/src/format/sst.rs` — SST format extension surface.
 - `slatedb/src/retention_iterator.rs` — existing TTL/tombstone elision; the synthesis path at `retention_iterator.rs:108-132` is the mechanism the multi-cycle design relies on.
