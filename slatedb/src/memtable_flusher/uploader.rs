@@ -283,7 +283,7 @@ impl MessageHandler<UploadJob> for UploadHandler {
 #[cfg(test)]
 mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
-    use crate::buffer_manager::BufferManager;
+    use crate::buffer_manager::ByteBufferManager;
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_state::SsTableView;
@@ -347,7 +347,7 @@ mod tests {
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
-        let write_buffer_manager = BufferManager::new(settings.max_unflushed_bytes);
+        let write_buffer_manager = ByteBufferManager::new(settings.max_unflushed_bytes);
         Arc::new(
             DbInner::new(
                 settings,

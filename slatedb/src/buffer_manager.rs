@@ -12,11 +12,11 @@ use tokio::sync::Notify;
 /// memtable is dropped after being flushed to L0, thereby freeing the
 /// budget for new writes.
 #[derive(Clone)]
-pub struct BufferManager {
+pub struct ByteBufferManager {
     inner: Arc<ByteBudgetSemaphore>,
 }
 
-impl BufferManager {
+impl ByteBufferManager {
     /// Creates a new write-buffer manager with the given byte budget.
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -225,25 +225,25 @@ mod tests {
     use tokio::time::timeout;
 
     // ---------------------------------------------------------------
-    // WriteBufferManager tests
+    // ByteBufferManager tests
     // ---------------------------------------------------------------
 
     #[tokio::test]
     async fn test_new_manager_has_full_budget() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         assert_eq!(mgr.available(), 1024);
     }
 
     #[tokio::test]
     async fn test_acquire_reduces_available() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let _permit = mgr.acquire(100).await;
         assert_eq!(mgr.available(), 924);
     }
 
     #[tokio::test]
     async fn test_acquire_entire_budget() {
-        let mgr = BufferManager::new(256);
+        let mgr = ByteBufferManager::new(256);
         let permit = mgr.acquire(256).await;
         assert_eq!(mgr.available(), 0);
         assert_eq!(permit.size(), 256);
@@ -251,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_permit_restores_budget() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let permit = mgr.acquire(300).await;
         assert_eq!(mgr.available(), 724);
         drop(permit);
@@ -260,7 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_acquires() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let p1 = mgr.acquire(200).await;
         let p2 = mgr.acquire(300).await;
         assert_eq!(mgr.available(), 524);
@@ -270,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_acquire_blocks_when_budget_exhausted() {
-        let mgr = BufferManager::new(100);
+        let mgr = ByteBufferManager::new(100);
         let _permit = mgr.acquire(100).await;
 
         // A second acquire should block because the budget is exhausted.
@@ -280,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_acquire_unblocks_after_drop() {
-        let mgr = BufferManager::new(100);
+        let mgr = ByteBufferManager::new(100);
         let permit = mgr.acquire(100).await;
 
         let mgr_clone = mgr.clone();
@@ -305,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_permit_size() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let permit = mgr.acquire(42).await;
         assert_eq!(permit.size(), 42);
     }
@@ -316,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_combines_sizes() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let p1 = mgr.acquire(100).await;
         let p2 = mgr.acquire(200).await;
 
@@ -327,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_drops_release_combined() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let p1 = mgr.acquire(100).await;
         let p2 = mgr.acquire(200).await;
 
@@ -339,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_other_drops_without_releasing() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let p1 = mgr.acquire(100).await;
         let p2 = mgr.acquire(200).await;
 
@@ -354,8 +354,8 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "merging permits from different semaphore instances")]
     async fn test_merge_different_managers_panics() {
-        let mgr1 = BufferManager::new(1024);
-        let mgr2 = BufferManager::new(1024);
+        let mgr1 = ByteBufferManager::new(1024);
+        let mgr2 = ByteBufferManager::new(1024);
         let p1 = mgr1.acquire(10).await;
         let p2 = mgr2.acquire(10).await;
 
@@ -368,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_zero_sized_permit_is_safe() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let p1 = mgr.acquire(100).await;
         let p2 = mgr.acquire(100).await;
 
@@ -386,7 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_after_merge_releases_all() {
-        let mgr = BufferManager::new(1024);
+        let mgr = ByteBufferManager::new(1024);
         let p1 = mgr.acquire(100).await;
         let p2 = mgr.acquire(200).await;
         let p3 = mgr.acquire(300).await;

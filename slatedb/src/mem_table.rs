@@ -15,12 +15,12 @@ use std::sync::atomic::Ordering::SeqCst;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
+use crate::buffer_manager::BufferPermit;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
-use crate::write_buffer_manager::BufferPermit;
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
