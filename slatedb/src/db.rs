@@ -6195,7 +6195,7 @@ mod tests {
         // - W2 starts opening: claims writer_epoch=2, writes its own fence WAL
         //   (above W1's), replays, and finishes init.
         // - W1 unpauses, finishes replay_wal, and returns its Db handle.
-        // - W1 issues a put. This put should fail
+        // - W1 issues a put. This put should fail because W1's next WAL id is taken.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_writer_paused_in_replay_wal_race";
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -6270,8 +6270,7 @@ mod tests {
             1
         );
 
-        // The race: W1 was fenced by W2 before W1's open returned, but W1's
-        // put currently still succeeds. This assertion documents the bug.
+        // W1's put should fail because its now fenced
         let result = db1
             .put_with_options(
                 b"w1",
