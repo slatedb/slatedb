@@ -241,7 +241,7 @@ impl FsCacheEntry {
             // If the evictor is backpressured, skip this cache write to avoid
             // stalling foreground PUTs. Cache writes are best-effort.
             if !evictor
-                .track_entry_accessed(path.clone(), buf.len(), EntryAccess::Write)
+                .track_entry_accessed(path.clone(), EntryAccess::Write(buf.len()))
                 .await
             {
                 return Ok(());
@@ -374,7 +374,7 @@ impl LocalCacheEntry for FsCacheEntry {
         if result.is_some() {
             if let Some(evictor) = &self.evictor {
                 evictor
-                    .track_entry_accessed(part_path, self.part_size, EntryAccess::Read)
+                    .track_entry_accessed(part_path, EntryAccess::Read(self.part_size))
                     .await;
             }
         }
@@ -500,7 +500,7 @@ impl LocalCacheEntry for FsCacheEntry {
             if let Some(evictor) = &self.evictor {
                 let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
                 evictor
-                    .track_entry_accessed(head_path, head_size_bytes, EntryAccess::Read)
+                    .track_entry_accessed(head_path, EntryAccess::Read(head_size_bytes))
                     .await;
             }
             Ok(Some((meta, attributes)))
@@ -523,7 +523,7 @@ impl LocalCacheEntry for FsCacheEntry {
 
         if let Some(evictor) = &self.evictor {
             evictor
-                .track_entry_accessed(path, 0, EntryAccess::Delete)
+                .track_entry_accessed(path, EntryAccess::Delete)
                 .await;
         } else {
             delete_cache_entry(path, self.file_handle_cache.clone()).await;
@@ -532,12 +532,12 @@ impl LocalCacheEntry for FsCacheEntry {
 }
 
 enum EntryAccess {
-    Read,
-    Write,
+    Read(usize),
+    Write(usize),
     Delete,
 }
 
-type FsCacheEvictorWork = (std::path::PathBuf, usize, EntryAccess);
+type FsCacheEvictorWork = (std::path::PathBuf, EntryAccess);
 // Minimum time between aggregated "evictor queue is full" warnings.
 const QUEUE_FULL_LOG_INTERVAL_MS: i64 = 30_000;
 
@@ -636,13 +636,13 @@ impl FsCacheEvictor {
     ) {
         loop {
             match rx.recv().await {
-                Some((path, bytes, access)) => match access {
-                    EntryAccess::Read => {
+                Some((path, access)) => match access {
+                    EntryAccess::Read(bytes) => {
                         inner
                             .track_entry_accessed(path, bytes, system_clock.now(), false)
                             .await;
                     }
-                    EntryAccess::Write => {
+                    EntryAccess::Write(bytes) => {
                         inner
                             .track_entry_accessed(path, bytes, system_clock.now(), true)
                             .await;
@@ -675,17 +675,12 @@ impl FsCacheEvictor {
     // sender and receiver. It doesn't close the channel, and both sender and receiver are dropped
     // when the evictor is dropped.
     #[allow(clippy::disallowed_methods)]
-    async fn track_entry_accessed(
-        &self,
-        path: std::path::PathBuf,
-        bytes: usize,
-        access: EntryAccess,
-    ) -> bool {
+    async fn track_entry_accessed(&self, path: std::path::PathBuf, access: EntryAccess) -> bool {
         if !self.started() {
             return true;
         }
 
-        match self.tx.try_send((path, bytes, access)) {
+        match self.tx.try_send((path, access)) {
             Ok(()) => true,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.queue_full_count.fetch_add(1, Ordering::AcqRel);
@@ -1255,15 +1250,14 @@ mod tests {
             let accepted = evictor
                 .track_entry_accessed(
                     std::path::PathBuf::from(format!("file{idx}")),
-                    1,
-                    EntryAccess::Write,
+                    EntryAccess::Write(1),
                 )
                 .await;
             assert!(accepted);
         }
 
         let accepted = evictor
-            .track_entry_accessed(std::path::PathBuf::from("overflow"), 1, EntryAccess::Write)
+            .track_entry_accessed(std::path::PathBuf::from("overflow"), EntryAccess::Write(1))
             .await;
         assert!(!accepted);
     }
