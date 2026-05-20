@@ -583,9 +583,13 @@ impl DbInner {
         };
 
         let db_state = self.state.read().state().core().clone();
-        let mut replay_iter =
-            WalReplayIterator::range(wal_id_range, &db_state, replay_options, Arc::clone(&self.table_store))
-                .await?;
+        let mut replay_iter = WalReplayIterator::range(
+            wal_id_range,
+            &db_state,
+            replay_options,
+            Arc::clone(&self.table_store),
+        )
+        .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
             // RFC-0024: re-extract each replayed entry's prefix to
