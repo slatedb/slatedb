@@ -9,10 +9,12 @@ it fits into SlateDB's cache layers, see the [Caching](/docs/design/caching) des
 
 ## Upgrade note for existing disk caches
 
-SlateDB versions that used Foyer 0.18 wrote the disk tier with Foyer's older large-engine
-layout. Foyer 0.22 uses the block engine, and that engine cannot read all entries from the
-old on-disk layout. After upgrading, startup may log `foyer_storage` `coding error` messages
-while recovering the old cache directory.
+When upgrading from SlateDB 0.12.x to SlateDB 0.13.0 or later, existing Foyer disk cache
+directories may need attention. SlateDB 0.8.x through 0.12.x used Foyer 0.18 and wrote the
+disk tier with Foyer's older large-engine layout. SlateDB 0.13.0 uses Foyer 0.22's block
+engine, and that engine cannot read all entries from the old on-disk layout. After upgrading,
+startup may log `foyer_storage` `coding error` messages while recovering the old cache
+directory.
 
 These errors are cache misses from SlateDB's point of view. SlateDB falls back to the object
 store, records the cache error in metrics, and reinserts accessed blocks into the new Foyer
