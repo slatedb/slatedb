@@ -10179,6 +10179,7 @@ const (
 	CompactionStatusRunning   CompactionStatus = 2
 	CompactionStatusCompleted CompactionStatus = 3
 	CompactionStatusFailed    CompactionStatus = 4
+	CompactionStatusCompacted CompactionStatus = 5
 )
 
 type FfiConverterCompactionStatus struct{}

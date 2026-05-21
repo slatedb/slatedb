@@ -1128,6 +1128,39 @@ impl std::fmt::Debug for CompactorOptions {
     }
 }
 
+/// Options for the compactor.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CompactionWorkerOptions {
+    // How many jobs a single worker may hold simultaneously.
+    pub max_concurrent_compactions: usize,
+
+    // How often a worker checks `.compactions` for new jobs.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub compactions_poll_interval: Duration,
+
+    // How many bytes a worker must process before emitting a heartbeat.
+    pub heartbeat_bytes: u64,
+
+    // Minimum wall-clock time between heartbeat writes.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub heartbeat_min_interval: Duration,
+}
+
+/// Default options for the compaction worker.
+impl Default for CompactionWorkerOptions {
+    /// Returns a `CompactionWorkerOptions` with a 5 second poll interval
+    fn default() -> Self {
+        Self {
+            max_concurrent_compactions: 4,
+            compactions_poll_interval: Duration::from_secs(5),
+            heartbeat_bytes: 64000,
+            heartbeat_min_interval: Duration::from_secs(1),
+        }
+    }
+}
+
 /// Options for the Size-Tiered Compaction Scheduler
 #[derive(Clone, Copy, Debug)]
 pub struct SizeTieredCompactionSchedulerOptions {

@@ -11,10 +11,13 @@ enum CompactionStatus : byte {
     Submitted = 0,
     /// The compaction is currently running.
     Running,
-    /// The compaction finished successfully.
+    /// The compaction finished successfully and was committed to the manifest.
     Completed,
     /// The compaction failed. It might or might not have started before failure.
     Failed,
+    /// The worker finished execution and wrote its final output SSTs; the
+    /// compaction coordinator has not yet committed the result to the manifest.
+    Compacted,
 }
 
 table TieredCompactionSpec {
@@ -63,6 +66,13 @@ table DrainSegmentSpec {
     sorted_runs: [uint32];
 }
 
+table WorkerSpec {
+    // worker_id of worker that owns compaction
+    worker_id: string;
+    // wall-clock ms of last progress write
+    last_heartbeat_ms: uint64;
+}
+
 table Compaction {
     // ID of compaction
     id: Ulid (required);
@@ -75,6 +85,9 @@ table Compaction {
 
     // Output SSTs already produced by this compaction.
     output_ssts: [CompactedSsTable];
+
+    // Spec of the worker that has claimed this compaction. null = unclaimed
+    worker: WorkerSpec;
 }
 
 table CompactionsV1 {
