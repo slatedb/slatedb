@@ -360,9 +360,9 @@ impl From<&CoreExternalDb> for ExternalDb {
 pub enum CompactionStatus {
     Submitted,
     Running,
-    Compacted,
     Completed,
     Failed,
+    Compacted,
 }
 
 impl From<CoreCompactionStatus> for CompactionStatus {
@@ -370,9 +370,9 @@ impl From<CoreCompactionStatus> for CompactionStatus {
         match value {
             CoreCompactionStatus::Submitted => Self::Submitted,
             CoreCompactionStatus::Running => Self::Running,
-            CoreCompactionStatus::Compacted => Self::Compacted,
             CoreCompactionStatus::Completed => Self::Completed,
             CoreCompactionStatus::Failed => Self::Failed,
+            CoreCompactionStatus::Compacted => Self::Compacted,
         }
     }
 }
