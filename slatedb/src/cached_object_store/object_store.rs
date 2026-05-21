@@ -178,12 +178,7 @@ impl CachedObjectStore {
     /// lazily from observed metadata locations, so this method may return `None`
     /// for early requests until successful GET/HEAD responses are observed.
     fn cache_location_for(&self, location: &Path) -> Option<Path> {
-        self.resolved_root.get().map(|root| {
-            if root.as_ref().is_empty() {
-                return location.clone();
-            }
-            root.parts().chain(location.parts()).collect()
-        })
+        cache_location_for(&self.resolved_root, location)
     }
 
     /// Lazily resolves the root prefix and validates the derived cache key.
@@ -692,6 +687,15 @@ fn head_only_get_result(meta: ObjectMeta, attributes: Attributes) -> GetResult {
     }
 }
 
+fn cache_location_for(resolved_root: &Arc<OnceCell<Path>>, location: &Path) -> Option<Path> {
+    resolved_root.get().map(|root| {
+        if root.as_ref().is_empty() {
+            return location.clone();
+        }
+        root.parts().chain(location.parts()).collect()
+    })
+}
+
 impl std::fmt::Display for CachedObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -732,12 +736,43 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.put_multipart_opts(location, opts).await
     }
 
+    /// Deletion of the cache entries associated with the object being
+    /// deleted is not atomic with respect to the object deletion from
+    /// the underlying object store. So for some period of time after
+    /// the deletion, cached object parts are still visible in the cache.
+    /// But assuming each object ever created by SlateDB is immutable and
+    /// has a unique name, this is not a problem.
+    ///
+    /// If eviction is enabled, deletion of the associated cache entries
+    /// happens asynchronously; when the control returns to the caller,
+    /// the entries still might be present in the cache. If eviction is
+    /// off, the deletion happens synchronously; when the control returns
+    /// to the caller, it is guaranteed no entries present in the cache
+    /// (assuming no errors happened during the deletion).
     fn delete_stream(
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        // TODO: handle cache eviction
-        self.object_store.delete_stream(locations)
+        let resolved_root = self.resolved_root.clone();
+        let cache_storage = self.cache_storage.clone();
+        let part_size_bytes = self.part_size_bytes;
+
+        self.object_store
+            .delete_stream(locations)
+            .then(move |result| {
+                let resolved_root = resolved_root.clone();
+                let cache_storage = cache_storage.clone();
+                async move {
+                    if let Ok(ref location) = result {
+                        if let Some(cache_location) = cache_location_for(&resolved_root, location) {
+                            let entry = cache_storage.entry(&cache_location, part_size_bytes);
+                            entry.delete().await;
+                        }
+                    }
+                    result
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -806,6 +841,7 @@ impl From<GetRange> for GetRangeKey {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::Bytes;
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
@@ -1981,5 +2017,120 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap().bytes().await.unwrap();
         assert_eq!(&bytes[..], &payload[..512]);
+    }
+
+    #[rstest::rstest]
+    #[case::no_evictor_cached(false, true)]
+    #[case::with_evictor_cached(true, true)]
+    #[case::no_evictor_uncached(false, false)]
+    #[case::with_evictor_uncached(true, false)]
+    #[tokio::test]
+    async fn test_delete(#[case] evictor: bool, #[case] cached: bool) {
+        const PART_SIZE: usize = 1024;
+
+        let location1 = Path::from("/data/testfile1");
+        let location2 = Path::from("/data/testfile2");
+
+        let test_cache_folder = new_test_cache_folder();
+        let payload = gen_rand_bytes(PART_SIZE * 3);
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+
+        object_store
+            .put(&location1, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+        object_store
+            .put(&location2, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder.clone(),
+            evictor.then_some(1024 * 1024),
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+
+        let cached_store = CachedObjectStore::new(
+            object_store,
+            Arc::clone(&cache_storage) as Arc<dyn LocalCacheStorage>,
+            PART_SIZE,
+            false,
+            stats,
+        )
+        .unwrap();
+        cached_store.start_evictor().await;
+
+        if cached {
+            cached_store
+                .get(&location1)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+        }
+        cached_store
+            .get(&location2)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        let cache_location1 = cached_store.cache_location_for(&location1).unwrap();
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        if cached {
+            assert_eq!(parts1.len(), 3, "{parts1:?}");
+            assert_eq!(cache_storage.file_handle_cache_population(), 6);
+        } else {
+            assert_eq!(parts1.len(), 0, "{parts1:?}");
+            assert_eq!(cache_storage.file_handle_cache_population(), 3);
+        }
+
+        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
+        let entry2 = cached_store
+            .cache_storage
+            .entry(&cache_location2, PART_SIZE);
+        let parts2 = entry2.cached_parts().await.unwrap();
+        assert_eq!(parts2.len(), 3, "{parts2:?}");
+
+        cached_store.delete(&location1).await.unwrap();
+        if evictor {
+            // XXX: If evictor is running, deletion is performed asynchronously
+            //      from the evictor "thread".
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
+
+        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
+        let entry2 = cached_store
+            .cache_storage
+            .entry(&cache_location2, PART_SIZE);
+        let parts2 = entry2.cached_parts().await.unwrap();
+        assert_eq!(parts2.len(), 3, "{parts2:?}");
+
+        // verify repeated delete is idempotent
+        cached_store.delete(&location1).await.unwrap();
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
     }
 }
