@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 
 /// Tracks and enforces a global memory budget for in-flight write data.
 ///
-/// Writers must acquire a [`WriteBufferPermit`] before submitting a batch.
+/// Writers must acquire a [`ByteBufferPermit`] before submitting a batch.
 /// The permit is attached to the active memtable and released when that
 /// memtable is dropped after being flushed to L0, thereby freeing the
 /// budget for new writes.
@@ -37,7 +37,11 @@ impl ByteBufferManager {
             };
         }
 
-        Arc::clone(&self.inner).acquire_permit(num_bytes).await
+        self.inner.acquire(num_bytes).await;
+        ByteBufferPermit {
+            reserved_bytes: AtomicUsize::new(num_bytes),
+            semaphore: Arc::clone(&self.inner),
+        }
     }
 
     /// Attempts to reserve `num_bytes` without blocking. Returns `Some(permit)`
@@ -85,6 +89,8 @@ impl ByteBufferManager {
         self.inner.capacity
     }
 
+    /// Returns `true` if allocated bytes have reached or exceeded the high
+    /// watermark, indicating that writers should apply backpressure.
     pub fn at_capacity(&self) -> bool {
         self.inner.allocated() >= self.high_watermark
     }
@@ -108,7 +114,7 @@ impl ByteBufferManager {
 /// An RAII guard representing a reserved portion of the write-buffer budget.
 ///
 /// Dropping the permit returns its reserved bytes to the parent
-/// [`WriteBufferManager`]. Multiple permits can be consolidated via
+/// [`ByteBufferManager`]. Multiple permits can be consolidated via
 /// [`merge`](Self::merge) so that a single drop releases the combined
 /// reservation.
 #[derive(Debug)]
@@ -130,7 +136,7 @@ impl ByteBufferPermit {
     /// # Panics
     ///
     /// Panics if `self` and `other` were acquired from different
-    /// `WriteBufferManager` instances.
+    /// `ByteBufferManager` instances.
     pub fn merge(&self, other: &Self) {
         assert!(
             Arc::ptr_eq(&self.semaphore, &other.semaphore),
@@ -176,6 +182,7 @@ struct ByteBudgetSemaphore {
 }
 
 impl ByteBudgetSemaphore {
+    /// Creates a new semaphore with the given total byte capacity.
     fn new(capacity: usize) -> Self {
         Self {
             notify: Notify::new(),
@@ -184,6 +191,8 @@ impl ByteBudgetSemaphore {
         }
     }
 
+    /// Reserves `num_bytes`, blocking until allocated bytes drop below
+    /// capacity. Uses a CAS loop with a `Notify` to avoid spinning.
     async fn acquire(&self, num_bytes: usize) {
         let mut current = self.allocated_bytes.load(Ordering::Relaxed);
         let notify_fut = self.notify.notified();
@@ -239,6 +248,12 @@ impl ByteBudgetSemaphore {
         }
     }
 
+    /// Releases `num_bytes` back to the budget and wakes any blocked
+    /// acquirers or capacity waiters if allocated bytes are now below capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_bytes` exceeds the currently allocated count.
     fn release(&self, num_bytes: usize) {
         let mut current = self.allocated_bytes.load(Ordering::Relaxed);
         loop {
@@ -266,6 +281,8 @@ impl ByteBudgetSemaphore {
         }
     }
 
+    /// Returns the number of unreserved bytes (capacity minus allocated),
+    /// clamped to zero when over-allocated via `force_acquire`.
     fn available(&self) -> usize {
         let current = self.allocated_bytes.load(Ordering::Relaxed);
         if current < self.capacity {
@@ -275,10 +292,13 @@ impl ByteBudgetSemaphore {
         }
     }
 
+    /// Returns the total number of bytes currently allocated.
     fn allocated(&self) -> usize {
         self.allocated_bytes.load(Ordering::Relaxed)
     }
 
+    /// Blocks until allocated bytes drop below `num_bytes`. Does not reserve
+    /// any capacity — callers must handle TOCTOU races.
     async fn wait_for_allocated_below(&self, num_bytes: usize) {
         let mut current = self.allocated_bytes.load(Ordering::Relaxed);
         if current < num_bytes {
@@ -297,14 +317,6 @@ impl ByteBudgetSemaphore {
                 notify_fut.set(self.notify.notified());
                 current = self.allocated_bytes.load(Ordering::Relaxed);
             }
-        }
-    }
-
-    async fn acquire_permit(self: Arc<Self>, num_bytes: usize) -> ByteBufferPermit {
-        self.acquire(num_bytes).await;
-        ByteBufferPermit {
-            reserved_bytes: AtomicUsize::new(num_bytes),
-            semaphore: self,
         }
     }
 }
