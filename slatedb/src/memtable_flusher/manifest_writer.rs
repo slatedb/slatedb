@@ -999,7 +999,7 @@ mod tests {
                 None,
                 status_manager,
                 segment_extractor,
-                ByteBufferManager::new(settings.max_unflushed_bytes),
+                ByteBufferManager::new(settings.max_unflushed_bytes, settings.max_unflushed_bytes),
             )
             .await
             .unwrap(),

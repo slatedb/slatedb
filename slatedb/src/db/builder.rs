@@ -597,9 +597,21 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
-        let write_buffer_manager = self
-            .write_buffer_manager
-            .unwrap_or_else(|| ByteBufferManager::new(self.settings.max_unflushed_bytes));
+        let write_buffer_manager = self.write_buffer_manager.unwrap_or_else(|| {
+            ByteBufferManager::new(
+                self.settings.max_unflushed_bytes,
+                self.settings.max_unflushed_bytes,
+            )
+        });
+        // if write_buffer_manager.capacity() < self.settings.l0_sst_size_bytes * 2 {
+        //     return Err(crate::Error::invalid(
+        //         format!(
+        //             "invalid configuration: write_buffer_manager capacity ({}) must be at least 2 x l0_sst_size_bytes ({})",
+        //             write_buffer_manager.capacity(),
+        //             self.settings.l0_sst_size_bytes * 2,
+        //         )
+        //     ));
+        // }
         let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
         let inner = Arc::new(
             DbInner::new(
