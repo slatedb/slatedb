@@ -488,7 +488,13 @@ impl DbInner {
                 );
 
                 let await_capacity = self.write_buffer_manager.await_capacity();
-                self.freeze_current_memtable()?;
+                // Only freeze the current memtable if there are no frozen
+                // memtables already queued for flushing. If frozen memtables
+                // exist, the flusher is already working on draining them and
+                // adding another would not help relieve pressure faster.
+                if imm_memtable_size_bytes == 0 {
+                    self.freeze_current_memtable()?;
+                }
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
                 let await_closed = async {
