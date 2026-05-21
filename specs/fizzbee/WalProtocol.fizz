@@ -172,13 +172,13 @@ symmetric role WalWriter:
 
     atomic action InitNextId:
         require self.status == "InitNextId"
-        sid = latest_sequence_id() # builder.rs#L549
+        sid = latest_sequence_id()
         self.next_id = sid + 1
         self.status = "ClaimEpoch"
 
     atomic action ClaimEpoch:
         require self.status == "ClaimEpoch"
-        current_epoch = current_epoch + 1 # builder.rs#L569
+        current_epoch = current_epoch + 1
         self.epoch = current_epoch
         self.status = "WriteFence"
 
@@ -188,13 +188,12 @@ symmetric role WalWriter:
             and self.attempts < MAX_FENCE_ATTEMPTS_PER_WRITER
         )
         self.attempts += 1
-        success = self.write(FENCE) # builder.rs#L610
+        success = self.write(FENCE)
         if success:
             self.status = "ValidateFence"
         else:
             self.status = "CheckFenced"
 
-    # Not yet implemented in code. We simply return success right now.
     atomic action ValidateFence:
         """
         Fence write succeeded. Make sure we're still the latest epoch and the
@@ -219,10 +218,10 @@ symmetric role WalWriter:
         latest epoch.
         """
         require self.status == "CheckFenced"
-        if self.epoch < current_epoch: # db.rs#L313
+        if self.epoch < current_epoch:
             self.status = "Fenced"
         else:
-            self.next_id += 1 # db.rs#L321
+            self.next_id += 1
             self.status = "WriteFence"
 
     atomic action WriteWal:
