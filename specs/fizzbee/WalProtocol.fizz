@@ -168,6 +168,8 @@ symmetric role WalWriter:
         self.attempts = 0
         # Epoch claimed by this writer.
         self.epoch = None
+        # WALs in current manifest.
+        self.manifest_wals = set()
         self.status = "InitNextId"
 
     atomic action InitNextId:
@@ -235,6 +237,7 @@ symmetric role WalWriter:
         success = self.write(DATA)
         if success:
             record_commit(self.next_id, self.epoch, DATA)
+            self.manifest_wals.add(self.next_id)
             self.next_id += 1
         else:
             # Another writer claimed this ID first, so this writer is fenced.
@@ -243,16 +246,15 @@ symmetric role WalWriter:
     atomic action Flush:
         """
         Pretend we've written more L0 data. This updates the manifest with a
-        new replay_after_wal_id. We just pick a random WAL ID to use as the
-        flush point.
+        new replay_after_wal_id. Picks a random ID that has data in the
+        memtable and uses it to advance the boundary.
         """
-        if self.writes > 0:
-            candidates = [
-                id
-                for id in objects.keys()
-                if id > replay_after_wal_id
-            ]
-            replay_after_wal_id = oneof candidates
+        require len(self.manifest_wals) > 0
+        if self.epoch == current_epoch:
+            replay_after_wal_id = oneof self.manifest_wals
+            self.manifest_wals = set([id for id in self.manifest_wals if id > replay_after_wal_id])
+        else:
+            self.status = "Fenced"
 
     atomic func write(_type):
         # If next_id is already in `objects`, this write does not succeed.
