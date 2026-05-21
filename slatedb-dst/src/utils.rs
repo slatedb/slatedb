@@ -104,6 +104,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
             include_size_threshold: rng.random_range(2.0..=8.0),
         }
         .into(),
+        embedded_worker: true,
     }
 }
 
