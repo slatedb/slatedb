@@ -118,6 +118,7 @@ use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::CachedObjectStore;
+use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
@@ -1551,6 +1552,8 @@ pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Byt
     system_clock: Option<Arc<dyn SystemClock>>,
     rand: Option<Arc<DbRand>>,
     projection_range: Option<R>,
+    segment_filter: Option<SegmentFilterFn>,
+    segment_projection: Option<SegmentProjectionFn>,
 }
 
 impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
@@ -1567,6 +1570,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
             system_clock: None,
             rand: None,
             projection_range: None,
+            segment_filter: None,
+            segment_projection: None,
         }
     }
 
@@ -1595,6 +1600,43 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
         self
     }
 
+    /// Restrict the clone to segments for which `f` returns `true`. The
+    /// unsegmented LSM tree participates as a logical segment with the empty
+    /// prefix `b""`, so e.g. `|p| !p.is_empty()` keeps only named segments
+    /// and `|p| p.is_empty()` keeps only the unsegmented tree.
+    pub fn with_segment_filter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&[u8]) -> bool + Send + Sync + 'static,
+    {
+        self.segment_filter = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a per-segment projection range. `f` receives each segment's prefix
+    /// and returns the range to retain. The returned range's bounded ends must
+    /// fall within `[prefix, prefix++)`; `Unbounded` ends resolve to the
+    /// segment edges. The result is intersected with any global
+    /// `projection_range`. Empty returned ranges surface as
+    /// `SlateDBError::InvalidProjection`.
+    pub fn with_segment_projection<F, Range>(mut self, f: F) -> Self
+    where
+        F: Fn(&[u8]) -> Range + Send + Sync + 'static,
+        Range: RangeBounds<Bytes>,
+    {
+        self.segment_projection = Some(Arc::new(move |prefix| {
+            let r = f(prefix);
+            crate::bytes_range::BytesRange::try_new(
+                r.start_bound().cloned(),
+                r.end_bound().cloned(),
+            )
+            .ok_or_else(|| crate::error::SlateDBError::InvalidProjection {
+                prefix: Bytes::copy_from_slice(prefix),
+                reason: "empty range".into(),
+            })
+        }));
+        self
+    }
+
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = Some(system_clock);
         self
@@ -1616,6 +1658,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
                 .unwrap_or_else(|| Arc::new(DefaultSystemClock::new())),
             self.rand.unwrap_or_else(|| Arc::new(Default::default())),
             self.projection_range,
+            self.segment_filter,
+            self.segment_projection,
         )
         .await?;
         Ok(())

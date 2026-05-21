@@ -205,6 +205,9 @@ pub(crate) enum SlateDBError {
     #[error("invalid union: {0}")]
     InvalidUnion(String),
 
+    #[error("invalid clone projection for segment prefix {prefix:?}: {reason}")]
+    InvalidProjection { prefix: Bytes, reason: String },
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -575,6 +578,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
             SlateDBError::InvalidUnion(_) => Error::invalid(msg),
+            SlateDBError::InvalidProjection { .. } => Error::invalid(msg),
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
             SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
