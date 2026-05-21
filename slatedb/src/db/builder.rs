@@ -546,7 +546,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             Some(latest_stored_manifest) => latest_stored_manifest.db_state().replay_after_wal_id,
             None => 0,
         };
-        let next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
+        let mut next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
 
         // Initialize the database
         let stored_manifest = match latest_manifest {
@@ -573,9 +573,21 @@ impl<P: Into<Path>> DbBuilder<P> {
         )
         .await?;
 
+        let mut manifest_dirty = manifest.prepare_dirty()?;
+        // verify that the next_wal_id we computed is still valid
+        if next_wal_id <= manifest_dirty.value.core.replay_after_wal_id {
+            // the wal gc boundary advanced because the old writer finished a flush - recompute
+            // the next wal id
+            next_wal_id = table_store.next_wal_sst_id(manifest_dirty.value.core.replay_after_wal_id).await?;
+            manifest.refresh().await?;
+            manifest_dirty = manifest.prepare_dirty()?;
+            // at this point we still hold the epoch, so it should not be possible for the barrier
+            // to have advanced past the computed next_wal_id
+            assert!(next_wal_id > manifest_dirty.value.core.replay_after_wal_id);
+        }
+
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
-        let manifest_dirty = manifest.prepare_dirty()?;
         let status_manager = DbStatusManager::new_with_manifest(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),

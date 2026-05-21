@@ -324,19 +324,11 @@ impl DbInner {
             self.status_manager.report_manifest(dirty_manifest.into());
 
             if wrote_fence {
-                // Our fence write might be behind replay_after_wal_id since we're racing with
-                // older writers that can advance replay_after_wal_id by flushing data to L0.
-                // We need to make sure the fence write falls above this barrier so it's visible
-                // to all other active writers.
-                if empty_wal_id > replay_after_wal_id {
-                    return Ok(replay_after_wal_id + 1..empty_wal_id + 1);
-                } else {
-                    // If we're behind the barrier, reset to the next WAL slot.
-                    empty_wal_id = self
-                        .table_store
-                        .next_wal_sst_id(replay_after_wal_id)
-                        .await?;
-                }
+                // this writer is the only writer that could have written replay_after_wal_id,
+                // so it should not be possible for it to have advanced past the fencing wal.
+                // older writers would have failed with a stale epoch
+                assert!(empty_wal_id > replay_after_wal_id);
+                return Ok(replay_after_wal_id + 1..empty_wal_id + 1);
             } else {
                 // We're (probably) ahead of the barrier, but we hit a race with another writer.
                 // Instead of paying for the LIST (API cost and latency), just try the next ID.
