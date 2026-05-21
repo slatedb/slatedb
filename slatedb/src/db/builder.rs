@@ -140,6 +140,7 @@ use crate::db_reader::DbReader;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::fence::{WriterFenceResult, WriterFencer};
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
@@ -541,13 +542,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             }),
         ));
 
-        // Get next WAL ID before writing manifest
-        let replay_after_wal_id = match &latest_manifest {
-            Some(latest_stored_manifest) => latest_stored_manifest.db_state().replay_after_wal_id,
-            None => 0,
-        };
-        let mut next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
-
         // Initialize the database
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
@@ -566,25 +560,13 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         };
 
-        let mut manifest = FenceableManifest::init_writer(
-            stored_manifest,
-            self.settings.manifest_update_timeout,
-            system_clock.clone(),
-        )
-        .await?;
+        let fencer = WriterFencer::new(table_store.clone(), &self.settings, system_clock.clone());
+        let WriterFenceResult {
+            manifest,
+            replay_range,
+        } = fencer.fence(stored_manifest).await?;
 
-        let mut manifest_dirty = manifest.prepare_dirty()?;
-        // verify that the next_wal_id we computed is still valid
-        if next_wal_id <= manifest_dirty.value.core.replay_after_wal_id {
-            // the wal gc boundary advanced because the old writer finished a flush - recompute
-            // the next wal id
-            next_wal_id = table_store.next_wal_sst_id(manifest_dirty.value.core.replay_after_wal_id).await?;
-            manifest.refresh().await?;
-            manifest_dirty = manifest.prepare_dirty()?;
-            // at this point we still hold the epoch, so it should not be possible for the barrier
-            // to have advanced past the computed next_wal_id
-            assert!(next_wal_id > manifest_dirty.value.core.replay_after_wal_id);
-        }
+        let manifest_dirty = manifest.prepare_dirty()?;
 
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
@@ -616,9 +598,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
             .await?,
         );
-
-        // Fence writers if WAL is enabled
-        let replay_range = inner.fence_writers(&mut manifest, next_wal_id).await?;
 
         // Setup background tasks
         let tokio_handle = Handle::current();

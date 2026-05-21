@@ -57,7 +57,7 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
-use crate::manifest::store::FenceableManifest;
+use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
@@ -292,50 +292,6 @@ impl DbInner {
         self.reader
             .scan_prefix_by_recency_with_options(prefix, options, &db_state)
             .await
-    }
-
-    /// Fences all writers with an older epoch than the provided `manifest` by flushing
-    /// an empty WAL file that acts as a barrier. Any parallel old writers will fail with
-    /// `SlateDBError::Fenced` when trying to "re-write" this file. Returns the range that must
-    /// be replayed to recover up to the current epoch
-    async fn fence_writers(
-        &self,
-        manifest: &mut FenceableManifest,
-        next_wal_id: u64,
-    ) -> Result<Range<u64>, SlateDBError> {
-        let mut empty_wal_id = next_wal_id;
-
-        loop {
-            let wrote_fence = match self.flush_empty_wal(empty_wal_id).await {
-                Ok(()) => true,
-                Err(SlateDBError::Fenced) => false,
-                Err(err) => return Err(err),
-            };
-
-            // Refresh validates that we own the latest epoch still.
-            manifest.refresh().await?;
-            let remote_dirty = manifest.prepare_dirty()?;
-            let replay_after_wal_id = remote_dirty.value.core.replay_after_wal_id;
-            let dirty_manifest = {
-                let mut state = self.state.write();
-                state.merge_remote_manifest(remote_dirty);
-                state.state().manifest.clone()
-            };
-            self.status_manager.report_manifest(dirty_manifest.into());
-
-            if wrote_fence {
-                // this writer is the only writer that could have written replay_after_wal_id,
-                // so it should not be possible for it to have advanced past the fencing wal.
-                // older writers would have failed with a stale epoch
-                assert!(empty_wal_id > replay_after_wal_id);
-                return Ok(replay_after_wal_id + 1..empty_wal_id + 1);
-            } else {
-                // We're (probably) ahead of the barrier, but we hit a race with another writer.
-                // Instead of paying for the LIST (API cost and latency), just try the next ID.
-                // This is an optimization: we could always advance with next_wal_sst_id.
-                empty_wal_id += 1;
-            }
-        }
     }
 
     #[allow(unused_variables)]
@@ -6275,130 +6231,6 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_fence_writers_retries_successful_fence_behind_replay_boundary() {
-        // Race:
-        // - t0: W2 computes stale next_wal_id=2 while W1 is still active.
-        // - t1: W1 writes WAL 2 and WAL 3, flushes them to L0, and advances
-        //   the replay boundary to 3.
-        // - t2: WAL GC deletes WAL 2, so a future create at stale WAL 2 can
-        //   succeed, but it leaves WAL 3 because replay_after_wal_id is not
-        //   eligible for deletion.
-        // - t3: W2 claims the writer epoch from that manifest.
-        // - t4: W2 builds the DbInner needed to run fence_writers.
-        // - t5: W2 writes a fence at stale WAL 2; current code accepts it.
-        // - t6: W1 can still create live WAL 4 unless W2 retried the fence
-        //   above the replay boundary.
-        // - t7: ValidateFence should make t6 fail with Fenced.
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_fence_writers_retries_successful_fence_behind_replay_boundary";
-        let mut settings = test_db_options(0, 128, None);
-        settings.flush_interval = None;
-
-        // - t0: W2 computes stale next_wal_id=2 while W1 is still active.
-        let stale_next_wal_id = 2;
-        let replay_after_wal_id = stale_next_wal_id + 1; // 3
-        let live_wal_id = replay_after_wal_id + 1; // 4
-
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            SsTableFormat::default(),
-            path,
-            None,
-        ));
-
-        // - t1: W1 writes WAL 2 and WAL 3, flushes them to L0, and advances
-        //   the replay boundary to 3.
-        for wal_id in [stale_next_wal_id, replay_after_wal_id] {
-            let mut w1_wal = table_store.table_builder();
-            w1_wal
-                .add(RowEntry::new_value(b"w1", b"write", wal_id))
-                .await
-                .unwrap();
-            let w1_wal = w1_wal.build().await.unwrap();
-            table_store
-                .write_sst(&SsTableId::Wal(wal_id), &w1_wal, false)
-                .await
-                .unwrap();
-        }
-        let mut core = ManifestCore::new();
-        core.replay_after_wal_id = replay_after_wal_id;
-        core.next_wal_sst_id = live_wal_id;
-
-        // - t2: WAL GC deletes WAL 2, so a future create at stale WAL 2 can
-        //   succeed, but it leaves WAL 3 because replay_after_wal_id is not
-        //   eligible for deletion.
-        table_store
-            .delete_sst(&SsTableId::Wal(stale_next_wal_id))
-            .await
-            .unwrap();
-
-        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest =
-            StoredManifest::create_new_db(manifest_store, core, system_clock.clone())
-                .await
-                .unwrap();
-
-        // - t3: W2 claims the writer epoch from that manifest.
-        let mut manifest = FenceableManifest::init_writer(
-            stored_manifest,
-            settings.manifest_update_timeout,
-            system_clock.clone(),
-        )
-        .await
-        .unwrap();
-        let manifest_dirty = manifest.prepare_dirty().unwrap();
-
-        // - t4: Build the minimal DbInner needed to run W2's fence_writers.
-        let status_manager = DbStatusManager::new_with_manifest(
-            manifest_dirty.value.core.last_l0_seq,
-            manifest_dirty.clone().into(),
-        );
-        let (write_tx, _write_rx) = SafeSender::unbounded_channel(status_manager.result_reader());
-        let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
-        let inner = DbInner::new(
-            settings,
-            system_clock,
-            Arc::new(DbRand::new(0)),
-            table_store.clone(),
-            manifest_dirty,
-            memtable_flusher,
-            write_tx,
-            MetricsRecorderHelper::noop(),
-            Arc::new(FailPointRegistry::new()),
-            None,
-            status_manager,
-            None,
-        )
-        .await
-        .unwrap();
-
-        // - t5: W2 writes a fence at stale WAL 2; current code accepts it.
-        inner
-            .fence_writers(&mut manifest, stale_next_wal_id)
-            .await
-            .unwrap();
-
-        // - t6: W1 can still create live WAL 4 unless W2 retried the fence
-        //   above the replay boundary.
-        let mut stale_writer_wal = table_store.table_builder();
-        stale_writer_wal
-            .add(RowEntry::new_value(b"stale", b"write", 0))
-            .await
-            .unwrap();
-        let stale_writer_wal = stale_writer_wal.build().await.unwrap();
-        let stale_write_result = table_store
-            .write_sst(&SsTableId::Wal(live_wal_id), &stale_writer_wal, false)
-            .await;
-
-        // - t7: ValidateFence should make t6 fail with Fenced.
-        assert!(
-            matches!(stale_write_result, Err(SlateDBError::Fenced)),
-            "expected fence_writers to retry from stale WAL {stale_next_wal_id} and fence live WAL {live_wal_id}"
-        );
     }
 
     #[tokio::test]
