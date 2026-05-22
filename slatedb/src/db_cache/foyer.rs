@@ -31,8 +31,10 @@
 //! ```
 //!
 
-use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
+use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
+use crate::error::SlateDBError;
 use async_trait::async_trait;
+use std::sync::Arc;
 use sysinfo::{CpuRefreshKind, System};
 
 /// The options for the Foyer cache.
@@ -123,5 +125,60 @@ impl DbCache for FoyerCache {
     fn entry_count(&self) -> u64 {
         // foyer cache doesn't support an entry count estimate
         0
+    }
+
+    async fn fetch_block(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+
+    async fn fetch_index(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+
+    async fn fetch_filter(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+
+    async fn fetch_stats(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+}
+
+impl FoyerCache {
+    /// Use foyer's `Cache::get_or_fetch`, which deduplicates concurrent loads for the same key.
+    ///
+    /// Loader errors round-trip via anyhow's source chain on the foyer error. Foyer wraps them
+    /// as `ErrorKind::External` (see foyer-memory's raw.rs). We don't try to recover the original
+    /// `crate::Error` value: foyer's broadcast path makes one-to-one recovery impossible for
+    /// concurrent waiters, so all error returns are normalized to `SlateDBError::FoyerError`
+    /// with the original chained as a source.
+    async fn dedup_fetch(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        let fetch = self
+            .inner
+            .get_or_fetch(&key, move || async move { loader().await });
+        match fetch.await {
+            Ok(entry) => Ok(entry.value().clone()),
+            Err(err) => Err(SlateDBError::FoyerError(Arc::new(err)).into()),
+        }
     }
 }

@@ -117,6 +117,17 @@ All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
 | `slatedb.gc.deleted_count` | counter | `resource`: manifest, wal, compacted, compactions | Deleted resources |
 | `slatedb.gc.count` | counter | | GC runs |
 
+### Memtable flush (`slatedb.memtable_flush.*`)
+
+| Name | Type | Labels | Description |
+|------|------|--------|-------------|
+| `slatedb.memtable_flush.memtable_freeze_count` | counter | | Frozen memtables |
+| `slatedb.memtable_flush.checkpoint_request_count` | counter | | Checkpoint requests |
+| `slatedb.memtable_flush.flush_request_count` | counter | | Flush requests |
+| `slatedb.memtable_flush.l0_upload_count` | counter | | Completed L0 uploads |
+| `slatedb.memtable_flush.l0_flush_count` | counter | | Completed L0 flushes |
+| `slatedb.memtable_flush.manifest_refresh_count` | counter | | Manifest refreshes |
+
 ### Object store (`slatedb.object_store.*`)
 
 All object store metrics carry four labels:
