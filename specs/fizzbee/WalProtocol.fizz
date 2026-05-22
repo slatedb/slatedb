@@ -1,0 +1,329 @@
+---
+deadlock_detection: false
+options:
+    max_actions: 40
+    crash_on_yield: false
+---
+
+# Run with:
+#
+# ```
+# fizz --experimental_no_graph specs/fizzbee/WalProtocol.fizz
+# ```
+#
+# This spec models SlateDB's object-store WAL writer fencing protocol, as
+# described by rfcs/0001-manifest.md. The real system stores WAL files as
+# immutable, monotonically numbered objects such as:
+#
+# - wal/00000000000000000012.sst
+# - wal/00000000000000000013.sst
+#
+# A writer claims a new writer epoch, writes a fence object into the next
+# available WAL slot with create-if-absent, validates that the fence is still
+# useful, and then writes normal WAL data objects. A newer writer can fence an
+# older writer by claiming a higher epoch and occupying later WAL slots.
+#
+# This model abstracts the WAL namespace and the manifest field that makes old
+# WALs eligible for removal:
+#
+# - `objects` is the current object-store contents. The key is the WAL object ID
+#   and the value is either `FENCE` or `DATA`.
+# - `current_epoch` is the highest epoch claimed by any writer. A writer whose
+#   epoch is below this value has been superseded by a newer writer.
+# - `replay_after_wal_id` is the manifest boundary. WALs at or below this ID
+#   have been flushed to L0 and no longer need to be replayed. In this model,
+#   garbage collection may delete `DATA` objects strictly below this boundary.
+# - each `WalWriter` lists the latest WAL object to choose the next ID, claims a
+#   fresh epoch, writes a fence object, validates the fence against the current
+#   epoch and `replay_after_wal_id`, and then appends `DATA` objects until it is
+#   fenced or reaches the model bound.
+# - each `GarbageCollector` deletes old `DATA` objects behind
+#   `replay_after_wal_id`. Fence objects remain as durable evidence that a WAL
+#   slot was occupied by a writer.
+#
+# `WriteFence` and `ValidateFence` are separate actions because the important
+# race is between the fence create and the validation step. During that window,
+# another writer can claim a later epoch or a flush can advance
+# `replay_after_wal_id`, making the just-written fence unusable.
+#
+# `Flush` nondeterministically advances `replay_after_wal_id` to an existing
+# WAL ID after the writer has created at least one object. This is to simulate
+# L0 MemTable flushes that advance replay boundaries.
+#
+# WalWriter state transitions:
+#
+#            ┌───────────────────┐
+#            │       Init        │
+#            └─────────┬─────────┘
+#            ┌─────────▼─────────┐
+#            │    InitNextId     │
+#            └─────────┬─────────┘
+#            ┌─────────▼─────────┐
+#            │    ClaimEpoch     │
+#            └─────────┬─────────┘
+#            ┌─────────▼─────────┐
+# ┌──────────▶    WriteFence     ◀──────────┐
+# │          └─────────┬─────────┘          │
+# │          ┌─────────┴─────────┐          │
+# │┌─────────▼─────────┐┌────────▼────────┐ │
+# └┤   ValidateFence   ││   CheckFenced   ├─┘
+#  └─────────┬─────┬───┘└────────┬────────┘
+#            │     └─────────────┤
+#      ┌─────▼─────┐       ┌─────▼─────┐
+#  ┌───▶ WriteWal  ├───────▶  Fenced   │
+#  │   └─────┬─────┘       └───────────┘
+#  └─────────┤
+#            │
+#      ┌─────▼─────┐
+#      │  Fenced   │
+#      └───────────┘
+#
+# The assertions prove the protocol properties we care about:
+#
+# - no WAL ID is reported successful more than once;
+# - live, replayable WAL IDs remain contiguous above `replay_after_wal_id`;
+# - acknowledged epochs are nondecreasing by WAL ID;
+# - `replay_after_wal_id` is monotonic and never exceeds the latest object;
+# - deletes only remove WAL IDs already covered by `replay_after_wal_id`; and
+# - the latest object is never deleted.
+#
+# GC for WAL fences is disabled in this model. If GC collects WAL fence writes,
+# there will always be a race condition where the writer might successfully writes
+# to a slot behind replay_after_wal_id. This is fixable by refreshing the manifest
+# and checking the replay_after_wal_id after each write, similar to the approach
+# taken in ValidateFence. We've opted to skip this check due to its added latency
+# and API costs. Users that want a full guarantee must leave WAL fence GC
+# disabled. Realistically, users may set a conservative WAL fence GC threshold
+# such as a week. This would guarantee that any stalled writer that attempts to
+# write less than a week after its last successful write/manifest refresh will be
+# fenced correctly.
+
+# Per-writer bound on successful object WAL writes including the fence write. This
+# is not a SlateDB protocol limit; it keeps the state space finite while still
+# allowing each writer to create multiple sequenced metadata objects and exercise
+# GC races between creates and boundary checks.
+MAX_WRITES_PER_WRITER = 3
+
+# Per-writer bound on fence write attempts. This is not a SlateDB protocol limit;
+# it prevents the model from an infinite loop where the writer always fences behind
+# the boundary. In practice, we would retry forever or have a timeout.
+MAX_FENCE_ATTEMPTS_PER_WRITER = 3
+
+DATA = "d"
+FENCE = "f"
+
+NUM_WRITERS = 3
+NUM_GCS = 2
+
+action Init:
+    # Objects that currently exist in the object store.
+    # Contains `id -> f|d`.
+    objects = {}
+
+    # The highest epoch claimed by any writer.
+    current_epoch = 0
+
+    # WALs <= this sequence ID have been written to L0 and are eligible for GC.
+    replay_after_wal_id = 0
+
+    # Ghost state: sequenced IDs that have been written to object storage and
+    # reported as successful.
+    _committed = {}
+    _commit_counts = {}
+
+    writers = bag()
+    for i in range(NUM_WRITERS):
+        writers.add(WalWriter())
+
+    gcs = bag()
+    for i in range(NUM_GCS):
+        gcs.add(GarbageCollector())
+
+atomic func latest_sequence_id():
+    """
+    Returns the most recently written sequence ID, or 0 if no objects exist.
+    """
+    if len(objects) == 0:
+        return 0
+    return max(objects.keys())
+
+atomic func record_commit(id, epoch, _type):
+    """
+    Records that a writer reported success for `id` at `epoch`. This is not
+    part of the real protocol; it's ghost state that lets assertions check that
+    writers only report success for IDs that passed the boundary check and were
+    not already reported by another writer.
+    """
+    _committed[id] = record(epoch=epoch, _type=_type)
+    _commit_counts[id] = _commit_counts.get(id, 0) + 1
+
+
+symmetric role WalWriter:
+    atomic action Init:
+        # Next sequence file ID to write to.
+        self.next_id = 0
+        # Counts successful writes to object storage.
+        self.writes = 0
+        # Counts the number of fence attempts.
+        self.attempts = 0
+        # Epoch claimed by this writer.
+        self.epoch = None
+        self.status = "InitNextId"
+
+    atomic action InitNextId:
+        require self.status == "InitNextId"
+        sid = latest_sequence_id() # builder.rs#L549
+        self.next_id = sid + 1
+        self.status = "ClaimEpoch"
+
+    atomic action ClaimEpoch:
+        require self.status == "ClaimEpoch"
+        current_epoch = current_epoch + 1 # builder.rs#L569
+        self.epoch = current_epoch
+        self.status = "WriteFence"
+
+    atomic action WriteFence:
+        require (
+            self.status == "WriteFence"
+            and self.attempts < MAX_FENCE_ATTEMPTS_PER_WRITER
+        )
+        self.attempts += 1
+        success = self.write(FENCE) # builder.rs#L610
+        if success:
+            self.status = "ValidateFence"
+        else:
+            self.status = "CheckFenced"
+
+    # Not yet implemented in code. We simply return success right now.
+    atomic action ValidateFence:
+        """
+        Fence write succeeded. Make sure we're still the latest epoch and the
+        fence write was > replay_after_wal_id.
+        """
+        require self.status == "ValidateFence"
+        if self.epoch < current_epoch:
+            # We don't technically need to check this, but might as well since
+            # we refresh the manifest to get the latest replay_after_wal_id anyway.
+            self.status = "Fenced"
+        elif self.next_id > replay_after_wal_id:
+            record_commit(self.next_id, self.epoch, FENCE)
+            self.status = "WriteWal"
+            self.next_id += 1
+        else:
+            self.status = "WriteFence"
+            self.next_id = max(self.next_id + 1, replay_after_wal_id + 1)
+
+    atomic action CheckFenced:
+        """
+        Fence write failed. Retry at the next slot unless we no longer own the
+        latest epoch.
+        """
+        require self.status == "CheckFenced"
+        if self.epoch < current_epoch: # db.rs#L313
+            self.status = "Fenced"
+        else:
+            self.next_id += 1 # db.rs#L321
+            self.status = "WriteFence"
+
+    atomic action WriteWal:
+        """
+        Write normal non-fence WAL data after a fence has already been written.
+        """
+        require (
+            self.status == "WriteWal"
+            and self.writes < MAX_WRITES_PER_WRITER
+        )
+        success = self.write(DATA)
+        if success:
+            record_commit(self.next_id, self.epoch, DATA)
+            self.next_id += 1
+        else:
+            # Another writer claimed this ID first, so this writer is fenced.
+            self.status = "Fenced"
+
+    atomic action Flush:
+        """
+        Pretend we've written more L0 data. This updates the manifest with a
+        new replay_after_wal_id. We just pick a random WAL ID to use as the
+        flush point.
+        """
+        if self.writes > 0:
+            candidates = [
+                id
+                for id in objects.keys()
+                if id > replay_after_wal_id
+            ]
+            replay_after_wal_id = oneof candidates
+
+    atomic func write(_type):
+        # If next_id is already in `objects`, this write does not succeed.
+        success = self.next_id not in objects.keys()
+        if success:
+            objects[self.next_id] = _type
+            self.writes += 1
+        return success
+
+
+symmetric role GarbageCollector:
+    atomic action Delete:
+        candidates = [
+            id
+            for id in objects
+            # Not <= because we need to keep the last WAL.
+            if id < replay_after_wal_id and objects[id] == DATA
+        ]
+        id = oneof candidates
+        objects.pop(id)
+
+
+# -----------------------------------------------------------------------------
+# Assertions
+# -----------------------------------------------------------------------------
+
+always assertion NoDuplicateCommit:
+    for id in _commit_counts:
+        if _commit_counts[id] != 1:
+            return False
+    return True
+
+always assertion LiveHistoryIsContiguous:
+    if len(objects) == 0:
+        return True
+    latest = max(objects.keys())
+    for id in range(replay_after_wal_id + 1, latest + 1):
+        if id not in objects.keys():
+            return False
+    return True
+
+always assertion CommittedEpochsAreNonDecreasing:
+    if len(_committed) == 0:
+        return True
+    latest = max(_committed.keys())
+    prev_epoch = 0
+    for id in range(1, latest + 1):
+        if id in _committed.keys():
+            r = _committed[id]
+            if r.epoch < prev_epoch:
+                return False
+            prev_epoch = r.epoch
+    return True
+
+always assertion LatestObjectIsNotBehindBoundary:
+    if len(objects) == 0:
+        return True
+    return max(objects.keys()) >= replay_after_wal_id
+
+transition assertion BoundaryIsMonotonic(before, after):
+    return after.replay_after_wal_id >= before.replay_after_wal_id
+
+transition assertion DeletesOnlyBehindBoundary(before, after):
+    for id in before.objects:
+        if id not in after.objects.keys() and before.replay_after_wal_id <= id:
+            return False
+    return True
+
+transition assertion LatestObjectIsNeverDeleted(before, after):
+    if len(before.objects) == 0:
+        return True
+    latest = max(before.objects.keys())
+    return latest in after.objects.keys()

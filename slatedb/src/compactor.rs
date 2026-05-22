@@ -54,10 +54,12 @@
 //! represents a description (Spec), a durable decision (Compaction), or a running
 //! attempt (JobSpec).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -75,12 +77,12 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
-use crate::db_state::SortedRun;
+use crate::db_state::{SortedRun, SsTableView};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
-use crate::manifest::SsTableHandle;
+use crate::manifest::{LsmTreeState, ManifestCore, SsTableHandle};
 use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
 use crate::tablestore::TableStore;
@@ -149,17 +151,22 @@ pub trait CompactionScheduler: Send + Sync {
         Ok(())
     }
 
-    /// Generate a compaction based on a compaction request.
+    /// Generate one or more compaction specs from a [`CompactionRequest`].
     ///
-    /// - If the request is a `CompactionRequest::Spec`, it simply returns the provided spec.
-    /// - If the request is a `CompactionRequest::Full`, it generates a compaction spec that
-    ///   includes all current sorted runs as sources, excluding L0 SSTs, and selects the
-    ///   lowest existing sorted run ID as the destination.
+    /// - [`CompactionRequest::Spec`] returns the caller-provided spec verbatim.
+    /// - [`CompactionRequest::FullSegment`] targets a single tree (root or a
+    ///   named segment): every sorted run becomes a source, the tree's lowest
+    ///   sorted-run id is the destination. Returns an error if the segment
+    ///   is unknown or the tree has no compacted sorted runs.
+    /// - [`CompactionRequest::Full`] applies the same per-tree rule to every
+    ///   tree in the DB (root + every named segment), best-effort: trees
+    ///   without compacted sorted runs are silently skipped and an empty
+    ///   `Vec` is returned if no tree is eligible.
     ///
-    /// Full compactions intentionally skip L0 so the size-tiered scheduler can continue
-    /// compacting new flush output in parallel. Including L0 would mark those SSTs as
-    /// in-use for the duration of the full compaction, eventually stalling writers once
-    /// L0 reaches `l0_max_ssts`.
+    /// L0 SSTs are intentionally excluded so the size-tiered scheduler can
+    /// keep compacting new flush output in parallel. Including L0 would
+    /// mark those SSTs as in-use for the duration of the compaction,
+    /// eventually stalling writers once L0 reaches `l0_max_ssts`.
     ///
     /// ## Arguments
     /// - `state`: Process-local view of the DB's manifest and compactions.
@@ -175,45 +182,87 @@ pub trait CompactionScheduler: Send + Sync {
     ) -> Result<Vec<CompactionSpec>, Error> {
         match request {
             CompactionRequest::Spec(spec) => Ok(vec![spec.clone()]),
+            CompactionRequest::FullSegment { segment } => {
+                let manifest = state.manifest().core();
+                let Some(tree) = manifest.tree_for_segment(segment) else {
+                    error!(
+                        "rejected full-segment compaction: unknown segment {:?}",
+                        segment
+                    );
+                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
+                };
+                match plan_full_tree(segment, tree) {
+                    Some(spec) => Ok(vec![spec]),
+                    None => {
+                        if !tree.l0.is_empty() {
+                            error!(
+                                "rejected full-segment compaction: segment {:?} has L0 SSTs but no sorted runs to merge; \
+                                 L0 SSTs are not eligible inputs",
+                                segment
+                            );
+                        }
+                        Err(crate::Error::from(SlateDBError::InvalidCompaction))
+                    }
+                }
+            }
             CompactionRequest::Full => {
                 let manifest = state.manifest().core();
-                let sources = manifest
-                    .tree
-                    .compacted
-                    .iter()
-                    .map(|sr| SourceId::SortedRun(sr.id))
-                    .collect::<Vec<_>>();
-                if sources.is_empty() {
-                    if !manifest.tree.l0.is_empty() {
-                        error!(
-                            "rejected full compaction: L0-only input is invalid because Full excludes L0 SSTs"
-                        );
-                    }
-                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
-                }
-                let destination = manifest
-                    .tree
-                    .compacted
-                    .iter()
-                    .map(|sr| sr.id)
-                    .min()
-                    .expect("full compaction requires at least one sorted run");
-                Ok(vec![CompactionSpec::new(sources, destination)])
+                let specs = manifest
+                    .trees_with_prefix()
+                    .filter_map(|(prefix, tree)| plan_full_tree(&prefix, tree))
+                    .collect();
+                Ok(specs)
             }
         }
     }
 }
 
+/// Build a [`CompactionSpec`] that compacts every sorted run in `tree` into
+/// the tree's lowest-id sorted run. Returns `None` when the tree has no
+/// compacted sorted runs — L0 SSTs are not eligible inputs.
+fn plan_full_tree(prefix: &Bytes, tree: &LsmTreeState) -> Option<CompactionSpec> {
+    if tree.compacted.is_empty() {
+        return None;
+    }
+    let sources = tree
+        .compacted
+        .iter()
+        .map(|sr| SourceId::SortedRun(sr.id))
+        .collect::<Vec<_>>();
+    let destination = sources
+        .iter()
+        .map(|s| s.unwrap_sorted_run())
+        .min()
+        .expect("at least one sorted run");
+    Some(CompactionSpec::for_segment(
+        prefix.clone(),
+        sources,
+        destination,
+    ))
+}
+
 /// Request to submit a compaction for execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CompactionRequest {
-    /// Compact all current sorted runs, excluding L0 SSTs.
+    /// Compact every tree in the DB — the root tree plus each named segment
+    /// (RFC-0024) — by merging every sorted run in each tree into that
+    /// tree's lowest-id sorted run. Trees with no compacted sorted runs are
+    /// silently skipped; an empty `Vec` is returned when no tree is eligible.
     ///
-    /// L0 SSTs are left to regular size-tiered compaction so memtable flushes can continue
-    /// producing new sorted runs while the full compaction is in flight. Pulling L0 into the
-    /// full compaction would block parallel L0 work and can back pressure writes once
-    /// `l0_max_ssts` is reached.
+    /// L0 SSTs are left to regular size-tiered compaction so memtable flushes
+    /// can continue producing new sorted runs while this compaction is in
+    /// flight. Pulling L0 into the merge would mark those SSTs as in-use
+    /// for the duration of the compaction, eventually stalling writers once
+    /// L0 reaches `l0_max_ssts`.
     Full,
+    /// Compact a single tree: every sorted run in the tree at `segment` is
+    /// merged into the tree's lowest-id sorted run. `segment: Bytes::new()`
+    /// targets the compatibility-encoded root tree (the only valid segment
+    /// on a database without a segment extractor); a non-empty prefix names
+    /// a segment. Rejected if the segment is unknown or the tree has no
+    /// compacted sorted runs. L0 SSTs are excluded for the same reason
+    /// documented on `Full`.
+    FullSegment { segment: Bytes },
     /// Use a caller-provided compaction spec.
     Spec(CompactionSpec),
 }
@@ -414,7 +463,7 @@ impl Compactor {
             dirty.value.insert(compaction.clone());
             match stored_compactions.update(dirty).await {
                 Ok(()) => return Ok(compaction_id),
-                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                Err(err) if err.is_sequenced_write_conflict() => {
                     stored_compactions.refresh().await?;
                 }
                 Err(err) => return Err(crate::Error::from(err)),
@@ -614,25 +663,15 @@ impl CompactorEventHandler {
     }
 
     /// Calculates the estimated total source bytes for a compaction.
-    fn calculate_estimated_source_bytes(
-        compaction: &Compaction,
-        db_state: &crate::manifest::ManifestCore,
-    ) -> u64 {
-        use crate::db_state::{SortedRun, SsTableView};
-        use std::collections::HashMap;
+    fn calculate_estimated_source_bytes(compaction: &Compaction, db_state: &ManifestCore) -> u64 {
+        let tree = db_state
+            .tree_for_segment(compaction.spec().segment())
+            .expect("compaction target segment missing from manifest");
 
-        let views_by_id: HashMap<Ulid, &SsTableView> = db_state
-            .tree
-            .l0
-            .iter()
-            .map(|view| (view.id, view))
-            .collect();
-        let srs_by_id: HashMap<u32, &SortedRun> = db_state
-            .tree
-            .compacted
-            .iter()
-            .map(|sr| (sr.id, sr))
-            .collect();
+        let views_by_id: HashMap<Ulid, &SsTableView> =
+            tree.l0.iter().map(|view| (view.id, view)).collect();
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            tree.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
         compaction
             .spec()
@@ -692,15 +731,24 @@ impl CompactorEventHandler {
         self.executor.is_stopped()
     }
 
-    /// Performs pre-execution validation for a proposed compaction and defers policy-specific
-    /// checks to the scheduler via [`CompactionScheduler::validate_compaction`]. Invariants
-    /// checked in this function:
+    /// Validates a Submitted compaction against the current manifest before starting it.
     ///
+    /// Runs on every Submitted spec regardless of origin (internal scheduler, admin
+    /// submission, reloaded `.compactions`), so this is the canonical gate for
+    /// spec-against-current-state validity. Cross-compaction conflicts (destination
+    /// collisions across active compactions, concurrent drains on the same segment) are
+    /// enforced upstream in [`CompactorState::add_compaction`] and are not re-checked here.
+    ///
+    /// Invariants checked:
     /// - Compaction has sources
-    /// - Compaction sources exist in DB state
-    /// - Compactions with only L0 sources must have a destination > highest existing SR ID
-    /// - At most one L0 compaction may be active at a time (the `last_compacted_l0`
-    ///   watermark cannot handle out-of-order completion of parallel L0 compactions)
+    /// - Drain specs do not target the empty-prefix (root) segment
+    /// - The target segment exists in the manifest
+    /// - All sources exist in the target segment's tree
+    /// - L0-only tiered compactions have a destination > highest SR id across all trees
+    /// - A tiered destination does not overwrite a committed SR in any tree unless the SR is among sources
+    /// - Drain L0 sources cover every L0 at or below the newest drained L0 in the target tree
+    /// - At most one L0 compaction is Running per segment
+    /// - Scheduler-specific policy via [`CompactionScheduler::validate_compaction`]
     fn validate_compaction(&self, compaction: &CompactionSpec) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
         if compaction.sources().is_empty() {
@@ -708,16 +756,30 @@ impl CompactorEventHandler {
             return Err(SlateDBError::InvalidCompaction);
         }
 
-        // Validate compaction sources exist in DB state
+        // Drain specs cannot target the empty-prefix segment (RFC-0024): the
+        // root-tree compatibility encoding is not retired by drain.
+        if compaction.is_drain() && compaction.segment().is_empty() {
+            warn!("rejected drain compaction targeting the empty-prefix segment");
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        // Validate compaction sources exist in the spec's target segment tree.
+        // RFC-0024: every spec names exactly one segment, and its sources must
+        // live in that segment's tree.
         let db_state = self.state().db_state();
-        let l0_view_ids = db_state
-            .tree
+        let Some(tree) = db_state.tree_for_segment(compaction.segment()) else {
+            warn!(
+                "submitted compaction targets unknown segment: {:?}",
+                compaction.segment()
+            );
+            return Err(SlateDBError::InvalidCompaction);
+        };
+        let l0_view_ids = tree
             .l0
             .iter()
             .map(|view| view.id)
             .collect::<std::collections::HashSet<_>>();
-        let sr_ids = db_state
-            .tree
+        let sr_ids = tree
             .compacted
             .iter()
             .map(|sr| sr.id)
@@ -732,31 +794,48 @@ impl CompactorEventHandler {
         }
 
         // Validate L0-only compactions create a new SR with id > highest existing
+        // across all segment trees. SR ids are globally unique (RFC-0024) and the
+        // scheduler allocates new L0 → SR destinations strictly above the global
+        // max; admin- or reload-submitted specs must observe the same contract.
         if compaction.has_l0_sources() && !compaction.has_sr_sources() {
-            let highest_id = self
-                .state()
-                .db_state()
-                .tree
-                .compacted
-                .first()
-                .map_or(0, |sr| sr.id + 1);
-            if compaction.destination() < highest_id {
-                warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
-                compaction.destination(), highest_id);
-                return Err(SlateDBError::InvalidCompaction);
+            let highest_id = db_state
+                .trees()
+                .flat_map(|t| t.compacted.iter())
+                .map(|sr| sr.id)
+                .max()
+                .map_or(0, |id| id + 1);
+            // Drain specs have no destination and aren't subject to this check.
+            if let Some(dst) = compaction.destination() {
+                if dst < highest_id {
+                    warn!(
+                        "compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
+                        dst, highest_id
+                    );
+                    return Err(SlateDBError::InvalidCompaction);
+                }
             }
         }
 
-        // Reject parallel L0 compactions. The last_compacted_l0 watermark assumes
-        // at most one L0 compaction is in flight; out-of-order completion would
-        // cause merge_remote_manifest to truncate still-in-flight L0 sources.
+        Self::validate_destination_overwrite(compaction, db_state)?;
+        Self::validate_drain_watermark_advance(compaction, tree)?;
+
+        // Reject parallel L0 compactions within the same segment. Each
+        // segment owns its own `last_compacted_l0_sst_view_id` watermark
+        // (RFC-0024), so out-of-order completion is only a hazard for
+        // compactions sharing a target tree. L0 compactions in disjoint
+        // segments — including drain specs in different segments — are
+        // safe to run concurrently.
         if compaction.has_l0_sources() {
-            let running_l0_exists = self
+            let target_segment = compaction.segment();
+            let running_l0_in_same_segment = self
                 .state()
                 .compactions_with_status(CompactionStatus::Running)
-                .any(|c| c.spec().has_l0_sources());
-            if running_l0_exists {
-                warn!("rejected compaction: parallel L0 compaction already running");
+                .any(|c| c.spec().has_l0_sources() && c.spec().segment() == target_segment);
+            if running_l0_in_same_segment {
+                warn!(
+                    "rejected compaction: parallel L0 compaction already running in segment {:?}",
+                    target_segment
+                );
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
@@ -764,6 +843,83 @@ impl CompactorEventHandler {
         self.scheduler
             .validate(&self.state().into(), compaction)
             .map_err(|_e| SlateDBError::InvalidCompaction)
+    }
+
+    /// Rejects a tiered compaction whose destination SR id already exists as a
+    /// committed SR anywhere in the manifest unless that SR is among the spec's
+    /// sources (i.e. the compaction overwrites it as part of the merge). SR ids
+    /// are globally unique across all segment trees (RFC-0024). Drain specs
+    /// produce no output SR and pass through unchecked.
+    fn validate_destination_overwrite(
+        compaction: &CompactionSpec,
+        db_state: &ManifestCore,
+    ) -> Result<(), SlateDBError> {
+        let Some(dst) = compaction.destination() else {
+            return Ok(());
+        };
+        let sr_exists_anywhere = db_state
+            .trees()
+            .flat_map(|t| t.compacted.iter())
+            .any(|sr| sr.id == dst);
+        let sr_in_sources = compaction.sources().iter().any(|src| match src {
+            SourceId::SortedRun(sr) => *sr == dst,
+            SourceId::SstView(_) => false,
+        });
+        if sr_exists_anywhere && !sr_in_sources {
+            warn!(
+                "compaction destination overwrites committed SR not in sources: {:?}",
+                dst
+            );
+            return Err(SlateDBError::InvalidCompaction);
+        }
+        Ok(())
+    }
+
+    /// Rejects a drain spec that would leave one or more L0s below the new
+    /// watermark. The watermark advances to the newest drained L0; every L0
+    /// at or below that point in `tree.l0` (which is sorted newest-first)
+    /// must be listed among the drain sources, or it would survive in
+    /// `tree.l0` while being eclipsed by the watermark — a manifest state
+    /// the writer cannot merge. Tiered specs do not advance the watermark
+    /// and pass through unchecked.
+    fn validate_drain_watermark_advance(
+        compaction: &CompactionSpec,
+        tree: &LsmTreeState,
+    ) -> Result<(), SlateDBError> {
+        if !compaction.is_drain() {
+            return Ok(());
+        }
+        let drained_l0_ids: std::collections::HashSet<ulid::Ulid> = compaction
+            .sources()
+            .iter()
+            .filter_map(|s| match s {
+                SourceId::SstView(id) => Some(*id),
+                SourceId::SortedRun(_) => None,
+            })
+            .collect();
+        if drained_l0_ids.is_empty() {
+            return Ok(());
+        }
+        // tree.l0 is sorted newest-first. Find the newest drained L0's index;
+        // every L0 at or after that index (older or equal) must also be drained.
+        let Some(newest_drained_idx) = tree
+            .l0
+            .iter()
+            .position(|view| drained_l0_ids.contains(&view.id))
+        else {
+            return Ok(());
+        };
+        for view in tree.l0.iter().skip(newest_drained_idx) {
+            if !drained_l0_ids.contains(&view.id) {
+                warn!(
+                    "drain spec leaves L0 below the new watermark: segment={:?}, surviving_l0={:?}",
+                    compaction.segment(),
+                    view.id
+                );
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+        Ok(())
     }
 
     /// Requests new compactions from the scheduler, validates them, and adds them to the
@@ -810,20 +966,27 @@ impl CompactorEventHandler {
     /// Starts (valid) submitted compactions up to the max concurrency limit. Invalid
     /// compactions are marked as failed. Successfully started compactions are marked
     /// as running. State changes are persisted after processing all submitted
-    /// compactions.
+    /// compactions. Drain specs mutate the manifest directly (no executor merge),
+    /// so the persistence step writes both the manifest and the compactions file
+    /// when any submission was a drain; otherwise it writes the compactions file alone.
     async fn maybe_start_compactions(&mut self) -> Result<(), SlateDBError> {
         let submitted_compactions = self
             .state()
             .compactions_with_status(CompactionStatus::Submitted)
             .cloned()
             .collect::<Vec<_>>();
+        let any_drain = submitted_compactions.iter().any(|c| c.spec().is_drain());
 
         let result = self
             .start_submitted_compactions(&submitted_compactions)
             .await;
 
         if !submitted_compactions.is_empty() {
-            self.state_writer.write_compactions_safely().await?;
+            if any_drain {
+                self.state_writer.write_state_safely().await?;
+            } else {
+                self.state_writer.write_compactions_safely().await?;
+            }
         }
 
         result
@@ -831,7 +994,9 @@ impl CompactorEventHandler {
 
     /// Starts (valid) submitted compactions up to the max concurrency limit. Invalid
     /// compactions are marked as failed. Successfully started compactions are marked
-    /// as running. This function modifies the state directly but does not persist it;
+    /// as running. Drain compactions short-circuit the executor (they perform no merge)
+    /// and are applied directly to the in-memory manifest, transitioning straight to
+    /// Completed. This function modifies the state directly but does not persist it;
     /// the caller is responsible for persisting state after this function returns.
     async fn start_submitted_compactions(
         &mut self,
@@ -843,16 +1008,21 @@ impl CompactorEventHandler {
                 "expected submitted compaction, got {:?}",
                 compaction.status()
             );
-            // Make sure we have capacity to start a new compaction.
-            let running_compaction_count = self.running_compaction_count();
-            if running_compaction_count >= self.options.max_concurrent_compactions {
-                info!(
-                    "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
-                    running_compaction_count,
-                    self.options.max_concurrent_compactions,
-                    compaction
-                );
-                break;
+
+            // Capacity gates only tiered compactions, which run on the
+            // executor. Drain specs mutate the manifest directly and never
+            // enter `Running`, so they bypass the check.
+            if !compaction.spec().is_drain() {
+                let running_compaction_count = self.running_compaction_count();
+                if running_compaction_count >= self.options.max_concurrent_compactions {
+                    info!(
+                        "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
+                        running_compaction_count,
+                        self.options.max_concurrent_compactions,
+                        compaction
+                    );
+                    continue;
+                }
             }
 
             // Validate the candidate compaction; mark as failed if invalid.
@@ -867,21 +1037,27 @@ impl CompactorEventHandler {
                 continue;
             }
 
-            // Compaction is valid and there is capacity, so start it.
-            match self
-                .start_compaction(compaction.id(), compaction.clone())
-                .await
-            {
-                Ok(_) => {
-                    self.state_mut().update_compaction(&compaction.id(), |c| {
-                        c.set_status(CompactionStatus::Running)
-                    });
-                }
-                Err(e) => {
-                    self.state_mut().update_compaction(&compaction.id(), |c| {
-                        c.set_status(CompactionStatus::Failed)
-                    });
-                    return Err(e);
+            // Drain specs apply the watermark advance and SR removal
+            // directly, marking the compaction Completed. Tiered specs
+            // dispatch to the executor.
+            if compaction.spec().is_drain() {
+                self.state_mut().finish_drain_compaction(compaction.id());
+            } else {
+                match self
+                    .start_compaction(compaction.id(), compaction.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        self.state_mut().update_compaction(&compaction.id(), |c| {
+                            c.set_status(CompactionStatus::Running)
+                        });
+                    }
+                    Err(e) => {
+                        self.state_mut().update_compaction(&compaction.id(), |c| {
+                            c.set_status(CompactionStatus::Failed)
+                        });
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -902,18 +1078,28 @@ impl CompactorEventHandler {
         let sst_views = compaction.get_l0_sst_views(db_state);
         let sorted_runs = compaction.get_sorted_runs(db_state);
         let spec = compaction.spec();
-        // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
-        let is_dest_last_run = db_state.tree.compacted.is_empty()
-            || db_state
-                .tree
-                .compacted
-                .last()
-                .is_some_and(|sr| spec.destination() == sr.id);
+        // Drain specs are intercepted in `start_submitted_compactions` before
+        // they reach here, so `start_compaction` is tiered-only and the
+        // destination is always set.
+        let destination = spec
+            .destination()
+            .expect("start_compaction reached with a drain spec — should have been intercepted");
+        // If there are no SRs in the target tree when we compact L0 then the
+        // resulting SR is the last sorted run. The check is scoped to the
+        // spec's target tree (RFC-0024); if the target segment is missing
+        // from the manifest, fall back to false — the commit path will no-op.
+        let is_dest_last_run = match db_state.tree_for_segment(spec.segment()) {
+            Some(tree) => {
+                tree.compacted.is_empty()
+                    || tree.compacted.last().is_some_and(|sr| destination == sr.id)
+            }
+            None => false,
+        };
 
         let job_args = StartCompactionJobArgs {
             id: job_id,
             compaction_id: compaction.id(),
-            destination: spec.destination(),
+            destination,
             sst_views,
             sorted_runs,
             output_ssts: compaction.output_ssts().clone(),
@@ -1020,6 +1206,14 @@ pub mod stats {
         compactor_stat_name!("total_bytes_being_compacted");
     pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
         compactor_stat_name!("total_throughput_bytes_per_sec");
+    pub const EXPIRED_ENTRIES_PURGED: &str = compactor_stat_name!("expired_entries_purged");
+    pub const EXPIRED_ENTRIES_PURGED_DESCRIPTION: &str =
+        "Count of expired entries purged by the RetentionIterator. \
+         `entry_type=\"value\"` counts expired value entries rewritten as tombstones; \
+         `entry_type=\"merge\"` counts expired merge entries dropped without a tombstone.";
+    pub const ENTRY_TYPE_LABEL: &str = "entry_type";
+    pub const ENTRY_TYPE_VALUE: &str = "value";
+    pub const ENTRY_TYPE_MERGE: &str = "merge";
 
     pub(crate) struct CompactionStats {
         pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
@@ -1029,6 +1223,8 @@ pub mod stats {
         pub(crate) total_bytes_being_compacted: Arc<dyn GaugeFn>,
         pub(crate) total_throughput: Arc<dyn GaugeFn>,
         pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
+        pub(crate) expired_entries_purged_value: Arc<dyn CounterFn>,
+        pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1045,6 +1241,23 @@ pub mod stats {
                     .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_COMPACT_PATH)])
                     .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
                     .register(),
+                expired_entries_purged_value: recorder
+                    .counter(EXPIRED_ENTRIES_PURGED)
+                    .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_VALUE)])
+                    .description(EXPIRED_ENTRIES_PURGED_DESCRIPTION)
+                    .register(),
+                expired_entries_purged_merge: recorder
+                    .counter(EXPIRED_ENTRIES_PURGED)
+                    .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE)])
+                    .description(EXPIRED_ENTRIES_PURGED_DESCRIPTION)
+                    .register(),
+            }
+        }
+
+        pub(crate) fn retention_metrics(&self) -> crate::retention_iterator::RetentionMetrics {
+            crate::retention_iterator::RetentionMetrics {
+                expired_entries_purged_value: self.expired_entries_purged_value.clone(),
+                expired_entries_purged_merge: self.expired_entries_purged_merge.clone(),
             }
         }
     }
@@ -1085,19 +1298,140 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
+    use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::test_utils::assert_iterator;
+    use crate::test_utils::{assert_iterator, FixedThreeBytePrefixExtractor, GatedObjectStore};
     use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     const PATH: &str = "/test/db";
+
+    #[derive(Clone)]
+    struct SegmentTestScheduler {
+        segment: Bytes,
+        min_l0_sources: usize,
+    }
+
+    impl CompactionScheduler for SegmentTestScheduler {
+        fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
+            let db_state = state.manifest().core();
+            let Some(tree) = db_state.tree_for_segment(self.segment.as_ref()) else {
+                return vec![];
+            };
+            if tree.l0.len() < self.min_l0_sources {
+                return vec![];
+            }
+
+            let mut sources: Vec<SourceId> = tree
+                .l0
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect();
+            sources.extend(tree.compacted.iter().map(|sr| SourceId::SortedRun(sr.id)));
+
+            let destination = db_state
+                .trees()
+                .flat_map(|tree| tree.compacted.iter().map(|sr| sr.id))
+                .max()
+                .map(|id| id.saturating_add(1))
+                .unwrap_or(0);
+
+            vec![CompactionSpec::for_segment(
+                self.segment.clone(),
+                sources,
+                destination,
+            )]
+        }
+    }
+
+    struct SegmentTestSchedulerSupplier {
+        scheduler: SegmentTestScheduler,
+    }
+
+    impl SegmentTestSchedulerSupplier {
+        fn new(segment: Bytes, min_l0_sources: usize) -> Self {
+            Self {
+                scheduler: SegmentTestScheduler {
+                    segment,
+                    min_l0_sources,
+                },
+            }
+        }
+    }
+
+    impl CompactionSchedulerSupplier for SegmentTestSchedulerSupplier {
+        fn compaction_scheduler(
+            &self,
+            _options: &CompactorOptions,
+        ) -> Box<dyn CompactionScheduler + Send + Sync> {
+            Box::new(self.scheduler.clone())
+        }
+    }
+
+    /// Test scheduler that proposes a single drain spec for the target
+    /// segment, listing every observed L0 and SR as a source. Used to drive
+    /// the segment-drain e2e path; there is no admin-triggered drain API.
+    #[derive(Clone)]
+    struct SegmentDrainTestScheduler {
+        segment: Bytes,
+    }
+
+    impl CompactionScheduler for SegmentDrainTestScheduler {
+        fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
+            let db_state = state.manifest().core();
+            let Some(tree) = db_state.tree_for_segment(self.segment.as_ref()) else {
+                return vec![];
+            };
+            if tree.l0.is_empty() && tree.compacted.is_empty() {
+                return vec![];
+            }
+            let active_drain = state
+                .compactions()
+                .map(|compactions| {
+                    compactions.recent_compactions().any(|c| {
+                        c.active() && c.spec().is_drain() && c.spec().segment() == &self.segment
+                    })
+                })
+                .unwrap_or(false);
+            if active_drain {
+                return vec![];
+            }
+            let mut sources: Vec<SourceId> = tree
+                .l0
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect();
+            sources.extend(tree.compacted.iter().map(|sr| SourceId::SortedRun(sr.id)));
+            vec![CompactionSpec::drain_segment(self.segment.clone(), sources)]
+        }
+    }
+
+    struct SegmentDrainTestSchedulerSupplier {
+        scheduler: SegmentDrainTestScheduler,
+    }
+
+    impl SegmentDrainTestSchedulerSupplier {
+        fn new(segment: Bytes) -> Self {
+            Self {
+                scheduler: SegmentDrainTestScheduler { segment },
+            }
+        }
+    }
+
+    impl CompactionSchedulerSupplier for SegmentDrainTestSchedulerSupplier {
+        fn compaction_scheduler(
+            &self,
+            _options: &CompactorOptions,
+        ) -> Box<dyn CompactionScheduler + Send + Sync> {
+            Box::new(self.scheduler.clone())
+        }
+    }
 
     struct StringConcatMergeOperator;
 
@@ -1210,6 +1544,399 @@ mod tests {
             }
         }
         assert!(expected.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_compacts_only_target_segment() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_compactor_compacts_only_target_segment";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options.clone())
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, os.clone())
+                    .with_options(compactor_options())
+                    .with_scheduler_supplier(Arc::new(SegmentTestSchedulerSupplier::new(
+                        Bytes::from_static(b"aaa"),
+                        2,
+                    ))),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        for (key, value) in [
+            (b"aaa-001".as_slice(), b"v1".as_slice()),
+            (b"aaa-002".as_slice(), b"v2".as_slice()),
+            (b"aaa-003".as_slice(), b"v3".as_slice()),
+            (b"bbb-001".as_slice(), b"v4".as_slice()),
+        ] {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        let db_state = run_for(Duration::from_secs(10), || async {
+            system_clock
+                .as_ref()
+                .advance(Duration::from_millis(60000))
+                .await;
+            let core = read_db_state_core(&db);
+            let aaa = core
+                .segments
+                .iter()
+                .find(|segment| segment.prefix.as_ref() == b"aaa")
+                .expect("missing segment aaa");
+            let bbb = core
+                .segments
+                .iter()
+                .find(|segment| segment.prefix.as_ref() == b"bbb")
+                .expect("missing segment bbb");
+            if aaa.tree.l0.is_empty()
+                && !aaa.tree.compacted.is_empty()
+                && bbb.tree.l0.len() == 1
+                && bbb.tree.compacted.is_empty()
+            {
+                Some(core)
+            } else {
+                None
+            }
+        })
+        .await
+        .expect("segment-scoped compaction did not complete");
+
+        let aaa = db_state
+            .segments
+            .iter()
+            .find(|segment| segment.prefix.as_ref() == b"aaa")
+            .expect("missing segment aaa");
+        let bbb = db_state
+            .segments
+            .iter()
+            .find(|segment| segment.prefix.as_ref() == b"bbb")
+            .expect("missing segment bbb");
+        assert!(aaa.tree.l0.is_empty());
+        assert_eq!(aaa.tree.compacted.len(), 1);
+        assert_eq!(bbb.tree.l0.len(), 1);
+        assert!(bbb.tree.compacted.is_empty());
+
+        for (key, value) in [
+            (b"aaa-001".as_slice(), b"v1".as_slice()),
+            (b"aaa-002".as_slice(), b"v2".as_slice()),
+            (b"aaa-003".as_slice(), b"v3".as_slice()),
+            (b"bbb-001".as_slice(), b"v4".as_slice()),
+        ] {
+            assert_eq!(
+                db.get(key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_compacts_all_segments_with_size_tiered_scheduler() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_compactor_compacts_all_segments_with_size_tiered_scheduler";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        let compactor_opts = options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options must be set");
+        compactor_opts.scheduler_options = scheduler_options;
+        compactor_opts.max_concurrent_compactions = 3;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        let entries: &[(&[u8], &[u8])] = &[
+            (b"aaa-001", b"v1"),
+            (b"aaa-002", b"v2"),
+            (b"bbb-001", b"v3"),
+            (b"bbb-002", b"v4"),
+            (b"ccc-001", b"v5"),
+            (b"ccc-002", b"v6"),
+        ];
+
+        for (key, value) in entries {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        let prefixes: [&[u8]; 3] = [b"aaa", b"bbb", b"ccc"];
+
+        let db_state = run_for(Duration::from_secs(10), || async {
+            system_clock
+                .as_ref()
+                .advance(Duration::from_millis(60000))
+                .await;
+            let core = read_db_state_core(&db);
+            let all_compacted = prefixes.iter().all(|prefix| {
+                core.segments
+                    .iter()
+                    .find(|segment| segment.prefix.as_ref() == *prefix)
+                    .map(|segment| segment.tree.l0.is_empty() && !segment.tree.compacted.is_empty())
+                    .unwrap_or(false)
+            });
+            if all_compacted {
+                Some(core)
+            } else {
+                None
+            }
+        })
+        .await
+        .expect("not every segment compacted via size-tiered scheduler");
+
+        for prefix in prefixes {
+            let segment = db_state
+                .segments
+                .iter()
+                .find(|segment| segment.prefix.as_ref() == prefix)
+                .unwrap_or_else(|| panic!("missing segment {:?}", prefix));
+            assert!(
+                segment.tree.l0.is_empty(),
+                "segment {:?} still has L0 SSTs",
+                prefix
+            );
+            assert_eq!(
+                segment.tree.compacted.len(),
+                1,
+                "segment {:?} should have a single sorted run",
+                prefix
+            );
+        }
+
+        for (key, value) in entries {
+            assert_eq!(
+                db.get(key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_drains_segment() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_compactor_drains_segment";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options.clone())
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, os.clone())
+                    .with_options(compactor_options())
+                    .with_scheduler_supplier(Arc::new(SegmentDrainTestSchedulerSupplier::new(
+                        Bytes::from_static(b"aaa"),
+                    ))),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        for (key, value) in [
+            (b"aaa-001".as_slice(), b"v1".as_slice()),
+            (b"aaa-002".as_slice(), b"v2".as_slice()),
+            (b"bbb-001".as_slice(), b"v3".as_slice()),
+        ] {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        // The marker is pruned on the writer's next commit, so periodically
+        // write a fresh bbb-* key to nudge the writer-side merge.
+        let nudge = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let db_state = run_for(Duration::from_secs(10), || {
+            let db = &db;
+            let system_clock = system_clock.clone();
+            let nudge_value = nudge.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move {
+                system_clock
+                    .as_ref()
+                    .advance(Duration::from_millis(60000))
+                    .await;
+                let key = format!("bbb-nudge-{:04}", nudge_value);
+                put_and_flush_memtable(db, key.as_bytes(), b"nudge").await;
+                let core = read_db_state_core(db);
+                let aaa_gone = !core
+                    .segments
+                    .iter()
+                    .any(|segment| segment.prefix.as_ref() == b"aaa");
+                let bbb_present = core
+                    .segments
+                    .iter()
+                    .any(|segment| segment.prefix.as_ref() == b"bbb");
+                if aaa_gone && bbb_present {
+                    Some(core)
+                } else {
+                    None
+                }
+            }
+        })
+        .await
+        .expect("drain marker for segment aaa was not pruned");
+
+        assert!(
+            !db_state
+                .segments
+                .iter()
+                .any(|segment| segment.prefix.as_ref() == b"aaa"),
+            "aaa segment should be gone from manifest"
+        );
+        let bbb = db_state
+            .segments
+            .iter()
+            .find(|segment| segment.prefix.as_ref() == b"bbb")
+            .expect("missing segment bbb");
+        assert!(
+            !bbb.tree.l0.is_empty() || !bbb.tree.compacted.is_empty(),
+            "bbb segment should still hold data"
+        );
+
+        assert_eq!(db.get(b"aaa-001").await.unwrap(), None);
+        assert_eq!(db.get(b"aaa-002").await.unwrap(), None);
+        assert_eq!(
+            db.get(b"bbb-001").await.unwrap(),
+            Some(Bytes::from_static(b"v3"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_scan_across_segments_after_compaction() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let path = "/tmp/test_scan_across_segments_after_compaction";
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 512;
+        options.flush_interval = None;
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        let compactor_opts = options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options must be set");
+        compactor_opts.scheduler_options = scheduler_options;
+        compactor_opts.max_concurrent_compactions = 3;
+
+        let db = Db::builder(path, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .with_segment_extractor(Arc::new(FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        // Two keys per segment, each flushed to its own L0 SST. Written in
+        // intra-segment lex order so the post-compaction scan order is
+        // deterministic without re-sorting on the test side.
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = [
+            b"aaa-001".as_slice(),
+            b"aaa-002",
+            b"bbb-001",
+            b"bbb-002",
+            b"ccc-001",
+            b"ccc-002",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.to_vec(), format!("v{}", i + 1).into_bytes()))
+        .collect();
+
+        for (key, value) in &entries {
+            put_and_flush_memtable(&db, key, value).await;
+        }
+
+        let prefixes: [&[u8]; 3] = [b"aaa", b"bbb", b"ccc"];
+        let _db_state = run_for(Duration::from_secs(10), || async {
+            system_clock
+                .as_ref()
+                .advance(Duration::from_millis(60000))
+                .await;
+            let core = read_db_state_core(&db);
+            let all_compacted = prefixes.iter().all(|prefix| {
+                core.segments
+                    .iter()
+                    .find(|segment| segment.prefix.as_ref() == *prefix)
+                    .map(|segment| segment.tree.l0.is_empty() && !segment.tree.compacted.is_empty())
+                    .unwrap_or(false)
+            });
+            if all_compacted {
+                Some(core)
+            } else {
+                None
+            }
+        })
+        .await
+        .expect("not every segment compacted before scan");
+
+        // Full ascending scan crosses every segment in prefix order.
+        let mut iter = db.scan::<Vec<u8>, _>(..).await.unwrap();
+        let mut collected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            collected.push((kv.key.to_vec(), kv.value.to_vec()));
+        }
+        assert_eq!(
+            collected, entries,
+            "full scan should yield every key in order"
+        );
+
+        // Per-segment prefix scan should return only that segment's keys.
+        for prefix in prefixes {
+            let mut iter = db.scan_prefix(prefix).await.unwrap();
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            while let Some(kv) = iter.next().await.unwrap() {
+                keys.push(kv.key.to_vec());
+            }
+            let expected: Vec<Vec<u8>> = entries
+                .iter()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .map(|(k, _)| k.clone())
+                .collect();
+            assert_eq!(keys, expected, "prefix scan for {:?}", prefix);
+        }
+
+        // Cross-segment range scan: spans the tail of aaa, all of bbb, and stops
+        // before the head of ccc.
+        let mut iter = db
+            .scan::<Vec<u8>, _>(b"aaa-002".to_vec()..b"ccc-001".to_vec())
+            .await
+            .unwrap();
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            keys.push(kv.key.to_vec());
+        }
+        assert_eq!(
+            keys,
+            vec![
+                b"aaa-002".to_vec(),
+                b"bbb-001".to_vec(),
+                b"bbb-002".to_vec(),
+            ],
+            "range scan spanning aaa and bbb"
+        );
     }
 
     #[cfg(feature = "wal_disable")]
@@ -2806,6 +3533,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_calculate_estimated_source_bytes_uses_target_segment_tree() {
+        let segment_l0 = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"seg/a")),
+                index_offset: 11,
+                index_len: 13,
+                ..SsTableInfo::default()
+            },
+        ));
+        let segment_sr_view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"seg/m")),
+                index_offset: 17,
+                index_len: 19,
+                ..SsTableInfo::default()
+            },
+        ));
+        let segment_sr = SortedRun {
+            id: 7,
+            sst_views: vec![segment_sr_view.clone()],
+        };
+
+        let mut core = ManifestCore::new();
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"seg"),
+            tree: LsmTreeState {
+                l0: VecDeque::from(vec![segment_l0.clone()]),
+                compacted: vec![segment_sr.clone()],
+                ..LsmTreeState::default()
+            },
+        }];
+
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::for_segment(
+                Bytes::from_static(b"seg"),
+                vec![
+                    SourceId::SstView(segment_l0.id),
+                    SourceId::SortedRun(segment_sr.id),
+                ],
+                9,
+            ),
+        );
+
+        let expected = segment_l0.estimate_size() + segment_sr.estimate_size();
+        let actual = CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core);
+        assert_eq!(actual, expected);
+    }
+
     #[tokio::test]
     async fn test_should_track_per_job_throughput() {
         let start_time_ms = 1000u64;
@@ -2912,6 +3693,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_submit_retries_on_boundary_conflict() {
+        // Set up a database with an initial manifest and compactions record.
+        let raw_os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_os = Arc::new(GatedObjectStore::new(Arc::clone(&raw_os)));
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(gated_os.clone());
+        let external_compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(PATH),
+            Arc::clone(&raw_os),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let stored_manifest = StoredManifest::load(manifest_store.clone(), system_clock.clone())
+            .await
+            .unwrap();
+        StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+
+        // Pause submit before its first write. While it is stale, an external writer creates
+        // a live newer version, then GC deletes and fences the stale writer's next id.
+        let start_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
+        let arrivals = gated_os.put_opts_gate.arrivals();
+        gated_os.put_opts_gate.close();
+        let submit_task = tokio::spawn({
+            let spec = spec.clone();
+            let compactions_store = compactions_store.clone();
+            let system_clock = system_clock.clone();
+            async move {
+                Compactor::submit(
+                    spec,
+                    compactions_store,
+                    Arc::new(DbRand::default()),
+                    system_clock,
+                )
+                .await
+            }
+        });
+
+        gated_os.put_opts_gate.wait_for_arrivals(arrivals + 1).await;
+
+        // The external writer wins the stale writer's intended id.
+        let mut external = StoredCompactions::load(external_compactions_store.clone())
+            .await
+            .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // A second external write leaves a live latest version above the future boundary,
+        // so the stale writer can make progress after refreshing.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // GC fences and removes the stale writer's next id, but preserves the live latest
+        // version at start_id + 2.
+        external_compactions_store
+            .advance_boundary(start_id + 1)
+            .await
+            .unwrap();
+        external_compactions_store
+            .delete_compactions(start_id + 1)
+            .await
+            .unwrap();
+        let latest = external_compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(latest, start_id + 2);
+
+        gated_os.put_opts_gate.release();
+
+        // Submit should refresh to the live newer version and retry at the next safe id.
+        let compaction_id = submit_task.await.unwrap().unwrap();
+
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
+        let stored = compactions
+            .compactions
+            .get(&compaction_id)
+            .expect("missing submitted compaction");
+
+        assert_eq!(compactions.id, start_id + 3);
+        assert_eq!(stored.spec(), &spec);
+        assert_eq!(stored.status(), CompactionStatus::Submitted);
+    }
+
+    #[tokio::test]
     async fn test_submit_full_compaction_uses_sorted_run_sources_only() {
         let os = Arc::new(InMemory::new());
         let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
@@ -2986,7 +3874,9 @@ mod tests {
                         stored_manifest.manifest().clone(),
                     ),
                 },
-                &CompactionRequest::Full,
+                &CompactionRequest::FullSegment {
+                    segment: Bytes::new(),
+                },
             )
             .unwrap();
         assert_eq!(specs.len(), 1);
@@ -3007,7 +3897,7 @@ mod tests {
         let expected_sources = vec![SourceId::SortedRun(2), SourceId::SortedRun(1)];
 
         assert_eq!(stored.spec().sources(), &expected_sources);
-        assert_eq!(stored.spec().destination(), 1);
+        assert_eq!(stored.spec().destination(), Some(1));
         assert_eq!(stored.status(), CompactionStatus::Submitted);
     }
 
@@ -3028,7 +3918,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_full_uses_sorted_runs_and_min_destination() {
+    fn test_plan_full_segment_root_uses_sorted_runs_and_min_destination() {
         let scheduler = MockScheduler::new();
         let mut core = ManifestCore::new();
         let l0_info = SsTableInfo {
@@ -3074,17 +3964,22 @@ mod tests {
         };
 
         let planned = scheduler
-            .generate(&state, &CompactionRequest::Full)
+            .generate(
+                &state,
+                &CompactionRequest::FullSegment {
+                    segment: Bytes::new(),
+                },
+            )
             .unwrap();
 
         let expected_sources = vec![SourceId::SortedRun(5), SourceId::SortedRun(2)];
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].sources(), &expected_sources);
-        assert_eq!(planned[0].destination(), 2);
+        assert_eq!(planned[0].destination(), Some(2));
     }
 
     #[test]
-    fn test_plan_full_without_sorted_runs_is_invalid() {
+    fn test_plan_full_segment_root_without_sorted_runs_is_invalid() {
         let scheduler = MockScheduler::new();
         let mut core = ManifestCore::new();
         let l0_info = SsTableInfo {
@@ -3109,13 +4004,334 @@ mod tests {
         };
 
         let err = scheduler
-            .generate(&state, &CompactionRequest::Full)
+            .generate(
+                &state,
+                &CompactionRequest::FullSegment {
+                    segment: Bytes::new(),
+                },
+            )
             .expect_err(
-            "full compaction should reject empty or L0-only inputs because L0 SSTs are excluded",
-        );
+                "full-segment should reject empty or L0-only inputs because L0 SSTs are excluded",
+            );
 
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
         assert_eq!(err.to_string(), "Invalid error: invalid compaction");
+    }
+
+    #[test]
+    fn test_plan_full_segment_targets_named_segment() {
+        // FullSegment against a named segment must pull sources from that
+        // segment's tree, not the root tree. RFC-0024 routes named-segment
+        // SRs through `core.segments[..].tree.compacted`, so a request
+        // against `b"key"` should ignore root-tree SRs entirely.
+        let scheduler = MockScheduler::new();
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some("test".into());
+        let sr_info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"key1")),
+            ..SsTableInfo::default()
+        };
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"key"),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![
+                    SortedRun {
+                        id: 7,
+                        sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                            SsTableId::Compacted(Ulid::from_parts(70, 0)),
+                            SST_FORMAT_VERSION_LATEST,
+                            sr_info.clone(),
+                        ))],
+                    },
+                    SortedRun {
+                        id: 3,
+                        sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                            SsTableId::Compacted(Ulid::from_parts(30, 0)),
+                            SST_FORMAT_VERSION_LATEST,
+                            sr_info,
+                        ))],
+                    },
+                ],
+            },
+        }];
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
+        };
+
+        let planned = scheduler
+            .generate(
+                &state,
+                &CompactionRequest::FullSegment {
+                    segment: Bytes::from_static(b"key"),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].segment().as_ref(), b"key");
+        assert_eq!(
+            planned[0].sources(),
+            &vec![SourceId::SortedRun(7), SourceId::SortedRun(3)]
+        );
+        assert_eq!(planned[0].destination(), Some(3));
+    }
+
+    #[test]
+    fn test_plan_full_segment_unknown_segment_is_invalid() {
+        // Asking to compact a non-empty segment prefix on an unsegmented DB
+        // (root has sorted runs, no segments configured) must be rejected.
+        // A segment-blind implementation that ignored the prefix would
+        // happily return root SRs here — this asserts the routing actually
+        // looks the segment up.
+        let scheduler = MockScheduler::new();
+        let mut core = ManifestCore::new();
+        let sr_info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"r")),
+            ..SsTableInfo::default()
+        };
+        core.tree.compacted = vec![SortedRun {
+            id: 9,
+            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(Ulid::from_parts(90, 0)),
+                SST_FORMAT_VERSION_LATEST,
+                sr_info,
+            ))],
+        }];
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
+        };
+
+        let err = scheduler
+            .generate(
+                &state,
+                &CompactionRequest::FullSegment {
+                    segment: Bytes::from_static(b"missing"),
+                },
+            )
+            .expect_err("full-segment against unknown segment should fail");
+
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+    }
+
+    #[test]
+    fn test_plan_full_segment_single_sorted_run_is_allowed() {
+        // A tree with exactly one SR is a legitimate target — the merge
+        // pipeline still applies retention, TTL, compaction filters, and
+        // merge-operator collapses. Reject only when there are no SRs at all.
+        let scheduler = MockScheduler::new();
+        let mut core = ManifestCore::new();
+        let sr_info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"a")),
+            ..SsTableInfo::default()
+        };
+        core.tree.compacted = vec![SortedRun {
+            id: 4,
+            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(Ulid::from_parts(40, 0)),
+                SST_FORMAT_VERSION_LATEST,
+                sr_info,
+            ))],
+        }];
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
+        };
+
+        let planned = scheduler
+            .generate(
+                &state,
+                &CompactionRequest::FullSegment {
+                    segment: Bytes::new(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].sources(), &vec![SourceId::SortedRun(4)]);
+        assert_eq!(planned[0].destination(), Some(4));
+    }
+
+    #[test]
+    fn test_plan_full_sweeps_root_and_every_named_segment() {
+        // Full must produce one spec per eligible tree, ordered as
+        // `trees_with_prefix()` yields them: root first, then segments by
+        // ascending prefix.
+        let scheduler = MockScheduler::new();
+        let mut core = ManifestCore::new();
+        let info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"x")),
+            ..SsTableInfo::default()
+        };
+        core.tree.compacted = vec![
+            SortedRun {
+                id: 8,
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                    SsTableId::Compacted(Ulid::from_parts(80, 0)),
+                    SST_FORMAT_VERSION_LATEST,
+                    info.clone(),
+                ))],
+            },
+            SortedRun {
+                id: 4,
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                    SsTableId::Compacted(Ulid::from_parts(40, 0)),
+                    SST_FORMAT_VERSION_LATEST,
+                    info.clone(),
+                ))],
+            },
+        ];
+        core.segment_extractor_name = Some("test".into());
+        core.segments = vec![
+            Segment {
+                prefix: Bytes::from_static(b"a/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![SortedRun {
+                        id: 3,
+                        sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                            SsTableId::Compacted(Ulid::from_parts(30, 0)),
+                            SST_FORMAT_VERSION_LATEST,
+                            info.clone(),
+                        ))],
+                    }],
+                },
+            },
+            Segment {
+                prefix: Bytes::from_static(b"b/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![
+                        SortedRun {
+                            id: 9,
+                            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                                SsTableId::Compacted(Ulid::from_parts(90, 0)),
+                                SST_FORMAT_VERSION_LATEST,
+                                info.clone(),
+                            ))],
+                        },
+                        SortedRun {
+                            id: 6,
+                            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                                SsTableId::Compacted(Ulid::from_parts(60, 0)),
+                                SST_FORMAT_VERSION_LATEST,
+                                info,
+                            ))],
+                        },
+                    ],
+                },
+            },
+        ];
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
+        };
+
+        let planned = scheduler
+            .generate(&state, &CompactionRequest::Full)
+            .unwrap();
+
+        assert_eq!(planned.len(), 3);
+        assert_eq!(planned[0].segment().as_ref(), b"");
+        assert_eq!(
+            planned[0].sources(),
+            &vec![SourceId::SortedRun(8), SourceId::SortedRun(4)]
+        );
+        assert_eq!(planned[0].destination(), Some(4));
+        assert_eq!(planned[1].segment().as_ref(), b"a/");
+        assert_eq!(planned[1].sources(), &vec![SourceId::SortedRun(3)]);
+        assert_eq!(planned[1].destination(), Some(3));
+        assert_eq!(planned[2].segment().as_ref(), b"b/");
+        assert_eq!(
+            planned[2].sources(),
+            &vec![SourceId::SortedRun(9), SourceId::SortedRun(6)]
+        );
+        assert_eq!(planned[2].destination(), Some(6));
+    }
+
+    #[test]
+    fn test_plan_full_skips_trees_without_sorted_runs() {
+        // Best-effort semantics: a tree with no compacted SRs is silently
+        // skipped (even if it has L0 SSTs), but eligible peers still produce
+        // specs. This is the key behavioral difference from FullSegment,
+        // which errors when explicitly asked to compact such a tree.
+        let scheduler = MockScheduler::new();
+        let mut core = ManifestCore::new();
+        let info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"x")),
+            ..SsTableInfo::default()
+        };
+        core.tree.compacted = vec![SortedRun {
+            id: 5,
+            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(Ulid::from_parts(50, 0)),
+                SST_FORMAT_VERSION_LATEST,
+                info.clone(),
+            ))],
+        }];
+        core.segment_extractor_name = Some("test".into());
+        core.segments = vec![
+            // L0-only: still skipped because L0 SSTs are ineligible inputs.
+            Segment {
+                prefix: Bytes::from_static(b"l0only/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
+                        SsTableId::Compacted(Ulid::from_parts(1, 0)),
+                        SST_FORMAT_VERSION_LATEST,
+                        info,
+                    ))]),
+                    compacted: vec![],
+                },
+            },
+            // Fully empty tree: also skipped.
+            Segment {
+                prefix: Bytes::from_static(b"none/"),
+                tree: LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0: VecDeque::new(),
+                    compacted: vec![],
+                },
+            },
+        ];
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
+        };
+
+        let planned = scheduler
+            .generate(&state, &CompactionRequest::Full)
+            .unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].segment().as_ref(), b"");
+        assert_eq!(planned[0].sources(), &vec![SourceId::SortedRun(5)]);
+    }
+
+    #[test]
+    fn test_plan_full_returns_empty_when_no_tree_is_eligible() {
+        // Empty DB / no compacted SRs anywhere → Ok(vec![]), not an error.
+        let scheduler = MockScheduler::new();
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(ManifestCore::new())),
+        };
+
+        let planned = scheduler
+            .generate(&state, &CompactionRequest::Full)
+            .unwrap();
+
+        assert!(planned.is_empty(), "expected empty plan, got {:?}", planned);
     }
 
     struct CompactorEventHandlerTestFixture {
@@ -3587,7 +4803,10 @@ mod tests {
         fixture.write_l0().await;
         fixture.handler.state_writer.refresh().await.unwrap();
         let spec = fixture.build_l0_compaction().await;
-        let spec_alt = CompactionSpec::new(spec.sources().clone(), spec.destination() + 1);
+        let spec_alt = CompactionSpec::new(
+            spec.sources().to_vec(),
+            spec.destination().expect("tiered spec") + 1,
+        );
         let first_id = Ulid::from_parts(1, 0);
         let second_id = Ulid::from_parts(2, 0);
         fixture
@@ -3865,7 +5084,7 @@ mod tests {
         // Build a minimal successful result
         let db_state = fixture.latest_db_state().await;
         let output_sr = SortedRun {
-            id: compaction.destination(),
+            id: compaction.destination().expect("tiered spec"),
             sst_views: db_state.tree.l0.iter().cloned().collect(),
         };
         let msg = CompactorMessage::CompactionJobFinished {
@@ -4071,6 +5290,53 @@ mod tests {
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
+    /// The L0-only monotonicity check is global across all segment trees, not
+    /// just the target tree. A spec whose destination is above the target
+    /// tree's local max but below the global max (an SR in some other
+    /// segment) must be rejected.
+    #[tokio::test]
+    async fn test_validate_compaction_l0_only_rejects_when_dest_below_global_highest_sr() {
+        use crate::manifest::{LsmTreeState, Segment};
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let prefix = Bytes::from_static(b"seg/");
+        let l0_view = Ulid::from_parts(1, 0);
+        let make_view = |id: Ulid| {
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(id),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        };
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        // Root tree holds SR(7) — the global max. The segment-targeted spec
+        // below proposes dst=3, which is above the segment's local max (0)
+        // but below the global max.
+        core.tree.compacted = vec![SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        }];
+        core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![make_view(l0_view)]),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
+        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
     #[tokio::test]
     async fn test_validate_compaction_mixed_l0_and_sr_deferred_to_scheduler() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
@@ -4134,6 +5400,264 @@ mod tests {
         );
         let err = fixture.handler.validate_compaction(&second_l0).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// L0 compactions in disjoint segments may run concurrently — each segment
+    /// owns its own watermark, so cross-segment parallelism is safe (RFC-0024).
+    /// The parallel-L0 rejection in `validate_compaction` must scope itself to
+    /// the spec's target segment.
+    ///
+    /// This test inspects `validate_compaction` directly by seeding the
+    /// compactor's local state with two segments and a Running spec — going
+    /// through the full schedule/start round-trip would require a writer
+    /// configured with a segment extractor, which the fixture doesn't model.
+    #[tokio::test]
+    async fn test_validate_compaction_allows_parallel_l0_in_disjoint_segments() {
+        use crate::manifest::{LsmTreeState, Segment};
+        use bytes::Bytes;
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+
+        let prefix_a = Bytes::from_static(b"seg-a/");
+        let prefix_b = Bytes::from_static(b"seg-b/");
+        let l0_a = Ulid::from_parts(1, 0);
+        let l0_b = Ulid::from_parts(2, 0);
+        let make_segment = |prefix: Bytes, l0_view_id: Ulid| Segment {
+            prefix,
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
+                    SsTableId::Compacted(l0_view_id),
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo::default(),
+                ))]),
+                compacted: Vec::new(),
+            },
+        };
+
+        // Seed the compactor's local state with the two segments. We never
+        // call handle_ticker again, so the writer/compactor merge protocol
+        // (which would reject compactor-only segments with data) doesn't
+        // run.
+        fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core
+            .segments = vec![
+            make_segment(prefix_a.clone(), l0_a),
+            make_segment(prefix_b.clone(), l0_b),
+        ];
+
+        // Seed a Running L0 compaction in segment A.
+        let running_id = Ulid::from_parts(100, 0);
+        let running_spec =
+            CompactionSpec::for_segment(prefix_a.clone(), vec![SourceId::SstView(l0_a)], 200);
+        fixture
+            .handler
+            .state_writer
+            .state
+            .insert_compaction_for_test(
+                Compaction::new(running_id, running_spec).with_status(CompactionStatus::Running),
+            );
+
+        // L0 in a different segment must validate successfully — its
+        // watermark is independent of segment A's.
+        let spec_b =
+            CompactionSpec::for_segment(prefix_b.clone(), vec![SourceId::SstView(l0_b)], 201);
+        fixture
+            .handler
+            .validate_compaction(&spec_b)
+            .expect("L0 in disjoint segment must be allowed");
+
+        // Sanity check: a second L0 spec in the SAME segment is still rejected.
+        let spec_a_dup =
+            CompactionSpec::for_segment(prefix_a.clone(), vec![SourceId::SstView(l0_a)], 202);
+        let err = fixture
+            .handler
+            .validate_compaction(&spec_a_dup)
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// `validate_compaction` rejects a spec whose target segment does not exist in
+    /// the manifest. The empty-prefix segment (root tree) always exists, so only
+    /// non-empty prefixes can fail this lookup.
+    #[tokio::test]
+    async fn test_validate_compaction_rejects_unknown_segment() {
+        let fixture = CompactorEventHandlerTestFixture::new().await;
+        let spec = CompactionSpec::for_segment(
+            Bytes::from_static(b"missing/"),
+            vec![SourceId::SortedRun(0)],
+            0,
+        );
+        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// RFC-0024: a compaction must operate within a single segment. A spec whose
+    /// sources reference a sorted run that lives in a different tree is rejected
+    /// because the source is absent from the target segment's tree.
+    #[tokio::test]
+    async fn test_validate_compaction_rejects_sources_from_other_segment() {
+        use crate::manifest::{LsmTreeState, Segment};
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // SR(99) lives in the root tree; segment "seg/" is empty.
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        core.tree.compacted = vec![SortedRun {
+            id: 99,
+            sst_views: Vec::new(),
+        }];
+        let prefix = Bytes::from_static(b"seg/");
+        core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: Vec::new(),
+            },
+        }];
+
+        // Segment-targeted spec lists SR(99) as a source — but SR(99) lives in
+        // the root tree, not in "seg/". Must be rejected.
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 0);
+        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// SR ids are globally unique across all trees (RFC-0024), so a segment-targeted
+    /// spec must be rejected if its destination already exists as an SR anywhere in
+    /// the manifest — including the root tree — and the SR is not listed among its
+    /// sources.
+    #[tokio::test]
+    async fn test_validate_compaction_destination_overwrite_check_is_global() {
+        use crate::manifest::{LsmTreeState, Segment};
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        // Place SR(7) in the root tree. The segment-targeted spec below uses 7 as
+        // its destination but does not list it among its sources.
+        core.tree.compacted = vec![SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        }];
+        // Seed SR(99) into the segment so the source-existence check passes and
+        // destination-overwrite is the rejection reason.
+        let prefix = Bytes::from_static(b"seg/");
+        core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![SortedRun {
+                    id: 99,
+                    sst_views: Vec::new(),
+                }],
+            },
+        }];
+
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
+        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// Drain specs cannot target the empty-prefix segment (RFC-0024): the
+    /// root-tree compatibility encoding is not retired by drain.
+    #[tokio::test]
+    async fn test_validate_compaction_rejects_drain_for_empty_prefix() {
+        let fixture = CompactorEventHandlerTestFixture::new().await;
+        let spec = CompactionSpec::drain_segment(Bytes::new(), vec![SourceId::SortedRun(0)]);
+        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// A drain spec must list every L0 at or below the newest drained L0 in
+    /// the target tree — otherwise the watermark advances over an un-listed
+    /// L0 and leaves it orphaned in `tree.l0` below the watermark.
+    #[tokio::test]
+    async fn test_validate_compaction_rejects_drain_with_non_contiguous_l0_sources() {
+        use crate::manifest::{LsmTreeState, Segment};
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let prefix = Bytes::from_static(b"seg/");
+        // tree.l0 is newest-first: [L0_3, L0_2, L0_1]. Drain spec names
+        // L0_3 and L0_1 but skips L0_2 — the watermark would advance to L0_3
+        // and L0_2 would be left below it.
+        let l0_3 = Ulid::from_parts(3, 0);
+        let l0_2 = Ulid::from_parts(2, 0);
+        let l0_1 = Ulid::from_parts(1, 0);
+        let make_view = |id: Ulid| {
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(id),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        };
+        fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core
+            .segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![make_view(l0_3), make_view(l0_2), make_view(l0_1)]),
+                compacted: Vec::new(),
+            },
+        }];
+
+        let spec = CompactionSpec::drain_segment(
+            prefix,
+            vec![SourceId::SstView(l0_3), SourceId::SstView(l0_1)],
+        );
+        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    async fn put_and_flush_memtable(db: &Db, key: &[u8], value: &[u8]) {
+        db.put_with_options(
+            key,
+            value,
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+    }
+
+    fn read_db_state_core(db: &Db) -> ManifestCore {
+        let db_state = db.inner.state.read();
+        db_state.state().core().clone()
     }
 
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>

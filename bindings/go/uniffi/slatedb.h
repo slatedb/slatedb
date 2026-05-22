@@ -370,6 +370,34 @@ static void call_UniffiForeignFutureCompleteVoid(
 
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD0
+typedef void (*UniffiCallbackInterfacePrefixExtractorMethod0)(uint64_t uniffi_handle, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfacePrefixExtractorMethod0(
+				UniffiCallbackInterfacePrefixExtractorMethod0 cb, uint64_t uniffi_handle, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD1
+typedef void (*UniffiCallbackInterfacePrefixExtractorMethod1)(uint64_t uniffi_handle, RustBuffer target, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfacePrefixExtractorMethod1(
+				UniffiCallbackInterfacePrefixExtractorMethod1 cb, uint64_t uniffi_handle, RustBuffer target, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, target, uniffi_out_return, callStatus );
+}
+
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0
 typedef void (*UniffiCallbackInterfaceLogCallbackMethod0)(uint64_t uniffi_handle, RustBuffer record, void* uniffi_out_return, RustCallStatus* callStatus );
@@ -508,6 +536,16 @@ static void call_UniffiCallbackInterfaceUpDownCounterMethod0(
 	return cb(uniffi_handle, value, uniffi_out_return, callStatus );
 }
 
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PREFIX_EXTRACTOR
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PREFIX_EXTRACTOR
+typedef struct UniffiVTableCallbackInterfacePrefixExtractor {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfacePrefixExtractorMethod0 name;
+    UniffiCallbackInterfacePrefixExtractorMethod1 prefixLen;
+} UniffiVTableCallbackInterfacePrefixExtractor;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOG_CALLBACK
@@ -691,6 +729,11 @@ void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(uint64_t ptr, uint6
 void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_FILTER_POLICIES
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_FILTER_POLICIES
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_filter_policies(uint64_t ptr, RustBuffer policies, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
 void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator(uint64_t ptr, uint64_t merge_operator, RustCallStatus *out_status
@@ -744,6 +787,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
 void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(uint64_t ptr, RustBuffer checkpoint_id, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_FILTER_POLICIES
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_FILTER_POLICIES
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_filter_policies(uint64_t ptr, RustBuffer policies, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
@@ -1149,6 +1197,56 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_seqnum(uint64_t ptr, Rust
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_UNMARK_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_UNMARK_WRITE
 uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_unmark_write(uint64_t ptr, RustBuffer keys
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_FILTERPOLICY
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_FILTERPOLICY
+uint64_t uniffi_slatedb_uniffi_fn_clone_filterpolicy(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_FILTERPOLICY
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_FILTERPOLICY
+void uniffi_slatedb_uniffi_fn_free_filterpolicy(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_FILTERPOLICY_BLOOM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_FILTERPOLICY_BLOOM
+uint64_t uniffi_slatedb_uniffi_fn_constructor_filterpolicy_bloom(uint32_t bits_per_key, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_FILTERPOLICY_BLOOM_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_FILTERPOLICY_BLOOM_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_constructor_filterpolicy_bloom_with_options(RustBuffer options, RustBuffer prefix_extractor, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_FILTERPOLICY_NAME
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_FILTERPOLICY_NAME
+RustBuffer uniffi_slatedb_uniffi_fn_method_filterpolicy_name(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_PREFIXEXTRACTOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_PREFIXEXTRACTOR
+uint64_t uniffi_slatedb_uniffi_fn_clone_prefixextractor(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_PREFIXEXTRACTOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_PREFIXEXTRACTOR
+void uniffi_slatedb_uniffi_fn_free_prefixextractor(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_PREFIXEXTRACTOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_PREFIXEXTRACTOR
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_prefixextractor(UniffiVTableCallbackInterfacePrefixExtractor* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_PREFIXEXTRACTOR_NAME
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_PREFIXEXTRACTOR_NAME
+RustBuffer uniffi_slatedb_uniffi_fn_method_prefixextractor_name(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_PREFIXEXTRACTOR_PREFIX_LEN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_PREFIXEXTRACTOR_PREFIX_LEN
+RustBuffer uniffi_slatedb_uniffi_fn_method_prefixextractor_prefix_len(uint64_t ptr, RustBuffer target, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBITERATOR
@@ -1926,6 +2024,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled(
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_FILTER_POLICIES
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_FILTER_POLICIES
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_filter_policies(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator(void
@@ -1971,6 +2075,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_FILTER_POLICIES
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_FILTER_POLICIES
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies(void
     
 );
 #endif
@@ -2382,6 +2492,24 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_FILTERPOLICY_NAME
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_FILTERPOLICY_NAME
+uint16_t uniffi_slatedb_uniffi_checksum_method_filterpolicy_name(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_PREFIXEXTRACTOR_NAME
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_PREFIXEXTRACTOR_NAME
+uint16_t uniffi_slatedb_uniffi_checksum_method_prefixextractor_name(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_PREFIXEXTRACTOR_PREFIX_LEN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_PREFIXEXTRACTOR_PREFIX_LEN
+uint16_t uniffi_slatedb_uniffi_checksum_method_prefixextractor_prefix_len(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next(void
@@ -2622,6 +2750,18 @@ uint16_t uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_FILTERPOLICY_BLOOM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_FILTERPOLICY_BLOOM
+uint16_t uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_FILTERPOLICY_BLOOM_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_FILTERPOLICY_BLOOM_WITH_OPTIONS
+uint16_t uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom_with_options(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_DEFAULTMETRICSRECORDER_NEW
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_DEFAULTMETRICSRECORDER_NEW
 uint16_t uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new(void
@@ -2695,6 +2835,10 @@ uint32_t ffi_slatedb_uniffi_uniffi_contract_version(void
 );
 #endif
 
+ void slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0(uint64_t uniffi_handle, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1(uint64_t uniffi_handle, RustBuffer target, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree(uint64_t handle);
+uint64_t slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorClone(uint64_t handle);
  void slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0(uint64_t uniffi_handle, RustBuffer record, void* uniffi_out_return, RustCallStatus* callStatus );
  void slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackFree(uint64_t handle);
 uint64_t slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackClone(uint64_t handle);

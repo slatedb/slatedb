@@ -31,12 +31,12 @@ use futures::stream::BoxStream;
 use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use slatedb_common::clock::SystemClock;
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use uuid::Uuid;
@@ -82,7 +82,7 @@ struct CheckpointState {
     last_remote_persisted_seq: u64,
 }
 
-static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
+static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
 
 impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
@@ -251,6 +251,11 @@ impl DbReaderInner {
             != current_state.tree.last_compacted_l0_sst_view_id
             || latest.last_l0_seq > current_state.last_l0_seq
             || latest.tree.compacted != current_state.tree.compacted
+            // RFC-0024: segment-only progress (per-segment compactions,
+            // drains, segment-set changes) is invisible to the root-tree
+            // diff above. Structural equality on `Segment` covers each
+            // segment's tree state, so any change retires the snapshot.
+            || latest.segments != current_state.segments
     }
 
     async fn replace_checkpoint(
@@ -284,8 +289,11 @@ impl DbReaderInner {
         if self.options.skip_wal_replay {
             return Ok(());
         }
-        let last_seen_wal_id = self.table_store.last_seen_wal_id().await?;
         let last_replayed_wal_id = self.state.read().last_wal_id;
+        let last_seen_wal_id = self
+            .table_store
+            .last_seen_wal_id(last_replayed_wal_id)
+            .await?;
         if last_seen_wal_id > last_replayed_wal_id {
             let current_checkpoint = Arc::clone(&self.state.read());
             let mut imm_memtable = current_checkpoint.imm_memtable().clone();
@@ -472,7 +480,7 @@ impl DbReaderInner {
                 (core.replay_after_wal_id, core.last_l0_seq)
             };
         let wal_id_end = if replay_new_wals {
-            table_store.last_seen_wal_id().await? + 1
+            table_store.last_seen_wal_id(replay_after_wal_id).await? + 1
         } else {
             core.next_wal_sst_id
         };
@@ -1199,6 +1207,7 @@ mod tests {
     use crate::db_stats::DbStats;
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
+    use crate::iter::IterationOrder;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
@@ -1407,7 +1416,8 @@ mod tests {
             Bytes::copy_from_slice(value),
         );
 
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -1442,7 +1452,8 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         let mut db_iter = reader.scan::<Vec<u8>, _>(..).await.unwrap();
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
 
         let manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert!(!manifest.manifest.core.checkpoints.is_empty());
@@ -1608,7 +1619,10 @@ mod tests {
 
     #[test]
     fn has_not_found_object_store_error_should_ignore_non_not_found_errors() {
-        let err = SlateDBError::from(object_store::Error::NotImplemented);
+        let err = SlateDBError::from(object_store::Error::NotImplemented {
+            operation: "test".to_string(),
+            implementer: "test".to_string(),
+        });
 
         assert!(!super::has_not_found_object_store_error(&err));
     }
@@ -1825,7 +1839,7 @@ mod tests {
 
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
@@ -1948,14 +1962,14 @@ mod tests {
             .unwrap()
             .id;
 
-        // Inject a failpoint on WAL listing before flushing so it is active
+        // Inject a failpoint on WAL probing before flushing so it is active
         // when the poller fires. With the buggy replay_new_wals=true,
-        // reestablish_checkpoint calls last_seen_wal_id() which lists WAL SSTs
+        // reestablish_checkpoint calls last_seen_wal_id() which probes WAL SSTs
         // and hits this failpoint. With the fix (replay_new_wals=false), the
-        // WAL listing is skipped entirely.
+        // WAL probing is skipped entirely.
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
@@ -2304,20 +2318,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn should_reestablish_checkpoint_when_latest_last_l0_seq_exceeds_last_remote_persisted_seq() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from(format!(
-            "/tmp/test_db_reader_should_reestablish_checkpoint_{}",
-            Uuid::new_v4()
-        ));
-        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+    fn build_db_reader_inner(
+        test_provider: &TestProvider,
+        current_core: &ManifestCore,
+    ) -> DbReaderInner {
         let manifest_store = test_provider.manifest_store();
         let table_store = test_provider.table_store();
-
-        let mut current_core = ManifestCore::new();
-        current_core.last_l0_seq = 10;
-        current_core.next_wal_sst_id = 2;
 
         let prior_state = CheckpointState {
             checkpoint: test_checkpoint(1, test_provider.system_clock.clone()),
@@ -2342,7 +2348,7 @@ mod tests {
             oracle.clone(),
             None,
         );
-        let inner = DbReaderInner {
+        DbReaderInner {
             manifest_store,
             table_store,
             options: DbReaderOptions::default(),
@@ -2354,7 +2360,23 @@ mod tests {
             status_manager: DbStatusManager::new(0),
             rand: test_provider.rand.clone(),
             recorder,
-        };
+        }
+    }
+
+    #[test]
+    fn should_reestablish_checkpoint_when_latest_last_l0_seq_exceeds_last_remote_persisted_seq() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_should_reestablish_checkpoint_{}",
+            Uuid::new_v4()
+        ));
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+
+        let mut current_core = ManifestCore::new();
+        current_core.last_l0_seq = 10;
+        current_core.next_wal_sst_id = 2;
+
+        let inner = build_db_reader_inner(&test_provider, &current_core);
 
         assert!(!inner.should_reestablish_checkpoint(&current_core));
 
@@ -2362,6 +2384,108 @@ mod tests {
         latest.last_l0_seq = 11;
 
         assert!(inner.should_reestablish_checkpoint(&latest));
+    }
+
+    #[test]
+    fn should_reestablish_checkpoint_when_segments_differ() {
+        // RFC-0024: per-segment compactions, drains, and segment-set changes
+        // are invisible to the root-tree diff. Verify the segments comparison
+        // fires on each of those shapes.
+        use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
+        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+        use crate::manifest::{LsmTreeState, Segment};
+
+        fn view(seq: u64) -> SsTableView {
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid::Ulid::from_parts(seq, 0)),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        fn segment_with(prefix: &'static [u8], tree: LsmTreeState) -> Segment {
+            Segment {
+                prefix: Bytes::from_static(prefix),
+                tree,
+            }
+        }
+        fn tree_l0(views: Vec<SsTableView>) -> LsmTreeState {
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(views),
+                compacted: vec![],
+            }
+        }
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_segments_diff_{}",
+            Uuid::new_v4()
+        ));
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+
+        let baseline_segment = segment_with(b"hour=12/", tree_l0(vec![view(1)]));
+        let mut current_core = ManifestCore::new();
+        current_core.segment_extractor_name = Some("hour".into());
+        current_core.segments = vec![baseline_segment.clone()];
+
+        let inner = build_db_reader_inner(&test_provider, &current_core);
+
+        // Identical segments → no refresh.
+        assert!(!inner.should_reestablish_checkpoint(&current_core));
+
+        // New segment appears.
+        let mut latest = current_core.clone();
+        latest
+            .segments
+            .push(segment_with(b"hour=13/", tree_l0(vec![view(2)])));
+        assert!(
+            inner.should_reestablish_checkpoint(&latest),
+            "adding a segment should retire the snapshot"
+        );
+
+        // Segment's L0 changes in place (compaction within a segment).
+        let mut latest = current_core.clone();
+        latest.segments = vec![segment_with(b"hour=12/", tree_l0(vec![view(1), view(3)]))];
+        assert!(
+            inner.should_reestablish_checkpoint(&latest),
+            "segment L0 change should retire the snapshot"
+        );
+
+        // Segment's compacted list changes (sorted-run added).
+        let mut latest = current_core.clone();
+        latest.segments = vec![segment_with(
+            b"hour=12/",
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![view(1)]),
+                compacted: vec![SortedRun {
+                    id: 0,
+                    sst_views: vec![view(4)],
+                }],
+            },
+        )];
+        assert!(
+            inner.should_reestablish_checkpoint(&latest),
+            "segment compacted change should retire the snapshot"
+        );
+
+        // Segment drained (watermark advances).
+        let mut latest = current_core.clone();
+        latest.segments = vec![segment_with(
+            b"hour=12/",
+            LsmTreeState {
+                last_compacted_l0_sst_view_id: Some(ulid::Ulid::from_parts(99, 0)),
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::new(),
+                compacted: vec![],
+            },
+        )];
+        assert!(
+            inner.should_reestablish_checkpoint(&latest),
+            "segment drain marker should retire the snapshot"
+        );
     }
 
     #[tokio::test]

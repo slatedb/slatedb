@@ -1592,10 +1592,17 @@ mod test {
             entries,
         );
 
-        // Unblock both and shut down
-        block1.notify_waiters();
-        block2.notify_waiters();
-        task_executor.shutdown_task("parallel").await.ok();
+        // Unblock both and shut down. Use notify_one so a permit is retained
+        // if a handler has logged but has not yet reached notified().await.
+        block1.notify_one();
+        block2.notify_one();
+        let result = timeout(
+            Duration::from_secs(5),
+            task_executor.shutdown_task("parallel"),
+        )
+        .await
+        .expect("timeout waiting for shutdown after unblock");
+        assert!(result.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1756,9 +1763,10 @@ mod test {
             "join_task should not resolve while members are still blocked"
         );
 
-        // Unblock both — now join should resolve
-        block1.notify_waiters();
-        block2.notify_waiters();
+        // Unblock both. notify_one is safe even if a handler has logged but
+        // has not yet reached notified().await.
+        block1.notify_one();
+        block2.notify_one();
         let result = timeout(Duration::from_secs(5), task_executor.join_task("parallel"))
             .await
             .expect("timeout waiting for join after unblock");

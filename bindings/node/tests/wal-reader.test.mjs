@@ -62,19 +62,26 @@ test("wal reader metadata and row decoding", async (t) => {
   assert.ok(files.length >= 3);
 
   const allRows = [];
+  let nonEmptyFiles = 0;
   for (const walFile of files) {
     const metadata = await walFile.metadata();
-    assert.ok(BigInt(metadata.size_bytes) > 0n);
     assert.notEqual(metadata.location, "");
 
     const iterator = cleanup.track(await walFile.iterator());
     const rows = await drainWalIterator(iterator);
+    if (BigInt(metadata.size_bytes) === 0n) {
+      assert.deepEqual(rows, []);
+      continue;
+    }
+
+    nonEmptyFiles += 1;
     for (const row of rows) {
       assert.ok(BigInt(row.seq) > 0n);
     }
     allRows.push(...rows);
   }
 
+  assert.ok(nonEmptyFiles > 0);
   assert.equal(allRows.length, 4);
   requireWalRow(allRows[0], RowEntryKind.Value, "a", "1");
   requireWalRow(allRows[1], RowEntryKind.Value, "b", "2");

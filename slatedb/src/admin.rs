@@ -435,10 +435,10 @@ impl Admin {
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
-        let manifest_has_wal = stored_manifest.db_state().wal_object_store_uri.is_some();
-        if self.object_stores.has_wal_object_store() != manifest_has_wal {
-            return Err(SlateDBError::WalStoreReconfigurationError.into());
-        }
+        let configured_wal_uri = self.object_stores.has_wal_object_store().then(String::new);
+        stored_manifest
+            .db_state()
+            .validate_wal_object_store_uri(configured_wal_uri.as_deref())?;
 
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
@@ -751,7 +751,7 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// |--------------|-----|----------|
 /// | OPENDAL_SCHEME | The OpenDAL scheme to use | Yes |
 /// | OPENDAL_* | The OpenDAL configuration | Yes |
-/// full list of schemes: https://docs.rs/opendal/latest/opendal/enum.Scheme.html
+/// full list of schemes: https://docs.rs/opendal/latest/opendal/services/index.html
 /// for example, to use s3-compatible storage, you can set:
 /// ```bash
 /// OPENDAL_SCHEME=s3
@@ -775,32 +775,26 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// full list of config: https://docs.rs/opendal/latest/opendal/services/oss/config/struct.OssConfig.html
 #[cfg(feature = "opendal")]
 pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    use opendal::{Operator, Scheme};
+    use opendal::Operator;
     use std::collections::HashMap;
-    use std::str::FromStr;
 
     let scheme_value = get_env_variable("OPENDAL_SCHEME")?;
-    let scheme =
-        Scheme::from_str(&scheme_value).map_err(|_| SlateDBError::InvalidEnvironmentVariable {
-            key: "OPENDAL_SCHEME".to_string(),
-            value: Some(scheme_value.clone()),
-        })?;
-    if !Scheme::enabled().contains(&scheme) {
-        return Err(SlateDBError::InvalidEnvironmentVariable {
-            key: "OPENDAL_SCHEME".to_string(),
-            value: Some(scheme_value),
-        }
-        .into());
-    }
     let iter = env::vars()
         .filter_map(|(k, v)| k.strip_prefix("OPENDAL_").map(|k| (k.to_lowercase(), v)))
         .collect::<HashMap<String, String>>();
 
-    let op = Operator::via_iter(scheme, iter).map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
-            store: "OpenDAL",
-            source: Box::new(error),
-        }))
+    let op = Operator::via_iter(&scheme_value, iter).map_err(|error| {
+        if error.kind() == opendal::ErrorKind::Unsupported {
+            SlateDBError::InvalidEnvironmentVariable {
+                key: "OPENDAL_SCHEME".to_string(),
+                value: Some(scheme_value.clone()),
+            }
+        } else {
+            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+                store: "OpenDAL",
+                source: Box::new(error),
+            }))
+        }
     })?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }
@@ -1195,8 +1189,8 @@ mod tests {
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(3)], 3);
         let compaction = admin.submit_compaction(spec).await.unwrap();
 
-        assert_eq!(compaction.spec().destination(), 3);
-        assert_eq!(compaction.spec().sources(), &vec![SourceId::SortedRun(3)]);
+        assert_eq!(compaction.spec().destination(), Some(3));
+        assert_eq!(compaction.spec().sources(), &[SourceId::SortedRun(3)]);
         assert_eq!(compaction.status(), CompactionStatus::Submitted);
     }
 

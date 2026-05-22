@@ -126,15 +126,20 @@ impl FilterQuery {
 /// Carries raw bytes that a custom filter policy knows how to decode.
 /// Built-in policies ignore this entirely.
 ///
-/// Marked `#[non_exhaustive]` so new variants can be added (e.g., a heap
-/// `Bytes` variant for larger payloads, or typed variants) as concrete
-/// user use cases emerge, without it being a breaking change.
+/// Marked `#[non_exhaustive]` so new variants can be added (e.g., typed
+/// variants) as concrete user use cases emerge, without it being a breaking
+/// change.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum FilterContext {
     /// Inline 64-byte payload with no heap allocation. Suitable for
     /// pairs of `u64`s, `u128`s, and other fixed-layout small structs.
     Inline([u8; 64]),
+    /// Variable-length, heap-allocated payload. Used when the encoded
+    /// context is too large for [`FilterContext::Inline`] or when the
+    /// length is dynamic, and across FFI boundaries that cannot represent
+    /// fixed-size arrays.
+    Bytes(Bytes),
 }
 
 // ---------------------------------------------------------------------------

@@ -7,10 +7,8 @@ use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
-use crate::prefix_extractor::PrefixTarget;
 use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
-use crate::sst_builder::EncodedSsTableBuilder;
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -56,17 +54,20 @@ impl DbInner {
     /// consecutively — the implementation streams one open builder at a
     /// time, finalizing on prefix transitions.
     ///
-    /// When no extractor is configured, every entry routes to the empty
-    /// prefix and the result is at most one entry. If retention prunes
-    /// every entry the result is an empty Vec in both the extractor and
-    /// no-extractor cases — per-memtable progress in the manifest
-    /// (`last_l0_seq`, `replay_after_wal_id`) advances independently of
-    /// whether any SST landed.
+    /// The touched-segment set is read from
+    /// [`KVTable::touched_segments`], populated by the write and
+    /// WAL-replay paths. A non-empty memtable with an empty set is
+    /// an invariant violation surfaced as `InvalidDBState`.
+    ///
+    /// If retention prunes every entry the result is an empty Vec
+    /// — per-memtable progress in the manifest (`last_l0_seq`,
+    /// `replay_after_wal_id`) advances independently of whether any
+    /// SST landed.
     pub(crate) async fn build_imm_ssts(
         &self,
         imm_table: Arc<KVTable>,
     ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
-        let Some(extractor) = self.segment_extractor.as_ref() else {
+        if self.segment_extractor.is_none() {
             return Ok(self
                 .build_imm_sst(imm_table)
                 .await?
@@ -76,32 +77,65 @@ impl DbInner {
                     encoded,
                 })
                 .collect());
-        };
-        let mut iter = self.iter_imm_table(imm_table).await?;
+        }
+        let touched = imm_table.touched_segments();
+        if touched.is_empty() {
+            // An empty memtable is fine; a non-empty memtable with
+            // no recorded prefixes is an invariant violation.
+            if imm_table.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Err(SlateDBError::InvalidDBState);
+        }
+        self.build_imm_segment_ssts(imm_table, touched).await
+    }
+
+    /// Sorted-merge walk over the precomputed touched-segment set.
+    /// Both inputs are sorted (`BTreeSet` iter is ascending; the
+    /// memtable yields keys in order). For each entry, advance the
+    /// segment cursor until `entry.key.starts_with(current_prefix)`
+    /// holds, then add to that segment's builder. Finalizes builders
+    /// only when entries actually landed in them, so post-retention
+    /// pruning that empties a segment yields no SST for it.
+    async fn build_imm_segment_ssts(
+        &self,
+        imm_table: Arc<KVTable>,
+        touched_segments: std::collections::BTreeSet<Bytes>,
+    ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
+        let mut entries = self.iter_imm_table(imm_table).await?;
+        let mut seg_iter = touched_segments.into_iter();
+        let mut current_prefix = seg_iter
+            .next()
+            .expect("touched_segments non-empty in this branch");
+        let mut current_builder = self.table_store.table_builder();
+        let mut current_has_entry = false;
         let mut out: Vec<EncodedSegmentSst> = Vec::new();
-        let mut current: Option<(Bytes, EncodedSsTableBuilder<'_>)> = None;
-        while let Some(entry) = iter.next().await? {
-            let n = extractor
-                .prefix_len(&PrefixTarget::Point(entry.key.clone()))
-                .expect("extractor returned None for a key already in the memtable");
-            let prefix = entry.key.slice(0..n);
-            let same_segment = current.as_ref().is_some_and(|(p, _)| p == &prefix);
-            if !same_segment {
-                if let Some((cur_prefix, builder)) = current.take() {
+        while let Some(entry) = entries.next().await? {
+            // Advance the segment cursor until the entry fits the
+            // current prefix. The validation contract guarantees a
+            // match; an exhausted iterator means the extractor's
+            // output diverges from the recorded set.
+            while !entry.key.starts_with(current_prefix.as_ref()) {
+                if current_has_entry {
                     out.push(EncodedSegmentSst {
-                        prefix: cur_prefix,
-                        encoded: builder.build().await?,
+                        prefix: current_prefix,
+                        encoded: current_builder.build().await?,
                     });
                 }
-                current = Some((prefix, self.table_store.table_builder()));
+                current_prefix = seg_iter.next().expect(
+                    "entry key has no matching prefix in touched_segments — \
+                         extractor output inconsistent with recorded set",
+                );
+                current_builder = self.table_store.table_builder();
+                current_has_entry = false;
             }
-            let (_, builder) = current.as_mut().expect("set on first iteration");
-            builder.add(entry).await?;
+            current_builder.add(entry).await?;
+            current_has_entry = true;
         }
-        if let Some((cur_prefix, builder)) = current {
+        if current_has_entry {
             out.push(EncodedSegmentSst {
-                prefix: cur_prefix,
-                encoded: builder.build().await?,
+                prefix: current_prefix,
+                encoded: current_builder.build().await?,
             });
         }
         Ok(out)
@@ -127,25 +161,11 @@ impl DbInner {
         Ok(handle)
     }
 
-    /// Write an empty WAL SST at `wal_id` as a fencing barrier. The
+    /// Write a zero-byte WAL object at `wal_id` as a fencing barrier. The
     /// object-storage put-if-absent at this slot is what fences in-flight
     /// WAL writes from older-epoch writers — see [`Self::fence_writers`].
-    ///
-    /// Builds the empty SST blob directly from an empty builder; bypasses
-    /// the L0 build pipeline since there's no memtable to flush. L0 data
-    /// must go through the segment-aware upload pipeline
-    /// ([`Self::build_imm_ssts`]).
     pub(crate) async fn flush_empty_wal(&self, wal_id: u64) -> Result<(), SlateDBError> {
-        let encoded_sst = self.table_store.table_builder().build().await?;
-        let empty = crate::mem_table::WritableKVTable::new();
-        self.upload_sst(
-            &db_state::SsTableId::Wal(wal_id),
-            empty.table().clone(),
-            &encoded_sst,
-            false,
-        )
-        .await?;
-        Ok(())
+        self.table_store.write_wal_fence(wal_id).await
     }
 
     /// Test helper: build L0 SSTs from `imm_table` via the segment-aware
@@ -161,6 +181,9 @@ impl DbInner {
         write_cache: bool,
     ) -> Result<Vec<SsTableHandle>, SlateDBError> {
         use crate::utils::IdGenerator;
+        // Tests that construct an `imm_table` outside the write path
+        // must call `KVTable::record_touched_segments` themselves
+        // before dispatching here.
         let built = self.build_imm_ssts(imm_table.clone()).await?;
         let mut handles = Vec::with_capacity(built.len());
         for sst in built {
@@ -220,6 +243,7 @@ impl DbInner {
             imm_table.last_tick(),
             self.system_clock.clone(),
             Arc::new(state.core().sequence_tracker.clone()),
+            None,
         )
         .await?;
         iter.init().await?;
@@ -776,6 +800,14 @@ mod tests {
         table.put(RowEntry::new_value(b"bbb-1", b"v3", 3));
         table.put(RowEntry::new_value(b"ccc-1", b"v4", 4));
         table.put(RowEntry::new_value(b"ccc-2", b"v5", 5));
+        // Production paths (writer / replay) populate the touched
+        // set inline; this test bypasses those, so we record the
+        // expected prefixes explicitly.
+        table.record_touched_segments(std::collections::BTreeSet::from([
+            Bytes::from_static(b"aaa"),
+            Bytes::from_static(b"bbb"),
+            Bytes::from_static(b"ccc"),
+        ]));
 
         let ssts = db
             .inner
@@ -841,6 +873,9 @@ mod tests {
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"aaa-1", b"v1", 1));
         table.put(RowEntry::new_value(b"aaa-2", b"v2", 2));
+        table.record_touched_segments(std::collections::BTreeSet::from([Bytes::from_static(
+            b"aaa",
+        )]));
 
         let ssts = db
             .inner
@@ -850,6 +885,30 @@ mod tests {
 
         assert_eq!(ssts.len(), 1);
         assert_eq!(ssts[0].prefix.as_ref(), b"aaa");
+        db.close().await.unwrap();
+    }
+
+    /// `build_imm_ssts` rejects the invariant violation where an
+    /// extractor is configured but the memtable has entries with no
+    /// recorded prefix set — surfacing what would otherwise be a
+    /// silent inconsistency.
+    #[tokio::test]
+    async fn build_imm_ssts_rejects_missing_touched_segments() {
+        let db = setup_test_db_with_extractor(
+            "/tmp/test_build_imm_ssts_invariant",
+            Arc::new(FixedThreeBytePrefixExtractor),
+        )
+        .await;
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"aaa-1", b"v1", 1));
+        // Deliberately do NOT call record_touched_segments.
+
+        let err = match db.inner.build_imm_ssts(table.table().clone()).await {
+            Ok(_) => panic!("expected InvalidDBState for missing touched_segments"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, SlateDBError::InvalidDBState));
         db.close().await.unwrap();
     }
 }

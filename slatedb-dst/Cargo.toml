@@ -28,6 +28,7 @@ parking_lot = { workspace = true }
 rand = { workspace = true }
 slatedb = { workspace = true, features = ["all"] }
 slatedb-common = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 tokio-util = { workspace = true, default-features = false, features = ["rt"] }
 tracing = { workspace = true }
@@ -36,7 +37,6 @@ walkdir = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

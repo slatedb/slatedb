@@ -64,24 +64,52 @@ impl GcTask for ManifestGcTask {
             .map(|checkpoint| checkpoint.manifest_id)
             .collect();
 
+        // Advance the boundary to the latest manifest that is older than min_age
+        if let Some(boundary) = manifest_metadata_list
+            .iter()
+            .filter(|manifest_metadata| {
+                utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+            })
+            .map(|manifest_metadata| manifest_metadata.id)
+            .max()
+        {
+            self.manifest_store.advance_boundary(boundary).await?;
+        }
+
         // Delete manifests older than min_age
-        for manifest_metadata in manifest_metadata_list {
-            let is_active = active_manifest_ids.contains(&manifest_metadata.id);
-            if !is_active
-                && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+        let manifests_to_delete = manifest_metadata_list
+            .into_iter()
+            .filter(|manifest_metadata| {
+                let is_active = active_manifest_ids.contains(&manifest_metadata.id);
+                !is_active
+                    && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+            })
+            .collect::<Vec<_>>();
+        if self.manifest_options.dry_run && !manifests_to_delete.is_empty() {
+            log::info!(
+                "dry run: skipping manifest deletion [count={}]",
+                manifests_to_delete.len()
+            );
+        }
+        for manifest_metadata in manifests_to_delete {
+            if self.manifest_options.dry_run {
+                log::debug!(
+                    "dry run: would delete manifest but skipped [id={:?}]",
+                    manifest_metadata.id
+                );
+                continue;
+            }
+            if let Err(e) = self
+                .manifest_store
+                .delete_manifest(manifest_metadata.id)
+                .await
             {
-                if let Err(e) = self
-                    .manifest_store
-                    .delete_manifest(manifest_metadata.id)
-                    .await
-                {
-                    error!(
-                        "error deleting manifest [id={:?}, error={}]",
-                        manifest_metadata.id, e
-                    );
-                } else {
-                    self.stats.gc_manifest_count.increment(1);
-                }
+                error!(
+                    "error deleting manifest [id={:?}, error={}]",
+                    manifest_metadata.id, e
+                );
+            } else {
+                self.stats.gc_manifest_count.increment(1);
             }
         }
 
@@ -90,5 +118,75 @@ impl GcTask for ManifestGcTask {
 
     fn resource(&self) -> &str {
         "Manifest"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{
+        store::{ManifestStore, StoredManifest},
+        ManifestCore,
+    };
+    use chrono::TimeDelta;
+    use object_store::{memory::InMemory, path::Path, ObjectStoreExt};
+    use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::metrics::MetricsRecorderHelper;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_collect_advances_boundary_for_old_manifest_files() {
+        let object_store = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from("/root"),
+            object_store.clone(),
+        ));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let recorder = MetricsRecorderHelper::noop();
+        let task = ManifestGcTask::new(
+            manifest_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(1),
+                interval: None,
+                dry_run: false,
+            },
+        );
+        task.collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap();
+
+        let raw_boundary = object_store
+            .get(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!("2", std::str::from_utf8(&raw_boundary).unwrap());
+
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(
+            vec![3],
+            manifests
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>()
+        );
     }
 }
