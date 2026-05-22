@@ -3262,7 +3262,6 @@ dependencies = [
  "moka",
  "object_store",
  "object_store_opendal",
- "once_cell",
  "opendal",
  "ouroboros",
  "parking_lot",
