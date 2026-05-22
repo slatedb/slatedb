@@ -31,12 +31,12 @@ use futures::stream::BoxStream;
 use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use slatedb_common::clock::SystemClock;
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use uuid::Uuid;
@@ -82,7 +82,7 @@ struct CheckpointState {
     last_remote_persisted_seq: u64,
 }
 
-static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
+static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
 
 impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
