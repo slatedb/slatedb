@@ -161,13 +161,6 @@ impl DbInner {
         Ok(handle)
     }
 
-    /// Write a zero-byte WAL object at `wal_id` as a fencing barrier. The
-    /// object-storage put-if-absent at this slot is what fences in-flight
-    /// WAL writes from older-epoch writers — see [`Self::fence_writers`].
-    pub(crate) async fn flush_empty_wal(&self, wal_id: u64) -> Result<(), SlateDBError> {
-        self.table_store.write_wal_fence(wal_id).await
-    }
-
     /// Test helper: build L0 SSTs from `imm_table` via the segment-aware
     /// path ([`Self::build_imm_ssts`]) and upload each one with a freshly
     /// allocated [`db_state::SsTableId::Compacted`]. Returns the resulting

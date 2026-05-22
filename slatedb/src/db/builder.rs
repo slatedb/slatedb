@@ -146,7 +146,7 @@ use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
-use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;

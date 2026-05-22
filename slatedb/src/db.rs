@@ -57,7 +57,6 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
-use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
