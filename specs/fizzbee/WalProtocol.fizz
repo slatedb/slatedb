@@ -148,13 +148,35 @@ action Init:
     for i in range(NUM_GCS):
         gcs.add(GarbageCollector())
 
-atomic func latest_sequence_id():
+func latest_sequence_id(wal_id_last_compacted):
     """
     Returns the most recently written sequence ID, or 0 if no objects exist.
+    Uses binary search to probe the object store for the highest existing
+    ID above the given boundary.
     """
-    if len(objects) == 0:
-        return 0
-    return max(objects.keys())
+    atomic:
+        if len(objects) == 0:
+            return 0
+
+        # Rather than using exponential probes as the real implementation
+        # does, just pick a bound 2x the number of existing objects to
+        # simulate a search range with some hits and some misses.
+        active_wals_count = max(objects.keys()) - replay_after_wal_id
+        left = wal_id_last_compacted + 1;
+        right = left + active_wals_count * 2
+
+    while left < right:
+        atomic:
+            mid = left + (right - left) // 2
+            if mid in objects.keys():
+                # `mid` exists, so the answer is mid or higher; discard
+                # everything at-or-below mid.
+                left = mid + 1
+            else:
+                # `mid` is missing, so the answer is strictly below mid.
+                right = mid
+
+    return left - 1
 
 atomic func record_commit(id, epoch, _type):
     """
@@ -185,11 +207,14 @@ symmetric role WalWriter:
         self.replayed = {}
         self.status = "InitNextId"
 
-    atomic action InitNextId:
-        require self.status == "InitNextId"
-        sid = latest_sequence_id()
-        self.next_id = sid + 1
-        self.status = "ClaimEpoch"
+    action InitNextId:
+        atomic:
+            require self.status == "InitNextId"
+            self.status = "InitingNextId"
+        sid = latest_sequence_id(replay_after_wal_id)
+        atomic:
+            self.next_id = sid + 1
+            self.status = "ClaimEpoch"
 
     atomic action ClaimEpoch:
         require self.status == "ClaimEpoch"
@@ -203,11 +228,14 @@ symmetric role WalWriter:
         else:
             self.status = "WriteFence"
 
-    atomic action RefreshNextId:
-        require self.status == "RefreshNextId"
-        sid = latest_sequence_id()
-        self.next_id = sid + 1
-        self.status = "RefreshManifest"
+    action RefreshNextId:
+        atomic:
+            require self.status == "RefreshNextId"
+            self.status = "RefreshingNextId"
+        sid = latest_sequence_id(replay_after_wal_id)
+        atomic:
+            self.next_id = sid + 1
+            self.status = "RefreshManifest"
 
     atomic action RefreshManifest:
         require self.status == "RefreshManifest"
@@ -450,7 +478,7 @@ transition assertion ValidateReplayRange(before, after):
     so it should not be possible for it to have advanced past the fencing wal.
     older writers would have failed with a stale epoch
     """
-    for writer in before.writers:
+    for writer in after.writers:
         # assert!(empty_wal_id > replay_after_wal_id);
         if (
             writer.status == "ReplayWal"
