@@ -6,6 +6,7 @@ use crate::Settings;
 use fail_parallel::fail_point;
 use fail_parallel::FailPointRegistry;
 use slatedb_common::SystemClock;
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,7 +28,7 @@ pub(crate) struct WriterFenceResult {
 struct FailPointCtl {
     fp_registry: Arc<FailPointRegistry>,
     event_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    event_toggle: Mutex<String>,
+    event_toggles: Mutex<HashSet<String>>,
 }
 
 impl FailPointCtl {
@@ -38,13 +39,13 @@ impl FailPointCtl {
         Self {
             fp_registry,
             event_tx,
-            event_toggle: Mutex::new("".to_string()),
+            event_toggles: Mutex::new(HashSet::new()),
         }
     }
 
     #[cfg(test)]
     fn enable_fp(&self, event: impl ToString) {
-        *self.event_toggle.lock().unwrap() = event.to_string();
+        self.event_toggles.lock().unwrap().insert(event.to_string());
     }
 }
 
@@ -84,11 +85,11 @@ impl WriterFencer {
     fn fp_notify(&self, event: impl ToString) {
         let event = event.to_string();
         let _ = self.fp_ctl.event_tx.send(event.clone());
-        let event_toggle = String::clone(&*self.fp_ctl.event_toggle.lock().unwrap());
+        let event_toggle = HashSet::clone(&*self.fp_ctl.event_toggles.lock().unwrap());
         fail_point!(
             Arc::clone(&self.fp_ctl.fp_registry),
             "fence_event",
-            event == event_toggle,
+            event_toggle.contains(&event),
             |_| {}
         );
     }
@@ -178,6 +179,7 @@ mod tests {
     use crate::config::{
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     };
+    use crate::error::SlateDBError;
     use crate::fence::{FailPointCtl, WriterFencer};
     use crate::format::sst::SsTableFormat;
     use crate::garbage_collector::GarbageCollector;
@@ -427,6 +429,126 @@ mod tests {
         assert!(result.is_ok());
         h.put(&db, 2, true).await;
         h.assert_fencing_wal().await;
+        h.assert_wals_contiguous().await;
+        h.assert_data().await;
+    }
+
+    struct FencerFencedTestCase {
+        pause_event: &'static str,
+        new_db_writes: bool,
+    }
+
+    impl FencerFencedTestCase {
+        const fn new(pause_event: &'static str, new_db_writes: bool) -> Self {
+            Self {
+                pause_event,
+                new_db_writes,
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::fence_manifest(FencerFencedTestCase::new("FenceManifest", false))]
+    #[case::fence_manifest_with_new_db_writes(FencerFencedTestCase::new("FenceManifest", true))]
+    #[case::reload_empty_wal_id(FencerFencedTestCase::new("ReloadEmptyWalId", false))]
+    #[case::reload_empty_wal_id_with_new_db_writes(FencerFencedTestCase::new(
+        "ReloadEmptyWalId",
+        true
+    ))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_fencer_fenced_after_claiming_epoch(#[case] case: FencerFencedTestCase) {
+        // initialize a fenced db
+        let mut h =
+            WriterFencerTestHarness::new("/tmp/test_fencer_fenced_after_claiming_epoch").await;
+        let db = h.fenced_db().await;
+        h.put(&db, 0, false).await;
+
+        // initialize a fencer. configure it to pause at LoadEmptyWalId (so the
+        // fenced writer can race ahead) and at the case's event (so a new
+        // writer can claim the epoch out from under the fencer).
+        h.fp_ctl.enable_fp("LoadEmptyWalId");
+        h.fp_ctl.enable_fp(case.pause_event);
+        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "pause").unwrap();
+
+        let fencer = h.fencer.take().unwrap();
+        let stored_manifest = h.stored_manifest.take().unwrap();
+        let jh = tokio::task::spawn(async move { fencer.fence(stored_manifest).await });
+        // wait for LoadEmptyWalId pause
+        assert_eq!(h.event_rx.recv().await.unwrap(), "LoadEmptyWalId");
+
+        // after LoadEmptyWalId pause, have the fenced db write some wals and flush and gc.
+        // This advances replay_after_wal_id past the fencer's stale empty_wal_id, so the
+        // recompute branch (and ReloadEmptyWalId fp_notify) fires when the fencer resumes.
+        h.put(&db, 1, false).await;
+        h.put(&db, 2, false).await;
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let replay_after_wal_id = h
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .manifest
+            .core
+            .replay_after_wal_id;
+        h.run_gc(replay_after_wal_id).await;
+
+        // resume the fencer. re-issuing "pause" wakes the current pause and
+        // keeps the action set to "pause" so the next toggled event also
+        // pauses.
+        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "pause").unwrap();
+
+        // wait for the case's pause event. fp_notify sends an event for every
+        // failpoint regardless of whether it pauses, so drain intermediate
+        // events (e.g. FenceManifest fires before ReloadEmptyWalId).
+        loop {
+            let event = h.event_rx.recv().await.unwrap();
+            if event == case.pause_event {
+                break;
+            }
+        }
+
+        // init the new db; this bumps the writer epoch, fencing our paused fencer
+        let db2 = h.db().await;
+        if case.new_db_writes {
+            // optionally let the new db write wals, flush, and gc — exercises the
+            // case where wals below the fencer's stale empty_wal_id get cleaned up
+            // while it is paused.
+            h.put(&db2, 3, false).await;
+            h.put(&db2, 4, false).await;
+            db2.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+            let replay_after_wal_id = h
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .replay_after_wal_id;
+            h.run_gc(replay_after_wal_id).await;
+        }
+
+        // resume the fencer
+        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "off").unwrap();
+
+        // validate that its fenced — the fencer's manifest.refresh sees the new db's
+        // bumped epoch and returns Fenced.
+        let result = jh.await.unwrap();
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result.map(|_| ())
+        );
+        db2.close().await.unwrap();
+
+        // validate that the wal is contiguous and db has all data
         h.assert_wals_contiguous().await;
         h.assert_data().await;
     }
