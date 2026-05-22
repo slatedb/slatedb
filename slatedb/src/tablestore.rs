@@ -43,6 +43,13 @@ struct ReadOnlyObject {
     path: Path,
 }
 
+#[derive(Clone, Copy)]
+enum ReadLoaderKind {
+    Filter,
+    Stats,
+    Index,
+}
+
 impl ReadOnlyBlob for ReadOnlyObject {
     async fn len(&self) -> Result<u64, SlateDBError> {
         let object_metadata = self.object_store.head(&self.path).await?;
@@ -557,7 +564,10 @@ impl TableStore {
             // below produces the authoritative error if there is one.
             let entry = if cache_blocks {
                 cache
-                    .fetch_filter(cache_key.clone(), self.read_filters_loader(handle))
+                    .fetch_filter(
+                        cache_key.clone(),
+                        self.read_loader(handle, ReadLoaderKind::Filter),
+                    )
                     .await
                     .ok()
             } else {
@@ -584,26 +594,6 @@ impl TableStore {
             .map_err(|e| e.with_path(&obj.path))
     }
 
-    fn read_filters_loader(&self, handle: &SsTableHandle) -> CacheLoader {
-        let info = handle.info.clone();
-        let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let sst_format = self.sst_format.clone();
-        Box::new(move || {
-            Box::pin(async move {
-                let obj = ReadOnlyObject {
-                    object_store,
-                    path: path.clone(),
-                };
-                let named_filters = sst_format
-                    .read_filters(&info, &obj)
-                    .await
-                    .map_err(|e| e.with_path(&obj.path))?;
-                Ok(CachedEntry::with_filters(named_filters))
-            })
-        })
-    }
-
     /// Reads the stats block of an SSTable.
     ///
     /// ## Arguments
@@ -620,7 +610,7 @@ impl TableStore {
         if let Some(ref cache) = self.cache {
             let entry = if cache_blocks {
                 cache
-                    .fetch_stats(cache_key, self.read_stats_loader(handle))
+                    .fetch_stats(cache_key, self.read_loader(handle, ReadLoaderKind::Stats))
                     .await
                     .ok()
             } else {
@@ -637,31 +627,6 @@ impl TableStore {
             .read_stats(&handle.info, &obj)
             .await
             .map_err(|e| e.with_path(&obj.path))
-    }
-
-    fn read_stats_loader(&self, handle: &SsTableHandle) -> CacheLoader {
-        let info = handle.info.clone();
-        let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let sst_format = self.sst_format.clone();
-        Box::new(move || {
-            Box::pin(async move {
-                let obj = ReadOnlyObject {
-                    object_store,
-                    path: path.clone(),
-                };
-                let stats = sst_format
-                    .read_stats(&info, &obj)
-                    .await
-                    .map_err(|e| e.with_path(&obj.path))?
-                    .ok_or_else(|| {
-                        crate::Error::data(
-                            "stats_len > 0 but read_stats returned no stats".to_string(),
-                        )
-                    })?;
-                Ok(CachedEntry::with_sst_stats(Arc::new(stats)))
-            })
-        })
     }
 
     /// Reads the index of an SSTable.
@@ -682,7 +647,7 @@ impl TableStore {
             // below produces the authoritative error if there is one.
             let entry = if cache_blocks {
                 cache
-                    .fetch_index(cache_key, self.read_index_loader(handle))
+                    .fetch_index(cache_key, self.read_loader(handle, ReadLoaderKind::Index))
                     .await
                     .ok()
             } else {
@@ -703,22 +668,42 @@ impl TableStore {
         ))
     }
 
-    fn read_index_loader(&self, handle: &SsTableHandle) -> CacheLoader {
+    fn read_loader(&self, handle: &SsTableHandle, kind: ReadLoaderKind) -> CacheLoader {
         let info = handle.info.clone();
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let sst_format = self.sst_format.clone();
         Box::new(move || {
             Box::pin(async move {
-                let obj = ReadOnlyObject {
-                    object_store,
-                    path: path.clone(),
-                };
-                let index = sst_format
-                    .read_index(&info, &obj)
-                    .await
-                    .map_err(|e| e.with_path(&obj.path))?;
-                Ok(CachedEntry::with_sst_index(Arc::new(index)))
+                let obj = ReadOnlyObject { object_store, path };
+                match kind {
+                    ReadLoaderKind::Filter => {
+                        let filters = sst_format
+                            .read_filters(&info, &obj)
+                            .await
+                            .map_err(|e| e.with_path(&obj.path))?;
+                        Ok(CachedEntry::with_filters(filters))
+                    }
+                    ReadLoaderKind::Stats => {
+                        let stats = sst_format
+                            .read_stats(&info, &obj)
+                            .await
+                            .map_err(|e| e.with_path(&obj.path))?
+                            .ok_or_else(|| {
+                                crate::Error::data(
+                                    "stats_len > 0 but read_stats returned no stats".to_string(),
+                                )
+                            })?;
+                        Ok(CachedEntry::with_sst_stats(Arc::new(stats)))
+                    }
+                    ReadLoaderKind::Index => {
+                        let index = sst_format
+                            .read_index(&info, &obj)
+                            .await
+                            .map_err(|e| e.with_path(&obj.path))?;
+                        Ok(CachedEntry::with_sst_index(Arc::new(index)))
+                    }
+                }
             })
         })
     }
