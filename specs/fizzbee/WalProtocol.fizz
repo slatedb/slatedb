@@ -386,6 +386,12 @@ always assertion ReplayContiguousWalsWithLowerEpochs:
                     return False
     return True
 
+always assertion WritersNotAllFenced:
+    for writer in writers:
+        if writer.status != "Fenced":
+            return True
+    return False
+
 transition assertion BoundaryIsMonotonic(before, after):
     return after.replay_after_wal_id >= before.replay_after_wal_id
 
