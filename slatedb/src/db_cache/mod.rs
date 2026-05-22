@@ -11,11 +11,12 @@
 //!
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
+use futures::future::BoxFuture;
 use log::{debug, error, trace};
 use parking_lot::Mutex;
 
@@ -43,6 +44,14 @@ pub const DEFAULT_META_CACHE_CAPACITY: u64 = 128 * 1024 * 1024;
 
 /// Atomic counter to generate unique scope IDs for `DbCacheWrapper` instances.
 static NEXT_CACHE_SCOPE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// A `FnOnce` returning a future that produces a [`CachedEntry`] on cache miss.
+///
+/// Used by [`DbCache::fetch_block`] and friends to load an entry into the cache. The closure
+/// is invoked at most once per concurrent fetch group; subsequent callers for the same key
+/// receive the same result.
+pub type CacheLoader =
+    Box<dyn FnOnce() -> BoxFuture<'static, Result<CachedEntry, crate::Error>> + Send + 'static>;
 
 /// A trait for slatedb's in-memory cache.
 ///
@@ -156,6 +165,68 @@ pub trait DbCache: Send + Sync {
     /// implementation is a no-op.
     async fn close(&self) -> Result<(), crate::Error> {
         Ok(())
+    }
+
+    /// Fetch a data-block entry, invoking `loader` on cache miss.
+    ///
+    /// Implementations should deduplicate concurrent fetches: if multiple callers request the
+    /// same key while it is being loaded, only one should run `loader` and the rest should
+    /// share its result. The default implementation does **not** dedup; it simply does a
+    /// get-miss-load-insert. Override in implementations whose backing cache exposes a
+    /// dedup-aware fetch primitive (e.g. foyer's `Cache::fetch`).
+    async fn fetch_block(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(entry) = self.get_block(&key).await? {
+            return Ok(entry);
+        }
+        let entry = loader().await?;
+        self.insert(key, entry.clone()).await;
+        Ok(entry)
+    }
+
+    /// Fetch an index entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
+    async fn fetch_index(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(entry) = self.get_index(&key).await? {
+            return Ok(entry);
+        }
+        let entry = loader().await?;
+        self.insert(key, entry.clone()).await;
+        Ok(entry)
+    }
+
+    /// Fetch a filter entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
+    async fn fetch_filter(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(entry) = self.get_filter(&key).await? {
+            return Ok(entry);
+        }
+        let entry = loader().await?;
+        self.insert(key, entry.clone()).await;
+        Ok(entry)
+    }
+
+    /// Fetch a stats entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
+    async fn fetch_stats(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(entry) = self.get_stats(&key).await? {
+            return Ok(entry);
+        }
+        let entry = loader().await?;
+        self.insert(key, entry.clone()).await;
+        Ok(entry)
     }
 }
 
@@ -459,6 +530,54 @@ impl DbCache for SplitCache {
         }
         Ok(())
     }
+
+    async fn fetch_block(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(cache) = &self.block_cache {
+            cache.fetch_block(key, loader).await
+        } else {
+            loader().await
+        }
+    }
+
+    async fn fetch_index(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(cache) = &self.meta_cache {
+            cache.fetch_index(key, loader).await
+        } else {
+            loader().await
+        }
+    }
+
+    async fn fetch_filter(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(cache) = &self.meta_cache {
+            cache.fetch_filter(key, loader).await
+        } else {
+            loader().await
+        }
+    }
+
+    async fn fetch_stats(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        if let Some(cache) = &self.meta_cache {
+            cache.fetch_stats(key, loader).await
+        } else {
+            loader().await
+        }
+    }
 }
 
 /// Wraps a [`DbCache`] to add statistics, error logging, and cache scoping.
@@ -503,6 +622,39 @@ const ERROR_LOG_INTERVAL: TimeDelta = TimeDelta::seconds(1);
 impl DbCacheWrapper {
     fn scoped_key(&self, key: &CachedKey) -> CachedKey {
         key.with_scope(self.scope_id)
+    }
+
+    fn record_fetch_outcome(
+        &self,
+        block_type: &str,
+        loader_ran: bool,
+        result: &Result<CachedEntry, crate::Error>,
+    ) {
+        match result {
+            Ok(_) if loader_ran => self.record_miss(block_type),
+            Ok(_) => self.record_hit(block_type),
+            Err(err) => self.record_get_err(block_type, err),
+        }
+    }
+
+    fn record_hit(&self, block_type: &str) {
+        match block_type {
+            "block" => self.stats.data_block_hit.increment(1),
+            "index" => self.stats.index_hit.increment(1),
+            "filter" => self.stats.filter_hit.increment(1),
+            "stats" => self.stats.stats_hit.increment(1),
+            _ => {}
+        }
+    }
+
+    fn record_miss(&self, block_type: &str) {
+        match block_type {
+            "block" => self.stats.data_block_miss.increment(1),
+            "index" => self.stats.index_miss.increment(1),
+            "filter" => self.stats.filter_miss.increment(1),
+            "stats" => self.stats.stats_miss.increment(1),
+            _ => {}
+        }
     }
 
     fn record_get_err(&self, block_type: &str, err: &crate::Error) {
@@ -623,6 +775,76 @@ impl DbCache for DbCacheWrapper {
     async fn close(&self) -> Result<(), crate::Error> {
         self.cache.close().await
     }
+
+    async fn fetch_block(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        let scoped_key = self.scoped_key(&key);
+        let (loader, loader_ran) = instrumented_loader(loader);
+        let result = self.cache.fetch_block(scoped_key, loader).await;
+        self.record_fetch_outcome("block", loader_ran.was_called(), &result);
+        result
+    }
+
+    async fn fetch_index(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        let scoped_key = self.scoped_key(&key);
+        let (loader, loader_ran) = instrumented_loader(loader);
+        let result = self.cache.fetch_index(scoped_key, loader).await;
+        self.record_fetch_outcome("index", loader_ran.was_called(), &result);
+        result
+    }
+
+    async fn fetch_filter(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        let scoped_key = self.scoped_key(&key);
+        let (loader, loader_ran) = instrumented_loader(loader);
+        let result = self.cache.fetch_filter(scoped_key, loader).await;
+        self.record_fetch_outcome("filter", loader_ran.was_called(), &result);
+        result
+    }
+
+    async fn fetch_stats(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        let scoped_key = self.scoped_key(&key);
+        let (loader, loader_ran) = instrumented_loader(loader);
+        let result = self.cache.fetch_stats(scoped_key, loader).await;
+        self.record_fetch_outcome("stats", loader_ran.was_called(), &result);
+        result
+    }
+}
+
+/// Tracks whether the loader closure was actually invoked. Used by `DbCacheWrapper`
+/// to attribute fetches as hits (loader skipped, value served from cache or a
+/// concurrent fetch) or misses (this caller's loader ran).
+#[derive(Clone)]
+struct LoaderRan(Arc<AtomicBool>);
+
+impl LoaderRan {
+    fn was_called(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+fn instrumented_loader(loader: CacheLoader) -> (CacheLoader, LoaderRan) {
+    let flag = Arc::new(AtomicBool::new(false));
+    let flag_for_closure = flag.clone();
+    let wrapped: CacheLoader = Box::new(move || {
+        flag_for_closure.store(true, Ordering::Relaxed);
+        loader()
+    });
+    (wrapped, LoaderRan(flag))
 }
 
 pub mod stats {

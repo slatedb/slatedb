@@ -20,7 +20,8 @@ options:
 #
 # A writer claims a new writer epoch, writes a fence object into the next
 # available WAL slot with create-if-absent, validates that the fence is still
-# useful, and then writes normal WAL data objects. A newer writer can fence an
+# useful, replays the WAL range from the previous replay boundary through that
+# fence, and then writes normal WAL data objects. A newer writer can fence an
 # older writer by claiming a higher epoch and occupying later WAL slots.
 #
 # This model abstracts the WAL namespace and the manifest field that makes old
@@ -35,8 +36,8 @@ options:
 #   garbage collection may delete `DATA` objects strictly below this boundary.
 # - each `WalWriter` lists the latest WAL object to choose the next ID, claims a
 #   fresh epoch, writes a fence object, validates the fence against the current
-#   epoch and `replay_after_wal_id`, and then appends `DATA` objects until it is
-#   fenced or reaches the model bound.
+#   epoch and `replay_after_wal_id`, replays WALs in that validated range, and
+#   then appends `DATA` objects until it is fenced or reaches the model bound.
 # - each `GarbageCollector` deletes old `DATA` objects behind
 #   `replay_after_wal_id`. Fence objects remain as durable evidence that a WAL
 #   slot was occupied by a writer.
@@ -46,9 +47,14 @@ options:
 # another writer can claim a later epoch or a flush can advance
 # `replay_after_wal_id`, making the just-written fence unusable.
 #
-# `Flush` nondeterministically advances `replay_after_wal_id` to an existing
-# WAL ID after the writer has created at least one object. This is to simulate
-# L0 MemTable flushes that advance replay boundaries.
+# `ReplayWal` models the recovery step returned by fence validation. The replay
+# range is half-open, and includes the writer's empty fence WAL so a later flush
+# can advance `replay_after_wal_id` through the fence before normal writes resume.
+#
+# `Flush` nondeterministically advances `replay_after_wal_id` to a WAL ID that
+# is represented in the writer's current memtable state, either from replay or a
+# normal `DATA` write. This simulates L0 MemTable flushes that advance replay
+# boundaries.
 #
 # WalWriter state transitions:
 #
@@ -69,26 +75,29 @@ options:
 # └┤   ValidateFence   ││   CheckFenced   ├─┘
 #  └─────────┬─────┬───┘└────────┬────────┘
 #            │     └─────────────┤
+#      ┌─────▼─────┐             │
+#  ┌───▶ ReplayWal ├─────────────┤
+#  │   └─────┬─────┘             │
+#  └─────────┤                   │
 #      ┌─────▼─────┐       ┌─────▼─────┐
 #  ┌───▶ WriteWal  ├───────▶  Fenced   │
 #  │   └─────┬─────┘       └───────────┘
-#  └─────────┤
-#            │
-#      ┌─────▼─────┐
-#      │  Fenced   │
-#      └───────────┘
+#  └─────────┘
 #
 # The assertions prove the protocol properties we care about:
 #
 # - no WAL ID is reported successful more than once;
 # - live, replayable WAL IDs remain contiguous above `replay_after_wal_id`;
+# - live WAL object epochs are nondecreasing by WAL ID;
 # - acknowledged epochs are nondecreasing by WAL ID;
+# - WALs being replayed still exist;
+# - replay consumes a contiguous prefix with no newer-epoch WALs;
 # - `replay_after_wal_id` is monotonic and never exceeds the latest object;
 # - deletes only remove WAL IDs already covered by `replay_after_wal_id`; and
 # - the latest object is never deleted.
 #
 # GC for WAL fences is disabled in this model. If GC collects WAL fence writes,
-# there will always be a race condition where the writer might successfully writes
+# there will always be a race condition where the writer might successfully write
 # to a slot behind replay_after_wal_id. This is fixable by refreshing the manifest
 # and checking the replay_after_wal_id after each write, similar to the approach
 # taken in ValidateFence. We've opted to skip this check due to its added latency
@@ -100,7 +109,7 @@ options:
 
 # Per-writer bound on successful object WAL writes including the fence write. This
 # is not a SlateDB protocol limit; it keeps the state space finite while still
-# allowing each writer to create multiple sequenced metadata objects and exercise
+# allowing each writer to create multiple sequenced WAL objects and exercise
 # GC races between creates and boundary checks.
 MAX_WRITES_PER_WRITER = 3
 
@@ -117,7 +126,7 @@ NUM_GCS = 2
 
 action Init:
     # Objects that currently exist in the object store.
-    # Contains `id -> f|d`.
+    # Contains id -> record(_type=d|f, epoch).
     objects = {}
 
     # The highest epoch claimed by any writer.
@@ -168,17 +177,23 @@ symmetric role WalWriter:
         self.attempts = 0
         # Epoch claimed by this writer.
         self.epoch = None
+        # WALs in current manifest.
+        self.manifest_wals = set()
+        # Range of WAL IDs to replay during recovery.
+        self.replay_range = None
+        # WAL IDs already consumed during ReplayWal.
+        self.replayed = {}
         self.status = "InitNextId"
 
     atomic action InitNextId:
         require self.status == "InitNextId"
-        sid = latest_sequence_id() # builder.rs#L549
+        sid = latest_sequence_id()
         self.next_id = sid + 1
         self.status = "ClaimEpoch"
 
     atomic action ClaimEpoch:
         require self.status == "ClaimEpoch"
-        current_epoch = current_epoch + 1 # builder.rs#L569
+        current_epoch = current_epoch + 1
         self.epoch = current_epoch
         self.status = "WriteFence"
 
@@ -188,17 +203,17 @@ symmetric role WalWriter:
             and self.attempts < MAX_FENCE_ATTEMPTS_PER_WRITER
         )
         self.attempts += 1
-        success = self.write(FENCE) # builder.rs#L610
+        success = self.write(FENCE)
         if success:
             self.status = "ValidateFence"
         else:
             self.status = "CheckFenced"
 
-    # Not yet implemented in code. We simply return success right now.
     atomic action ValidateFence:
         """
         Fence write succeeded. Make sure we're still the latest epoch and the
-        fence write was > replay_after_wal_id.
+        fence write was > replay_after_wal_id. A valid fence returns the WAL
+        range that this writer must replay before accepting normal writes.
         """
         require self.status == "ValidateFence"
         if self.epoch < current_epoch:
@@ -207,8 +222,9 @@ symmetric role WalWriter:
             self.status = "Fenced"
         elif self.next_id > replay_after_wal_id:
             record_commit(self.next_id, self.epoch, FENCE)
-            self.status = "WriteWal"
             self.next_id += 1
+            self.replay_range = (replay_after_wal_id + 1, self.next_id)
+            self.status = "ReplayWal"
         else:
             self.status = "WriteFence"
             self.next_id = max(self.next_id + 1, replay_after_wal_id + 1)
@@ -219,15 +235,41 @@ symmetric role WalWriter:
         latest epoch.
         """
         require self.status == "CheckFenced"
-        if self.epoch < current_epoch: # db.rs#L313
+        if self.epoch < current_epoch:
             self.status = "Fenced"
         else:
-            self.next_id += 1 # db.rs#L321
+            self.next_id += 1
             self.status = "WriteFence"
+
+    atomic action ReplayWal:
+        """
+        Replay the range returned by ValidateFence, one WAL ID per action. The
+        range includes this writer's empty fence WAL so Flush can advance
+        replay_after_wal_id through the recovered history.
+        """
+        require self.status == "ReplayWal"
+        # Dynamically derive replay position from previously replayed WALs.
+        replay_id = self.replay_range[0] + len(self.replayed)
+        if replay_id >= self.replay_range[-1]:
+            self.status = "WriteWal"
+        else:
+            self.replayed[replay_id] = objects.get(replay_id)
+            if self.replayed[replay_id] == None:
+                # If a replayed WAL disappeared after we lost ownership, this
+                # writer is fenced and stops replaying.
+                if self.epoch < current_epoch:
+                    self.status = "Fenced"
+                # If the object is missing but we're still the owner, this is bad.
+                # Fail in ReplayWalsExist.
+            else:
+                # The real replay path accounts for this WAL ID in a
+                # ReplayedMemtable. Even an empty fence WAL can be represented
+                # this way, so Flush may advance the boundary through it.
+                self.manifest_wals.add(replay_id)
 
     atomic action WriteWal:
         """
-        Write normal non-fence WAL data after a fence has already been written.
+        Write normal non-fence WAL data after replaying through the fence WAL.
         """
         require (
             self.status == "WriteWal"
@@ -236,6 +278,7 @@ symmetric role WalWriter:
         success = self.write(DATA)
         if success:
             record_commit(self.next_id, self.epoch, DATA)
+            self.manifest_wals.add(self.next_id)
             self.next_id += 1
         else:
             # Another writer claimed this ID first, so this writer is fenced.
@@ -244,22 +287,22 @@ symmetric role WalWriter:
     atomic action Flush:
         """
         Pretend we've written more L0 data. This updates the manifest with a
-        new replay_after_wal_id. We just pick a random WAL ID to use as the
-        flush point.
+        new replay_after_wal_id. Picks a random WAL ID represented in this
+        writer's replayed or newly written memtables and advances the boundary
+        through it.
         """
-        if self.writes > 0:
-            candidates = [
-                id
-                for id in objects.keys()
-                if id > replay_after_wal_id
-            ]
-            replay_after_wal_id = oneof candidates
+        require len(self.manifest_wals) > 0
+        if self.epoch == current_epoch:
+            replay_after_wal_id = oneof self.manifest_wals
+            self.manifest_wals = set([id for id in self.manifest_wals if id > replay_after_wal_id])
+        else:
+            self.status = "Fenced"
 
     atomic func write(_type):
         # If next_id is already in `objects`, this write does not succeed.
         success = self.next_id not in objects.keys()
         if success:
-            objects[self.next_id] = _type
+            objects[self.next_id] = record(_type=_type, epoch=self.epoch)
             self.writes += 1
         return success
 
@@ -270,7 +313,7 @@ symmetric role GarbageCollector:
             id
             for id in objects
             # Not <= because we need to keep the last WAL.
-            if id < replay_after_wal_id and objects[id] == DATA
+            if id < replay_after_wal_id and objects[id]._type == DATA
         ]
         id = oneof candidates
         objects.pop(id)
@@ -308,10 +351,46 @@ always assertion CommittedEpochsAreNonDecreasing:
             prev_epoch = r.epoch
     return True
 
+always assertion LiveObjectEpochsAreNonDecreasing:
+    if len(objects) == 0:
+        return True
+    latest = max(objects.keys())
+    prev_epoch = 0
+    for id in range(replay_after_wal_id + 1, latest + 1):
+        if id in objects.keys():
+            if objects[id].epoch < prev_epoch:
+                return False
+            prev_epoch = objects[id].epoch
+    return True
+
 always assertion LatestObjectIsNotBehindBoundary:
     if len(objects) == 0:
         return True
     return max(objects.keys()) >= replay_after_wal_id
+
+always assertion ReplayWalsExist:
+    for writer in writers:
+        if writer.status == "ReplayWal":
+            if None in writer.replayed.values():
+                return False
+    return True
+
+always assertion ReplayContiguousWalsWithLowerEpochs:
+    for writer in writers:
+        if writer.status == "ReplayWal" and len(writer.replayed) > 0:
+            min_id = min(writer.replayed.keys())
+            for i in range(min_id, min_id + len(writer.replayed)):
+                if i not in writer.replayed.keys():
+                    return False
+                if writer.epoch < writer.replayed[i].epoch:
+                    return False
+    return True
+
+always assertion WritersNotAllFenced:
+    for writer in writers:
+        if writer.status != "Fenced":
+            return True
+    return False
 
 transition assertion BoundaryIsMonotonic(before, after):
     return after.replay_after_wal_id >= before.replay_after_wal_id
