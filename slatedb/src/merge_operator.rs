@@ -249,6 +249,9 @@ pub(crate) struct MergeOperatorIterator<T: RowEntryIterator> {
     /// A barrier sequence number that supports snapshot reads using this iterator. If not None,
     /// the iterator will not merge entries with sequence number greater than this value.
     snapshot_barrier_seq: Option<u64>,
+    /// Optional caller-supplied identifier; when `Some`, each `merge_batch`
+    /// call is wrapped in a `slatedb.query.merge` span tagged with this id.
+    query_id: Option<String>,
 }
 
 /// Tracks metadata across multiple entries during merge operations.
@@ -310,6 +313,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         delegate: T,
         merge_different_expire_ts: bool,
         snapshot_barrier_seq: Option<u64>,
+        query_id: Option<String>,
     ) -> Self {
         Self {
             merge_operator,
@@ -317,6 +321,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
             buffered_entry: None,
             merge_different_expire_ts,
             snapshot_barrier_seq,
+            query_id,
         }
     }
 }
@@ -353,7 +358,17 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
             }
         }
 
+        let span = self.query_id.as_ref().map(|id| {
+            tracing::debug_span!(
+                "slatedb.query.merge",
+                query_id = %id,
+                key = ?key,
+                num_operands = operands.len(),
+            )
+        });
+        let _enter = span.as_ref().map(|s| s.enter());
         let batch_result = self.merge_operator.merge_batch(key, None, &operands)?;
+        drop(_enter);
         batch.clear();
         Ok(batch_result)
     }
@@ -428,9 +443,19 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         }
 
         results.reverse();
+        let span = self.query_id.as_ref().map(|id| {
+            tracing::debug_span!(
+                "slatedb.query.merge",
+                query_id = %id,
+                key = ?key,
+                num_operands = results.len(),
+            )
+        });
+        let _enter = span.as_ref().map(|s| s.enter());
         let final_result = self
             .merge_operator
             .merge_batch(&key, base_value, &results)?;
+        drop(_enter);
 
         Ok(Some(RowEntry {
             key: key.clone(),
@@ -660,6 +685,7 @@ mod tests {
             data.into(),
             true,
             None,
+            None,
         );
         assert_iterator(
             &mut iterator,
@@ -684,6 +710,7 @@ mod tests {
             merge_operator,
             data.into(),
             true,
+            None,
             None,
         );
 
@@ -810,6 +837,7 @@ mod tests {
             test_case.unsorted_data.into(),
             test_case.merge_different_expire_ts,
             test_case.snapshot_barrier_seq,
+            None,
         );
         assert_iterator(&mut iterator, test_case.expected).await;
     }
@@ -952,6 +980,7 @@ mod tests {
             data.into(),
             true,
             None,
+            None,
         );
 
         // Expected: max should return 10, sum should return 15
@@ -982,6 +1011,7 @@ mod tests {
             data.into(),
             true,
             None,
+            None,
         );
 
         let expected_bytes: Vec<u8> = (1..=250).map(|i| i as u8).collect();
@@ -1004,6 +1034,7 @@ mod tests {
             merge_operator,
             data.into(),
             true,
+            None,
             None,
         );
 
@@ -1028,6 +1059,7 @@ mod tests {
             merge_operator,
             data.into(),
             true,
+            None,
             None,
         );
 
@@ -1059,6 +1091,7 @@ mod tests {
             merge_operator,
             data.into(),
             true,
+            None,
             None,
         );
 
@@ -1093,6 +1126,7 @@ mod tests {
             data.into(),
             true,
             None,
+            None,
         );
 
         // Entries sorted by reverse seq: seq=5, 4, 3, 2, 1
@@ -1123,6 +1157,7 @@ mod tests {
             data.into(),
             true,
             None,
+            None,
         );
 
         // Sorted by reverse seq: seq=4, 3, 2, 1, 0(BASE)
@@ -1151,6 +1186,7 @@ mod tests {
             data.into(),
             true,
             None,
+            None,
         );
 
         // Sorted by reverse seq: seq=3, 2, 1
@@ -1177,6 +1213,7 @@ mod tests {
             merge_operator,
             data.into(),
             true,
+            None,
             None,
         );
 

@@ -243,6 +243,7 @@ impl DbIterator {
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         merge_operator: Option<MergeOperatorType>,
         order: IterationOrder,
+        query_id: Option<String>,
     ) -> Result<Self, SlateDBError> {
         // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
@@ -289,6 +290,7 @@ impl DbIterator {
                 // The entries in the write batch iterator have seq num u64::MAX and any merges
                 // there need to be merged with the entries from the other iterators.
                 None,
+                query_id,
             ));
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
@@ -514,6 +516,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
+            None,
         )
         .await
         .unwrap();
@@ -555,6 +558,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
+            None,
         )
         .await
         .unwrap();
@@ -586,6 +590,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
+            None,
         )
         .await
         .unwrap();
@@ -635,6 +640,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
+            None,
         )
         .await
         .unwrap();

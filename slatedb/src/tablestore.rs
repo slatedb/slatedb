@@ -548,12 +548,14 @@ impl TableStore {
             if let Some(entry) = entry {
                 // Already decoded.
                 if let Some(filters) = entry.filters() {
+                    tracing::Span::current().record("cached", true);
                     return Ok(filters);
                 }
 
                 // Encoded form from disk-cache deserialize. Decode
                 // and overwrite the cache entry with the decoded form.
                 if let Some(encoded) = entry.encoded_filters() {
+                    tracing::Span::current().record("cached", true);
                     return Ok(self.decode_and_refresh(cache, cache_key, &encoded).await);
                 }
             }
@@ -566,6 +568,7 @@ impl TableStore {
             .read_filters(&handle.info, &obj)
             .await
             .map_err(|e| e.with_path(&obj.path))?;
+        tracing::Span::current().record("cached", false);
         if cache_blocks && !named_filters.is_empty() {
             if let Some(ref cache) = self.cache {
                 cache
@@ -635,6 +638,7 @@ impl TableStore {
                 .unwrap_or(None)
                 .and_then(|e| e.sst_index())
             {
+                tracing::Span::current().record("cached", true);
                 return Ok(index);
             }
         }
@@ -647,6 +651,7 @@ impl TableStore {
                 .await
                 .map_err(|e| e.with_path(&obj.path))?,
         );
+        tracing::Span::current().record("cached", false);
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 cache
@@ -700,6 +705,8 @@ impl TableStore {
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
+        let mut cache_hits: u64 = 0;
+        let mut cache_misses: u64 = 0;
 
         // If block cache is available, try to retrieve cached blocks
         if let Some(ref cache) = self.cache {
@@ -722,6 +729,7 @@ impl TableStore {
             for (index, block_result) in cached_blocks.into_iter().enumerate() {
                 match block_result {
                     Some(cached_block) => {
+                        cache_hits += 1;
                         // If a cached block is found, add it to blocks_read
                         if let Some(start) = last_uncached_start.take() {
                             uncached_ranges.push((blocks.start + start)..(blocks.start + index));
@@ -729,6 +737,7 @@ impl TableStore {
                         blocks_read.push_back(cached_block);
                     }
                     None => {
+                        cache_misses += 1;
                         // If a block is not in cache, mark the start of an uncached range
                         last_uncached_start.get_or_insert(index);
                     }
@@ -740,8 +749,12 @@ impl TableStore {
             }
         } else {
             // If no cache is available, treat all blocks as uncached
+            cache_misses += (blocks.end - blocks.start) as u64;
             uncached_ranges.push(blocks.clone());
         }
+        let current_span = tracing::Span::current();
+        current_span.record("cache_hits", cache_hits);
+        current_span.record("cache_misses", cache_misses);
         // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let obj_ref = &obj;

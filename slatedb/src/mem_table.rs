@@ -192,6 +192,10 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
     /// in seq-ascending order. Pushing them onto this stack and popping gives
     /// seq-descending order, which is what the merge iterator needs for dedup.
     descending_stack: Vec<RowEntry>,
+    /// Optional `slatedb.query.memtable` span. When `Some`, it is re-entered
+    /// around every poll so the span's busy time reflects cumulative memtable
+    /// lookup cost across all rows yielded for the query.
+    span: Option<tracing::Span>,
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
@@ -202,10 +206,14 @@ impl RowEntryIterator for MemTableIterator {
     }
 
     async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        let span = self.borrow_span().clone();
+        let _enter = span.as_ref().map(|s| s.enter());
         Ok(self.next_sync())
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        let span = self.borrow_span().clone();
+        let _enter = span.as_ref().map(|s| s.enter());
         loop {
             let front = self.borrow_item().clone();
             if front.is_some_and(|record| record.key < next_key) {
@@ -483,23 +491,33 @@ impl KVTable {
     }
 
     pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator {
-        self.range(range, IterationOrder::Ascending)
+        self.range(range, IterationOrder::Ascending, None)
     }
 
     pub(crate) fn range<T: RangeBounds<Bytes>>(
         &self,
         range: T,
         ordering: IterationOrder,
+        query_id: Option<&str>,
     ) -> MemTableIterator {
         let internal_range = KVTableInternalKeyRange::from(range);
+        let span = query_id.map(|id| {
+            tracing::debug_span!(
+                "slatedb.query.memtable",
+                query_id = %id,
+                key = ?internal_range,
+            )
+        });
         let mut iterator = MemTableIteratorInnerBuilder {
             map: self.map.clone(),
             inner_builder: |map| map.range(internal_range),
             ordering,
             item: None,
             descending_stack: Vec::new(),
+            span: span.clone(),
         }
         .build();
+        let _enter = span.as_ref().map(|s| s.enter());
         iterator.next_sync();
         iterator
     }
@@ -843,7 +861,7 @@ mod tests {
             .run(
                 &(arbitrary::nonempty_range(10), arbitrary::iteration_order()),
                 |(range, ordering)| {
-                    let mut kv_iter = kv_table.table.range(range.clone(), ordering);
+                    let mut kv_iter = kv_table.table.range(range.clone(), ordering, None);
 
                     runtime.block_on(test_utils::assert_ranged_kv_scan(
                         &sample_table,
@@ -960,7 +978,7 @@ mod tests {
         table.put(RowEntry::new_value(b"bbbb", b"new", 2));
         table.put(RowEntry::new_value(b"cccc", b"v3", 3));
 
-        let mut iter = table.table().range(.., IterationOrder::Descending);
+        let mut iter = table.table().range(.., IterationOrder::Descending, None);
 
         // In descending order, for key "bbbb" the newest version (seq 2) must
         // come before the older version (seq 1) so that dedup works correctly.
