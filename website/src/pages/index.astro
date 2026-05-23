@@ -85,7 +85,7 @@ value = await db.get(b"hello")`,
 const features = [
     {
         name: 'Zero-disk architecture',
-        body: 'Runs as an in-process engine with no local state, no control plane, and no replication protocol.',
+        body: 'Runs as an in-process engine without local disk or inter-node networking.',
         tag: '// no local state',
     },
     {
@@ -203,7 +203,7 @@ const features = [
                 <!-- 3. Editorial paragraph -->
                 <section class="prose">
                     <p>
-                        Object storage has quietly become the most interesting place in the cloud — durable across regions, atomic on writes, priced like background noise. SlateDB is the storage engine that <em>lives inside</em> your system and treats that surface as the disk. Build a&nbsp;database, a&nbsp;cache, a&nbsp;feature store, a&nbsp;ledger, a&nbsp;workflow engine — whatever you’re putting in front of object storage, SlateDB is the layer that makes the writes correct, the reads fast, and the operations boring.
+                    Object storage is the foundation that holds up modern cloud native systems: strongly consistent, absurdly durable, and priced like background noise. SlateDB <em>embeds within your system</em> and provides online, transactional access to object storage. Build a&nbsp;database, a&nbsp;cache, a&nbsp;feature store, a&nbsp;ledger, a&nbsp;workflow engine or anything on top of object storage and SlateDB is the layer that makes <em>the writes correct, the reads fast, and the ops boring.</em>
                     </p>
                 </section>
 
