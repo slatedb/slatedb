@@ -6,6 +6,7 @@ import starlightLlmsTxt from 'starlight-llms-txt';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateRfcWrappers } from './scripts/generate-rfcs.js';
+import { generateMdMirrors } from './scripts/generate-md-mirrors.js';
 import mermaid from 'astro-mermaid';
 
 const site = 'https://slatedb.io';
@@ -41,8 +42,12 @@ export default defineConfig({
 				Hero: './src/components/Hero.astro',
 				// Override the page title to render the frontmatter description as a lede subtitle.
 				PageTitle: './src/components/PageTitle.astro',
+				// Override the right-hand page sidebar to add a "Copy as Markdown" link below the TOC.
+				PageSidebar: './src/components/PageSidebar.astro',
 				// Override the sidebar to pin a community-stats card at the bottom.
 				Sidebar: './src/components/Sidebar.astro',
+				// Extend <Head> to advertise the per-page markdown mirror via <link rel="alternate">.
+				Head: './src/components/Head.astro',
 			},
 			expressiveCode: {
 				themes: ['github-light'],
@@ -84,7 +89,7 @@ export default defineConfig({
 					tag: 'link',
 					attrs: {
 						rel: 'stylesheet',
-						href: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap',
+						href: 'https://fonts.googleapis.com/css2?family=Marcellus&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap',
 					},
 				},
 			],
@@ -313,6 +318,29 @@ export default defineConfig({
 					const onChange = (file) => {
 						if (file.endsWith('.md') && file.includes(`${path.sep}rfcs${path.sep}`)) {
 							generateRfcWrappers();
+						}
+					};
+					server.watcher.on('add', onChange);
+					server.watcher.on('change', onChange);
+					server.watcher.on('unlink', onChange);
+				},
+			},
+			{
+				name: 'slatedb-md-mirrors',
+				// Run after the RFC wrappers exist, so we can mirror them too.
+				async buildStart() {
+					await generateRfcWrappers();
+					await generateMdMirrors();
+				},
+				configureServer(server) {
+					generateMdMirrors();
+					/** @param {string} file */
+					const onChange = (file) => {
+						const isDocSource =
+							(file.endsWith('.mdx') || file.endsWith('.md')) &&
+							(file.includes(`${path.sep}src${path.sep}content${path.sep}docs${path.sep}`));
+						if (isDocSource) {
+							generateMdMirrors();
 						}
 					};
 					server.watcher.on('add', onChange);

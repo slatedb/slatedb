@@ -1,8 +1,31 @@
 /* ---------------------------------------------------------------
- * SlateDB docs — refined typography + chrome inspired by Mintlify
+ * SlateDB — serious-infra identity
+ * Slate ink on cool off-white, Marcellus headlines, terracotta accent
  * ------------------------------------------------------------- */
 
 :root {
+	/* Material tokens — used directly where needed, mapped to Starlight vars below */
+	--ink-1: #0f1620;
+	--ink-2: #1f2a37;
+	--ink-3: #3d4856;
+	--ink-4: #5e6878;
+	--ink-5: #8b94a3;
+	--ink-6: #c8cdd5;
+	--ink-7: #dfe2e8;
+
+	--surface-0: #f6f7f9;
+	--surface-1: #ffffff;
+	--surface-2: #eef0f3;
+	--surface-3: #e2e6eb;
+
+	--accent-high: #7a3e22;
+	--accent: #b26844;
+	--accent-low: #f3e3d8;
+
+	/* RGB triplets for rgba() composition */
+	--surface-0-rgb: 246, 247, 249;
+	--ink-1-rgb: 15, 22, 32;
+
 	/* Typography */
 	--sl-font:
 		'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -10,54 +33,52 @@
 	--sl-font-mono:
 		'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
 		Consolas, 'Liberation Mono', monospace;
+	--sl-font-serif:
+		'Marcellus', ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
 	--sl-line-height: 1.7;
-	--sl-line-height-headings: 1.25;
+	--sl-line-height-headings: 1.2;
 
 	/* Content width — narrower, more readable column */
 	--sl-content-width: 44rem;
 
-	/* Social icon defaults (existing) */
-	--sl-social-icon-color: #475569;
-	--sl-social-icon-hover-color: black;
+	/* Social icon defaults */
+	--sl-social-icon-color: var(--ink-3);
+	--sl-social-icon-hover-color: var(--ink-1);
 	--sl-social-icon-size: 1.5rem;
-	--sl-image-bg-color: black;
-	--sl-color-bg-nav: white;
+	--sl-image-bg-color: var(--ink-1);
+	--sl-color-bg-nav: var(--surface-0);
 }
 
 :root[data-theme='light'] {
-	/* Refined neutral scale — slightly warmer, softer than Starlight defaults */
-	--sl-color-white: #0f172a;
-	--sl-color-gray-1: #1f2937;
-	--sl-color-gray-2: #374151;
-	--sl-color-gray-3: #6b7280;
-	--sl-color-gray-4: #9ca3af;
-	--sl-color-gray-5: #e5e7eb;
-	--sl-color-gray-6: #f3f4f6;
-	--sl-color-gray-7: #f9fafb;
-	--sl-color-black: #ffffff;
-	--sl-color-bg: #ffffff;
+	/* Map Starlight palette onto the material tokens. */
+	--sl-color-white: var(--ink-1);
+	--sl-color-gray-1: var(--ink-2);
+	--sl-color-gray-2: var(--ink-3);
+	--sl-color-gray-3: var(--ink-4);
+	--sl-color-gray-4: var(--ink-5);
+	--sl-color-gray-5: var(--ink-6);
+	--sl-color-gray-6: var(--ink-7);
+	--sl-color-gray-7: var(--surface-2);
+	--sl-color-black: var(--surface-0);
+	--sl-color-bg: var(--surface-0);
 
-	/* Single accent — refined indigo */
-	--sl-color-accent-high: #1e3a8a;
-	--sl-color-accent: #4f46e5;
-	--sl-color-accent-low: #eef2ff;
+	--sl-color-accent-high: var(--accent-high);
+	--sl-color-accent: var(--accent);
+	--sl-color-accent-low: var(--accent-low);
 	--sl-color-text: var(--sl-color-gray-2);
 	--sl-color-text-accent: var(--sl-color-accent);
 
-	/* Soften surfaces */
-	--sl-color-bg-nav: #ffffff;
+	--sl-color-bg-nav: var(--surface-0);
 	--sl-color-bg-sidebar: var(--sl-color-bg);
-	--sl-color-bg-inline-code: rgba(15, 23, 42, 0.06);
+	--sl-color-bg-inline-code: rgba(var(--ink-1-rgb), 0.06);
 
-	/* Faint hairlines */
-	--sl-color-hairline: rgba(15, 23, 42, 0.06);
-	--sl-color-hairline-light: rgba(15, 23, 42, 0.06);
-	--sl-color-hairline-shade: rgba(15, 23, 42, 0.08);
+	--sl-color-hairline: rgba(var(--ink-1-rgb), 0.07);
+	--sl-color-hairline-light: rgba(var(--ink-1-rgb), 0.07);
+	--sl-color-hairline-shade: rgba(var(--ink-1-rgb), 0.1);
 
-	/* Calmer shadows */
-	--sl-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
-	--sl-shadow-md: 0 6px 16px rgba(15, 23, 42, 0.05);
-	--sl-shadow-lg: 0 20px 40px rgba(15, 23, 42, 0.08);
+	--sl-shadow-sm: 0 1px 2px rgba(var(--ink-1-rgb), 0.05);
+	--sl-shadow-md: 0 6px 16px rgba(var(--ink-1-rgb), 0.06);
+	--sl-shadow-lg: 0 20px 40px rgba(var(--ink-1-rgb), 0.09);
 }
 
 /* ---------------------------------------------------------------
@@ -69,7 +90,7 @@
 	border-bottom: none !important;
 	box-shadow: none !important;
 	backdrop-filter: saturate(180%) blur(8px);
-	background-color: rgba(255, 255, 255, 0.85);
+	background-color: rgba(var(--surface-0-rgb), 0.85);
 }
 
 /* Remove all dividers Starlight draws between stacked content panels */
@@ -120,7 +141,7 @@ starlight-theme-select {
 
 	site-search button[data-open-modal]:hover {
 		border-color: var(--sl-color-gray-4) !important;
-		background-color: #ffffff !important;
+		background-color: var(--surface-1) !important;
 		color: var(--sl-color-gray-2) !important;
 		box-shadow: var(--sl-shadow-sm) !important;
 	}
@@ -134,7 +155,7 @@ site-search button[data-open-modal] > kbd {
 }
 
 site-search button[data-open-modal] > kbd > kbd {
-	background-color: rgba(15, 23, 42, 0.06) !important;
+	background-color: rgba(var(--ink-1-rgb), 0.06) !important;
 	color: var(--sl-color-gray-3);
 	border-radius: 0.3rem;
 	padding: 0.05rem 0.35rem !important;
@@ -370,19 +391,27 @@ starlight-toc nav li:has(ul a[aria-current='true']) > a {
 	line-height: var(--sl-line-height);
 }
 
-/* Headings */
+/* Headings — Marcellus on editorial sizes (h1–h3); h4+ stays sans for density.
+   Marcellus is single-weight; no font-variation-settings. */
+.sl-markdown-content h1:not(:where(.not-content *)),
+.sl-markdown-content h2:not(:where(.not-content *)),
+.sl-markdown-content h3:not(:where(.not-content *)) {
+	font-family: var(--sl-font-serif);
+	font-weight: 400;
+	color: var(--ink-1);
+	letter-spacing: -0.005em;
+}
+
 .sl-markdown-content h2:not(:where(.not-content *)) {
 	margin-top: 3rem !important;
 	padding-bottom: 0.5rem;
 	border-bottom: 1px solid var(--sl-color-hairline);
-	font-weight: 600;
 	letter-spacing: -0.015em;
 }
 
 .sl-markdown-content h3:not(:where(.not-content *)) {
 	margin-top: 2.25rem !important;
-	font-weight: 600;
-	letter-spacing: -0.01em;
+	letter-spacing: -0.005em;
 }
 
 .sl-markdown-content h4:not(:where(.not-content *)) {
@@ -482,7 +511,7 @@ starlight-toc nav li:has(ul a[aria-current='true']) > a {
 }
 
 .expressive-code pre {
-	background-color: #fbfbfd !important;
+	background-color: var(--surface-1) !important;
 }
 
 /* ---------------------------------------------------------------
@@ -497,26 +526,26 @@ starlight-toc nav li:has(ul a[aria-current='true']) > a {
 }
 
 .starlight-aside--note {
-	background-color: rgba(79, 70, 229, 0.06);
-	border-inline-start-color: #4f46e5;
+	background-color: var(--accent-low);
+	border-inline-start-color: var(--accent);
 	color: var(--sl-color-gray-1);
 }
 
 .starlight-aside--tip {
-	background-color: rgba(16, 185, 129, 0.07);
-	border-inline-start-color: #10b981;
+	background-color: rgba(16, 138, 110, 0.08);
+	border-inline-start-color: #2f7a64;
 	color: var(--sl-color-gray-1);
 }
 
 .starlight-aside--caution {
-	background-color: rgba(245, 158, 11, 0.08);
-	border-inline-start-color: #f59e0b;
+	background-color: rgba(180, 120, 40, 0.1);
+	border-inline-start-color: #b07728;
 	color: var(--sl-color-gray-1);
 }
 
 .starlight-aside--danger {
-	background-color: rgba(239, 68, 68, 0.07);
-	border-inline-start-color: #ef4444;
+	background-color: rgba(170, 56, 56, 0.08);
+	border-inline-start-color: #9c3434;
 	color: var(--sl-color-gray-1);
 }
 
