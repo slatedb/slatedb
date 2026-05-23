@@ -4,6 +4,7 @@ import ThemeProvider from '../components/ThemeProvider.astro';
 import barsIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/bars.svg?raw';
 import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.svg?raw';
 import { getStarsLabel } from '../lib/github-stars';
+import { highlight } from '../lib/highlight';
 
 const starsLabel = await getStarsLabel();
 
@@ -243,10 +244,47 @@ const features = [
                                 <div class="qs-install">
                                     <span class="qs-prompt">$</span>
                                     <code>{l.install}</code>
+                                    <button class="qs-copy" type="button" data-copy={l.install} aria-label="Copy install command">
+                                        <svg class="qs-copy-icon qs-copy-icon-clip" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                        <svg class="qs-copy-icon qs-copy-icon-check" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polyline points="20 6 9 17 4 12"></polyline>
+                                        </svg>
+                                    </button>
                                 </div>
-                                <pre class="qs-code"><code>{l.code}</code></pre>
+                                <pre class="qs-code"><code set:html={highlight(l.code, l.id)}></code></pre>
                             </div>
                         ))}
+                    </div>
+                </section>
+
+                <!-- 6. Closing CTA -->
+                <section class="closing" aria-label="Read the docs">
+                    <!-- Doric colonnade flanking the closing block. Four
+                         distinct variants are arranged two per side; the right
+                         side is mirrored via CSS scaleX(-1) so the inner-facing
+                         edges of all four point toward the headline. -->
+                    <div class="closing-colonnade closing-colonnade-left" aria-hidden="true">
+                        <img src="/img/slate-doric.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                        <img src="/img/slate-doric-2.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                    </div>
+                    <div class="closing-colonnade closing-colonnade-right" aria-hidden="true">
+                        <img src="/img/slate-doric-3.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                        <img src="/img/slate-doric-4.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                    </div>
+                    <div class="closing-text">
+                        <h2 class="closing-headline">Ready to build?</h2>
+                        <p class="closing-sub">
+                            The full reference covers architecture, operations, tutorials, and the RFC archive.
+                        </p>
+                        <div class="closing-ctas">
+                            <a class="cta cta-primary" href="/docs/get-started/introduction/">Read the docs</a>
+                            <a class="cta cta-secondary" href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer">
+                                <span>View on GitHub</span>
+                            </a>
+                        </div>
                     </div>
                 </section>
             </main>
@@ -743,11 +781,47 @@ const features = [
     }
 
     .feature {
+        /* Each tile's hover glow points back toward the grid's center, so
+           the six glows together read as one shared light source. Per-tile
+           coordinates set below via :nth-child(), adjusted per breakpoint. */
+        --glow-x: 50%;
+        --glow-y: 50%;
         background-color: var(--surface-1);
         padding: 1.75rem 1.5rem;
         display: flex;
         flex-direction: column;
         gap: 0.5rem;
+        transition: background 0.2s ease;
+    }
+    .feature:hover {
+        background:
+            radial-gradient(circle at var(--glow-x) var(--glow-y), rgba(178, 104, 68, 0.12), transparent 75%),
+            var(--surface-1);
+    }
+    /* 3 cols × 2 rows — grid center sits between cols 2&3 and rows 1&2. */
+    .features-grid > :nth-child(1) { --glow-x: 100%; --glow-y: 100%; }
+    .features-grid > :nth-child(2) { --glow-x: 50%;  --glow-y: 100%; }
+    .features-grid > :nth-child(3) { --glow-x: 0%;   --glow-y: 100%; }
+    .features-grid > :nth-child(4) { --glow-x: 100%; --glow-y: 0%; }
+    .features-grid > :nth-child(5) { --glow-x: 50%;  --glow-y: 0%; }
+    .features-grid > :nth-child(6) { --glow-x: 0%;   --glow-y: 0%; }
+    @media (max-width: 900px) {
+        /* 2 cols × 3 rows */
+        .features-grid > :nth-child(1) { --glow-x: 100%; --glow-y: 100%; }
+        .features-grid > :nth-child(2) { --glow-x: 0%;   --glow-y: 100%; }
+        .features-grid > :nth-child(3) { --glow-x: 100%; --glow-y: 50%; }
+        .features-grid > :nth-child(4) { --glow-x: 0%;   --glow-y: 50%; }
+        .features-grid > :nth-child(5) { --glow-x: 100%; --glow-y: 0%; }
+        .features-grid > :nth-child(6) { --glow-x: 0%;   --glow-y: 0%; }
+    }
+    @media (max-width: 560px) {
+        /* 1 col × 6 rows — center is between rows 3 and 4 */
+        .features-grid > :nth-child(1),
+        .features-grid > :nth-child(2),
+        .features-grid > :nth-child(3) { --glow-x: 50%; --glow-y: 100%; }
+        .features-grid > :nth-child(4),
+        .features-grid > :nth-child(5),
+        .features-grid > :nth-child(6) { --glow-x: 50%; --glow-y: 0%; }
     }
     .feature-tag {
         font-family:
@@ -755,6 +829,10 @@ const features = [
         font-size: 0.7rem;
         color: var(--ink-4);
         margin-bottom: 0.25rem;
+        transition: color 0.15s ease;
+    }
+    .feature:hover .feature-tag {
+        color: var(--accent);
     }
     .feature-name {
         font-family: 'Inter', system-ui, sans-serif;
@@ -837,10 +915,11 @@ const features = [
     .qs-pane.active { display: block; }
 
     .qs-install {
+        position: relative;
         font-family:
             'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 0.825rem;
-        padding: 1rem 1.25rem;
+        padding: 1rem 3rem 1rem 1.25rem;
         color: var(--ink-2);
         background-color: var(--surface-0);
         border-bottom: 1px solid var(--ink-6);
@@ -852,6 +931,31 @@ const features = [
         margin-right: 0.6rem;
         user-select: none;
     }
+    .qs-copy {
+        position: absolute;
+        top: 0.5rem;
+        right: 0.5rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.75rem;
+        height: 1.75rem;
+        padding: 0;
+        background: none;
+        border: 1px solid transparent;
+        border-radius: 0.375rem;
+        color: var(--ink-4);
+        cursor: pointer;
+        transition: color 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
+    }
+    .qs-copy:hover {
+        color: var(--ink-2);
+        background-color: var(--surface-1);
+        border-color: var(--ink-6);
+    }
+    .qs-copy-icon-check { display: none; }
+    .qs-copy.copied .qs-copy-icon-clip { display: none; }
+    .qs-copy.copied .qs-copy-icon-check { display: inline-block; color: var(--accent); }
 
     .qs-code {
         margin: 0;
@@ -865,6 +969,111 @@ const features = [
         overflow-x: auto;
     }
     .qs-code code { background: none; padding: 0; font-family: inherit; }
+    /* Hand-rolled monochrome highlighter (see src/lib/highlight.ts): only
+       language keywords are colored, in the page accent. Everything else
+       inherits the default ink color for a single-hue look. The :global() is
+       required because `set:html` injects spans that don't carry Astro's
+       scoped-component class, so the selector must escape the component scope. */
+    .qs-code :global(.kw) { color: var(--accent); }
+
+    /* ---------- Closing CTA ---------- */
+
+    .closing {
+        position: relative;
+        padding: 6rem 0 7rem;
+        text-align: center;
+        border-top: 1px solid var(--sl-color-hairline, rgba(15, 22, 32, 0.08));
+        margin-top: 4rem;
+        isolation: isolate;
+    }
+    /* Doric columns flanking the closing CTA. Same ambient treatment as the
+       hero atlas — slight transparency + minimal blur so the figures read as
+       background art rather than foreground content. Right column mirrored
+       below via scaleX(-1). */
+    .closing-colonnade {
+        position: absolute;
+        top: 50%;
+        display: flex;
+        align-items: end;
+        pointer-events: none;
+        z-index: 0;
+    }
+    .closing-colonnade img {
+        /* Fixed height so the columns stay visually stable as the viewport
+           narrows — the colonnade is hidden below 767px anyway, so there's no
+           tight range that needs adaptive scaling. */
+        height: 18rem;
+        width: auto;
+        opacity: 0.48;
+        filter: blur(0.5px);
+    }
+    /* Spacing between the two columns within a pair. Negative pulls them
+       together (their raster has whitespace padding); positive pushes them
+       apart. Tune to taste. */
+    .closing-colonnade img + img {
+        margin-inline-start: -8rem;
+    }
+    /* Push each pair outward into main's inline padding so the gap between
+       the left pair and right pair (around the text) opens up. */
+    .closing-colonnade-left {
+        left: -2rem;
+        transform: translateY(-50%);
+    }
+    .closing-colonnade-right {
+        right: -2rem;
+        transform: translateY(-50%) scaleX(-1);
+    }
+    /* Constrain the text column so it sits clear of the colonnade with
+       comfortable breathing room on either side. */
+    .closing-text {
+        position: relative;
+        z-index: 1;
+        max-width: 30rem;
+        margin-inline: auto;
+    }
+    /* Same "vellum" trick used for the editorial prose: a translucent
+       surface-0 wash + backdrop-blur with a feathered radial mask sits behind
+       the text, so when the colonnade visually overlaps the headline the text
+       still reads cleanly. No visible card edges. */
+    .closing-text::before {
+        content: "";
+        position: absolute;
+        inset: -1.5rem -2rem;
+        background-color: rgba(246, 247, 249, 0.55);
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        -webkit-mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
+        mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
+        z-index: -1;
+        pointer-events: none;
+    }
+    @media (max-width: 767px) {
+        .closing-colonnade { display: none; }
+    }
+    .closing-headline {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-weight: 400;
+        font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+        line-height: 1.15;
+        letter-spacing: -0.005em;
+        color: var(--ink-1);
+        margin: 0;
+    }
+    .closing-sub {
+        max-width: 36rem;
+        margin: 1rem auto 0;
+        font-size: 1rem;
+        line-height: 1.6;
+        color: var(--ink-3);
+    }
+    .closing-ctas {
+        margin-top: 2rem;
+        display: flex;
+        justify-content: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+    }
 
     /* ---------- Footer (Commonhaus block preserved) ---------- */
 
@@ -963,6 +1172,28 @@ const features = [
                 });
             });
         }
+
+        // Copy-to-clipboard buttons on each quickstart install row
+        document.querySelectorAll<HTMLButtonElement>('.qs-copy').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const text = btn.getAttribute('data-copy') ?? '';
+                try {
+                    await navigator.clipboard.writeText(text);
+                } catch {
+                    // Older browsers / non-secure contexts: fall back to execCommand.
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                btn.classList.add('copied');
+                setTimeout(() => btn.classList.remove('copied'), 1500);
+            });
+        });
 
         // GitHub stars are fetched at build time (src/lib/github-stars.ts) and
         // rendered statically — no runtime fetch, no layout jitter on load.
