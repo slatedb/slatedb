@@ -294,7 +294,7 @@ Only the coordinator commits manifest updates (preserves single-writer invariant
 On coordinator restart, the recovery logic is:
 
 1. Leave `Running` jobs alone. If the owning worker survived the coordinator restart it continues executing and emitting heartbeats; if it died, the failure detection protocol reclaims it once `worker_heartbeat_timeout_ms` elapses past `coordinator_start_time_ms` (see step 2 of the failure detection protocol).
-2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the job is marked `Failed` in `.compactions`. This is safe: the manifest was already updated, the output SSTs are already referenced and protected from GC, and the scheduler has no dependency on whether the entry reads `Completed` or `Failed`.
+2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the coordinator verifies the output SR is present in the manifest and marks the job `Completed` without re-writing the manifest.
 3. Retain active (`Submitted`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
 
 ### Deployment Shapes
