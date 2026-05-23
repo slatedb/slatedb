@@ -68,7 +68,7 @@ pub struct DbTransaction {
     /// Isolation level for this transaction
     isolation_level: IsolationLevel,
     /// Range trackers for scanned ranges (used for SSI conflict detection)
-    range_trackers: Mutex<Vec<Arc<DbIteratorRangeTracker>>>,
+    range_trackers: Mutex<Vec<DbIteratorRangeTracker>>,
     /// Keys that should be excluded from write conflict detection when committing.
     untracked_write_keys: RwLock<HashSet<Bytes>>,
 }
@@ -272,14 +272,16 @@ impl DbTransaction {
         options: &ScanOptions,
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, crate::Error> {
-        // Track read range for SSI conflict detection if needed
-        let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
-            let tracker = Arc::new(DbIteratorRangeTracker::new());
-            self.range_trackers.lock().push(tracker.clone());
-            Some(tracker)
-        } else {
-            None
-        };
+        // Under SSI, register the *requested* scan range with the transaction
+        // so that any concurrent write inside it is detected as an
+        // rw-anti-dependency at commit time — including writes to portions of
+        // the range that the iterator never yielded (empty scans, partial
+        // scans, scans whose tombstones were skipped). See
+        // `DbIteratorRangeTracker` for the rationale.
+        if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            let tracker = DbIteratorRangeTracker::new(range.clone());
+            self.range_trackers.lock().push(tracker);
+        }
 
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
@@ -305,7 +307,6 @@ impl DbTransaction {
                     db_state: &db_state,
                     write_batch_iter,
                     max_seq: Some(self.started_seq),
-                    range_tracker,
                     prefix,
                 },
             )
@@ -543,14 +544,14 @@ impl DbTransaction {
         // Take the write_batch for submission to the database.
         let write_batch = self.write_batch.read().clone();
 
-        // Extract actual scanned ranges from trackers for SSI conflict detection
+        // Materialize the SSI read-range dependencies the transaction
+        // accumulated during scans. Each tracker carries the requested scan
+        // range; the conflict check in `TransactionManager` will then catch
+        // any committed write whose key falls inside it.
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
             for tracker in self.range_trackers.lock().iter() {
-                if tracker.has_data() {
-                    if let Some(range) = tracker.get_range() {
-                        self.txn_manager.track_read_range(&self.txn_id, range);
-                    }
-                }
+                self.txn_manager
+                    .track_read_range(&self.txn_id, tracker.get_range());
             }
         }
 

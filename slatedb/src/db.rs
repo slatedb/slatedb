@@ -251,7 +251,6 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
@@ -274,7 +273,6 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: Some(prefix),
                 },
             )

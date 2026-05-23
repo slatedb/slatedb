@@ -14,7 +14,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
-use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
+use crate::{error::SlateDBError, DbIterator};
 
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -51,10 +51,6 @@ pub(crate) struct ScanContext<'a> {
     /// with a greater sequence number are filtered out by the iterator
     /// construction. Used by snapshots and transactions.
     pub(crate) max_seq: Option<u64>,
-    /// Optional tracker that records the scanned range for SSI conflict
-    /// detection. Populated only for transactions running at the
-    /// serializable-snapshot isolation level.
-    pub(crate) range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     /// Optional scan prefix forwarded to per-SST filter evaluation. When set,
     /// filters are probed with a prefix query so SSTs that do not contain the
     /// prefix can be skipped.
@@ -238,7 +234,6 @@ impl Reader {
             mem_iters,
             segment_iter,
             max_seq,
-            None,
             self.read_merge_operator.clone(),
             sst_iter_options.order,
         )
@@ -311,7 +306,6 @@ impl Reader {
             mem_iters,
             segment_iter,
             max_seq,
-            ctx.range_tracker,
             self.read_merge_operator.clone(),
             options.order,
         )
@@ -1733,7 +1727,6 @@ mod tests {
                     db_state: &test_db_state,
                     write_batch_iter: wb_iter,
                     max_seq: test_case.max_seq,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
@@ -1863,7 +1856,6 @@ mod tests {
                     db_state: &test_db_state,
                     write_batch_iter: wb_iter,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
@@ -2036,7 +2028,6 @@ mod tests {
                     db_state: &test_db_state,
                     write_batch_iter: wb_iter,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
