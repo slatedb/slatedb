@@ -946,6 +946,159 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Two SSI transactions each scan a disjoint range that is empty at the
+    /// snapshot, then each writes a key inside the *other* transaction's
+    /// scanned range. Under a correct SSI implementation exactly one of the
+    /// two must abort: the requested-but-empty scan ranges create
+    /// rw-anti-dependencies in both directions, and no serial order is
+    /// consistent with both reads. Regression: previously the range tracker
+    /// only recorded yielded keys, so an empty scan registered no range and
+    /// both txns committed (write skew).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_ssi_write_skew_via_empty_scans() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Seed a key well outside both scan ranges so neither scan sees it.
+        db.put(b"~outside_both_ranges", b"v").await.unwrap();
+        db.flush().await.unwrap();
+
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let txn2 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        // T1 scans [a..m); empty.
+        {
+            let mut iter = txn1.scan(&b"a"[..]..&b"m"[..]).await.unwrap();
+            assert!(iter.next().await.unwrap().is_none(), "[a..m) is empty");
+        }
+        // T2 scans [n..z); empty.
+        {
+            let mut iter = txn2.scan(&b"n"[..]..&b"z"[..]).await.unwrap();
+            assert!(iter.next().await.unwrap().is_none(), "[n..z) is empty");
+        }
+
+        // Each writes into the other's scan range.
+        txn1.put(b"x_from_t1", b"v1").unwrap();
+        txn2.put(b"b_from_t2", b"v2").unwrap();
+
+        let r1 = txn1.commit().await;
+        let r2 = txn2.commit().await;
+
+        // Exactly one of the two must be rejected as a TransactionConflict.
+        assert!(
+            r1.is_ok() ^ r2.is_ok(),
+            "expected exactly one commit to abort, got r1={r1:?}, r2={r2:?}",
+        );
+    }
+
+    /// A scan over a wide range that yields a single key in the middle still
+    /// observes the entire requested range, so a concurrent write into the
+    /// unobserved portion is a phantom. Regression: previously the tracker
+    /// only recorded `[yielded_first, yielded_last]`, so a write outside that
+    /// bounding box but inside the requested range was missed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_ssi_phantom_outside_yielded_bbox() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        db.put(b"k_mid", b"seed").await.unwrap();
+        db.flush().await.unwrap();
+
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        // Scan [k_aaa..k_zzz); only k_mid is in range, so the yielded bbox
+        // collapses to (k_mid, k_mid) under the old tracker.
+        {
+            let mut iter = txn1.scan(&b"k_aaa"[..]..&b"k_zzz"[..]).await.unwrap();
+            let kv = iter.next().await.unwrap().expect("k_mid present");
+            assert_eq!(kv.key.as_ref(), b"k_mid");
+            assert!(iter.next().await.unwrap().is_none(), "only k_mid in range");
+        }
+
+        // Concurrent non-txn writer inserts a key inside T1's requested range
+        // but outside the yielded bbox.
+        db.put(b"k_aaa_inserted", b"phantom").await.unwrap();
+
+        // T1 makes a write so commit triggers SSI conflict checks.
+        txn1.put(b"t1_marker", b"x").unwrap();
+        assert!(txn1.commit().await.is_err());
+    }
+
+    /// A tombstone that sits inside a scan's requested range causes
+    /// `DbIterator::next_entry` to skip the key, so the caller sees an
+    /// "absent" observation. A concurrent resurrect of that key is therefore
+    /// a phantom. Regression: the old tracker only saw yielded keys, so
+    /// tombstone-only ranges registered no read dependency at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_ssi_tombstone_resurrection_in_scan_range() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        db.put(b"k_deleted", b"v_orig").await.unwrap();
+        db.flush().await.unwrap();
+        db.delete(b"k_deleted").await.unwrap();
+        db.flush().await.unwrap();
+
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        {
+            let mut iter = txn1.scan(&b"k_a"[..]..&b"k_z"[..]).await.unwrap();
+            assert!(
+                iter.next().await.unwrap().is_none(),
+                "tombstone in range should make scan appear empty to caller",
+            );
+        }
+
+        // Concurrent (non-txn) writer resurrects the exact key T1 observed
+        // as absent.
+        db.put(b"k_deleted", b"resurrected").await.unwrap();
+
+        txn1.put(b"t1_marker", b"x").unwrap();
+        assert!(txn1.commit().await.is_err());
+    }
+
+    /// `scan_prefix` shares the same range-tracking machinery as `scan`, so
+    /// the empty-prefix-scan blind spot is the same anomaly: a "first
+    /// writer" gate based on an empty prefix scan must abort when another
+    /// writer races in. Regression: previously an empty prefix scan tracked
+    /// no range and both writers committed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_ssi_empty_scan_prefix_detects_concurrent_insert() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        db.put(b"sentinel", b"x").await.unwrap();
+        db.flush().await.unwrap();
+
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        {
+            let mut iter = txn1.scan_prefix(b"users/").await.unwrap();
+            assert!(iter.next().await.unwrap().is_none(), "no users yet");
+        }
+
+        // Concurrent writer races T1 and creates the first user.
+        db.put(b"users/alice", b"first").await.unwrap();
+
+        txn1.put(b"users/bob", b"second").unwrap();
+        assert!(txn1.commit().await.is_err());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_txn_commit_await_durable_false() {
         use crate::config::{DurabilityLevel::*, ReadOptions, WriteOptions};
