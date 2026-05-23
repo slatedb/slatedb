@@ -1,0 +1,33 @@
+---
+const PAGE_TITLE_ID = '_top';
+const { title, description } = Astro.locals.starlightRoute.entry.data;
+---
+
+<div class="page-title-block">
+	<h1 id={PAGE_TITLE_ID}>{title}</h1>
+	{description && <p class="lede">{description}</p>}
+</div>
+
+<style>
+	.page-title-block {
+		margin-top: 1rem;
+		margin-bottom: 1.5rem;
+	}
+
+	h1 {
+		margin: 0;
+		font-size: var(--sl-text-h1);
+		line-height: 1.15;
+		font-weight: 600;
+		letter-spacing: -0.02em;
+		color: var(--sl-color-white);
+	}
+
+	.lede {
+		margin: 0.625rem 0 0;
+		font-size: 1.0625rem;
+		line-height: 1.55;
+		color: var(--sl-color-gray-3);
+		font-weight: 400;
+	}
+</style>

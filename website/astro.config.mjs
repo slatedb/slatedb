@@ -39,6 +39,25 @@ export default defineConfig({
 				// Override the default theme provider to ensure light mode is always enabled.
 				ThemeProvider: './src/components/ThemeProvider.astro',
 				Hero: './src/components/Hero.astro',
+				// Override the page title to render the frontmatter description as a lede subtitle.
+				PageTitle: './src/components/PageTitle.astro',
+				// Override the sidebar to pin a community-stats card at the bottom.
+				Sidebar: './src/components/Sidebar.astro',
+			},
+			expressiveCode: {
+				themes: ['github-light'],
+				styleOverrides: {
+					borderRadius: '0.75rem',
+					borderColor: 'transparent',
+					codeFontSize: '0.85rem',
+					codeLineHeight: '1.55',
+					frames: {
+						shadowColor: 'rgba(15, 23, 42, 0.04)',
+						editorActiveTabIndicatorTopColor: 'transparent',
+						editorActiveTabBorderColor: 'transparent',
+						editorTabBarBorderBottomColor: 'transparent',
+					},
+				},
 			},
 			customCss: ['./src/styles/custom.css'],
 			editLink: {
@@ -52,6 +71,21 @@ export default defineConfig({
 				{
 					tag: 'meta',
 					attrs: { property: 'og:image:alt', content: ogImageAlt },
+				},
+				{
+					tag: 'link',
+					attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+				},
+				{
+					tag: 'link',
+					attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' },
+				},
+				{
+					tag: 'link',
+					attrs: {
+						rel: 'stylesheet',
+						href: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap',
+					},
 				},
 			],
 			plugins: [
@@ -261,26 +295,6 @@ export default defineConfig({
 					label: 'RFCs',
 					collapsed: true,
 					autogenerate: { directory: 'rfcs' },
-				},
-				{
-					label: 'Community',
-					items: [
-						{
-							label: 'Discord',
-							link: 'https://discord.gg/mHYmGy5MgA',
-							attrs: { target: '_blank' }
-						},
-						{
-							label: 'Dosu',
-							link: 'https://app.dosu.dev/d8f2da6d-6c4e-43a9-b5f2-b03db801b4d1/ask',
-							attrs: { target: '_blank' }
-						},
-						{
-							label: 'GitHub',
-							link: 'https://github.com/slatedb/slatedb',
-							attrs: { target: '_blank' }
-						}
-					]
 				},
 			]
 		}),
