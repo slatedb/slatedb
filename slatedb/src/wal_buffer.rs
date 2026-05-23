@@ -389,6 +389,7 @@ impl WalBufferManager {
         self.table_store
             .write_sst(&SsTableId::Wal(wal_id), &encoded_sst, false)
             .await?;
+        // wal_flush_bytes could fail to count WALs that are durable but client does not get response
         self.db_stats.wal_flush_bytes.increment(written_bytes);
 
         self.mono_clock.fetch_max_last_durable_tick(last_tick);

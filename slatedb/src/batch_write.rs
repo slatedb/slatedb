@@ -94,14 +94,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
             options,
             done,
         } = message;
-        let batch_size_bytes = batch.size_bytes() as u64;
         let result = self.db_inner.write_batch(batch, &options).await;
-        if result.is_ok() {
-            self.db_inner
-                .db_stats
-                .user_write_bytes
-                .increment(batch_size_bytes);
-        }
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
@@ -168,7 +161,7 @@ impl DbInner {
 
         // Count batch-local merge folding on the flush path so DB-side merge
         // resolution uses one metric for both write batches and memtable flushes.
-        let (entries, touched_segments) = batch
+        let (entries, touched_segments, entries_size) = batch
             .extract_entries(
                 commit_seq,
                 now,
@@ -201,6 +194,9 @@ impl DbInner {
             // if WAL is disabled, we just write the entries to memtable.
             self.write_entries_to_memtable(entries, touched_segments)
         };
+        // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
+        // after merge operators are collapsed together
+        self.db_stats.memtable_write_bytes.increment(entries_size);
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
