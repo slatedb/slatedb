@@ -110,7 +110,7 @@ main .content-panel + .content-panel,
 
 /* Reduce logo size */
 .site-title img {
-	height: calc((var(--sl-nav-height) - 2 * var(--sl-nav-pad-y)) * 0.8) !important;
+	height: calc((var(--sl-nav-height) - 2 * var(--sl-nav-pad-y)) * 0.65) !important;
 }
 
 /* Hide the theme selector */

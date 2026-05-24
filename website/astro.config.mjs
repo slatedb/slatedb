@@ -21,6 +21,10 @@ export default defineConfig({
 		starlight({
 			title: 'SlateDB',
 			description: 'An embedded database built on object storage',
+			// Use our own src/pages/404.astro (Sisyphus art) instead of
+			// Starlight's bare docs-themed 404, which otherwise wins at
+			// the literal /404 URL via injectRoute.
+			disable404Route: true,
 			logo: {
 				src: './public/img/logo-full.svg',
 				alt: 'SlateDB',
