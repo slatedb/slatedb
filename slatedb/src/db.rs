@@ -8032,6 +8032,106 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    /// Regression test: cancelling a commit future after the write batch has been
+    /// sent to the writer (but before it is processed) drops the DbTransaction,
+    /// which removes it from active_txns. The writer then:
+    ///   1. Skips conflict detection (check_has_conflict returns false for
+    ///      missing txn_ids)
+    ///   2. Skips tracking the committed state (track_recent_committed_txn
+    ///      silently no-ops)
+    ///
+    /// This allows a second transaction writing the same key to commit without
+    /// detecting a write-write conflict — a lost update anomaly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_commit_future_cancel_bypasses_conflict_detection() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_commit_future_cancel_bypasses_conflict_detection",
+            object_store,
+        )
+        .with_fp_registry(fp_registry.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // Write initial data.
+        db.put(b"x", b"v0").await.unwrap();
+        let initial_last_seq = db.inner.oracle.last_seq();
+
+        // Start txn1 and buffer a write to key "x".
+        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1_started_seq = txn1.seqnum();
+        txn1.put(b"x", b"txn1_value").unwrap();
+
+        // Pause the writer *before* it tracks the committed transaction state.
+        // At the pause point the WAL + memtable writes have already happened,
+        // but track_recent_committed_txn has not been called yet.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "pause").unwrap();
+
+        // Commit txn1 in a background task. It will send the batch to the
+        // writer, which will process it up to the pause point and block.
+        let txn1_commit = tokio::spawn(async move { txn1.commit().await });
+
+        // Wait until the writer has started processing txn1's batch.
+        // oracle.last_seq() advances at the very start of write_batch.
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if db.inner.oracle.last_seq() > initial_last_seq {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(reached.is_ok(), "writer did not start processing txn1");
+        // Give the writer a moment to reach the actual pause point.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Cancel txn1's commit future. This drops the DbTransaction,
+        // which calls drop_txn and removes txn1 from active_txns.
+        txn1_commit.abort();
+        let _ = txn1_commit.await;
+
+        // BUG: txn1 was removed from active_txns by Drop, even though the
+        // writer hasn't finished processing it yet. This should be is_some().
+        assert!(
+            db.inner.txn_manager.min_active_seq().is_none(),
+            "txn1 was removed from active_txns by Drop"
+        );
+
+        // Start txn2 while the writer is still paused (committed_seq has not
+        // been advanced yet), so txn2 starts at the same snapshot as txn1.
+        let txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert_eq!(
+            txn2.seqnum(),
+            txn1_started_seq,
+            "txn2 should start at the same seq as txn1 (committed_seq not yet advanced)"
+        );
+        txn2.put(b"x", b"txn2_value").unwrap();
+
+        // Un-pause the writer. It will try to track txn1's committed state but
+        // will not find txn1 in active_txns (already removed by Drop), so the
+        // committed state is silently lost.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
+
+        // Wait for the writer to finish processing txn1's batch.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Commit txn2. Both txn1 and txn2 wrote key "x" from the same snapshot.
+        // A correct implementation would detect a write-write conflict here.
+        let result = txn2.commit().await;
+        // BUG: txn2 should detect a WW conflict with txn1, but the commit
+        // succeeds because txn1's committed state was lost when its commit
+        // future was cancelled before the writer tracked it.
+        assert!(
+            result.is_ok(),
+            "demonstrates the bug: txn2 commits without detecting WW conflict"
+        );
+
+        db.close().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_txn_conflict_commit_seq_gap_does_not_block_l0_retirement() {
         const REPRO_SEED: u64 = 2_985_011_763_506_195_159;
