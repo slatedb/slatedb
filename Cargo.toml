@@ -51,7 +51,7 @@ log = "0.4.27"
 lru = "0.18"
 lz4_flex = "0.11.5"
 moka = "0.12.8"
-object_store = "0.13.1"
+object_store = "0.13.2"
 object_store_opendal = "0.56.0"
 opendal = { version = "0.56.0", default-features = false }
 ouroboros = "0.18"

@@ -140,12 +140,13 @@ use crate::db_reader::DbReader;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::fence::{WriterFenceResult, WriterFencer};
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
-use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
@@ -541,13 +542,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             }),
         ));
 
-        // Get next WAL ID before writing manifest
-        let replay_after_wal_id = match &latest_manifest {
-            Some(latest_stored_manifest) => latest_stored_manifest.db_state().replay_after_wal_id,
-            None => 0,
-        };
-        let next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
-
         // Initialize the database
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
@@ -566,16 +560,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         };
 
-        let mut manifest = FenceableManifest::init_writer(
-            stored_manifest,
-            self.settings.manifest_update_timeout,
-            system_clock.clone(),
-        )
-        .await?;
+        let fencer = WriterFencer::new(table_store.clone(), &self.settings, system_clock.clone());
+        let WriterFenceResult {
+            manifest,
+            replay_range,
+        } = fencer.fence(stored_manifest).await?;
+
+        let manifest_dirty = manifest.prepare_dirty()?;
 
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
-        let manifest_dirty = manifest.prepare_dirty()?;
         let status_manager = DbStatusManager::new_with_manifest(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),
@@ -604,9 +598,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
             .await?,
         );
-
-        // Fence writers if WAL is enabled
-        let replay_range = inner.fence_writers(&mut manifest, next_wal_id).await?;
 
         // Setup background tasks
         let tokio_handle = Handle::current();
