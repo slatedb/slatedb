@@ -717,10 +717,7 @@ pub fn load_memory() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    use object_store::aws::S3ConditionalPut;
-
-    let builder = object_store::aws::AmazonS3Builder::from_env()
-        .with_conditional_put(S3ConditionalPut::ETagMatch);
+    let builder = object_store::aws::AmazonS3Builder::from_env();
 
     Ok(Arc::new(builder.build().map_err(|error| {
         SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
