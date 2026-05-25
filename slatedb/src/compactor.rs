@@ -346,8 +346,9 @@ impl Compactor {
         system_clock: Arc<dyn SystemClock>,
         closed_result: Arc<dyn ClosedResultWriter>,
         merge_operator: Option<MergeOperatorType>,
-        #[cfg(feature = "compaction_filters")]
-        compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
+        #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
+            Arc<dyn CompactionFilterSupplier>,
+        >,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(recorder));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
