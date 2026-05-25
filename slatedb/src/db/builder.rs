@@ -699,7 +699,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
-        inner.replay_wal(replay_range).await?;
+        inner
+            .replay_wal(replay_range, manifest_store.clone())
+            .await?;
 
         // Preload cache if enabled
         if let Some(cached_obj_store) = cached_object_store {

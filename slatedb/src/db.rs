@@ -57,6 +57,7 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
+use crate::manifest::store::ManifestStore;
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
@@ -500,11 +501,12 @@ impl DbInner {
         }
     }
 
-    async fn replay_wal(&self, wal_id_range: Range<u64>) -> Result<(), SlateDBError> {
-        // Tests use this fail point to pause replay so the writer that owns
-        // this epoch can race with a newer writer's fence + replay.
+    async fn replay_wal(
+        &self,
+        wal_id_range: Range<u64>,
+        manifest_store: Arc<ManifestStore>,
+    ) -> Result<(), SlateDBError> {
         let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
-        let _ = writer_epoch;
         fail_point!(
             Arc::clone(&self.fp_registry),
             "replay-wal-pause",
@@ -538,7 +540,24 @@ impl DbInner {
         )
         .await?;
 
-        while let Some(replayed_table) = replay_iter.next().await? {
+        loop {
+            let replayed_table = match replay_iter.next().await {
+                Ok(Some(replayed_table)) => replayed_table,
+                Ok(None) => break,
+                // If the manifest or an SST referenced by the WAL is missing, it may
+                // indicate that a newer writer has advanced `replay_after_wal_id` and
+                // the GC has removed this WAL entry. Check the latest manifest's
+                // writer_epoch to see if this client is fenced.
+                Err(err) if err.has_object_store_not_found() => {
+                    let latest_manifest = manifest_store.read_latest_manifest().await?;
+                    if latest_manifest.manifest.writer_epoch > writer_epoch {
+                        return Err(SlateDBError::Fenced);
+                    }
+                    return Err(err);
+                }
+                Err(err) => return Err(err),
+            };
+
             // RFC-0024: re-extract each replayed entry's prefix to
             // populate the memtable's touched-segment set. Per the
             // validation model, durable WAL entries were validated when
@@ -2070,8 +2089,8 @@ mod tests {
     use crate::seq_tracker::FindOption;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
-        assert_iterator, lookup_merge_operator_operands, OnDemandCompactionSchedulerSupplier,
-        StringConcatMergeOperator,
+        assert_iterator, lookup_merge_operator_operands, GatedObjectStore,
+        OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
@@ -6230,6 +6249,155 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    async fn wait_for_wal_sst_count(table_store: &TableStore, min_count: usize, context: &str) {
+        for _ in 0..6000 {
+            let wals = table_store.list_wal_ssts(..).await.unwrap();
+            if wals.len() >= min_count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{context}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_not_found_should_be_fenced_when_writer_epoch_advanced() {
+        let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(base_store.clone()));
+        let gated_object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let path = "/tmp/wal_replay_not_found_should_be_fenced_when_writer_epoch_advanced";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = gated_object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        let probe_table_store = TableStore::new(
+            ObjectStores::new(base_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        );
+        wait_for_wal_sst_count(
+            &probe_table_store,
+            1,
+            "W1 did not write its fence WAL in time",
+        )
+        .await;
+
+        let head_arrivals_before = gated_store.head_gate.arrivals();
+        gated_store.head_gate.close();
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        gated_store
+            .head_gate
+            .wait_for_arrivals(head_arrivals_before + 1)
+            .await;
+
+        let db2 = Db::builder(path, base_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            db2.inner.state.read().state().manifest.value.writer_epoch,
+            2
+        );
+
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
+            .await
+            .unwrap();
+        gated_store.head_gate.release();
+
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced)),
+            "expected fenced error, got {err:?}"
+        );
+
+        db2.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_not_found_should_remain_not_found_when_writer_epoch_unchanged() {
+        let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(base_store.clone()));
+        let gated_object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let path = "/tmp/wal_replay_not_found_should_remain_not_found_when_writer_epoch_unchanged";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = gated_object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        let probe_table_store = TableStore::new(
+            ObjectStores::new(base_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        );
+        wait_for_wal_sst_count(
+            &probe_table_store,
+            1,
+            "W1 did not write its fence WAL in time",
+        )
+        .await;
+
+        let head_arrivals_before = gated_store.head_gate.arrivals();
+        gated_store.head_gate.close();
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        gated_store
+            .head_gate
+            .wait_for_arrivals(head_arrivals_before + 1)
+            .await;
+
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
+            .await
+            .unwrap();
+        gated_store.head_gate.release();
+
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
     }
 
     #[tokio::test]
