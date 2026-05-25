@@ -9,8 +9,10 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
+csv = { workspace = true }
 humantime = { workspace = true }
 object_store = { workspace = true }
 serde_json = { workspace = true }
