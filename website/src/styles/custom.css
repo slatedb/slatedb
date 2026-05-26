@@ -1,34 +1,671 @@
+/* ---------------------------------------------------------------
+ * SlateDB — serious-infra identity
+ * Slate ink on cool off-white, Marcellus headlines, terracotta accent
+ * ------------------------------------------------------------- */
+
 :root {
-    --sl-social-icon-color: #475569;
-    --sl-social-icon-hover-color: black;
-    --sl-social-icon-size: 1.5rem;
-    --sl-image-bg-color: black;
-    --sl-color-bg-nav: white;
+	/* Material tokens — used directly where needed, mapped to Starlight vars below */
+	--ink-1: #0f1620;
+	--ink-2: #1f2a37;
+	--ink-3: #3d4856;
+	--ink-4: #5e6878;
+	--ink-5: #8b94a3;
+	--ink-6: #c8cdd5;
+	--ink-7: #dfe2e8;
+
+	--surface-0: #f6f7f9;
+	--surface-1: #ffffff;
+	--surface-2: #eef0f3;
+	--surface-3: #e2e6eb;
+
+	--accent-high: #7a3e22;
+	--accent: #b26844;
+	--accent-low: #f3e3d8;
+
+	/* RGB triplets for rgba() composition */
+	--surface-0-rgb: 246, 247, 249;
+	--ink-1-rgb: 15, 22, 32;
+
+	/* Typography */
+	--sl-font:
+		'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+		'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	--sl-font-mono:
+		'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
+		Consolas, 'Liberation Mono', monospace;
+	--sl-font-serif:
+		'Marcellus', ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+	--sl-line-height: 1.7;
+	--sl-line-height-headings: 1.2;
+
+	/* Content width — narrower, more readable column */
+	--sl-content-width: 44rem;
+
+	/* Social icon defaults */
+	--sl-social-icon-color: var(--ink-3);
+	--sl-social-icon-hover-color: var(--ink-1);
+	--sl-social-icon-size: 1.5rem;
+	--sl-image-bg-color: var(--ink-1);
+	--sl-color-bg-nav: var(--surface-0);
 }
 
-.getting-started {
-    padding-block: clamp(2.5rem, 1rem, 10rem);
+:root[data-theme='light'] {
+	/* Map Starlight palette onto the material tokens. */
+	--sl-color-white: var(--ink-1);
+	--sl-color-gray-1: var(--ink-2);
+	--sl-color-gray-2: var(--ink-3);
+	--sl-color-gray-3: var(--ink-4);
+	--sl-color-gray-4: var(--ink-5);
+	--sl-color-gray-5: var(--ink-6);
+	--sl-color-gray-6: var(--ink-7);
+	--sl-color-gray-7: var(--surface-2);
+	--sl-color-black: var(--surface-0);
+	--sl-color-bg: var(--surface-0);
+
+	--sl-color-accent-high: var(--accent-high);
+	--sl-color-accent: var(--accent);
+	--sl-color-accent-low: var(--accent-low);
+	--sl-color-text: var(--sl-color-gray-2);
+	--sl-color-text-accent: var(--sl-color-accent);
+
+	--sl-color-bg-nav: var(--surface-0);
+	--sl-color-bg-sidebar: var(--sl-color-bg);
+	--sl-color-bg-inline-code: rgba(var(--ink-1-rgb), 0.06);
+
+	--sl-color-hairline: rgba(var(--ink-1-rgb), 0.07);
+	--sl-color-hairline-light: rgba(var(--ink-1-rgb), 0.07);
+	--sl-color-hairline-shade: rgba(var(--ink-1-rgb), 0.1);
+
+	--sl-shadow-sm: 0 1px 2px rgba(var(--ink-1-rgb), 0.05);
+	--sl-shadow-md: 0 6px 16px rgba(var(--ink-1-rgb), 0.06);
+	--sl-shadow-lg: 0 20px 40px rgba(var(--ink-1-rgb), 0.09);
 }
 
-.expressive-code {
-    margin-top: 1.25rem;
-}
+/* ---------------------------------------------------------------
+ * Header — slim, no hard border, soft shadow
+ * ------------------------------------------------------------- */
 
-.sl-markdown-content img {
-    background-color: var(--sl-image-bg-color);
-}
-
-/* Hide the theme selector */
-starlight-theme-select {
-    display: none;
-}
-
-/* Remove border-bottom only on main page (pages without sidebar) */
+.page[data-has-sidebar] .header,
 .page:not([data-has-sidebar]) .header {
-    border-bottom: none !important;
+	border-bottom: none !important;
+	box-shadow: none !important;
+	backdrop-filter: saturate(180%) blur(8px);
+	background-color: rgba(var(--surface-0-rgb), 0.85);
+}
+
+/* Remove all dividers Starlight draws between stacked content panels */
+.main-pane .content-panel + .content-panel,
+main .content-panel + .content-panel,
+.content-panel + .content-panel {
+	border-top: 0 !important;
+}
+
+/* Force-hide mobile-only TOC strip; its fixed position + border-top can show through
+   below the navbar on wide viewports if the utility class loses the cascade race. */
+@media (min-width: 50rem) {
+	mobile-starlight-toc {
+		display: none !important;
+	}
 }
 
 /* Reduce logo size */
 .site-title img {
-    height: calc((var(--sl-nav-height) - 2 * var(--sl-nav-pad-y)) * 0.8) !important;
+	height: calc((var(--sl-nav-height) - 2 * var(--sl-nav-pad-y)) * 0.65) !important;
+}
+
+/* Hide the theme selector */
+starlight-theme-select {
+	display: none;
+}
+
+/* ---------------------------------------------------------------
+ * Search — pill-shaped with subtle border, kbd chip on the right
+ * ------------------------------------------------------------- */
+
+@media (min-width: 50rem) {
+	site-search button[data-open-modal] {
+		border: 1px solid var(--sl-color-gray-5) !important;
+		border-radius: 9999px !important;
+		padding: 0.45rem 0.5rem 0.45rem 0.85rem !important;
+		background-color: var(--sl-color-gray-7) !important;
+		color: var(--sl-color-gray-3) !important;
+		font-size: 0.8125rem !important;
+		height: auto !important;
+		min-height: 2.25rem;
+		box-shadow: none !important;
+		transition:
+			border-color 0.15s ease,
+			background-color 0.15s ease,
+			box-shadow 0.15s ease;
+	}
+
+	site-search button[data-open-modal]:hover {
+		border-color: var(--sl-color-gray-4) !important;
+		background-color: var(--surface-1) !important;
+		color: var(--sl-color-gray-2) !important;
+		box-shadow: var(--sl-shadow-sm) !important;
+	}
+}
+
+/* Outer kbd: invisible wrapper — only the inner kbds get the pill */
+site-search button[data-open-modal] > kbd {
+	background-color: transparent !important;
+	padding: 0 !important;
+	gap: 0.2rem;
+}
+
+site-search button[data-open-modal] > kbd > kbd {
+	background-color: rgba(var(--ink-1-rgb), 0.06) !important;
+	color: var(--sl-color-gray-3);
+	border-radius: 0.3rem;
+	padding: 0.05rem 0.35rem !important;
+	font-size: 0.7rem !important;
+	font-family: var(--sl-font) !important;
+	font-weight: 500;
+	line-height: 1;
+}
+
+/* ---------------------------------------------------------------
+ * Sidebar — Mintlify-style: uppercase group labels, rounded items,
+ * accent tint on active. Drops the right border in favor of whitespace.
+ * ------------------------------------------------------------- */
+
+@media (min-width: 50rem) {
+	.sidebar-pane {
+		border-inline-end: 1px solid var(--sl-color-hairline) !important;
+		background-color: var(--sl-color-bg) !important;
+	}
+}
+
+.sidebar-content {
+	padding-top: 1.25rem !important;
+	gap: 0.5rem !important;
+}
+
+/* Top-level group labels: uppercase, small, tracked */
+.sidebar-content ul.top-level > li > details > summary .large,
+.sidebar-content ul.top-level > li > a.large {
+	text-transform: uppercase !important;
+	font-size: 0.7rem !important;
+	letter-spacing: 0.08em !important;
+	font-weight: 600 !important;
+	color: var(--sl-color-gray-3) !important;
+}
+
+.sidebar-content ul.top-level > li > details > summary {
+	padding-inline: 0.5rem;
+}
+
+.sidebar-content ul.top-level > li + li {
+	margin-top: 1rem !important;
+}
+
+/* Nested items: indented under the group, with a faint vertical guide line */
+.sidebar-content ul ul {
+	margin-top: 0.375rem;
+	margin-inline-start: 0.5rem;
+	padding-inline-start: 0.75rem;
+	border-inline-start: 1px solid var(--sl-color-hairline);
+}
+
+.sidebar-content ul ul li {
+	border-inline-start: none !important;
+	margin-inline-start: 0 !important;
+	padding-inline-start: 0 !important;
+}
+
+.sidebar-content ul ul a {
+	font-size: 0.8125rem !important;
+	padding: 0.35rem 0.625rem !important;
+	margin: 0.0625rem 0 !important;
+	border-radius: 0.375rem !important;
+	color: var(--sl-color-gray-2) !important;
+	line-height: 1.4 !important;
+	font-weight: 400;
+	transition:
+		background-color 0.12s ease,
+		color 0.12s ease;
+}
+
+.sidebar-content ul ul a:hover,
+.sidebar-content ul ul a:focus {
+	background-color: var(--sl-color-gray-7) !important;
+	color: var(--sl-color-gray-1) !important;
+}
+
+.sidebar-content ul ul a[aria-current='page'],
+.sidebar-content ul ul a[aria-current='page']:hover,
+.sidebar-content ul ul a[aria-current='page']:focus {
+	background-color: var(--sl-color-accent-low) !important;
+	color: var(--sl-color-accent) !important;
+	font-weight: 600 !important;
+}
+
+/* Single (non-grouped) top-level links: same styling as nested */
+.sidebar-content ul.top-level > li > a {
+	font-size: 0.8125rem !important;
+	padding: 0.4rem 0.75rem !important;
+	border-radius: 0.5rem !important;
+	color: var(--sl-color-gray-2) !important;
+}
+.sidebar-content ul.top-level > li > a:hover {
+	background-color: var(--sl-color-gray-7) !important;
+}
+.sidebar-content ul.top-level > li > a[aria-current='page'] {
+	background-color: var(--sl-color-accent-low) !important;
+	color: var(--sl-color-accent) !important;
+	font-weight: 600 !important;
+}
+
+/* Soften the disclosure caret */
+.sidebar-content summary .caret {
+	color: var(--sl-color-gray-4);
+}
+
+/* External link indicator for sidebar items that open in a new tab */
+.sidebar-content a[target='_blank']::after {
+	content: '';
+	display: inline-block;
+	width: 0.7em;
+	height: 0.7em;
+	margin-left: 0.4em;
+	vertical-align: -0.05em;
+	background-color: currentColor;
+	opacity: 0.55;
+	-webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'/%3E%3Cpolyline points='15 3 21 3 21 9'/%3E%3Cline x1='10' y1='14' x2='21' y2='3'/%3E%3C/svg%3E");
+	-webkit-mask-repeat: no-repeat;
+	-webkit-mask-position: center;
+	-webkit-mask-size: contain;
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'/%3E%3Cpolyline points='15 3 21 3 21 9'/%3E%3Cline x1='10' y1='14' x2='21' y2='3'/%3E%3C/svg%3E");
+	mask-repeat: no-repeat;
+	mask-position: center;
+	mask-size: contain;
+}
+
+/* ---------------------------------------------------------------
+ * Right-hand TOC — minimal, accent indicator on active
+ * ------------------------------------------------------------- */
+
+/* Drop the vertical hairline between main content and the TOC, and push TOC right */
+.right-sidebar {
+	border-inline-start: none !important;
+}
+
+@media (min-width: 72rem) {
+	.right-sidebar {
+		left: auto !important;
+		inset-inline-end: 0 !important;
+		width: 16rem !important;
+	}
+	.right-sidebar-panel {
+		padding-inline-start: 0 !important;
+		padding-inline-end: 1.25rem !important;
+	}
+	.right-sidebar-panel .sl-container {
+		max-width: none !important;
+		width: 100% !important;
+		margin-inline: 0 !important;
+	}
+}
+
+/* Smaller "On this page" header with a tiny TOC icon */
+.right-sidebar-panel h2 {
+	display: flex !important;
+	align-items: center;
+	gap: 0.4rem;
+	font-size: 0.7rem !important;
+	font-weight: 600 !important;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--sl-color-gray-3) !important;
+	margin-bottom: 0.625rem !important;
+}
+
+.right-sidebar-panel h2::before {
+	content: '';
+	display: inline-block;
+	width: 0.875rem;
+	height: 0.875rem;
+	background: currentColor;
+	-webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='currentColor'%3E%3Crect x='3' y='5' width='18' height='2' rx='1'/%3E%3Crect x='3' y='11' width='14' height='2' rx='1'/%3E%3Crect x='3' y='17' width='10' height='2' rx='1'/%3E%3C/svg%3E");
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='currentColor'%3E%3Crect x='3' y='5' width='18' height='2' rx='1'/%3E%3Crect x='3' y='11' width='14' height='2' rx='1'/%3E%3Crect x='3' y='17' width='10' height='2' rx='1'/%3E%3C/svg%3E");
+	-webkit-mask-repeat: no-repeat;
+	mask-repeat: no-repeat;
+	-webkit-mask-size: contain;
+	mask-size: contain;
+	flex-shrink: 0;
+}
+
+/* Flat TOC with a 2px accent bar on the active item.
+   When the active item is a sub-heading, its parent(s) also get the bar — gives
+   a sense of where you are in the section without a full tree. */
+starlight-toc nav ul {
+	border-inline-start: none;
+	padding-inline-start: 0;
+}
+
+starlight-toc nav a {
+	--pad-inline: 1rem;
+	position: relative;
+	font-size: 0.8125rem !important;
+	color: var(--sl-color-gray-3) !important;
+	padding-block: 0.4rem !important;
+	line-height: 1.4 !important;
+	border-radius: 0 !important;
+	border-inline-start: 1px solid transparent;
+	margin-inline-start: -1px;
+	transition:
+		color 0.15s ease,
+		border-color 0.15s ease;
+}
+
+starlight-toc nav a:hover {
+	color: var(--sl-color-gray-1) !important;
+}
+
+/* Active leaf */
+starlight-toc nav a[aria-current='true'] {
+	color: var(--sl-color-accent) !important;
+	border-inline-start-color: var(--sl-color-accent) !important;
+	font-weight: 600 !important;
+}
+
+/* Active path: when a descendant is active, give the ancestor a gray bar (no accent) */
+starlight-toc nav li:has(ul a[aria-current='true']) > a {
+	color: var(--sl-color-gray-3) !important;
+	border-inline-start-color: var(--sl-color-gray-4) !important;
+	font-weight: 400 !important;
+}
+
+/* ---------------------------------------------------------------
+ * Content typography — comfortable rhythm, refined headings
+ * ------------------------------------------------------------- */
+
+.sl-markdown-content {
+	font-size: 1rem;
+}
+
+.sl-markdown-content p,
+.sl-markdown-content li {
+	color: var(--sl-color-gray-2);
+	line-height: var(--sl-line-height);
+}
+
+/* Headings — Marcellus on editorial sizes (h1–h3); h4+ stays sans for density.
+   Marcellus is single-weight; no font-variation-settings. */
+.sl-markdown-content h1:not(:where(.not-content *)),
+.sl-markdown-content h2:not(:where(.not-content *)),
+.sl-markdown-content h3:not(:where(.not-content *)) {
+	font-family: var(--sl-font-serif);
+	font-weight: 400;
+	color: var(--ink-1);
+	letter-spacing: -0.005em;
+}
+
+.sl-markdown-content h2:not(:where(.not-content *)) {
+	margin-top: 3rem !important;
+	padding-bottom: 0.5rem;
+	border-bottom: 1px solid var(--sl-color-hairline);
+	letter-spacing: -0.015em;
+}
+
+.sl-markdown-content h3:not(:where(.not-content *)) {
+	margin-top: 2.25rem !important;
+	letter-spacing: -0.005em;
+}
+
+.sl-markdown-content h4:not(:where(.not-content *)) {
+	margin-top: 1.75rem !important;
+	font-weight: 600;
+}
+
+/* Subtle anchor links — only on hover */
+.sl-markdown-content .anchor-link {
+	opacity: 0;
+	transition: opacity 0.15s ease;
+	color: var(--sl-color-gray-4) !important;
+}
+.sl-markdown-content h2:hover .anchor-link,
+.sl-markdown-content h3:hover .anchor-link,
+.sl-markdown-content h4:hover .anchor-link,
+.sl-markdown-content h5:hover .anchor-link {
+	opacity: 1;
+}
+
+/* Links */
+.sl-markdown-content a:not(:where(.not-content *, .sl-link-card *, .anchor-link)) {
+	color: var(--sl-color-accent);
+	text-decoration: none;
+	background-image: linear-gradient(currentColor, currentColor);
+	background-position: 0 100%;
+	background-repeat: no-repeat;
+	background-size: 100% 1px;
+	transition: background-size 0.12s ease;
+}
+.sl-markdown-content a:not(:where(.not-content *, .sl-link-card *, .anchor-link)):hover {
+	background-size: 100% 2px;
+}
+
+/* Inline code — soft tinted pill */
+.sl-markdown-content :not(pre) > code:not(:where(.not-content *)) {
+	background-color: var(--sl-color-bg-inline-code);
+	border: none;
+	border-radius: 0.375rem;
+	padding: 0.15em 0.4em;
+	font-size: 0.875em;
+	font-weight: 500;
+	color: var(--sl-color-gray-1);
+}
+
+/* Strong */
+.sl-markdown-content strong {
+	color: var(--sl-color-gray-1);
+	font-weight: 600;
+}
+
+/* Lists */
+.sl-markdown-content ul:not(:where(.not-content *)),
+.sl-markdown-content ol:not(:where(.not-content *)) {
+	padding-inline-start: 1.5rem;
+}
+.sl-markdown-content li + li:not(:where(.not-content *)) {
+	margin-top: 0.375rem;
+}
+
+/* Blockquote */
+.sl-markdown-content blockquote:not(:where(.not-content *)) {
+	border-inline-start: 3px solid var(--sl-color-gray-5);
+	background: transparent;
+	padding: 0.25rem 0 0.25rem 1.25rem;
+	color: var(--sl-color-gray-3);
+	font-style: normal;
+}
+
+/* Keep existing image-on-black behavior for diagrams */
+.sl-markdown-content img {
+	background-color: var(--sl-image-bg-color);
+	border-radius: 0.5rem;
+}
+
+/* ---------------------------------------------------------------
+ * Code blocks (Expressive Code) — softer chrome
+ * ------------------------------------------------------------- */
+
+.expressive-code {
+	margin-top: 1.25rem;
+	margin-bottom: 1.25rem;
+}
+
+.expressive-code .frame {
+	box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.04) !important;
+	border: 1px solid var(--sl-color-hairline) !important;
+}
+
+.expressive-code .frame.is-terminal .header,
+.expressive-code .frame:not(.is-terminal) .header {
+	background-color: var(--sl-color-gray-7) !important;
+	border-bottom: 1px solid var(--sl-color-hairline) !important;
+	font-family: var(--sl-font-mono);
+	font-size: 0.75rem;
+	color: var(--sl-color-gray-3);
+}
+
+.expressive-code pre {
+	background-color: var(--surface-1) !important;
+}
+
+/* ---------------------------------------------------------------
+ * Asides / Callouts — Mintlify-style tinted wash
+ * ------------------------------------------------------------- */
+
+.starlight-aside {
+	border: none !important;
+	border-radius: 0.75rem;
+	padding: 1rem 1.125rem;
+	border-inline-start: 3px solid;
+}
+
+.starlight-aside--note {
+	background-color: var(--accent-low);
+	border-inline-start-color: var(--accent);
+	color: var(--sl-color-gray-1);
+}
+
+.starlight-aside--tip {
+	background-color: rgba(16, 138, 110, 0.08);
+	border-inline-start-color: #2f7a64;
+	color: var(--sl-color-gray-1);
+}
+
+.starlight-aside--caution {
+	background-color: rgba(180, 120, 40, 0.1);
+	border-inline-start-color: #b07728;
+	color: var(--sl-color-gray-1);
+}
+
+.starlight-aside--danger {
+	background-color: rgba(170, 56, 56, 0.08);
+	border-inline-start-color: #9c3434;
+	color: var(--sl-color-gray-1);
+}
+
+.starlight-aside__title {
+	font-weight: 600;
+	font-size: 0.875rem;
+	letter-spacing: -0.005em;
+	color: var(--sl-color-gray-1);
+}
+
+.starlight-aside__icon {
+	width: 1rem;
+	height: 1rem;
+}
+
+/* ---------------------------------------------------------------
+ * Tables — no outer border, hairlines between rows
+ * ------------------------------------------------------------- */
+
+.sl-markdown-content table:not(:where(.not-content *)) {
+	border: none;
+	border-collapse: collapse;
+	width: 100%;
+	font-size: 0.9rem;
+	margin: 1.5rem 0;
+}
+
+.sl-markdown-content table th:not(:where(.not-content *)) {
+	border: none;
+	border-bottom: 1px solid var(--sl-color-gray-5);
+	background-color: transparent;
+	text-align: start;
+	text-transform: uppercase;
+	font-size: 0.7rem;
+	letter-spacing: 0.06em;
+	font-weight: 600;
+	color: var(--sl-color-gray-3);
+	padding: 0.5rem 0.75rem;
+}
+
+.sl-markdown-content table td:not(:where(.not-content *)) {
+	border: none;
+	border-bottom: 1px solid var(--sl-color-hairline);
+	padding: 0.75rem;
+	vertical-align: top;
+}
+
+.sl-markdown-content table tr:last-child td:not(:where(.not-content *)) {
+	border-bottom: none;
+}
+
+/* ---------------------------------------------------------------
+ * Link cards (Starlight <LinkCard>) — softer radius + shadow
+ * ------------------------------------------------------------- */
+
+.sl-link-card {
+	border-radius: 0.875rem !important;
+	border-color: var(--sl-color-gray-5) !important;
+	box-shadow: var(--sl-shadow-sm);
+	transition:
+		border-color 0.15s ease,
+		box-shadow 0.15s ease,
+		transform 0.15s ease;
+}
+
+.sl-link-card:hover {
+	border-color: var(--sl-color-gray-4) !important;
+	box-shadow: var(--sl-shadow-md);
+	transform: translateY(-1px);
+}
+
+.sl-link-card .title {
+	color: var(--sl-color-white);
+	font-weight: 600;
+}
+
+.sl-link-card .description {
+	color: var(--sl-color-gray-3);
+}
+
+/* ---------------------------------------------------------------
+ * Previous / Next pagination cards
+ * ------------------------------------------------------------- */
+
+.pagination-links a {
+	padding: 0.625rem 0.875rem !important;
+	border-radius: 0.625rem !important;
+	border-color: var(--sl-color-gray-5) !important;
+	background-color: var(--sl-color-bg);
+	color: var(--sl-color-gray-3) !important;
+	box-shadow: none !important;
+	font-size: 0.75rem;
+	transition:
+		border-color 0.15s ease,
+		box-shadow 0.15s ease,
+		transform 0.15s ease;
+}
+
+.pagination-links a:hover {
+	border-color: var(--sl-color-gray-4) !important;
+	box-shadow: var(--sl-shadow-sm) !important;
+}
+
+.pagination-links svg {
+	width: 1rem !important;
+	height: 1rem !important;
+	color: var(--sl-color-gray-4);
+}
+
+.pagination-links .link-title {
+	font-size: 0.9rem !important;
+	font-weight: 500 !important;
+	color: var(--sl-color-white) !important;
+	line-height: 1.3 !important;
+}
+
+/* ---------------------------------------------------------------
+ * Misc preserved from prior styling
+ * ------------------------------------------------------------- */
+
+.getting-started {
+	padding-block: clamp(2.5rem, 1rem, 10rem);
 }

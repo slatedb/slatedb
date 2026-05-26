@@ -1,7 +1,6 @@
 ---
 import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
 import Search from '@astrojs/starlight/components/Search.astro';
-
 ---
 
 <div class="header">
@@ -13,61 +12,59 @@ import Search from '@astrojs/starlight/components/Search.astro';
 			<Search />
 		</div>
 		<div class="sl-flex header-links">
-			<a href="/docs/get-started/introduction/" class="header-link">docs</a>
-			<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link">github</a>
-			<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">discord</a>
+			<a href="/docs/get-started/introduction/" class="header-link">Docs</a>
+			<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link">GitHub</a>
+			<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">Discord</a>
 		</div>
 	</div>
 </div>
 
 <style>
-        .header {
-			display: flex;
-			gap: var(--sl-nav-gap);
-			justify-content: space-between;
-			align-items: center;
-			height: 100%;
-		}
+	.header {
+		display: flex;
+		gap: var(--sl-nav-gap);
+		justify-content: space-between;
+		align-items: center;
+		height: 100%;
+	}
 
-		.title-wrapper {
-			/* Prevent long titles overflowing and covering the search and menu buttons on narrow viewports. */
-			overflow: clip;
-			/* Avoid clipping focus ring around link inside title wrapper. */
-			padding: 0.25rem;
-			margin: -0.25rem;
-			min-width: 0;
-		}
+	.title-wrapper {
+		overflow: clip;
+		padding: 0.25rem;
+		margin: -0.25rem;
+		min-width: 0;
+	}
 
-		.search-wrapper {
-			flex: 1;
-			width: 360px;
-			justify-content: flex-end;
-		}
+	.search-wrapper {
+		flex: 1;
+		width: 320px;
+		justify-content: flex-end;
+	}
 
-		.right-group {
-			gap: 1rem;
-			align-items: center;
-		}
+	.right-group {
+		gap: 1.25rem;
+		align-items: center;
+	}
 
-		.header-links {
-			display: flex;
-			gap: 1.5rem;
-			align-items: center;
-		}
+	.header-links {
+		display: flex;
+		gap: 1.25rem;
+		align-items: center;
+	}
 
-		.header-link {
-			font-size: 0.875rem;
-			font-family: monospace;
-			color: var(--sl-color-text);
-			text-decoration: none;
-			transition: color 0.2s ease;
-		}
+	.header-link {
+		font-size: 0.875rem;
+		font-weight: 500;
+		color: var(--sl-color-gray-2);
+		text-decoration: none;
+		transition: color 0.15s ease;
+	}
 
-		.header-link:hover {
-			color: var(--sl-color-gray-3);
-		}
+	.header-link:hover {
+		color: var(--sl-color-text-accent);
+	}
 
-        .sl-flex {
-            display: flex;
-        }
+	.sl-flex {
+		display: flex;
+	}
 </style>
