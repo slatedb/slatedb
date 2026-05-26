@@ -703,18 +703,29 @@ impl CompactorState {
         }
 
         for compaction in remote_compactions.value.iter() {
-            if let Entry::Vacant(v) = merged.entry(compaction.id()) {
-                // The compactor should control all compaction state transitions. If the
-                // compactor finds a new remote compaction (a compaction that the compactor
-                // didn't create), it must be in `Submitted` status (the beginning status).
-                if !matches!(compaction.status(), CompactionStatus::Submitted) {
-                    error!(
-                        "skipping remote commpaction with unexpected (non-Submitted) status [compaction={:?}]",
-                        compaction,
-                    );
-                    continue;
+            match merged.entry(compaction.id()) {
+                Entry::Vacant(v) => {
+                    // The compactor should control all compaction state transitions. If the
+                    // compactor finds a new remote compaction (a compaction that the compactor
+                    // didn't create), it must be in `Submitted` status (the beginning status).
+                    if !matches!(compaction.status(), CompactionStatus::Submitted) {
+                        error!(
+                            "skipping remote compaction with unexpected (non-Submitted) status [compaction={:?}]",
+                            compaction,
+                        );
+                        continue;
+                    }
+                    v.insert(compaction.clone());
                 }
-                v.insert(compaction.clone());
+                Entry::Occupied(mut o) => {
+                    // Accept `Compacted` status written by a remote worker. This is the
+                    // signal that execution finished and the coordinator should commit the
+                    // manifest. All other remote status updates are ignored; the coordinator
+                    // owns every other transition.
+                    if matches!(compaction.status(), CompactionStatus::Compacted) {
+                        o.insert(compaction.clone());
+                    }
+                }
             }
         }
 
@@ -1152,6 +1163,32 @@ mod tests {
         assert_eq!(
             merged.get(&remote_submitted).expect("not found").status(),
             CompactionStatus::Submitted
+        );
+    }
+
+    #[test]
+    fn test_merge_remote_compactions_accepts_compacted_from_worker() {
+        let manifest = new_dirty_manifest();
+        let compactor_epoch = manifest.value.compactor_epoch;
+        let id = Ulid::from_parts(1, 0);
+
+        let mut local_compactions = new_dirty_compactions(compactor_epoch);
+        local_compactions
+            .value
+            .insert(compaction_with_status(id, CompactionStatus::Running));
+        let mut state = CompactorState::new(manifest, local_compactions);
+
+        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
+        remote_compactions
+            .value
+            .insert(compaction_with_status(id, CompactionStatus::Compacted));
+
+        state.merge_remote_compactions(remote_compactions);
+
+        let merged = &state.compactions.value;
+        assert_eq!(
+            merged.get(&id).expect("not found").status(),
+            CompactionStatus::Compacted
         );
     }
 

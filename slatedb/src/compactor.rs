@@ -749,11 +749,10 @@ impl CompactorEventHandler {
                         .set(self.system_clock.now().timestamp());
                 }
                 Err(_) => {
-                    // Sources are already absent from the manifest: the manifest write
-                    // completed before the last coordinator crash. Mark Failed so the
-                    // entry doesn't get retried on the next tick.
+                    // Validation failed against the current manifest. Mark Failed so the
+                    // entry isn't retried on the next tick.
                     info!(
-                        "compaction sources already absent from manifest, marking Failed [id={}]",
+                        "compacted entry failed validation, marking Failed [id={}]",
                         id
                     );
                     self.state_mut()
