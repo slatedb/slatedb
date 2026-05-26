@@ -735,7 +735,6 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
-        let mut any_failed = false;
         for compaction in compacted {
             let id = compaction.id();
             match self.validate_compaction(compaction.spec()) {
@@ -753,8 +752,6 @@ impl CompactorEventHandler {
                             .collect(),
                     };
                     self.state_mut().finish_compaction(id, output_sr);
-                    self.log_compaction_state();
-                    self.state_writer.write_state_safely().await?;
                     self.stats
                         .last_compaction_ts
                         .set(self.system_clock.now().timestamp());
@@ -768,14 +765,12 @@ impl CompactorEventHandler {
                     );
                     self.state_mut()
                         .update_compaction(&id, |c| c.set_status(CompactionStatus::Failed));
-                    any_failed = true;
                 }
             }
         }
 
-        if any_failed {
-            self.state_writer.write_compactions_safely().await?;
-        }
+        self.log_compaction_state();
+        self.state_writer.write_state_safely().await?;
 
         Ok(())
     }
