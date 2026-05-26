@@ -1082,7 +1082,12 @@ impl CompactorEventHandler {
             .start_submitted_compactions(&submitted_compactions)
             .await;
 
-        if !submitted_compactions.is_empty() {
+        // For a remote executor, non-drain compactions are left as `Submitted` for
+        // workers to CAS-claim. `start_submitted_compactions` made no state changes for
+        // them, so writing back the coordinator's in-memory view would overwrite any
+        // `Running` or `Compacted` state the worker already wrote — preventing commits.
+        let has_local_mutations = !submitted_compactions.is_empty() && (any_drain || !self.executor.is_remote());
+        if has_local_mutations {
             if any_drain {
                 self.state_writer.write_state_safely().await?;
             } else {
