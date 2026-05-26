@@ -1156,7 +1156,7 @@ impl Default for CompactionWorkerOptions {
             max_concurrent_compactions: 4,
             compactions_poll_interval: Duration::from_secs(5),
             heartbeat_bytes: 5_242_880,
-            heartbeat_min_interval: Duration::from_secs(1),
+            heartbeat_min_interval: Duration::from_secs(5),
         }
     }
 }
