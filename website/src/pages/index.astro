@@ -82,37 +82,35 @@ value = await db.get(b"hello")`,
     },
 ];
 
-// Six mechanism-named feature tiles.
+// Four mechanism-named feature cells for the homepage engineering plate.
 const features = [
     {
+        id: 'zero-disk',
+        figure: 'Fig. 1',
+        figureTitle: 'object storage is the disk',
         name: 'Zero-disk architecture',
-        body: 'Runs as an in-process engine without local disk or inter-node networking.',
-        tag: '// no local state',
+        body: 'Persist WALs, SSTs, manifests, and compacted runs directly to object storage. Keep the durability and cost profile of S3-class storage without local disks or cross-AZ storage traffic.',
     },
     {
-        name: 'Snapshot isolation + transactions',
-        body: 'Readers and writers see a consistent view of the database. Transactional writes are first-class.',
-        tag: '// consistent reads',
+        id: 'deployment',
+        figure: 'Fig. 2',
+        figureTitle: 'embed once, read everywhere',
+        name: 'Flexible deployment',
+        body: 'Embed SlateDB in your service, run a single writer per database, and fan out readers wherever your workload needs them.',
     },
     {
-        name: 'Single-writer, multi-reader',
-        body: 'One writer per database. Multiple readers across nodes can read the same database concurrently.',
-        tag: '// fan out reads',
+        id: 'semantics',
+        figure: 'Fig. 3',
+        figureTitle: 'correct shared state',
+        name: 'Transactional semantics',
+        body: 'Transactions, snapshots, and snapshot isolation give clients a consistent view, while writer fencing keeps stale writers from corrupting committed state.',
     },
     {
-        name: 'Writer fencing',
-        body: 'Zombie writer processes are detected and prevented from corrupting committed state.',
-        tag: '// safe failover',
-    },
-    {
-        name: 'Pluggable compaction',
-        body: 'Choose the compaction strategy that fits your access pattern. Run it in-process or standalone.',
-        tag: '// your policy',
-    },
-    {
-        name: 'Read caching',
-        body: 'In-memory and optional on-disk caches reduce read latency and object-store API cost.',
-        tag: '// memory + disk',
+        id: 'performance',
+        figure: 'Fig. 4',
+        figureTitle: 'latency and cost controls',
+        name: 'Performance control',
+        body: 'Run compaction in-process or separately with custom logic. Layer memory and optional disk caches over object storage, backed by a Rust core.',
     },
 ];
 ---
@@ -208,18 +206,57 @@ const features = [
                     </p>
                 </section>
 
-                <!-- 4. Feature grid -->
+                <!-- 4. Feature plate -->
                 <section class="features" aria-label="Features">
-                    <h2 class="section-eyebrow">the engine</h2>
-                    <div class="features-grid">
-                        {features.map((f, i) => (
-                            <article class="feature">
-                                <div class="feature-tag">{f.tag}</div>
-                                <div class="feature-numeral" aria-hidden="true">{['I','II','III','IV','V','VI'][i]}</div>
-                                <h3 class="feature-name">{f.name}</h3>
-                                <p class="feature-body">{f.body}</p>
-                            </article>
-                        ))}
+                    <div class="features-head">
+                        <h2 class="section-eyebrow">the engine</h2>
+                    </div>
+                    <div class="feature-plate" data-feature-plate>
+                        <div class="plate-main">
+                            <div class="plate-figure-stack" aria-label="Feature figure">
+                                {features.map((f, i) => (
+                                    <article
+                                        id={`feature-panel-${f.id}`}
+                                        class={`plate-panel ${i === 0 ? 'active' : ''}`}
+                                        role="tabpanel"
+                                        aria-labelledby={`feature-tab-${f.id}`}
+                                        data-feature-panel={f.id}
+                                    >
+                                        <span class="plate-figure-marker">{f.figure}</span>
+                                    </article>
+                                ))}
+                            </div>
+                            <div class="plate-copy-stack">
+                                {features.map((f, i) => (
+                                    <article
+                                        class={`plate-copy ${i === 0 ? 'active' : ''}`}
+                                        data-feature-copy={f.id}
+                                    >
+                                        <h3 class="feature-name">{f.name}</h3>
+                                        <p class="feature-body">{f.body}</p>
+                                    </article>
+                                ))}
+                            </div>
+                        </div>
+                        <div class="plate-tabs" role="tablist" aria-label="Feature figures">
+                            {features.map((f, i) => (
+                                <button
+                                    id={`feature-tab-${f.id}`}
+                                    class={`plate-tab ${i === 0 ? 'active' : ''}`}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={i === 0 ? 'true' : 'false'}
+                                    aria-controls={`feature-panel-${f.id}`}
+                                    data-feature-tab={f.id}
+                                >
+                                    <span>
+                                        <span class="feature-index">{['I', 'II', 'III', 'IV'][i]}</span>
+                                        {f.name}
+                                    </span>
+                                    <span class="plate-tab-tag">{f.figureTitle}</span>
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 </section>
 
@@ -889,6 +926,611 @@ const features = [
         margin: 0;
     }
 
+    /* ---------- Feature plate prototype ---------- */
+
+    .features-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(18rem, 31rem);
+        gap: 2rem;
+        align-items: end;
+        margin-bottom: 1.5rem;
+    }
+    .features-head .section-eyebrow {
+        margin: 0;
+    }
+    .features-summary {
+        margin: 0;
+        font-family:
+            'Source Serif 4', ui-serif, Georgia, serif;
+        font-size: 1.125rem;
+        line-height: 1.55;
+        color: var(--ink-2);
+        font-variation-settings: 'opsz' 18;
+    }
+
+    .feature-plate {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(24rem, 0.95fr);
+        border: 1px solid var(--ink-6);
+        border-radius: 0.75rem;
+        overflow: hidden;
+        background-color: var(--surface-1);
+        box-shadow: 0 1px 2px rgba(27, 36, 47, 0.04),
+                    0 8px 24px rgba(27, 36, 47, 0.05);
+    }
+
+    .plate-figure {
+        min-height: 31rem;
+        padding: 1.5rem;
+        border-right: 1px solid var(--ink-6);
+        display: flex;
+        flex-direction: column;
+        position: relative;
+        background:
+            linear-gradient(rgba(80, 70, 55, 0.08) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(80, 70, 55, 0.08) 1px, transparent 1px),
+            var(--surface-0);
+        background-size: 36px 36px, 36px 36px, auto;
+    }
+
+    .plate-label,
+    .plate-footnotes,
+    .feature-meta,
+    .feature-points {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .plate-label {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding-bottom: 0.85rem;
+        border-bottom: 1px solid rgba(200, 205, 213, 0.85);
+        font-size: 0.7rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+
+    .lsm-diagram {
+        flex: 1;
+        display: grid;
+        grid-template-columns: minmax(10rem, 1fr) minmax(6rem, 0.45fr) minmax(10rem, 1fr);
+        gap: 1rem;
+        align-items: center;
+        padding: 2rem 0;
+        min-height: 20rem;
+    }
+
+    .diagram-node {
+        min-height: 8.5rem;
+        padding: 1.1rem;
+        border: 1px solid var(--ink-6);
+        border-radius: 0.5rem;
+        background-color: rgba(255, 255, 255, 0.76);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.55rem;
+        box-shadow: 0 1px 2px rgba(27, 36, 47, 0.03);
+    }
+    .diagram-node strong {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-size: 1.6rem;
+        font-weight: 400;
+        line-height: 1;
+        color: var(--ink-1);
+    }
+    .diagram-node span:not(.diagram-kicker) {
+        font-size: 0.875rem;
+        line-height: 1.45;
+        color: var(--ink-3);
+    }
+    .diagram-kicker {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.68rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+    .diagram-store {
+        border-color: rgba(122, 62, 34, 0.36);
+    }
+
+    .diagram-link {
+        position: relative;
+        display: grid;
+        gap: 0.35rem;
+        justify-items: center;
+        align-content: center;
+        min-height: 10rem;
+        color: var(--ink-4);
+    }
+    .diagram-link::before {
+        content: '';
+        position: absolute;
+        left: -1.25rem;
+        right: -1.25rem;
+        top: 50%;
+        height: 1px;
+        background: linear-gradient(90deg, var(--ink-6), var(--accent), var(--ink-6));
+    }
+    .diagram-link::after {
+        content: '';
+        position: absolute;
+        right: -1.35rem;
+        top: calc(50% - 0.22rem);
+        width: 0.45rem;
+        height: 0.45rem;
+        border-top: 1px solid var(--accent);
+        border-right: 1px solid var(--accent);
+        transform: rotate(45deg);
+        background-color: transparent;
+    }
+    .diagram-link span {
+        position: relative;
+        z-index: 1;
+        padding: 0.12rem 0.3rem;
+        background-color: var(--surface-0);
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.68rem;
+        line-height: 1.2;
+    }
+
+    .plate-footnotes {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.75rem;
+        padding-top: 0.85rem;
+        border-top: 1px solid rgba(200, 205, 213, 0.85);
+        font-size: 0.68rem;
+        color: var(--ink-4);
+    }
+
+    .feature-callouts {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1px;
+        background-color: var(--ink-6);
+    }
+
+    .feature-callouts .feature {
+        --glow-x: 100%;
+        --glow-y: 0%;
+        background-color: var(--surface-1);
+        padding: 1.35rem 1.25rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        min-height: 13.5rem;
+        position: relative;
+        transition: background 0.2s ease;
+    }
+    .feature-callouts .feature:hover {
+        background:
+            radial-gradient(circle at var(--glow-x) var(--glow-y), rgba(178, 104, 68, 0.12), transparent 70%),
+            var(--surface-1);
+    }
+
+    .feature-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        padding-bottom: 0.65rem;
+        border-bottom: 1px solid var(--ink-7);
+        font-size: 0.68rem;
+        color: var(--ink-4);
+    }
+    .feature-index {
+        color: var(--accent-high);
+    }
+    .feature-callouts .feature-tag {
+        color: var(--ink-4);
+        margin: 0;
+        padding: 0;
+        position: static;
+    }
+    .feature-callouts .feature-tag::after {
+        content: none;
+    }
+    .feature-callouts .feature-name {
+        letter-spacing: 0;
+    }
+    .feature-callouts .feature-body {
+        font-size: 0.9rem;
+        line-height: 1.58;
+    }
+    .feature-points {
+        list-style: none;
+        margin: auto 0 0;
+        padding: 0;
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.68rem;
+        color: var(--ink-4);
+    }
+    .feature-points li {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        min-width: 0;
+    }
+    .feature-points li::before {
+        content: '';
+        flex: 0 0 0.75rem;
+        height: 1px;
+        background-color: var(--accent);
+        opacity: 0.7;
+    }
+
+    @media (max-width: 980px) {
+        .features-head,
+        .feature-plate {
+            grid-template-columns: 1fr;
+        }
+        .plate-figure {
+            border-right: 0;
+            border-bottom: 1px solid var(--ink-6);
+            min-height: 27rem;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .features-summary {
+            font-size: 1rem;
+        }
+        .plate-figure {
+            min-height: auto;
+        }
+        .plate-label {
+            display: grid;
+            gap: 0.35rem;
+        }
+        .plate-footnotes {
+            grid-template-columns: 1fr;
+        }
+        .lsm-diagram {
+            grid-template-columns: 1fr;
+            min-height: auto;
+            padding: 1.5rem 0;
+        }
+        .diagram-link {
+            min-height: 4rem;
+        }
+        .diagram-link::before {
+            left: 50%;
+            right: auto;
+            top: -0.25rem;
+            bottom: -0.25rem;
+            width: 1px;
+            height: auto;
+            background: linear-gradient(var(--ink-6), var(--accent), var(--ink-6));
+        }
+        .diagram-link::after {
+            right: auto;
+            left: calc(50% - 0.22rem);
+            top: auto;
+            bottom: -0.25rem;
+            transform: rotate(135deg);
+        }
+        .feature-callouts {
+            grid-template-columns: 1fr;
+        }
+        .feature-callouts .feature {
+            min-height: auto;
+        }
+    }
+
+    /* ---------- Selectable feature plate ---------- */
+
+    .feature-plate {
+        display: block;
+    }
+
+    .plate-main {
+        display: grid;
+        grid-template-columns: minmax(18rem, 0.62fr) minmax(0, 1.15fr);
+        min-height: 34rem;
+    }
+
+    .plate-figure-stack {
+        position: relative;
+        order: 2;
+        min-height: 34rem;
+        border-left: 1px solid var(--ink-6);
+        background:
+            linear-gradient(rgba(80, 70, 55, 0.08) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(80, 70, 55, 0.08) 1px, transparent 1px),
+            var(--surface-0);
+        background-size: 36px 36px, 36px 36px, auto;
+    }
+
+    .plate-panel {
+        position: relative;
+        min-height: 34rem;
+        padding: 1.5rem;
+        display: none;
+        flex-direction: column;
+    }
+    .plate-panel.active {
+        display: flex;
+    }
+    .plate-figure-marker {
+        position: absolute;
+        top: 1.25rem;
+        right: 1.25rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.7rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+
+    .plate-copy-stack {
+        position: relative;
+        order: 1;
+        background-color: var(--surface-1);
+    }
+
+    .plate-copy {
+        min-height: 34rem;
+        padding: 2rem;
+        display: none;
+        flex-direction: column;
+        gap: 0.9rem;
+    }
+    .plate-copy.active {
+        display: flex;
+    }
+
+    .plate-copy .feature-tag {
+        color: var(--ink-4);
+        margin: 0;
+        padding: 0;
+        position: static;
+    }
+    .plate-copy .feature-tag::after {
+        content: none;
+    }
+    .plate-copy .feature-name {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-weight: 400;
+        font-size: 1.6rem;
+        letter-spacing: 0;
+    }
+    .plate-copy .feature-body {
+        font-size: 1rem;
+        line-height: 1.62;
+    }
+
+    .plate-diagram {
+        flex: 1;
+        display: grid;
+        align-items: center;
+        gap: 1rem;
+        padding: 2rem 0;
+        min-height: 22rem;
+    }
+
+    .diagram-zero {
+        grid-template-columns: minmax(10rem, 1fr) minmax(6rem, 0.45fr) minmax(10rem, 1fr);
+    }
+
+    .diagram-deployment {
+        grid-template-columns: minmax(10rem, 0.9fr) minmax(9rem, 0.75fr) minmax(9rem, 0.9fr);
+    }
+    .diagram-hub {
+        min-height: 8.5rem;
+        padding: 1rem;
+        border: 1px solid rgba(122, 62, 34, 0.36);
+        border-radius: 50%;
+        background-color: rgba(255, 255, 255, 0.78);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        gap: 0.45rem;
+        position: relative;
+    }
+    .diagram-hub::before,
+    .diagram-hub::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        width: 2rem;
+        height: 1px;
+        background-color: var(--accent);
+        opacity: 0.7;
+    }
+    .diagram-hub::before { right: 100%; }
+    .diagram-hub::after { left: 100%; }
+    .diagram-hub strong {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-size: 1.35rem;
+        font-weight: 400;
+        line-height: 1;
+        color: var(--ink-1);
+    }
+
+    .reader-grid,
+    .perf-rail {
+        display: grid;
+        gap: 0.65rem;
+    }
+    .mini-node {
+        padding: 0.8rem 0.85rem;
+        border: 1px solid var(--ink-6);
+        border-radius: 0.45rem;
+        background-color: rgba(255, 255, 255, 0.74);
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.72rem;
+        color: var(--ink-3);
+    }
+
+    .diagram-semantics {
+        grid-template-columns: minmax(12rem, 1fr) minmax(11rem, 0.72fr);
+    }
+    .semantic-stack {
+        display: grid;
+        gap: 0.75rem;
+    }
+    .semantic-row {
+        padding: 0.95rem 1rem;
+        border: 1px solid var(--ink-6);
+        border-radius: 0.45rem;
+        background-color: rgba(255, 255, 255, 0.74);
+        display: grid;
+        gap: 0.35rem;
+    }
+    .semantic-row span {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.68rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+    .semantic-row strong {
+        font-size: 0.95rem;
+        color: var(--ink-1);
+    }
+    .semantic-gate {
+        min-height: 12rem;
+        padding: 1.1rem;
+        border: 1px solid rgba(122, 62, 34, 0.36);
+        border-radius: 0.5rem;
+        background-color: rgba(255, 255, 255, 0.78);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.55rem;
+    }
+    .semantic-gate strong {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-size: 1.55rem;
+        font-weight: 400;
+        color: var(--ink-1);
+    }
+    .semantic-gate span:not(.diagram-kicker) {
+        color: var(--ink-3);
+        line-height: 1.45;
+    }
+
+    .diagram-performance {
+        grid-template-columns: minmax(8rem, 0.7fr) minmax(11rem, 1fr) minmax(8rem, 0.7fr);
+    }
+    .perf-core {
+        border-color: rgba(122, 62, 34, 0.36);
+    }
+
+    .plate-tabs {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1px;
+        background-color: var(--ink-6);
+        border-top: 1px solid var(--ink-6);
+    }
+    .plate-tab {
+        min-width: 0;
+        padding: 0.95rem 1rem;
+        border: 0;
+        border-radius: 0;
+        background-color: var(--surface-0);
+        color: var(--ink-3);
+        cursor: pointer;
+        text-align: left;
+        display: grid;
+        gap: 0.35rem;
+        transition: background-color 0.15s ease, color 0.15s ease;
+    }
+    .plate-tab:hover {
+        background-color: var(--surface-1);
+        color: var(--ink-1);
+    }
+    .plate-tab.active {
+        background-color: var(--ink-1);
+        color: var(--surface-0);
+    }
+    .plate-tab span:first-child {
+        min-width: 0;
+        font-family:
+            'Inter', ui-sans-serif, system-ui, sans-serif;
+        font-size: 0.86rem;
+        font-weight: 600;
+        line-height: 1.25;
+    }
+    .plate-tab .feature-index {
+        margin-right: 0.45rem;
+    }
+    .plate-tab.active .feature-index {
+        color: var(--accent-low);
+    }
+    .plate-tab-tag {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.66rem;
+        line-height: 1.25;
+        color: var(--ink-4);
+    }
+    .plate-tab.active .plate-tab-tag {
+        color: var(--ink-6);
+    }
+
+    @media (max-width: 980px) {
+        .plate-main {
+            grid-template-columns: 1fr;
+        }
+        .plate-figure-stack {
+            border-left: 0;
+            border-top: 1px solid var(--ink-6);
+        }
+        .plate-copy,
+        .plate-panel {
+            min-height: auto;
+        }
+        .plate-tabs {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+
+    @media (max-width: 640px) {
+        .plate-panel,
+        .plate-copy {
+            padding: 1.25rem;
+        }
+        .plate-diagram,
+        .diagram-zero,
+        .diagram-deployment,
+        .diagram-semantics,
+        .diagram-performance {
+            grid-template-columns: 1fr;
+            min-height: auto;
+        }
+        .diagram-link {
+            min-height: 4rem;
+        }
+        .diagram-hub {
+            border-radius: 0.5rem;
+        }
+        .diagram-hub::before,
+        .diagram-hub::after {
+            display: none;
+        }
+        .plate-tabs {
+            grid-template-columns: 1fr;
+        }
+    }
+
     /* ---------- Quickstart ---------- */
 
     .quickstart {
@@ -1175,6 +1817,43 @@ const features = [
         }
     };
     onReady(() => {
+        // Feature plate tabs
+        const featurePlate = document.querySelector('[data-feature-plate]');
+        if (featurePlate) {
+            const featureTabs = Array.from(featurePlate.querySelectorAll<HTMLButtonElement>('[data-feature-tab]'));
+            const featurePanels = Array.from(featurePlate.querySelectorAll<HTMLElement>('[data-feature-panel]'));
+            const featureCopies = Array.from(featurePlate.querySelectorAll<HTMLElement>('[data-feature-copy]'));
+            const activateFeature = (id: string, focus = false) => {
+                featureTabs.forEach((tab) => {
+                    const matches = tab.dataset.featureTab === id;
+                    tab.classList.toggle('active', matches);
+                    tab.setAttribute('aria-selected', matches ? 'true' : 'false');
+                    if (matches && focus) tab.focus();
+                });
+                featurePanels.forEach((panel) => {
+                    panel.classList.toggle('active', panel.dataset.featurePanel === id);
+                });
+                featureCopies.forEach((copy) => {
+                    copy.classList.toggle('active', copy.dataset.featureCopy === id);
+                });
+            };
+
+            featureTabs.forEach((tab, index) => {
+                tab.addEventListener('click', () => {
+                    const id = tab.dataset.featureTab;
+                    if (id) activateFeature(id);
+                });
+                tab.addEventListener('keydown', (event) => {
+                    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                    event.preventDefault();
+                    const offset = event.key === 'ArrowRight' ? 1 : -1;
+                    const next = featureTabs[(index + offset + featureTabs.length) % featureTabs.length];
+                    const id = next?.dataset.featureTab;
+                    if (id) activateFeature(id, true);
+                });
+            });
+        }
+
         // Quickstart language tabs
         const tabs = document.querySelectorAll('.qs-tab');
         const panes = document.querySelectorAll('.qs-pane');
