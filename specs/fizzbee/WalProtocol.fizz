@@ -264,8 +264,15 @@ symmetric role WalWriter:
         """
         require self.status == "ValidateFence"
         if self.epoch < current_epoch:
-            # We don't technically need to check this, but might as well since
-            # we refresh the manifest to get the latest replay_after_wal_id anyway.
+            # Protect against successfully initializing if writer comes in,
+            # fences this writer, advances the replay_after_wal_id boundary,
+            # and GC clears the slot this writer is writing to:
+            # - W2 decides WAL-11 is fencing wal
+            # - W1 writes WAL-11 first
+            # - W3 initializes and finishes fencing
+            # - W3 advances boundary to WAL-12
+            # - gc deletes WAL-11
+            # - W2 writes WAL-11 <-- check client is not fenced on successful write
             self.status = "Fenced"
         else:
             record_commit(self.next_id, self.epoch, FENCE)

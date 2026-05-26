@@ -599,14 +599,18 @@ impl ManifestWriterHandler {
         &mut self,
         done: Option<oneshot::Sender<Result<(), SlateDBError>>>,
     ) -> Result<(), SlateDBError> {
-        self.manifest.refresh().await?;
-        let remote_dirty = self.manifest.prepare_dirty()?;
-        self.merge_remote_manifest(remote_dirty);
-        if let Some(tx) = done {
-            let _ = tx.send(Ok(()));
+        let result = async {
+            self.manifest.refresh().await?;
+            let remote_dirty = self.manifest.prepare_dirty()?;
+            self.merge_remote_manifest(remote_dirty);
+            let _ = self.tracker_tx.send(TrackerMessage::ManifestRefreshed);
+            Ok(())
         }
-        let _ = self.tracker_tx.send(TrackerMessage::ManifestRefreshed);
-        Ok(())
+        .await;
+        if let Some(tx) = done {
+            let _ = tx.send(result.clone());
+        }
+        result
     }
 
     fn merge_remote_manifest(
