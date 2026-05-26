@@ -57,7 +57,6 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
-use crate::manifest::store::ManifestStore;
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
@@ -501,11 +500,7 @@ impl DbInner {
         }
     }
 
-    async fn replay_wal(
-        &self,
-        wal_id_range: Range<u64>,
-        manifest_store: Arc<ManifestStore>,
-    ) -> Result<(), SlateDBError> {
+    async fn replay_wal(&self, wal_id_range: Range<u64>) -> Result<(), SlateDBError> {
         let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
         fail_point!(
             Arc::clone(&self.fp_registry),
@@ -549,8 +544,8 @@ impl DbInner {
                 // the GC has removed this WAL entry. Check the latest manifest's
                 // writer_epoch to see if this client is fenced.
                 Err(err) if err.has_object_store_not_found() => {
-                    let latest_manifest = manifest_store.read_latest_manifest().await?;
-                    if latest_manifest.manifest.writer_epoch > writer_epoch {
+                    self.memtable_flusher.refresh_manifest().await?;
+                    if self.state.read().state().manifest.value.writer_epoch > writer_epoch {
                         return Err(SlateDBError::Fenced);
                     }
                     return Err(err);
