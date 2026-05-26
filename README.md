@@ -168,6 +168,7 @@ See who's using SlateDB.
 - [Storrito](https://storrito.com)
 - [Tensorlake](https://www.tensorlake.ai)
 - [Volga](https://github.com/volga-project/volga)
+- [WombatKV](https://github.com/Venkat2811/wombatkv)
 - [ZeroFS](https://zerofs.net)
 
 ## Talks
