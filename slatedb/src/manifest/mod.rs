@@ -4496,6 +4496,31 @@ mod tests {
     }
 
     #[test]
+    fn test_projected_drops_segment_when_projection_and_global_range_disjoint() {
+        // segment_projection narrows hour=11/ to a sub-range, but the global
+        // range only covers hour=12/. The hour=11/ intersection is empty, so
+        // it must be dropped. hour=12/ uses its full segment range and
+        // intersects with the global range to a non-empty result.
+        let manifest = manifest_with_full_segments("hour", &[b"hour=11/", b"hour=12/"]);
+        let projector: SegmentProjectionFn = Arc::new(|prefix: &[u8]| {
+            Ok(if prefix == b"hour=11/" {
+                BytesRange::from_ref("hour=11/a".."hour=11/m")
+            } else {
+                BytesRange::from_prefix(prefix)
+            })
+        });
+        let config = ProjectionConfig {
+            global_range: Some(BytesRange::from_ref("hour=12/a".."hour=12/z")),
+            segment_filter: None,
+            segment_projection: Some(projector),
+        };
+
+        let projected = Manifest::projected(&manifest, &config).unwrap();
+        assert_eq!(projected.core.segments.len(), 1);
+        assert_eq!(projected.core.segments[0].prefix.as_ref(), b"hour=12/");
+    }
+
+    #[test]
     fn test_projected_errors_when_segment_range_outside_prefix() {
         let manifest = manifest_with_full_segments("hour", &[b"hour=11/"]);
         let projector: SegmentProjectionFn =
