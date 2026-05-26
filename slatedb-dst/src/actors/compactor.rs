@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use log::info;
 use rand::RngCore;
 use slatedb::compactor::stats::COMPACTOR_EPOCH;
-use slatedb::config::CompactorOptions;
+use slatedb::config::{CompactionWorkerOptions, CompactorOptions};
 use slatedb::{CloseReason, CompactorBuilder, Error, ErrorKind};
 use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
 use tokio::task::JoinHandle;
@@ -25,6 +25,8 @@ pub struct CompactorActorOptions {
     pub restart_interval: Duration,
     /// The options to use when constructing each standalone compactor.
     pub compactor_options: CompactorOptions,
+    /// The options to use for the embedded compaction worker.
+    pub worker_options: CompactionWorkerOptions,
 }
 
 pub struct CompactorActor {
@@ -128,6 +130,8 @@ impl CompactorActor {
             .with_options(self.actor_options.compactor_options.clone())
             .with_system_clock(ctx.system_clock())
             .with_seed(ctx.rand().rng().next_u64());
+
+        builder = builder.with_worker_options(self.actor_options.worker_options.clone());
 
         if let Some(merge_operator) = ctx.merge_operator() {
             builder = builder.with_merge_operator(merge_operator);

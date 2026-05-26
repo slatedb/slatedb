@@ -11,6 +11,7 @@ use rand::{Rng, RngCore};
 use rstest::rstest;
 use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;
+use slatedb::config::CompactionWorkerOptions;
 use slatedb_dst::{
     actors::{
         initialize_accounts, AuditorActor, BankAuditView, BankMergeOperator, BankOptions,
@@ -165,6 +166,10 @@ fn test_dst_bank_with_toxics(
             CompactorActor::new(CompactorActorOptions {
                 restart_interval: Duration::from_millis(250),
                 compactor_options,
+                worker_options: CompactionWorkerOptions {
+                    compactions_poll_interval: Duration::from_millis(10),
+                    ..CompactionWorkerOptions::default()
+                },
             })?,
         )
         .actor("shutdown", ShutdownActor::new(shutdown_at_ms)?);

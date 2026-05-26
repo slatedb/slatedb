@@ -27,7 +27,10 @@ use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
-use slatedb::config::{CompactorOptions, DurabilityLevel, SizeTieredCompactionSchedulerOptions};
+use slatedb::config::{
+    CompactionWorkerOptions, CompactorOptions, DurabilityLevel,
+    SizeTieredCompactionSchedulerOptions,
+};
 use slatedb::{Db, DbRand, PrefixExtractor};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use tempfile::TempDir;
@@ -210,6 +213,10 @@ fn run_seed_once(
         .into(),
         ..CompactorOptions::default()
     };
+    let worker_options = CompactionWorkerOptions {
+        compactions_poll_interval: Duration::from_millis(10),
+        ..CompactionWorkerOptions::default()
+    };
     let mut harness = Harness::new(name, seed, move |ctx| async move {
         let failures = ctx.failure_controller();
         for index in 0..10 {
@@ -264,6 +271,7 @@ fn run_seed_once(
             CompactorActor::new(CompactorActorOptions {
                 restart_interval: Duration::from_millis(25),
                 compactor_options,
+                worker_options,
             })?,
         )
         .actor("shutdown", ShutdownActor::new(shutdown_at_ms)?);

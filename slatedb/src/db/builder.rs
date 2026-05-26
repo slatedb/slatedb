@@ -129,7 +129,7 @@ use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
-use crate::config::CompactorOptions;
+use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{Settings, SstBlockSize};
@@ -945,6 +945,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     compaction_runtime: Handle,
     options: CompactorOptions,
+    worker_options: CompactionWorkerOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
     recorder: MetricsRecorderHelper,
@@ -965,6 +966,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             main_object_store,
             compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
+            worker_options: CompactionWorkerOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
@@ -984,6 +986,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             main_object_store: self.main_object_store,
             compaction_runtime: self.compaction_runtime,
             options: self.options,
+            worker_options: self.worker_options,
             scheduler_supplier: self.scheduler_supplier,
             rand: self.rand,
             recorder: self.recorder,
@@ -1007,6 +1010,16 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Sets the options to use for the compactor.
     pub fn with_options(mut self, options: CompactorOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Sets the options for the embedded compaction worker.
+    ///
+    /// Only has effect when [`CompactorOptions::embedded_worker`] is `true`.
+    /// When `None` (the default), worker options are derived from the
+    /// coordinator's [`CompactorOptions`].
+    pub fn with_worker_options(mut self, options: CompactionWorkerOptions) -> Self {
+        self.worker_options = options;
         self
     }
 
@@ -1134,6 +1147,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compactions_store,
             table_store,
             self.options,
+            self.worker_options,
             scheduler_supplier,
             self.compaction_runtime,
             self.rand,

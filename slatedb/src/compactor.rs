@@ -321,6 +321,7 @@ pub struct Compactor {
     compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
+    worker_options: crate::config::CompactionWorkerOptions,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
     task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
@@ -339,6 +340,7 @@ impl Compactor {
         compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         options: CompactorOptions,
+        worker_options: crate::config::CompactionWorkerOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
@@ -360,6 +362,7 @@ impl Compactor {
             compactions_store,
             table_store,
             options: Arc::new(options),
+            worker_options,
             scheduler_supplier,
             task_executor,
             compactor_runtime,
@@ -446,12 +449,7 @@ impl Compactor {
     /// Phase 2 keeps this implicit — full `CompactionWorkerOptions` on the
     /// coordinator builder is left for a follow-up.
     fn worker_options(&self) -> crate::config::CompactionWorkerOptions {
-        crate::config::CompactionWorkerOptions {
-            max_concurrent_compactions: self.options.max_concurrent_compactions,
-            max_sst_size: self.options.max_sst_size,
-            max_fetch_tasks: self.options.max_fetch_tasks,
-            ..crate::config::CompactionWorkerOptions::default()
-        }
+        self.worker_options.clone()
     }
 
     /// Gracefully stops the compactor task and waits for it to finish.
