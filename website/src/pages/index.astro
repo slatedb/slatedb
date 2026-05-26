@@ -10,12 +10,11 @@ const starsLabel = await getStarsLabel();
 
 // The "used by" companies — even row, all logos rendered at the same height.
 const usedBy = [
-    { name: 'Dropbox',    href: 'https://www.dropbox.com/',     logo: '/img/logos/dropbox.svg' },
-    { name: 'TensorLake', href: 'https://www.tensorlake.ai/',   logo: '/img/logos/tensorlake.svg' },
+    { name: 'Dropbox',    href: 'https://www.dropbox.com/',     logo: '/img/logos/dropbox.svg',    scale: 1.2 },
+    { name: 'TensorLake', href: 'https://www.tensorlake.ai/',   logo: '/img/logos/tensorlake.svg', scale: 1.2 },
     { name: 'S2',         href: 'https://s2.dev/',                logo: '/img/logos/s2.svg' },
     { name: 'Goldsky',    href: 'https://goldsky.com/',           logo: '/img/logos/goldsky.svg' },
     { name: 'Gadget',     href: 'https://gadget.dev/',            logo: '/img/logos/gadget.svg' },
-    { name: 'Embucket',   href: 'https://www.embucket.com/',     logo: '/img/logos/embucket.svg' },
     { name: 'MerkleMap',  href: 'https://merklemap.com/',        logo: '/img/logos/merklemap.svg' },
     { name: 'OpenData',   href: 'https://opendata.dev/',         logo: '/img/logos/opendata.svg' },
     { name: 'Massive',    href: 'https://massive.com/',           logo: '/img/logos/massive.png' },
@@ -197,7 +196,7 @@ const features = [
                     <div class="usedby-label">used by</div>
                     <div class="usedby-row">
                         {usedBy.map((c) => (
-                            <a href={c.href} target="_blank" rel="noopener noreferrer" class="usedby-logo">
+                            <a href={c.href} target="_blank" rel="noopener noreferrer" class="usedby-logo" style={c.scale ? `--logo-scale: ${c.scale}` : undefined}>
                                 <img src={c.logo} alt={c.name} />
                             </a>
                         ))}
@@ -278,6 +277,9 @@ const features = [
                     </div>
                     <div class="qs-card">
                         <div class="qs-tabs" role="tablist">
+                            <div class="qs-dots" aria-hidden="true">
+                                <span></span><span></span><span></span>
+                            </div>
                             {langs.map((l, i) => (
                                 <button
                                     class={`qs-tab ${i === 0 ? 'active' : ''}`}
@@ -742,6 +744,8 @@ const features = [
         width: auto;
         max-width: 100%;
         object-fit: contain;
+        transform: scale(var(--logo-scale, 1));
+        transform-origin: center;
         filter: grayscale(100%);
         opacity: 0.55;
         transition: opacity 0.2s ease, filter 0.2s ease;
@@ -780,7 +784,7 @@ const features = [
         font-family:
             'Source Serif 4', ui-serif, Georgia, serif;
         font-weight: 500;
-        font-size: 1.5rem;
+        font-size: clamp(1.125rem, 2.6vw, 1.5rem);
         line-height: 1.55;
         color: var(--ink-1);
         margin: 0;
@@ -962,11 +966,7 @@ const features = [
         display: grid;
         grid-template-columns: minmax(0, 1.05fr) minmax(24rem, 0.95fr);
         border: 1px solid var(--ink-6);
-        border-radius: 0.75rem;
         overflow: hidden;
-        background-color: var(--surface-1);
-        box-shadow: 0 1px 2px rgba(27, 36, 47, 0.04),
-                    0 8px 24px rgba(27, 36, 47, 0.05);
     }
 
     .plate-figure {
@@ -1297,7 +1297,6 @@ const features = [
     .plate-copy-stack {
         position: relative;
         order: 1;
-        background-color: var(--surface-1);
         display: flex;
         flex-direction: column;
     }
@@ -1590,10 +1589,33 @@ const features = [
     .qs-tabs {
         display: flex;
         flex-wrap: wrap;
+        align-items: center;
         gap: 0;
         padding: 0 0.5rem;
         border-bottom: 1px solid var(--ink-6);
         background-color: var(--surface-0);
+    }
+    .qs-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0 0.75rem 0 0.4rem;
+        margin-right: 0.35rem;
+        align-self: stretch;
+        border-right: 1px solid var(--ink-6);
+    }
+    .qs-dots span {
+        display: block;
+        width: 0.6rem;
+        height: 0.6rem;
+        border-radius: 50%;
+        border: 1px solid var(--ink-5);
+        background-color: transparent;
+        box-sizing: border-box;
+    }
+    .qs-dots span:nth-child(1) {
+        background-color: var(--accent);
+        border-color: var(--accent);
     }
     .qs-tab {
         font-family:
