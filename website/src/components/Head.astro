@@ -1,0 +1,21 @@
+---
+// Extends Starlight's default <Head> with a `<link rel="alternate">` pointing
+// at the per-page markdown mirror emitted by scripts/generate-md-mirrors.js.
+// LLM crawlers that honor content alternates will pick this up automatically.
+
+import Default from '@astrojs/starlight/components/Head.astro';
+
+// Derive the .md URL from the current pathname. Pages live at e.g.
+//   /docs/get-started/quickstart/    -> mirror at /docs/get-started/quickstart.md
+//   /rfcs/0001-manifest/             -> mirror at /rfcs/0001-manifest.md
+const pathname = Astro.url.pathname.replace(/\/$/, '');
+const isDocsRoute = pathname.startsWith('/docs/') || pathname.startsWith('/rfcs/');
+const mdHref = isDocsRoute ? `${pathname}.md` : null;
+---
+
+<Default />
+{
+    mdHref && (
+        <link rel="alternate" type="text/markdown" href={mdHref} title="Markdown source" />
+    )
+}

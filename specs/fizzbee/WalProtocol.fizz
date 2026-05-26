@@ -64,23 +64,23 @@ options:
 #            ┌─────────▼─────────┐
 #            │    InitNextId     │
 #            └─────────┬─────────┘
-#            ┌─────────▼─────────┐
-#            │    ClaimEpoch     │
-#            └─────────┬─────────┘
-#            ┌─────────▼─────────┐
-# ┌──────────▶    WriteFence     ◀──────────┐
-# │          └─────────┬─────────┘          │
-# │          ┌─────────┴─────────┐          │
-# │┌─────────▼─────────┐┌────────▼────────┐ │
-# └┤   ValidateFence   ││   CheckFenced   ├─┘
-#  └─────────┬─────┬───┘└────────┬────────┘
-#            │     └─────────────┤
-#      ┌─────▼─────┐             │
-#  ┌───▶ ReplayWal ├─────────────┤
-#  │   └─────┬─────┘             │
-#  └─────────┤                   │
-#      ┌─────▼─────┐       ┌─────▼─────┐
-#  ┌───▶ WriteWal  ├───────▶  Fenced   │
+#            ┌─────────▼─────────┐ ┌───────────────────┐ ┌───────────────────┐
+#            │    ClaimEpoch     ├─▶   RefreshNextId   ├─▶  RefreshManifest  │
+#            └─────────┬─────────┘ └───────────────────┘ └──────┬────┬───────┘
+#            ┌─────────▼─────────┐                              │    │
+#            │    WriteFence     ◀──────────┬───────────────────┘    │
+#            └─────────┬─────────┘          │                        │
+#            ┌─────────┴─────────┐          │                        │
+#  ┌─────────▼─────────┐┌────────▼────────┐ │                        │
+#  │   ValidateFence   ││   CheckFenced   ├─┘                        │
+#  └─────────┬─────┬───┘└────────┬────────┘                          │
+#            │     └─────────────┤                                   │
+#      ┌─────▼─────┐             │                                   │
+#  ┌───▶ ReplayWal ├─────────────┤                                   │
+#  │   └─────┬─────┘             │                                   │
+#  └─────────┤                   │                                   │
+#      ┌─────▼─────┐       ┌─────▼─────┐                             │
+#  ┌───▶ WriteWal  ├───────▶  Fenced   ◀─────────────────────────────┘
 #  │   └─────┬─────┘       └───────────┘
 #  └─────────┘
 #
@@ -148,13 +148,35 @@ action Init:
     for i in range(NUM_GCS):
         gcs.add(GarbageCollector())
 
-atomic func latest_sequence_id():
+func latest_sequence_id(wal_id_last_compacted):
     """
     Returns the most recently written sequence ID, or 0 if no objects exist.
+    Uses binary search to probe the object store for the highest existing
+    ID above the given boundary.
     """
-    if len(objects) == 0:
-        return 0
-    return max(objects.keys())
+    atomic:
+        if len(objects) == 0:
+            return 0
+
+        # Rather than using exponential probes as the real implementation
+        # does, just pick a bound 2x the number of existing objects to
+        # simulate a search range with some hits and some misses.
+        active_wals_count = max(objects.keys()) - replay_after_wal_id
+        left = wal_id_last_compacted + 1;
+        right = left + active_wals_count * 2
+
+    while left < right:
+        atomic:
+            mid = left + (right - left) // 2
+            if mid in objects.keys():
+                # `mid` exists, so the answer is mid or higher; discard
+                # everything at-or-below mid.
+                left = mid + 1
+            else:
+                # `mid` is missing, so the answer is strictly below mid.
+                right = mid
+
+    return left - 1
 
 atomic func record_commit(id, epoch, _type):
     """
@@ -185,17 +207,42 @@ symmetric role WalWriter:
         self.replayed = {}
         self.status = "InitNextId"
 
-    atomic action InitNextId:
-        require self.status == "InitNextId"
-        sid = latest_sequence_id()
-        self.next_id = sid + 1
-        self.status = "ClaimEpoch"
+    action InitNextId:
+        atomic:
+            require self.status == "InitNextId"
+            self.status = "InitingNextId"
+        sid = latest_sequence_id(replay_after_wal_id)
+        atomic:
+            self.next_id = sid + 1
+            self.status = "ClaimEpoch"
 
     atomic action ClaimEpoch:
         require self.status == "ClaimEpoch"
         current_epoch = current_epoch + 1
         self.epoch = current_epoch
-        self.status = "WriteFence"
+        # Verify that the next_id we computed is still valid. It's possible that between
+        # computing next_id and fencing the manifest, the fenced writer advanced the gc
+        # boundary (replay_after_wal_id)
+        if self.next_id <= replay_after_wal_id:
+            self.status = "RefreshNextId"
+        else:
+            self.status = "WriteFence"
+
+    action RefreshNextId:
+        atomic:
+            require self.status == "RefreshNextId"
+            self.status = "RefreshingNextId"
+        sid = latest_sequence_id(replay_after_wal_id)
+        atomic:
+            self.next_id = sid + 1
+            self.status = "RefreshManifest"
+
+    atomic action RefreshManifest:
+        require self.status == "RefreshManifest"
+        if self.epoch < current_epoch:
+            self.status = "Fenced"
+        else:
+            self.status = "WriteFence"
 
     atomic action WriteFence:
         require (
@@ -211,23 +258,20 @@ symmetric role WalWriter:
 
     atomic action ValidateFence:
         """
-        Fence write succeeded. Make sure we're still the latest epoch and the
-        fence write was > replay_after_wal_id. A valid fence returns the WAL
-        range that this writer must replay before accepting normal writes.
+        Fence write succeeded. Make sure we're still the latest epoch. A valid
+        fence returns the WAL range that this writer must replay before
+        accepting normal writes.
         """
         require self.status == "ValidateFence"
         if self.epoch < current_epoch:
             # We don't technically need to check this, but might as well since
             # we refresh the manifest to get the latest replay_after_wal_id anyway.
             self.status = "Fenced"
-        elif self.next_id > replay_after_wal_id:
+        else:
             record_commit(self.next_id, self.epoch, FENCE)
             self.next_id += 1
             self.replay_range = (replay_after_wal_id + 1, self.next_id)
             self.status = "ReplayWal"
-        else:
-            self.status = "WriteFence"
-            self.next_id = max(self.next_id + 1, replay_after_wal_id + 1)
 
     atomic action CheckFenced:
         """
@@ -406,3 +450,39 @@ transition assertion LatestObjectIsNeverDeleted(before, after):
         return True
     latest = max(before.objects.keys())
     return latest in after.objects.keys()
+
+transition assertion RefreshNextOwnsBoundary(before, after):
+    """
+    At this point we still hold the epoch, so it should not be possible for the
+    barrier to have advanced past the computed next_id.
+    """
+    writers = {}
+    for writer in before.writers:
+        writers[writer.__id__] = [writer]
+    for writer in after.writers:
+        writers[writer.__id__].append(writer)
+    for writers in writers.values():
+        before_writer, after_writer = writers
+        # assert!(empty_wal_id > manifest_dirty.value.core.replay_after_wal_id);
+        if (
+            before_writer.status == "RefreshManifest"
+            and after_writer.status == "WriteFence"
+            and after_writer.next_id <= replay_after_wal_id
+        ):
+            return False
+    return True
+
+transition assertion ValidateReplayRange(before, after):
+    """
+    This writer is the only writer that could have written replay_after_wal_id,
+    so it should not be possible for it to have advanced past the fencing wal.
+    older writers would have failed with a stale epoch
+    """
+    for writer in after.writers:
+        # assert!(empty_wal_id > replay_after_wal_id);
+        if (
+            writer.status == "ReplayWal"
+            and writer.replay_range[0] >= writer.replay_range[-1]
+        ):
+            return False
+    return True

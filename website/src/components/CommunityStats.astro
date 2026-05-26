@@ -1,0 +1,160 @@
+---
+import githubIcon from '@hackernoon/pixel-icon-library/icons/SVG/brands/github.svg?raw';
+import discordIcon from '@hackernoon/pixel-icon-library/icons/SVG/brands/discord.svg?raw';
+
+const DISCORD_INVITE = 'mHYmGy5MgA';
+const GITHUB_REPO = 'slatedb/slatedb';
+
+const fmt = (n: number | null): string => {
+	if (n == null) return '—';
+	if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
+	return String(n);
+};
+
+const fetchJson = async (url: string): Promise<any | null> => {
+	try {
+		const r = await fetch(url, { headers: { 'User-Agent': 'slatedb-docs' } });
+		if (!r.ok) return null;
+		return await r.json();
+	} catch {
+		return null;
+	}
+};
+
+const [gh, discord] = await Promise.all([
+	fetchJson(`https://api.github.com/repos/${GITHUB_REPO}`),
+	fetchJson(`https://discord.com/api/v10/invites/${DISCORD_INVITE}?with_counts=true`),
+]);
+
+const stars = gh?.stargazers_count ?? null;
+const repoName = gh?.full_name ?? GITHUB_REPO;
+const onlineMembers = discord?.approximate_presence_count ?? null;
+const guildName = discord?.guild?.name ?? 'SlateDB';
+---
+
+<aside class="community-stats">
+	<a
+		class="stat"
+		href={`https://discord.gg/${DISCORD_INVITE}`}
+		target="_blank"
+		rel="noopener noreferrer"
+	>
+		<span class="icon" set:html={discordIcon} />
+		<span class="name">{guildName}</span>
+		<span class="dot" aria-hidden="true"></span>
+		<span class="meta"><strong>{fmt(onlineMembers)}</strong> online</span>
+	</a>
+	<a
+		class="stat"
+		href={`https://github.com/${GITHUB_REPO}`}
+		target="_blank"
+		rel="noopener noreferrer"
+	>
+		<span class="icon" set:html={githubIcon} />
+		<span class="name">{repoName}</span>
+		<svg
+			class="star"
+			width="14"
+			height="14"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			aria-hidden="true"
+			><path d="M12 2 15.09 8.26 22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2Z"
+			></path></svg
+		>
+		<span class="meta">{fmt(stars)}</span>
+	</a>
+</aside>
+
+<style>
+	.community-stats {
+		position: sticky;
+		bottom: 0;
+		margin-top: auto;
+		margin-inline: calc(-1 * var(--sl-sidebar-pad-x));
+		padding: 0.5rem var(--sl-sidebar-pad-x);
+		background: var(--sl-color-bg);
+		border-top: 1px solid var(--sl-color-hairline);
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		gap: 0.4rem;
+		height: calc(1.36 * var(--sl-nav-height));
+		box-sizing: border-box;
+	}
+
+	.stat {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.8125rem;
+		color: var(--sl-color-gray-2);
+		text-decoration: none;
+		transition: color 0.12s ease;
+	}
+
+	.stat:hover {
+		color: var(--sl-color-gray-1);
+	}
+
+	.stat:hover .name {
+		text-decoration: underline;
+		text-decoration-color: var(--sl-color-gray-5);
+		text-underline-offset: 2px;
+	}
+
+	.icon {
+		display: inline-flex;
+		width: 1rem;
+		height: 1rem;
+		color: var(--sl-color-gray-1);
+		flex-shrink: 0;
+	}
+
+	.icon :global(svg) {
+		width: 100%;
+		height: 100%;
+		fill: currentColor;
+	}
+
+	.name {
+		color: var(--sl-color-gray-1);
+		font-weight: 500;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	.dot {
+		width: 0.4rem;
+		height: 0.4rem;
+		background-color: #2f7a64;
+		border-radius: 50%;
+		flex-shrink: 0;
+		margin-inline-start: auto;
+		box-shadow: 0 0 0 1px rgba(47, 122, 100, 0.2);
+	}
+
+	.meta {
+		color: var(--sl-color-gray-3);
+		font-variant-numeric: tabular-nums;
+		font-size: 0.78rem;
+		flex-shrink: 0;
+	}
+
+	.meta strong {
+		font-weight: 600;
+		color: var(--sl-color-gray-1);
+	}
+
+	.star {
+		color: var(--sl-color-gray-3);
+		flex-shrink: 0;
+		margin-inline-start: auto;
+	}
+</style>
