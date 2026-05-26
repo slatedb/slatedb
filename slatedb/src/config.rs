@@ -1141,7 +1141,7 @@ impl std::fmt::Debug for CompactorOptions {
 }
 
 /// Options for the compaction worker.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CompactionWorkerOptions {
     /// How many jobs a single worker may hold simultaneously.
     pub max_concurrent_compactions: usize,
