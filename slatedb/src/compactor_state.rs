@@ -702,12 +702,13 @@ impl CompactorState {
             merged.insert(compaction.id(), compaction.clone());
         }
 
+        // For compactions not in local state (Vacant), only accept `Submitted` since
+        // execution hasn't started so it's safe to adopt. For known compactions (Occupied),
+        // only accept `Compacted`, the worker's signal that execution finished and the
+        // coordinator should commit the manifest.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
                 Entry::Vacant(v) => {
-                    // The compactor should control all compaction state transitions. If the
-                    // compactor finds a new remote compaction (a compaction that the compactor
-                    // didn't create), it must be in `Submitted` status (the beginning status).
                     if !matches!(compaction.status(), CompactionStatus::Submitted) {
                         error!(
                             "skipping remote compaction with unexpected (non-Submitted) status [compaction={:?}]",
@@ -718,10 +719,6 @@ impl CompactorState {
                     v.insert(compaction.clone());
                 }
                 Entry::Occupied(mut o) => {
-                    // Accept `Compacted` status written by a remote worker. This is the
-                    // signal that execution finished and the coordinator should commit the
-                    // manifest. All other remote status updates are ignored; the coordinator
-                    // owns every other transition.
                     if matches!(compaction.status(), CompactionStatus::Compacted) {
                         o.insert(compaction.clone());
                     }
