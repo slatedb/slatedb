@@ -711,8 +711,19 @@ impl CompactorEventHandler {
     /// Recovery: on coordinator restart, `Compacted` entries are left intact in
     /// `.compactions`. The first call to this method after startup retries the manifest
     /// write. `validate_compaction` will fail if the sources are already absent (meaning
-    /// the manifest was written before the crash), in which case the entry is safely
-    /// marked `Failed`.
+    /// the manifest was written before the crash), in which case the entry is marked
+    /// `Failed` even though the compaction may have actually succeeded. This is preferred
+    /// over trying to detect success after the fact because any heuristic (e.g. checking
+    /// whether the destination SR is present in the manifest) is fragile: the destination
+    /// SR id may coincide with a source SR id (e.g. `[L0:1, SR:1] -> SR:1`), so the
+    /// destination SR can exist both before and after the compaction runs and its presence
+    /// alone does not confirm the compaction's output was committed. Marking `Failed` is
+    /// safe in both crash scenarios:
+    /// - Crash before manifest write: sources are still present, so the scheduler
+    ///   re-compacts them on the next tick.
+    /// - Crash after manifest write: sources are already absent and the manifest is
+    ///   already in the correct post-compaction state, so marking `Failed` has no
+    ///   effect on correctness.
     async fn commit_compacted_entries(&mut self) -> Result<(), SlateDBError> {
         let compacted = self
             .state()
