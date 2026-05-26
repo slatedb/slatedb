@@ -292,6 +292,26 @@ impl SlateDBError {
         }
     }
 
+    /// Returns true if this error or any of its sources is an object-store NotFound.
+    pub(crate) fn has_object_store_not_found(&self) -> bool {
+        fn is_object_store_not_found(err: &(dyn std::error::Error + 'static)) -> bool {
+            err.downcast_ref::<object_store::Error>()
+                .is_some_and(|err| matches!(err, object_store::Error::NotFound { .. }))
+                || err
+                    .downcast_ref::<Arc<object_store::Error>>()
+                    .is_some_and(|err| matches!(err.as_ref(), object_store::Error::NotFound { .. }))
+        }
+
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(err) = current {
+            if is_object_store_not_found(err) {
+                return true;
+            }
+            current = err.source();
+        }
+        false
+    }
+
     /// Returns true if this error means a sequenced write should refresh and retry.
     pub(crate) fn is_sequenced_write_conflict(&self) -> bool {
         matches!(self, Self::TransactionalObjectVersionExists)
@@ -657,6 +677,16 @@ mod tests {
         let public_err = Error::from(err);
 
         assert_eq!(public_err.kind(), ErrorKind::Data);
+    }
+
+    #[test]
+    fn has_object_store_not_found_detects_wrapped_source() {
+        let err = SlateDBError::from(object_store::Error::NotFound {
+            path: "test/path".to_string(),
+            source: Box::new(std::io::Error::other("not found")),
+        });
+
+        assert!(err.has_object_store_not_found());
     }
 
     #[test]
