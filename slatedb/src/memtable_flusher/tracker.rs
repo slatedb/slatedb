@@ -203,7 +203,10 @@ impl FlushTracker {
             "flush-memtable-to-l0",
             |_| { Ok(()) }
         );
-        self.reconcile_and_dispatch().await?;
+        if let Err(err) = self.reconcile_and_dispatch().await {
+            let _ = sender.send(Err(err.clone()));
+            return Err(err);
+        }
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer.send_flush(through_seq, sender)?;
         Ok(())
@@ -215,7 +218,10 @@ impl FlushTracker {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.reconcile_and_dispatch().await?;
+        if let Err(err) = self.reconcile_and_dispatch().await {
+            let _ = sender.send(Err(err.clone()));
+            return Err(err);
+        }
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer
             .send_checkpoint(through_seq, options, sender)?;
@@ -508,6 +514,7 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
+    use crate::memtable_flusher::uploader::Uploader;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -761,11 +768,17 @@ mod tests {
         inner: Arc<DbInner>,
         flusher: MemtableFlusher,
         executor: crate::dispatcher::MessageHandlerExecutor,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     }
 
     impl StartedFlusher {
         async fn shutdown(&self) {
             MemtableFlusher::shutdown(&self.executor).await;
+        }
+
+        async fn shutdown_uploader_with_error(&self, err: SlateDBError) {
+            self.closed_result.write_result(Err(err));
+            Uploader::shutdown(&self.executor).await;
         }
     }
 
@@ -799,6 +812,7 @@ mod tests {
             inner,
             flusher,
             executor,
+            closed_result,
         }
     }
 
@@ -1007,6 +1021,61 @@ mod tests {
             matches!(flush_result, Err(SlateDBError::Fenced)),
             "expected Fenced, got {:?}",
             flush_result
+        );
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn flush_waiter_receives_error_when_reconcile_fails_before_manifest_writer() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_reconcile_flush_error",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
+        flusher
+            .shutdown_uploader_with_error(SlateDBError::Fenced)
+            .await;
+
+        let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap();
+        assert!(
+            matches!(flush_result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            flush_result
+        );
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_waiter_receives_error_when_reconcile_fails_before_manifest_writer() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_reconcile_checkpoint_error",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
+        flusher
+            .shutdown_uploader_with_error(SlateDBError::Fenced)
+            .await;
+
+        let checkpoint_result = timeout(
+            Duration::from_secs(5),
+            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(checkpoint_result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            checkpoint_result
         );
 
         flusher.shutdown().await;
