@@ -1000,9 +1000,9 @@ impl Manifest {
         // The unsegmented tree is treated as a logical segment with empty
         // prefix. Filter+project it through the same path as named segments.
         match Self::resolve_segment_action(b"", config)? {
-            SegmentAction::Drop => projected.core.tree = LsmTreeState::default(),
+            SegmentAction::Drop => projected.core.tree = Arc::new(LsmTreeState::default()),
             SegmentAction::Project(range) => {
-                Self::project_tree_in_place(&mut projected.core.tree, &range)
+                Self::project_tree_in_place(Arc::make_mut(&mut projected.core.tree), &range)
             }
             SegmentAction::PassThrough => {}
         }
@@ -1021,7 +1021,7 @@ impl Manifest {
             match Self::resolve_segment_action(&segment.prefix, config)? {
                 SegmentAction::Drop => { /* filtered out */ }
                 SegmentAction::Project(range) => {
-                    Self::project_tree_in_place(&mut segment.tree, &range);
+                    Self::project_tree_in_place(Arc::make_mut(&mut segment.tree), &range);
                     if !segment.tree.l0.is_empty() || !segment.tree.compacted.is_empty() {
                         kept.push(segment);
                     }
@@ -4418,7 +4418,7 @@ mod tests {
                 let full = BytesRange::from_prefix(p);
                 Segment {
                     prefix: Bytes::copy_from_slice(p),
-                    tree: LsmTreeState {
+                    tree: Arc::new(LsmTreeState {
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -4434,7 +4434,7 @@ mod tests {
                             Some(full),
                         )]),
                         compacted: vec![],
-                    },
+                    }),
                 }
             })
             .collect();

@@ -2251,8 +2251,7 @@ mod tests {
         let mut state = ManifestCore::new();
         state.replay_after_wal_id = 4;
         state.next_wal_sst_id = 5;
-        state
-            .tree
+        Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(active_l0_handle));
         let mut stored_manifest = StoredManifest::create_new_db(
