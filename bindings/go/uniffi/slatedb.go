@@ -1275,7 +1275,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter()
 		})
-		if checksum != 51600 {
+		if checksum != 33496 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter: UniFFI API checksum mismatch")
 		}
@@ -1284,7 +1284,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge()
 		})
-		if checksum != 34281 {
+		if checksum != 11200 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge: UniFFI API checksum mismatch")
 		}
@@ -1293,7 +1293,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram()
 		})
-		if checksum != 4383 {
+		if checksum != 43433 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram: UniFFI API checksum mismatch")
 		}
@@ -1302,7 +1302,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter()
 		})
-		if checksum != 19270 {
+		if checksum != 23894 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
 		}
@@ -1338,7 +1338,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter()
 		})
-		if checksum != 40366 {
+		if checksum != 39547 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter: UniFFI API checksum mismatch")
 		}
@@ -1347,7 +1347,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge()
 		})
-		if checksum != 30425 {
+		if checksum != 50645 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge: UniFFI API checksum mismatch")
 		}
@@ -1356,7 +1356,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter()
 		})
-		if checksum != 64639 {
+		if checksum != 5890 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
 		}
@@ -1365,7 +1365,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram()
 		})
-		if checksum != 26503 {
+		if checksum != 20670 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram: UniFFI API checksum mismatch")
 		}
@@ -5869,10 +5869,10 @@ type DefaultMetricsRecorderInterface interface {
 	MetricByNameAndLabels(name string, labels []MetricLabel) *Metric
 	// Returns every metric with the requested name.
 	MetricsByName(name string) []Metric
-	RegisterCounter(name string, description string, labels []MetricLabel) Counter
-	RegisterGauge(name string, description string, labels []MetricLabel) Gauge
-	RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram
-	RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter
+	RegisterCounter(name string, description *string, labels []MetricLabel) Counter
+	RegisterGauge(name string, description *string, labels []MetricLabel) Gauge
+	RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram
+	RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter
 	// Returns a point-in-time snapshot of every registered metric.
 	Snapshot() []Metric
 }
@@ -5913,39 +5913,39 @@ func (_self *DefaultMetricsRecorder) MetricsByName(name string) []Metric {
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterCounter(name string, description string, labels []MetricLabel) Counter {
+func (_self *DefaultMetricsRecorder) RegisterCounter(name string, description *string, labels []MetricLabel) Counter {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterGauge(name string, description string, labels []MetricLabel) Gauge {
+func (_self *DefaultMetricsRecorder) RegisterGauge(name string, description *string, labels []MetricLabel) Gauge {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_gauge(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram {
+func (_self *DefaultMetricsRecorder) RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_histogram(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter {
+func (_self *DefaultMetricsRecorder) RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_up_down_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
@@ -6609,13 +6609,13 @@ func (c FfiConverterMergeOperator) register() {
 // Application-defined metrics recorder used to publish SlateDB metrics.
 type MetricsRecorder interface {
 	// Registers a monotonically increasing counter.
-	RegisterCounter(name string, description string, labels []MetricLabel) Counter
+	RegisterCounter(name string, description *string, labels []MetricLabel) Counter
 	// Registers a gauge.
-	RegisterGauge(name string, description string, labels []MetricLabel) Gauge
+	RegisterGauge(name string, description *string, labels []MetricLabel) Gauge
 	// Registers an up/down counter.
-	RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter
+	RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter
 	// Registers a histogram with explicit bucket boundaries.
-	RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram
+	RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram
 }
 
 // Application-defined metrics recorder used to publish SlateDB metrics.
@@ -6624,42 +6624,42 @@ type MetricsRecorderImpl struct {
 }
 
 // Registers a monotonically increasing counter.
-func (_self *MetricsRecorderImpl) RegisterCounter(name string, description string, labels []MetricLabel) Counter {
+func (_self *MetricsRecorderImpl) RegisterCounter(name string, description *string, labels []MetricLabel) Counter {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
 // Registers a gauge.
-func (_self *MetricsRecorderImpl) RegisterGauge(name string, description string, labels []MetricLabel) Gauge {
+func (_self *MetricsRecorderImpl) RegisterGauge(name string, description *string, labels []MetricLabel) Gauge {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_gauge(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
 // Registers an up/down counter.
-func (_self *MetricsRecorderImpl) RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter {
+func (_self *MetricsRecorderImpl) RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_up_down_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
 // Registers a histogram with explicit bucket boundaries.
-func (_self *MetricsRecorderImpl) RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram {
+func (_self *MetricsRecorderImpl) RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_histogram(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
 	}))
 }
 func (object *MetricsRecorderImpl) Destroy() {
@@ -6754,7 +6754,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
@@ -6778,7 +6778,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
@@ -6802,7 +6802,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
@@ -6826,7 +6826,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
