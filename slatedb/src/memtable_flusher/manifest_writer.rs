@@ -137,7 +137,7 @@ impl ManifestWriter {
         through_seq: Option<u64>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx.send_with_failure_callback(
+        self.commands_tx.send_or_handle_closed(
             ManifestWriterCommand::AwaitFlush {
                 through_seq,
                 sender,
@@ -159,7 +159,7 @@ impl ManifestWriter {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx.send_with_failure_callback(
+        self.commands_tx.send_or_handle_closed(
             ManifestWriterCommand::CreateCheckpoint {
                 through_seq,
                 options,
@@ -178,7 +178,7 @@ impl ManifestWriter {
         &self,
         sender: oneshot::Sender<Result<(), SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx.send_with_failure_callback(
+        self.commands_tx.send_or_handle_closed(
             ManifestWriterCommand::PollManifest { done: Some(sender) },
             |message, err| {
                 if let ManifestWriterCommand::PollManifest { done: Some(sender) } = message {

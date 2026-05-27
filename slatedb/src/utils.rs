@@ -752,14 +752,14 @@ impl<T> SafeSender<T> {
         }
     }
 
-    /// Like [`Self::send`], but invokes `on_failure` with the rejected message
+    /// Like [`Self::send`], but invokes `on_closed` with the rejected message
     /// and closed result so callers can fail embedded response channels
     /// explicitly.
     #[inline]
-    pub(crate) fn send_with_failure_callback<F>(
+    pub(crate) fn send_or_handle_closed<F>(
         &self,
         message: T,
-        on_failure: F,
+        on_closed: F,
     ) -> Result<(), SlateDBError>
     where
         F: FnOnce(T, &SlateDBError),
@@ -770,7 +770,7 @@ impl<T> SafeSender<T> {
                 let channel_error = e.to_string();
                 let message = e.into_inner();
                 let err = self.closed_send_error(channel_error);
-                on_failure(message, &err);
+                on_closed(message, &err);
                 Err(err)
             }
         }
