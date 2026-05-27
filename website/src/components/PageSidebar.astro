@@ -1,0 +1,126 @@
+---
+import MobileTableOfContents from 'virtual:starlight/components/MobileTableOfContents';
+import TableOfContents from 'virtual:starlight/components/TableOfContents';
+
+const pathname = Astro.url.pathname.replace(/\/$/, '');
+const mdHref = pathname.startsWith('/docs/') || pathname.startsWith('/rfcs/')
+    ? `${pathname}.md`
+    : null;
+---
+
+{
+    Astro.locals.starlightRoute.toc && (
+        <>
+            <div class="lg:sl-hidden">
+                <MobileTableOfContents />
+            </div>
+            <div class="right-sidebar-panel sl-hidden lg:sl-block">
+                <div class="sl-container">
+                    {mdHref && (
+                        <a class="md-link" href={mdHref} data-md-link aria-label="Copy this page as Markdown">
+                            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                            </svg>
+                            <span class="md-label">Copy as Markdown</span>
+                            <span class="md-label-done" hidden>Copied</span>
+                        </a>
+                    )}
+                    <TableOfContents />
+                </div>
+            </div>
+        </>
+    )
+}
+
+<script>
+    document.addEventListener('click', async (e) => {
+        const target = e.target instanceof Element ? e.target.closest('[data-md-link]') : null;
+        if (!(target instanceof HTMLAnchorElement)) return;
+        if (e.metaKey || e.ctrlKey || (e instanceof MouseEvent && e.button === 1)) return;
+        e.preventDefault();
+        try {
+            const r = await fetch(target.href);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const text = await r.text();
+            await navigator.clipboard.writeText(text);
+            const label = target.querySelector('.md-label');
+            const done = target.querySelector('.md-label-done');
+            if (label instanceof HTMLElement) label.hidden = true;
+            if (done instanceof HTMLElement) done.hidden = false;
+            setTimeout(() => {
+                if (label instanceof HTMLElement) label.hidden = false;
+                if (done instanceof HTMLElement) done.hidden = true;
+            }, 1600);
+        } catch {
+            window.location.href = target.href;
+        }
+    });
+</script>
+
+<style>
+    .md-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin-bottom: 1.25rem;
+        padding: 0.35rem 0.6rem;
+        font-family: var(--sl-font-mono);
+        font-size: 0.72rem;
+        color: var(--sl-color-gray-3);
+        background-color: var(--surface-1, #ffffff);
+        border: 1px solid var(--sl-color-hairline-shade);
+        border-radius: 0.4rem;
+        text-decoration: none;
+        transition:
+            color 0.15s ease,
+            border-color 0.15s ease,
+            background-color 0.15s ease;
+    }
+    .md-link:hover {
+        color: var(--sl-color-gray-1) !important;
+        border-color: var(--sl-color-gray-4);
+    }
+    .md-link svg {
+        flex-shrink: 0;
+        color: var(--sl-color-gray-4);
+    }
+
+    @layer starlight.core {
+        .right-sidebar-panel {
+            padding: 1rem var(--sl-sidebar-pad-x);
+        }
+        .sl-container {
+            width: calc(var(--sl-sidebar-width) - 2 * var(--sl-sidebar-pad-x));
+        }
+        .right-sidebar-panel :global(h2) {
+            color: var(--sl-color-white);
+            font-size: var(--sl-text-h5);
+            font-weight: 600;
+            line-height: var(--sl-line-height-headings);
+            margin-bottom: 0.5rem;
+        }
+        .right-sidebar-panel :global(:where(a)) {
+            display: block;
+            font-size: var(--sl-text-xs);
+            text-decoration: none;
+            color: var(--sl-color-gray-3);
+            overflow-wrap: anywhere;
+        }
+        .right-sidebar-panel :global(:where(a):hover) {
+            color: var(--sl-color-white);
+        }
+        @media (min-width: 72rem) {
+            .sl-container {
+                max-width: calc(
+                    (
+                        (
+                                100vw - var(--sl-sidebar-width) - 2 * var(--sl-content-pad-x) - 2 *
+                                    var(--sl-sidebar-pad-x)
+                            ) * 0.25 /* MAGIC NUMBER 🥲 */
+                    )
+                );
+            }
+        }
+    }
+</style>

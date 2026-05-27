@@ -89,6 +89,7 @@ jobs:
           publish_if_missing "slatedb-common"
           publish_if_missing "slatedb-txn-obj"
           publish_if_missing "slatedb"
+          publish_if_missing "slatedb-uniffi"
 
       - name: Publish SlateDB CLI to crates.io
         env:

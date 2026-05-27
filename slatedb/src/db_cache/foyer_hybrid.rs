@@ -71,11 +71,12 @@
 //!
 
 use crate::{
-    db_cache::{CachedEntry, CachedKey, DbCache},
+    db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache},
     error::SlateDBError,
 };
 use async_trait::async_trait;
 use log::info;
+use std::sync::Arc;
 
 pub struct FoyerHybridCache {
     inner: foyer::HybridCache<CachedKey, CachedEntry>,
@@ -145,6 +146,57 @@ impl DbCache for FoyerHybridCache {
             Err(e) => info!("foyer hybrid cache: close failed [error={e:?}]"),
         }
         result
+    }
+
+    async fn fetch_block(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+
+    async fn fetch_index(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+
+    async fn fetch_filter(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+
+    async fn fetch_stats(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.dedup_fetch(key, loader).await
+    }
+}
+
+impl FoyerHybridCache {
+    /// Use foyer's `HybridCache::get_or_fetch`, which deduplicates concurrent loads across
+    /// memory + disk tiers. See [`crate::db_cache::foyer::FoyerCache::dedup_fetch`] for the
+    /// error-handling rationale.
+    async fn dedup_fetch(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        let fetch = self
+            .inner
+            .get_or_fetch(&key, move || async move { loader().await });
+        match fetch.await {
+            Ok(entry) => Ok(entry.value().clone()),
+            Err(err) => Err(SlateDBError::FoyerError(Arc::new(err)).into()),
+        }
     }
 }
 

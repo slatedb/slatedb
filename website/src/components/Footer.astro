@@ -20,7 +20,6 @@ import SocialIcons from './SocialIcons.astro';
 <style>
     
     .footer {
-		z-index: var(--sl-z-index-navbar);
 		width: 100%;
 		height: calc(1.5 * var(--sl-nav-height));
 		border-top: 1px solid var(--sl-color-hairline-shade);
@@ -48,12 +47,13 @@ import SocialIcons from './SocialIcons.astro';
 
     .copyright-wrapper {
         font-size: .75rem;
-		font-family: monospace;
+		font-family: var(--sl-font-mono);
 		order: 2;
 		text-align: center;
 		line-height: 140%;
-		color: #999;
-		a { color: #999; }
+		color: var(--sl-color-gray-3);
+		a { color: var(--sl-color-gray-3); }
+		a:hover { color: var(--sl-color-gray-2); }
 	}
 
 	@media (min-width: 50rem) {

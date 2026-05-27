@@ -463,14 +463,15 @@ pub struct CompactionSpecUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_COMPACTION_STATUS: i8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_COMPACTION_STATUS: i8 = 3;
+pub const ENUM_MAX_COMPACTION_STATUS: i8 = 4;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 4] = [
+pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 5] = [
   CompactionStatus::Submitted,
   CompactionStatus::Running,
   CompactionStatus::Completed,
   CompactionStatus::Failed,
+  CompactionStatus::Compacted,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -482,18 +483,22 @@ impl CompactionStatus {
   pub const Submitted: Self = Self(0);
   /// The compaction is currently running.
   pub const Running: Self = Self(1);
-  /// The compaction finished successfully.
+  /// The compaction finished successfully and was committed to the manifest.
   pub const Completed: Self = Self(2);
   /// The compaction failed. It might or might not have started before failure.
   pub const Failed: Self = Self(3);
+  /// The worker finished execution and wrote its final output SSTs; the
+  /// compaction coordinator has not yet committed the result to the manifest.
+  pub const Compacted: Self = Self(4);
 
   pub const ENUM_MIN: i8 = 0;
-  pub const ENUM_MAX: i8 = 3;
+  pub const ENUM_MAX: i8 = 4;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::Submitted,
     Self::Running,
     Self::Completed,
     Self::Failed,
+    Self::Compacted,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -502,6 +507,7 @@ impl CompactionStatus {
       Self::Running => Some("Running"),
       Self::Completed => Some("Completed"),
       Self::Failed => Some("Failed"),
+      Self::Compacted => Some("Compacted"),
       _ => None,
     }
   }
@@ -2838,6 +2844,120 @@ impl core::fmt::Debug for DrainSegmentSpec<'_> {
       ds.finish()
   }
 }
+pub enum WorkerSpecOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct WorkerSpec<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for WorkerSpec<'a> {
+  type Inner = WorkerSpec<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> WorkerSpec<'a> {
+  pub const VT_WORKER_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_LAST_HEARTBEAT_MS: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    WorkerSpec { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args WorkerSpecArgs<'args>
+  ) -> flatbuffers::WIPOffset<WorkerSpec<'bldr>> {
+    let mut builder = WorkerSpecBuilder::new(_fbb);
+    builder.add_last_heartbeat_ms(args.last_heartbeat_ms);
+    if let Some(x) = args.worker_id { builder.add_worker_id(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn worker_id(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(WorkerSpec::VT_WORKER_ID, None)}
+  }
+  #[inline]
+  pub fn last_heartbeat_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(WorkerSpec::VT_LAST_HEARTBEAT_MS, Some(0)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for WorkerSpec<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("worker_id", Self::VT_WORKER_ID, false)?
+     .visit_field::<u64>("last_heartbeat_ms", Self::VT_LAST_HEARTBEAT_MS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct WorkerSpecArgs<'a> {
+    pub worker_id: Option<flatbuffers::WIPOffset<&'a str>>,
+    pub last_heartbeat_ms: u64,
+}
+impl<'a> Default for WorkerSpecArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    WorkerSpecArgs {
+      worker_id: None,
+      last_heartbeat_ms: 0,
+    }
+  }
+}
+
+pub struct WorkerSpecBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> WorkerSpecBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_worker_id(&mut self, worker_id: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(WorkerSpec::VT_WORKER_ID, worker_id);
+  }
+  #[inline]
+  pub fn add_last_heartbeat_ms(&mut self, last_heartbeat_ms: u64) {
+    self.fbb_.push_slot::<u64>(WorkerSpec::VT_LAST_HEARTBEAT_MS, last_heartbeat_ms, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> WorkerSpecBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    WorkerSpecBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<WorkerSpec<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for WorkerSpec<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("WorkerSpec");
+      ds.field("worker_id", &self.worker_id());
+      ds.field("last_heartbeat_ms", &self.last_heartbeat_ms());
+      ds.finish()
+  }
+}
 pub enum CompactionOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -2859,6 +2979,7 @@ impl<'a> Compaction<'a> {
   pub const VT_SPEC: flatbuffers::VOffsetT = 8;
   pub const VT_STATUS: flatbuffers::VOffsetT = 10;
   pub const VT_OUTPUT_SSTS: flatbuffers::VOffsetT = 12;
+  pub const VT_WORKER: flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2870,6 +2991,7 @@ impl<'a> Compaction<'a> {
     args: &'args CompactionArgs<'args>
   ) -> flatbuffers::WIPOffset<Compaction<'bldr>> {
     let mut builder = CompactionBuilder::new(_fbb);
+    if let Some(x) = args.worker { builder.add_worker(x); }
     if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
     if let Some(x) = args.spec { builder.add_spec(x); }
     if let Some(x) = args.id { builder.add_id(x); }
@@ -2913,6 +3035,13 @@ impl<'a> Compaction<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>(Compaction::VT_OUTPUT_SSTS, None)}
+  }
+  #[inline]
+  pub fn worker(&self) -> Option<WorkerSpec<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<WorkerSpec>>(Compaction::VT_WORKER, None)}
   }
   #[inline]
   #[allow(non_snake_case)]
@@ -2961,6 +3090,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
      })?
      .visit_field::<CompactionStatus>("status", Self::VT_STATUS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("output_ssts", Self::VT_OUTPUT_SSTS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<WorkerSpec>>("worker", Self::VT_WORKER, false)?
      .finish();
     Ok(())
   }
@@ -2971,6 +3101,7 @@ pub struct CompactionArgs<'a> {
     pub spec: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
     pub status: CompactionStatus,
     pub output_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
+    pub worker: Option<flatbuffers::WIPOffset<WorkerSpec<'a>>>,
 }
 impl<'a> Default for CompactionArgs<'a> {
   #[inline]
@@ -2981,6 +3112,7 @@ impl<'a> Default for CompactionArgs<'a> {
       spec: None, // required field
       status: CompactionStatus::Submitted,
       output_ssts: None,
+      worker: None,
     }
   }
 }
@@ -3009,6 +3141,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_output_ssts(&mut self, output_ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_OUTPUT_SSTS, output_ssts);
+  }
+  #[inline]
+  pub fn add_worker(&mut self, worker: flatbuffers::WIPOffset<WorkerSpec<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<WorkerSpec>>(Compaction::VT_WORKER, worker);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionBuilder<'a, 'b, A> {
@@ -3054,6 +3190,7 @@ impl core::fmt::Debug for Compaction<'_> {
       };
       ds.field("status", &self.status());
       ds.field("output_ssts", &self.output_ssts());
+      ds.field("worker", &self.worker());
       ds.finish()
   }
 }

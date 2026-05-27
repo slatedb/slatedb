@@ -1015,7 +1015,7 @@ impl CompactorEventHandler {
             if !compaction.spec().is_drain() {
                 let running_compaction_count = self.running_compaction_count();
                 if running_compaction_count >= self.options.max_concurrent_compactions {
-                    info!(
+                    debug!(
                         "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
                         running_compaction_count,
                         self.options.max_concurrent_compactions,

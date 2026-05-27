@@ -365,6 +365,7 @@ func init() {
 	FfiConverterLogCallbackINSTANCE.register()
 	FfiConverterMergeOperatorINSTANCE.register()
 	FfiConverterMetricsRecorderINSTANCE.register()
+	FfiConverterPrefixExtractorINSTANCE.register()
 	FfiConverterUpDownCounterINSTANCE.register()
 	uniffiCheckChecksums()
 }
@@ -526,6 +527,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_filter_policies()
+		})
+		if checksum != 9193 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_filter_policies: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator()
 		})
 		if checksum != 5839 {
@@ -594,6 +604,15 @@ func uniffiCheckChecksums() {
 		if checksum != 41016 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies()
+		})
+		if checksum != 12871 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1210,6 +1229,33 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_filterpolicy_name()
+		})
+		if checksum != 39457 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_filterpolicy_name: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_prefixextractor_name()
+		})
+		if checksum != 14936 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_prefixextractor_name: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_prefixextractor_prefix_len()
+		})
+		if checksum != 8228 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_prefixextractor_prefix_len: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_next()
 		})
 		if checksum != 1225 {
@@ -1275,7 +1321,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter()
 		})
-		if checksum != 51600 {
+		if checksum != 33496 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter: UniFFI API checksum mismatch")
 		}
@@ -1284,7 +1330,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge()
 		})
-		if checksum != 34281 {
+		if checksum != 11200 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge: UniFFI API checksum mismatch")
 		}
@@ -1293,7 +1339,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram()
 		})
-		if checksum != 4383 {
+		if checksum != 43433 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram: UniFFI API checksum mismatch")
 		}
@@ -1302,7 +1348,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter()
 		})
-		if checksum != 19270 {
+		if checksum != 23894 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
 		}
@@ -1338,7 +1384,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter()
 		})
-		if checksum != 40366 {
+		if checksum != 39547 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter: UniFFI API checksum mismatch")
 		}
@@ -1347,7 +1393,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge()
 		})
-		if checksum != 30425 {
+		if checksum != 50645 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge: UniFFI API checksum mismatch")
 		}
@@ -1356,7 +1402,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter()
 		})
-		if checksum != 64639 {
+		if checksum != 5890 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
 		}
@@ -1365,7 +1411,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram()
 		})
-		if checksum != 26503 {
+		if checksum != 20670 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram: UniFFI API checksum mismatch")
 		}
@@ -1566,6 +1612,24 @@ func uniffiCheckChecksums() {
 		if checksum != 44755 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_split_cache: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom()
+		})
+		if checksum != 6011 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom_with_options()
+		})
+		if checksum != 47045 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3633,6 +3697,11 @@ type DbBuilderInterface interface {
 	WithDbCache(dbCache *DbCache) error
 	// Disables the SST block and metadata cache.
 	WithDbCacheDisabled() error
+	// Sets the filter policies used for SST filter construction and evaluation.
+	//
+	// Pass an empty vec to disable filters entirely. When unset, the default
+	// is a single bloom filter with 10 bits per key.
+	WithFilterPolicies(policies []*FilterPolicy) error
 	// Installs an application-defined merge operator.
 	WithMergeOperator(mergeOperator MergeOperator) error
 	// Installs an application-defined metrics recorder.
@@ -3714,6 +3783,21 @@ func (_self *DbBuilder) WithDbCacheDisabled() error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled(
 			_pointer, _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the filter policies used for SST filter construction and evaluation.
+//
+// Pass an empty vec to disable filters entirely. When unset, the default
+// is a single bloom filter with 10 bits per key.
+func (_self *DbBuilder) WithFilterPolicies(policies []*FilterPolicy) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_filter_policies(
+			_pointer, FfiConverterSequenceFilterPolicyINSTANCE.Lower(policies), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -4582,6 +4666,12 @@ type DbReaderBuilderInterface interface {
 	Build() (*DbReader, error)
 	// Pins the reader to an existing checkpoint UUID string.
 	WithCheckpointId(checkpointId string) error
+	// Sets the filter policies used when decoding SST filter blocks.
+	//
+	// Must match (or be a superset of) the writer's policies so SST filter
+	// sub-blocks can be decoded; unrecognized policy names are silently
+	// skipped. Defaults to a single bloom filter with 10 bits per key.
+	WithFilterPolicies(policies []*FilterPolicy) error
 	// Installs an application-defined merge operator used while reading merge rows.
 	WithMergeOperator(mergeOperator MergeOperator) error
 	// Installs an application-defined metrics recorder.
@@ -4647,6 +4737,22 @@ func (_self *DbReaderBuilder) WithCheckpointId(checkpointId string) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(
 			_pointer, FfiConverterStringINSTANCE.Lower(checkpointId), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the filter policies used when decoding SST filter blocks.
+//
+// Must match (or be a superset of) the writer's policies so SST filter
+// sub-blocks can be decoded; unrecognized policy names are silently
+// skipped. Defaults to a single bloom filter with 10 bits per key.
+func (_self *DbReaderBuilder) WithFilterPolicies(policies []*FilterPolicy) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_filter_policies(
+			_pointer, FfiConverterSequenceFilterPolicyINSTANCE.Lower(policies), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -5869,10 +5975,10 @@ type DefaultMetricsRecorderInterface interface {
 	MetricByNameAndLabels(name string, labels []MetricLabel) *Metric
 	// Returns every metric with the requested name.
 	MetricsByName(name string) []Metric
-	RegisterCounter(name string, description string, labels []MetricLabel) Counter
-	RegisterGauge(name string, description string, labels []MetricLabel) Gauge
-	RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram
-	RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter
+	RegisterCounter(name string, description *string, labels []MetricLabel) Counter
+	RegisterGauge(name string, description *string, labels []MetricLabel) Gauge
+	RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram
+	RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter
 	// Returns a point-in-time snapshot of every registered metric.
 	Snapshot() []Metric
 }
@@ -5913,39 +6019,39 @@ func (_self *DefaultMetricsRecorder) MetricsByName(name string) []Metric {
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterCounter(name string, description string, labels []MetricLabel) Counter {
+func (_self *DefaultMetricsRecorder) RegisterCounter(name string, description *string, labels []MetricLabel) Counter {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterGauge(name string, description string, labels []MetricLabel) Gauge {
+func (_self *DefaultMetricsRecorder) RegisterGauge(name string, description *string, labels []MetricLabel) Gauge {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_gauge(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram {
+func (_self *DefaultMetricsRecorder) RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_histogram(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
 	}))
 }
 
-func (_self *DefaultMetricsRecorder) RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter {
+func (_self *DefaultMetricsRecorder) RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter {
 	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_up_down_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
@@ -6013,6 +6119,106 @@ func LowerToExternalDefaultMetricsRecorder(value *DefaultMetricsRecorder) uint64
 type FfiDestroyerDefaultMetricsRecorder struct{}
 
 func (_ FfiDestroyerDefaultMetricsRecorder) Destroy(value *DefaultMetricsRecorder) {
+	value.Destroy()
+}
+
+// A filter policy used to build and read SST filters.
+//
+// Construct one with [`FilterPolicy::bloom`] or
+// [`FilterPolicy::bloom_with_options`] for the built-in bloom filter.
+type FilterPolicyInterface interface {
+	// Returns the policy name encoded into SSTs that use this policy.
+	Name() string
+}
+
+// A filter policy used to build and read SST filters.
+//
+// Construct one with [`FilterPolicy::bloom`] or
+// [`FilterPolicy::bloom_with_options`] for the built-in bloom filter.
+type FilterPolicy struct {
+	ffiObject FfiObject
+}
+
+// Constructs a bloom filter policy with the given bits per key,
+// whole-key filtering enabled, and no prefix extractor.
+func FilterPolicyBloom(bitsPerKey uint32) *FilterPolicy {
+	return FfiConverterFilterPolicyINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_filterpolicy_bloom(FfiConverterUint32INSTANCE.Lower(bitsPerKey), _uniffiStatus)
+	}))
+}
+
+// Constructs a bloom filter policy from the supplied options, with an
+// optional prefix extractor enabling prefix-based bloom filtering.
+func FilterPolicyBloomWithOptions(options BloomFilterOptions, prefixExtractor *PrefixExtractor) *FilterPolicy {
+	return FfiConverterFilterPolicyINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_filterpolicy_bloom_with_options(FfiConverterBloomFilterOptionsINSTANCE.Lower(options), FfiConverterOptionalPrefixExtractorINSTANCE.Lower(prefixExtractor), _uniffiStatus)
+	}))
+}
+
+// Returns the policy name encoded into SSTs that use this policy.
+func (_self *FilterPolicy) Name() string {
+	_pointer := _self.ffiObject.incrementPointer("*FilterPolicy")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_filterpolicy_name(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+func (object *FilterPolicy) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterFilterPolicy struct{}
+
+var FfiConverterFilterPolicyINSTANCE = FfiConverterFilterPolicy{}
+
+func (c FfiConverterFilterPolicy) Lift(handle C.uint64_t) *FilterPolicy {
+	result := &FilterPolicy{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_filterpolicy(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_filterpolicy(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*FilterPolicy).Destroy)
+	return result
+}
+
+func (c FfiConverterFilterPolicy) Read(reader io.Reader) *FilterPolicy {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterFilterPolicy) Lower(value *FilterPolicy) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*FilterPolicy")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterFilterPolicy) Write(writer io.Writer, value *FilterPolicy) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalFilterPolicy(handle uint64) *FilterPolicy {
+	return FfiConverterFilterPolicyINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalFilterPolicy(value *FilterPolicy) uint64 {
+	return uint64(FfiConverterFilterPolicyINSTANCE.Lower(value))
+}
+
+type FfiDestroyerFilterPolicy struct{}
+
+func (_ FfiDestroyerFilterPolicy) Destroy(value *FilterPolicy) {
 	value.Destroy()
 }
 
@@ -6609,13 +6815,13 @@ func (c FfiConverterMergeOperator) register() {
 // Application-defined metrics recorder used to publish SlateDB metrics.
 type MetricsRecorder interface {
 	// Registers a monotonically increasing counter.
-	RegisterCounter(name string, description string, labels []MetricLabel) Counter
+	RegisterCounter(name string, description *string, labels []MetricLabel) Counter
 	// Registers a gauge.
-	RegisterGauge(name string, description string, labels []MetricLabel) Gauge
+	RegisterGauge(name string, description *string, labels []MetricLabel) Gauge
 	// Registers an up/down counter.
-	RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter
+	RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter
 	// Registers a histogram with explicit bucket boundaries.
-	RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram
+	RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram
 }
 
 // Application-defined metrics recorder used to publish SlateDB metrics.
@@ -6624,42 +6830,42 @@ type MetricsRecorderImpl struct {
 }
 
 // Registers a monotonically increasing counter.
-func (_self *MetricsRecorderImpl) RegisterCounter(name string, description string, labels []MetricLabel) Counter {
+func (_self *MetricsRecorderImpl) RegisterCounter(name string, description *string, labels []MetricLabel) Counter {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
 // Registers a gauge.
-func (_self *MetricsRecorderImpl) RegisterGauge(name string, description string, labels []MetricLabel) Gauge {
+func (_self *MetricsRecorderImpl) RegisterGauge(name string, description *string, labels []MetricLabel) Gauge {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_gauge(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
 // Registers an up/down counter.
-func (_self *MetricsRecorderImpl) RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter {
+func (_self *MetricsRecorderImpl) RegisterUpDownCounter(name string, description *string, labels []MetricLabel) UpDownCounter {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_up_down_counter(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
 	}))
 }
 
 // Registers a histogram with explicit bucket boundaries.
-func (_self *MetricsRecorderImpl) RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram {
+func (_self *MetricsRecorderImpl) RegisterHistogram(name string, description *string, labels []MetricLabel, boundaries []float64) Histogram {
 	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
 	defer _self.ffiObject.decrementPointer()
 	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_histogram(
-			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
 	}))
 }
 func (object *MetricsRecorderImpl) Destroy() {
@@ -6754,7 +6960,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
@@ -6778,7 +6984,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
@@ -6802,7 +7008,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
@@ -6826,7 +7032,7 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3(
 			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
 				inner: name,
 			}),
-			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+			FfiConverterOptionalStringINSTANCE.Lift(GoRustBuffer{
 				inner: description,
 			}),
 			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
@@ -6959,6 +7165,186 @@ type FfiDestroyerObjectStore struct{}
 
 func (_ FfiDestroyerObjectStore) Destroy(value *ObjectStore) {
 	value.Destroy()
+}
+
+// Application-provided prefix extractor used to configure prefix-based
+// bloom filters.
+type PrefixExtractor interface {
+	// Stable identifier for this extractor's configuration. Included in the
+	// bloom filter policy name so filters built with different extractors
+	// are never mismatched.
+	Name() string
+	// Returns the prefix length to use for `target`, or `None` when no
+	// prefix is extractable.
+	PrefixLen(target PrefixTarget) *uint64
+}
+
+// Application-provided prefix extractor used to configure prefix-based
+// bloom filters.
+type PrefixExtractorImpl struct {
+	ffiObject FfiObject
+}
+
+// Stable identifier for this extractor's configuration. Included in the
+// bloom filter policy name so filters built with different extractors
+// are never mismatched.
+func (_self *PrefixExtractorImpl) Name() string {
+	_pointer := _self.ffiObject.incrementPointer("PrefixExtractor")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_prefixextractor_name(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// Returns the prefix length to use for `target`, or `None` when no
+// prefix is extractable.
+func (_self *PrefixExtractorImpl) PrefixLen(target PrefixTarget) *uint64 {
+	_pointer := _self.ffiObject.incrementPointer("PrefixExtractor")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_prefixextractor_prefix_len(
+				_pointer, FfiConverterPrefixTargetINSTANCE.Lower(target), _uniffiStatus),
+		}
+	}))
+}
+func (object *PrefixExtractorImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterPrefixExtractor struct {
+	handleMap *concurrentHandleMap[PrefixExtractor]
+}
+
+var FfiConverterPrefixExtractorINSTANCE = FfiConverterPrefixExtractor{
+	handleMap: newConcurrentHandleMap[PrefixExtractor](),
+}
+
+func (c FfiConverterPrefixExtractor) Lift(handle C.uint64_t) PrefixExtractor {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &PrefixExtractorImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_prefixextractor(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_prefixextractor(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*PrefixExtractorImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterPrefixExtractor) Read(reader io.Reader) PrefixExtractor {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterPrefixExtractor) Lower(value PrefixExtractor) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*PrefixExtractorImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("PrefixExtractor")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterPrefixExtractor) Write(writer io.Writer, value PrefixExtractor) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalPrefixExtractor(handle uint64) PrefixExtractor {
+	return FfiConverterPrefixExtractorINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalPrefixExtractor(value PrefixExtractor) uint64 {
+	return uint64(FfiConverterPrefixExtractorINSTANCE.Lower(value))
+}
+
+type FfiDestroyerPrefixExtractor struct{}
+
+func (_ FfiDestroyerPrefixExtractor) Destroy(value PrefixExtractor) {
+	if val, ok := value.(*PrefixExtractorImpl); ok {
+		val.Destroy()
+	}
+}
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0(uniffiHandle C.uint64_t, uniffiOutReturn *C.RustBuffer, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterPrefixExtractorINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res :=
+		uniffiObj.Name()
+
+	*uniffiOutReturn = FfiConverterStringINSTANCE.Lower(res)
+}
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1(uniffiHandle C.uint64_t, target C.RustBuffer, uniffiOutReturn *C.RustBuffer, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterPrefixExtractorINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res :=
+		uniffiObj.PrefixLen(
+			FfiConverterPrefixTargetINSTANCE.Lift(GoRustBuffer{
+				inner: target,
+			}),
+		)
+
+	*uniffiOutReturn = FfiConverterOptionalUint64INSTANCE.Lower(res)
+}
+
+var UniffiVTableCallbackInterfacePrefixExtractorINSTANCE = C.UniffiVTableCallbackInterfacePrefixExtractor{
+	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorClone),
+	name:        (C.UniffiCallbackInterfacePrefixExtractorMethod0)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0),
+	prefixLen:   (C.UniffiCallbackInterfacePrefixExtractorMethod1)(C.slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1),
+}
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree(handle C.uint64_t) {
+	FfiConverterPrefixExtractorINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorClone
+func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterPrefixExtractorINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterPrefixExtractorINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterPrefixExtractor) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_prefixextractor(&UniffiVTableCallbackInterfacePrefixExtractorINSTANCE)
 }
 
 // Mutable database settings object used to configure a [`crate::DbBuilder`].
@@ -7856,6 +8242,59 @@ func LowerToExternalWriteBatch(value *WriteBatch) uint64 {
 type FfiDestroyerWriteBatch struct{}
 
 func (_ FfiDestroyerWriteBatch) Destroy(value *WriteBatch) {
+	value.Destroy()
+}
+
+// Options controlling how a bloom filter policy is constructed.
+//
+// Pass an optional prefix extractor as a separate constructor parameter; it
+// is kept out of this record because uniffi cannot marshal a trait object
+// inside a record across every target language.
+type BloomFilterOptions struct {
+	// Average bits stored per inserted key. Higher values lower the false
+	// positive rate at the cost of filter size.
+	BitsPerKey uint32
+	// When `true`, hashes the full key into the filter so point lookups can
+	// probe it. Defaults to `true`.
+	WholeKeyFiltering bool
+}
+
+func (r *BloomFilterOptions) Destroy() {
+	FfiDestroyerUint32{}.Destroy(r.BitsPerKey)
+	FfiDestroyerBool{}.Destroy(r.WholeKeyFiltering)
+}
+
+type FfiConverterBloomFilterOptions struct{}
+
+var FfiConverterBloomFilterOptionsINSTANCE = FfiConverterBloomFilterOptions{}
+
+func (c FfiConverterBloomFilterOptions) Lift(rb RustBufferI) BloomFilterOptions {
+	return LiftFromRustBuffer[BloomFilterOptions](c, rb)
+}
+
+func (c FfiConverterBloomFilterOptions) Read(reader io.Reader) BloomFilterOptions {
+	return BloomFilterOptions{
+		FfiConverterUint32INSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterBloomFilterOptions) Lower(value BloomFilterOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[BloomFilterOptions](c, value)
+}
+
+func (c FfiConverterBloomFilterOptions) LowerExternal(value BloomFilterOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[BloomFilterOptions](c, value))
+}
+
+func (c FfiConverterBloomFilterOptions) Write(writer io.Writer, value BloomFilterOptions) {
+	FfiConverterUint32INSTANCE.Write(writer, value.BitsPerKey)
+	FfiConverterBoolINSTANCE.Write(writer, value.WholeKeyFiltering)
+}
+
+type FfiDestroyerBloomFilterOptions struct{}
+
+func (_ FfiDestroyerBloomFilterOptions) Destroy(value BloomFilterOptions) {
 	value.Destroy()
 }
 
@@ -8782,12 +9221,16 @@ type ReadOptions struct {
 	Dirty bool
 	// Whether fetched blocks should be inserted into the block cache.
 	CacheBlocks bool
+	// Optional context forwarded to custom filter policies; ignored by
+	// built-in filters.
+	FilterContext *FilterContext
 }
 
 func (r *ReadOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
+	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
 }
 
 type FfiConverterReadOptions struct{}
@@ -8803,6 +9246,7 @@ func (c FfiConverterReadOptions) Read(reader io.Reader) ReadOptions {
 		FfiConverterDurabilityLevelINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalFilterContextINSTANCE.Read(reader),
 	}
 }
 
@@ -8818,6 +9262,7 @@ func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
+	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)
 }
 
 type FfiDestroyerReadOptions struct{}
@@ -8964,6 +9409,9 @@ type ScanOptions struct {
 	MaxFetchTasks uint64
 	// The iteration order for the scan. Defaults to ascending when not set.
 	Order *IterationOrder
+	// Optional context forwarded to custom filter policies; ignored by
+	// built-in filters. Only consulted for prefix scans.
+	FilterContext *FilterContext
 }
 
 func (r *ScanOptions) Destroy() {
@@ -8973,6 +9421,7 @@ func (r *ScanOptions) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
 	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
 	FfiDestroyerOptionalIterationOrder{}.Destroy(r.Order)
+	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
 }
 
 type FfiConverterScanOptions struct{}
@@ -8991,6 +9440,7 @@ func (c FfiConverterScanOptions) Read(reader io.Reader) ScanOptions {
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterOptionalIterationOrderINSTANCE.Read(reader),
+		FfiConverterOptionalFilterContextINSTANCE.Read(reader),
 	}
 }
 
@@ -9009,6 +9459,7 @@ func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
 	FfiConverterOptionalIterationOrderINSTANCE.Write(writer, value.Order)
+	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)
 }
 
 type FfiDestroyerScanOptions struct{}
@@ -9728,6 +10179,7 @@ const (
 	CompactionStatusRunning   CompactionStatus = 2
 	CompactionStatusCompleted CompactionStatus = 3
 	CompactionStatusFailed    CompactionStatus = 4
+	CompactionStatusCompacted CompactionStatus = 5
 )
 
 type FfiConverterCompactionStatus struct{}
@@ -10155,6 +10607,69 @@ func (_ FfiDestroyerError) Destroy(value *Error) {
 	}
 }
 
+// Opaque caller-supplied context forwarded to custom filter policies at
+// query time.
+//
+// Custom filter policies read this to parametrize their evaluation; built-in
+// policies (including the bloom filter) ignore it. The payload is opaque to
+// SlateDB; the receiving policy is responsible for any decoding.
+type FilterContext interface {
+	Destroy()
+}
+
+// Variable-length payload. Maps to [`slatedb::FilterContext::Bytes`].
+type FilterContextBytes struct {
+	Payload []byte
+}
+
+func (e FilterContextBytes) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Payload)
+}
+
+type FfiConverterFilterContext struct{}
+
+var FfiConverterFilterContextINSTANCE = FfiConverterFilterContext{}
+
+func (c FfiConverterFilterContext) Lift(rb RustBufferI) FilterContext {
+	return LiftFromRustBuffer[FilterContext](c, rb)
+}
+
+func (c FfiConverterFilterContext) Lower(value FilterContext) C.RustBuffer {
+	return LowerIntoRustBuffer[FilterContext](c, value)
+}
+
+func (c FfiConverterFilterContext) LowerExternal(value FilterContext) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FilterContext](c, value))
+}
+func (FfiConverterFilterContext) Read(reader io.Reader) FilterContext {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return FilterContextBytes{
+			FfiConverterBytesINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterFilterContext.Read()", id))
+	}
+}
+
+func (FfiConverterFilterContext) Write(writer io.Writer, value FilterContext) {
+	switch variant_value := value.(type) {
+	case FilterContextBytes:
+		writeInt32(writer, 1)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Payload)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterFilterContext.Write", value))
+	}
+}
+
+type FfiDestroyerFilterContext struct{}
+
+func (_ FfiDestroyerFilterContext) Destroy(value FilterContext) {
+	value.Destroy()
+}
+
 // Filter block format stored in SST metadata.
 type FilterFormat uint
 
@@ -10566,6 +11081,80 @@ func (FfiConverterMetricValue) Write(writer io.Writer, value MetricValue) {
 type FfiDestroyerMetricValue struct{}
 
 func (_ FfiDestroyerMetricValue) Destroy(value MetricValue) {
+	value.Destroy()
+}
+
+// Identifies the target of a [`PrefixExtractor::prefix_len`] query.
+type PrefixTarget interface {
+	Destroy()
+}
+
+// A complete key, supplied either during SST construction or a point lookup.
+type PrefixTargetPoint struct {
+	Key []byte
+}
+
+func (e PrefixTargetPoint) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Key)
+}
+
+// A scan prefix supplied during a prefix scan.
+type PrefixTargetPrefix struct {
+	Prefix []byte
+}
+
+func (e PrefixTargetPrefix) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Prefix)
+}
+
+type FfiConverterPrefixTarget struct{}
+
+var FfiConverterPrefixTargetINSTANCE = FfiConverterPrefixTarget{}
+
+func (c FfiConverterPrefixTarget) Lift(rb RustBufferI) PrefixTarget {
+	return LiftFromRustBuffer[PrefixTarget](c, rb)
+}
+
+func (c FfiConverterPrefixTarget) Lower(value PrefixTarget) C.RustBuffer {
+	return LowerIntoRustBuffer[PrefixTarget](c, value)
+}
+
+func (c FfiConverterPrefixTarget) LowerExternal(value PrefixTarget) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[PrefixTarget](c, value))
+}
+func (FfiConverterPrefixTarget) Read(reader io.Reader) PrefixTarget {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return PrefixTargetPoint{
+			FfiConverterBytesINSTANCE.Read(reader),
+		}
+	case 2:
+		return PrefixTargetPrefix{
+			FfiConverterBytesINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterPrefixTarget.Read()", id))
+	}
+}
+
+func (FfiConverterPrefixTarget) Write(writer io.Writer, value PrefixTarget) {
+	switch variant_value := value.(type) {
+	case PrefixTargetPoint:
+		writeInt32(writer, 1)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
+	case PrefixTargetPrefix:
+		writeInt32(writer, 2)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Prefix)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterPrefixTarget.Write", value))
+	}
+}
+
+type FfiDestroyerPrefixTarget struct{}
+
+func (_ FfiDestroyerPrefixTarget) Destroy(value PrefixTarget) {
 	value.Destroy()
 }
 
@@ -11186,6 +11775,47 @@ func (_ FfiDestroyerOptionalLogCallback) Destroy(value *LogCallback) {
 	}
 }
 
+type FfiConverterOptionalPrefixExtractor struct{}
+
+var FfiConverterOptionalPrefixExtractorINSTANCE = FfiConverterOptionalPrefixExtractor{}
+
+func (c FfiConverterOptionalPrefixExtractor) Lift(rb RustBufferI) *PrefixExtractor {
+	return LiftFromRustBuffer[*PrefixExtractor](c, rb)
+}
+
+func (_ FfiConverterOptionalPrefixExtractor) Read(reader io.Reader) *PrefixExtractor {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterPrefixExtractorINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalPrefixExtractor) Lower(value *PrefixExtractor) C.RustBuffer {
+	return LowerIntoRustBuffer[*PrefixExtractor](c, value)
+}
+
+func (c FfiConverterOptionalPrefixExtractor) LowerExternal(value *PrefixExtractor) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*PrefixExtractor](c, value))
+}
+
+func (_ FfiConverterOptionalPrefixExtractor) Write(writer io.Writer, value *PrefixExtractor) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterPrefixExtractorINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalPrefixExtractor struct{}
+
+func (_ FfiDestroyerOptionalPrefixExtractor) Destroy(value *PrefixExtractor) {
+	if value != nil {
+		FfiDestroyerPrefixExtractor{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalCompaction struct{}
 
 var FfiConverterOptionalCompactionINSTANCE = FfiConverterOptionalCompaction{}
@@ -11596,6 +12226,47 @@ func (_ FfiDestroyerOptionalCompressionCodec) Destroy(value *CompressionCodec) {
 	}
 }
 
+type FfiConverterOptionalFilterContext struct{}
+
+var FfiConverterOptionalFilterContextINSTANCE = FfiConverterOptionalFilterContext{}
+
+func (c FfiConverterOptionalFilterContext) Lift(rb RustBufferI) *FilterContext {
+	return LiftFromRustBuffer[*FilterContext](c, rb)
+}
+
+func (_ FfiConverterOptionalFilterContext) Read(reader io.Reader) *FilterContext {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterFilterContextINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalFilterContext) Lower(value *FilterContext) C.RustBuffer {
+	return LowerIntoRustBuffer[*FilterContext](c, value)
+}
+
+func (c FfiConverterOptionalFilterContext) LowerExternal(value *FilterContext) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*FilterContext](c, value))
+}
+
+func (_ FfiConverterOptionalFilterContext) Write(writer io.Writer, value *FilterContext) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterFilterContextINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalFilterContext struct{}
+
+func (_ FfiDestroyerOptionalFilterContext) Destroy(value *FilterContext) {
+	if value != nil {
+		FfiDestroyerFilterContext{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalIterationOrder struct{}
 
 var FfiConverterOptionalIterationOrderINSTANCE = FfiConverterOptionalIterationOrder{}
@@ -11775,6 +12446,53 @@ type FfiDestroyerSequenceBytes struct{}
 func (FfiDestroyerSequenceBytes) Destroy(sequence [][]byte) {
 	for _, value := range sequence {
 		FfiDestroyerBytes{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceFilterPolicy struct{}
+
+var FfiConverterSequenceFilterPolicyINSTANCE = FfiConverterSequenceFilterPolicy{}
+
+func (c FfiConverterSequenceFilterPolicy) Lift(rb RustBufferI) []*FilterPolicy {
+	return LiftFromRustBuffer[[]*FilterPolicy](c, rb)
+}
+
+func (c FfiConverterSequenceFilterPolicy) Read(reader io.Reader) []*FilterPolicy {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]*FilterPolicy, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterFilterPolicyINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceFilterPolicy) Lower(value []*FilterPolicy) C.RustBuffer {
+	return LowerIntoRustBuffer[[]*FilterPolicy](c, value)
+}
+
+func (c FfiConverterSequenceFilterPolicy) LowerExternal(value []*FilterPolicy) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]*FilterPolicy](c, value))
+}
+
+func (c FfiConverterSequenceFilterPolicy) Write(writer io.Writer, value []*FilterPolicy) {
+	if len(value) > math.MaxInt32 {
+		panic("[]*FilterPolicy is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterFilterPolicyINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceFilterPolicy struct{}
+
+func (FfiDestroyerSequenceFilterPolicy) Destroy(sequence []*FilterPolicy) {
+	for _, value := range sequence {
+		FfiDestroyerFilterPolicy{}.Destroy(value)
 	}
 }
 

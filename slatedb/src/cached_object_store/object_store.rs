@@ -5,8 +5,11 @@ use crate::config::ObjectStoreCacheOptions;
 use crate::rand::DbRand;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
-use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
-use object_store::{Attributes, GetRange, GetResultPayload, PutMultipartOptions, PutResult};
+use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
+use object_store::{
+    Attributes, CopyOptions, GetRange, GetResultPayload, PutMultipartOptions, PutResult,
+    RenameOptions,
+};
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
 use slatedb_common::clock::SystemClock;
 use std::{ops::Range, sync::Arc};
@@ -33,7 +36,7 @@ pub(crate) struct CachedObjectStore {
     resolved_root: Arc<OnceCell<Path>>,
     stats: Arc<CachedObjectStoreStats>,
     // Deduplicates concurrent HEAD requests for the same path after a cache miss.
-    head_flights: SingleFlight<Path, ObjectMeta>,
+    head_flights: SingleFlight<Path, (ObjectMeta, Attributes)>,
     // Deduplicates concurrent prefetch/GET requests for the same path after a cache miss.
     prefetch_flights: SingleFlight<(Path, Option<GetRangeKey>), (ObjectMeta, Attributes)>,
     // Deduplicates concurrent fetches of the same part after a cache miss.
@@ -175,12 +178,7 @@ impl CachedObjectStore {
     /// lazily from observed metadata locations, so this method may return `None`
     /// for early requests until successful GET/HEAD responses are observed.
     fn cache_location_for(&self, location: &Path) -> Option<Path> {
-        self.resolved_root.get().map(|root| {
-            if root.as_ref().is_empty() {
-                return location.clone();
-            }
-            root.parts().chain(location.parts()).collect()
-        })
+        cache_location_for(&self.resolved_root, location)
     }
 
     /// Lazily resolves the root prefix and validates the derived cache key.
@@ -256,18 +254,19 @@ impl CachedObjectStore {
         Some(Path::from(prefix.trim_end_matches('/')))
     }
 
-    pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+    pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<GetResult> {
         if let Some(cache_location) = self.cache_location_for(location) {
             let entry = self
                 .cache_storage
                 .entry(&cache_location, self.part_size_bytes);
-            if let Ok(Some((meta, _))) = entry.read_head().await {
-                return Ok(meta);
+            if let Ok(Some((meta, attributes))) = entry.read_head().await {
+                return Ok(head_only_get_result(meta, attributes));
             }
         }
 
         // Cache miss — deduplicate concurrent HEAD requests for the same path.
-        self.head_flights
+        let (meta, attributes) = self
+            .head_flights
             .call(location.clone(), || async {
                 let result = self
                     .object_store
@@ -281,12 +280,14 @@ impl CachedObjectStore {
                     )
                     .await?;
                 let meta = result.meta.clone();
+                let attributes = result.attributes.clone();
                 if self.resolve_root(location, &meta.location) {
                     self.save_get_result(result).await.ok();
                 }
-                Ok(meta)
+                Ok::<_, object_store::Error>((meta, attributes))
             })
-            .await
+            .await?;
+        Ok(head_only_get_result(meta, attributes))
     }
 
     pub(crate) async fn cached_get_opts(
@@ -677,6 +678,24 @@ impl CachedObjectStore {
     }
 }
 
+fn head_only_get_result(meta: ObjectMeta, attributes: Attributes) -> GetResult {
+    GetResult {
+        payload: GetResultPayload::Stream(stream::empty().boxed()),
+        range: 0..0,
+        meta,
+        attributes,
+    }
+}
+
+fn cache_location_for(resolved_root: &Arc<OnceCell<Path>>, location: &Path) -> Option<Path> {
+    resolved_root.get().map(|root| {
+        if root.as_ref().is_empty() {
+            return location.clone();
+        }
+        root.parts().chain(location.parts()).collect()
+    })
+}
+
 impl std::fmt::Display for CachedObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -694,11 +713,10 @@ impl ObjectStore for CachedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if options.head {
+            return self.cached_head(location).await;
+        }
         self.cached_get_opts(location, options).await
-    }
-
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.cached_head(location).await
     }
 
     async fn put_opts(
@@ -710,13 +728,6 @@ impl ObjectStore for CachedObjectStore {
         self.cached_put_opts(location, payload, opts).await
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.object_store.put_multipart(location).await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -725,9 +736,43 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.put_multipart_opts(location, opts).await
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        // TODO: handle cache eviction
-        self.object_store.delete(location).await
+    /// Deletion of the cache entries associated with the object being
+    /// deleted is not atomic with respect to the object deletion from
+    /// the underlying object store. So for some period of time after
+    /// the deletion, cached object parts are still visible in the cache.
+    /// But assuming each object ever created by SlateDB is immutable and
+    /// has a unique name, this is not a problem.
+    ///
+    /// If eviction is enabled, deletion of the associated cache entries
+    /// happens asynchronously; when the control returns to the caller,
+    /// the entries still might be present in the cache. If eviction is
+    /// off, the deletion happens synchronously; when the control returns
+    /// to the caller, it is guaranteed no entries present in the cache
+    /// (assuming no errors happened during the deletion).
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let resolved_root = self.resolved_root.clone();
+        let cache_storage = self.cache_storage.clone();
+        let part_size_bytes = self.part_size_bytes;
+
+        self.object_store
+            .delete_stream(locations)
+            .then(move |result| {
+                let resolved_root = resolved_root.clone();
+                let cache_storage = cache_storage.clone();
+                async move {
+                    if let Ok(ref location) = result {
+                        if let Some(cache_location) = cache_location_for(&resolved_root, location) {
+                            let entry = cache_storage.entry(&cache_location, part_size_bytes);
+                            entry.delete().await;
+                        }
+                    }
+                    result
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -746,20 +791,22 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.list_with_delimiter(prefix).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.copy(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.object_store.copy_opts(from, to, options).await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.rename(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.copy_if_not_exists(from, to).await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.rename_if_not_exists(from, to).await
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        self.object_store.rename_opts(from, to, options).await
     }
 }
 
@@ -794,9 +841,10 @@ impl From<GetRange> for GetRangeKey {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::Bytes;
-    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
+    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
     use rand::Rng;
 
     use super::CachedObjectStore;
@@ -852,10 +900,6 @@ mod tests {
             Ok(result)
         }
 
-        async fn head(&self, location: &Path) -> object_store::Result<object_store::ObjectMeta> {
-            self.inner.head(location).await
-        }
-
         async fn put_opts(
             &self,
             location: &Path,
@@ -863,13 +907,6 @@ mod tests {
             opts: object_store::PutOptions,
         ) -> object_store::Result<object_store::PutResult> {
             self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart(
-            &self,
-            location: &Path,
-        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
-            self.inner.put_multipart(location).await
         }
 
         async fn put_multipart_opts(
@@ -880,8 +917,11 @@ mod tests {
             self.inner.put_multipart_opts(location, opts).await
         }
 
-        async fn delete(&self, location: &Path) -> object_store::Result<()> {
-            self.inner.delete(location).await
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
         }
 
         fn list(
@@ -908,20 +948,13 @@ mod tests {
             self.inner.list_with_delimiter(prefix).await
         }
 
-        async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.rename(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.copy_if_not_exists(from, to).await
-        }
-
-        async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-            self.inner.rename_if_not_exists(from, to).await
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 
@@ -1671,7 +1704,7 @@ mod tests {
 
         // Wrap with a gate-controlled store so we can block callers deterministically.
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch many concurrent head requests for the same path.
@@ -1683,23 +1716,23 @@ mod tests {
         }
 
         // Wait until exactly 1 caller arrives at the gate (SingleFlight dedup
-        // ensures only one caller reaches get_opts).
-        gated.get_opts_gate.wait_for_arrivals(1).await;
+        // ensures only one caller reaches the head gate).
+        gated.head_gate.wait_for_arrivals(1).await;
         assert_eq!(
-            gated.get_opts_gate.arrivals(),
+            gated.head_gate.arrivals(),
             1,
             "SingleFlight should let only 1 through"
         );
 
         // Release the gate — success path.
-        gated.get_opts_gate.release();
+        gated.head_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
         }
 
-        // SingleFlight should collapse them into a single actual GET request.
-        let count = get_request_count(&recorder, "get");
+        // SingleFlight should collapse them into a single actual HEAD request.
+        let count = get_request_count(&recorder, "head");
         assert_eq!(
             count, 1,
             "expected 1 actual object store request, got {count}"
@@ -1751,7 +1784,7 @@ mod tests {
 
         // The prefetch SingleFlight should collapse all prefetch GETs into one.
         // Part reads may also be deduplicated. Total GET count should be much less than 10.
-        let count = get_request_count(&recorder, "get");
+        let count = get_request_count(&recorder, "get_range");
         assert!(
             count <= 2,
             "expected at most 2 actual object store requests (prefetch + maybe 1 part), got {count}"
@@ -1772,7 +1805,7 @@ mod tests {
         }
 
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (recorder, cached_store) = build_instrumented_cached_store(gated.clone());
 
         let mut handles = Vec::new();
@@ -1783,22 +1816,22 @@ mod tests {
         }
 
         // Each distinct path has its own SingleFlight key, so all 5 should arrive.
-        gated.get_opts_gate.wait_for_arrivals(5).await;
+        gated.head_gate.wait_for_arrivals(5).await;
         assert_eq!(
-            gated.get_opts_gate.arrivals(),
+            gated.head_gate.arrivals(),
             5,
             "different keys should each pass through SingleFlight independently"
         );
 
         // Release all.
-        gated.get_opts_gate.release();
+        gated.head_gate.release();
 
         for handle in handles {
             handle.await.unwrap().unwrap();
         }
 
         // Each distinct path should result in its own request.
-        let count = get_request_count(&recorder, "get");
+        let count = get_request_count(&recorder, "head");
         assert_eq!(
             count, 5,
             "expected 5 actual object store requests (one per path), got {count}"
@@ -1854,7 +1887,7 @@ mod tests {
         }
 
         // Each distinct range key should trigger its own prefetch request.
-        let count = get_request_count(&recorder, "get");
+        let count = get_request_count(&recorder, "get_range");
         assert!(
             count >= 3,
             "expected at least 3 object store requests (one per distinct range), got {count}"
@@ -1872,7 +1905,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (_, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // Launch concurrent head requests.
@@ -1884,19 +1917,17 @@ mod tests {
         }
 
         // Wait for the single winning caller to arrive at the gate.
-        gated.get_opts_gate.wait_for_arrivals(1).await;
+        gated.head_gate.wait_for_arrivals(1).await;
 
         // Inject failure, then release.
-        gated
-            .get_opts_gate
-            .set_error(|| object_store::Error::Generic {
-                store: "test",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "injected test failure",
-                )),
-            });
-        gated.get_opts_gate.release();
+        gated.head_gate.set_error(|| object_store::Error::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected test failure",
+            )),
+        });
+        gated.head_gate.release();
 
         // All callers should see an error.
         for handle in handles {
@@ -1916,7 +1947,7 @@ mod tests {
             .unwrap();
 
         let gated = Arc::new(GatedObjectStore::new(mem));
-        gated.get_opts_gate.close();
+        gated.head_gate.close();
         let (_, cached_store) = build_instrumented_cached_store(gated.clone());
 
         // First call — configure failure.
@@ -1924,29 +1955,27 @@ mod tests {
         let p = path.clone();
         let handle = tokio::spawn(async move { store.cached_head(&p).await });
 
-        gated.get_opts_gate.wait_for_arrivals(1).await;
-        gated
-            .get_opts_gate
-            .set_error(|| object_store::Error::Generic {
-                store: "test",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "injected test failure",
-                )),
-            });
-        gated.get_opts_gate.release();
+        gated.head_gate.wait_for_arrivals(1).await;
+        gated.head_gate.set_error(|| object_store::Error::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected test failure",
+            )),
+        });
+        gated.head_gate.release();
 
         let result = handle.await.unwrap();
         assert!(result.is_err(), "first call should fail");
 
         // Second call — configure success.
-        gated.get_opts_gate.clear_error();
+        gated.head_gate.clear_error();
         let store = cached_store.clone();
         let p = path.clone();
         let handle = tokio::spawn(async move { store.cached_head(&p).await });
 
-        gated.get_opts_gate.wait_for_arrivals(2).await;
-        gated.get_opts_gate.release();
+        gated.head_gate.wait_for_arrivals(2).await;
+        gated.head_gate.release();
 
         let result = handle.await.unwrap();
         assert!(result.is_ok(), "second call should succeed after retry");
@@ -1988,5 +2017,120 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap().bytes().await.unwrap();
         assert_eq!(&bytes[..], &payload[..512]);
+    }
+
+    #[rstest::rstest]
+    #[case::no_evictor_cached(false, true)]
+    #[case::with_evictor_cached(true, true)]
+    #[case::no_evictor_uncached(false, false)]
+    #[case::with_evictor_uncached(true, false)]
+    #[tokio::test]
+    async fn test_delete(#[case] evictor: bool, #[case] cached: bool) {
+        const PART_SIZE: usize = 1024;
+
+        let location1 = Path::from("/data/testfile1");
+        let location2 = Path::from("/data/testfile2");
+
+        let test_cache_folder = new_test_cache_folder();
+        let payload = gen_rand_bytes(PART_SIZE * 3);
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+
+        object_store
+            .put(&location1, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+        object_store
+            .put(&location2, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder.clone(),
+            evictor.then_some(1024 * 1024),
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+
+        let cached_store = CachedObjectStore::new(
+            object_store,
+            Arc::clone(&cache_storage) as Arc<dyn LocalCacheStorage>,
+            PART_SIZE,
+            false,
+            stats,
+        )
+        .unwrap();
+        cached_store.start_evictor().await;
+
+        if cached {
+            cached_store
+                .get(&location1)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+        }
+        cached_store
+            .get(&location2)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        let cache_location1 = cached_store.cache_location_for(&location1).unwrap();
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        if cached {
+            assert_eq!(parts1.len(), 3, "{parts1:?}");
+            assert_eq!(cache_storage.file_handle_cache_population(), 6);
+        } else {
+            assert_eq!(parts1.len(), 0, "{parts1:?}");
+            assert_eq!(cache_storage.file_handle_cache_population(), 3);
+        }
+
+        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
+        let entry2 = cached_store
+            .cache_storage
+            .entry(&cache_location2, PART_SIZE);
+        let parts2 = entry2.cached_parts().await.unwrap();
+        assert_eq!(parts2.len(), 3, "{parts2:?}");
+
+        cached_store.delete(&location1).await.unwrap();
+        if evictor {
+            // XXX: If evictor is running, deletion is performed asynchronously
+            //      from the evictor "thread".
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
+
+        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
+        let entry2 = cached_store
+            .cache_storage
+            .entry(&cache_location2, PART_SIZE);
+        let parts2 = entry2.cached_parts().await.unwrap();
+        assert_eq!(parts2.len(), 3, "{parts2:?}");
+
+        // verify repeated delete is idempotent
+        cached_store.delete(&location1).await.unwrap();
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
     }
 }

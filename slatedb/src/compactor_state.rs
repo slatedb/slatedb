@@ -225,20 +225,26 @@ impl Display for CompactionSpec {
 ///
 /// State transitions:
 /// ```text
-/// Submitted <-> Running --> Completed
-///     |             |
-///     |             v
-///     +----------> Failed
+/// Submitted <-> Running --> Compacted --> Completed
+///     |             |           |
+///     |             v           |
+///     +----------> Failed <-----+
 /// ```
 ///
-/// `Completed` and `Failed` are terminal states.
+/// `Completed` and `Failed` are terminal states. `Compacted` is the
+/// distributed-compaction intermediate state where the worker has written its
+/// final output SSTs but the coordinator has not yet committed the result to
+/// the manifest. See RFC-0025.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CompactionStatus {
     /// The compaction has been submitted but not yet started.
     Submitted,
     /// The compaction is currently running.
     Running,
-    /// The compaction finished successfully.
+    /// The worker finished execution and wrote its output SSTs; the
+    /// coordinator has not yet committed the result to the manifest.
+    Compacted,
+    /// The compaction finished successfully and was committed to the manifest.
     Completed,
     /// The compaction failed. It might or might not have started before failure.
     Failed,
@@ -248,12 +254,37 @@ impl CompactionStatus {
     fn active(self) -> bool {
         matches!(
             self,
-            CompactionStatus::Submitted | CompactionStatus::Running
+            CompactionStatus::Submitted | CompactionStatus::Running | CompactionStatus::Compacted
         )
     }
 
     fn finished(self) -> bool {
         matches!(self, CompactionStatus::Completed | CompactionStatus::Failed)
+    }
+}
+
+/// Identity and liveness for the worker currently executing a compaction.
+///
+/// Persisted in `.compactions` alongside the `Compaction` once a worker claims
+/// it. A null `WorkerSpec` on a `Submitted` compaction means the job is
+/// unclaimed and available to be picked up by the next polling worker.
+///
+/// See RFC-0025 for the claim and heartbeat protocols.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkerSpec {
+    /// The id of the worker that owns this compaction.
+    pub worker_id: String,
+    /// Wall-clock ms of the last progress write performed by the owning worker.
+    /// Used by the coordinator to reclaim jobs whose owners have gone silent.
+    pub last_heartbeat_ms: u64,
+}
+
+impl WorkerSpec {
+    pub fn new(worker_id: String, last_heartbeat_ms: u64) -> Self {
+        Self {
+            worker_id,
+            last_heartbeat_ms,
+        }
     }
 }
 
@@ -275,6 +306,9 @@ pub struct Compaction {
     status: CompactionStatus,
     /// Output SSTs produced by this compaction, if any.
     output_ssts: Vec<SsTableHandle>,
+    /// The worker that has claimed this compaction. `None` means the
+    /// compaction is unclaimed (only valid when `status == Submitted`).
+    worker: Option<WorkerSpec>,
 }
 
 impl Compaction {
@@ -285,6 +319,7 @@ impl Compaction {
             bytes_processed: 0,
             status: CompactionStatus::Submitted,
             output_ssts: Vec::new(),
+            worker: None,
         }
     }
 
@@ -295,6 +330,11 @@ impl Compaction {
 
     pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
         self.output_ssts = output_ssts;
+        self
+    }
+
+    pub(crate) fn with_worker(mut self, worker: Option<WorkerSpec>) -> Self {
+        self.worker = worker;
         self
     }
 
@@ -382,6 +422,11 @@ impl Compaction {
     /// Sets the current status of this compaction.
     pub(crate) fn set_status(&mut self, status: CompactionStatus) {
         self.status = status;
+    }
+
+    /// Returns the worker that has claimed this compaction, if any.
+    pub fn worker(&self) -> Option<&WorkerSpec> {
+        self.worker.as_ref()
     }
 
     /// Returns true if the compaction is active (submitted or running).

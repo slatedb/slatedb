@@ -14,8 +14,8 @@ use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutOptions as OS_PutOptions,
-    PutPayload, PutResult,
+    CopyOptions, GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutOptions as OS_PutOptions, PutPayload, PutResult,
 };
 use rand::{Rng, RngCore};
 use std::cmp::Ordering as CmpOrdering;
@@ -429,6 +429,8 @@ pub(crate) struct FlakyObjectStore {
     fail_first_put_opts: AtomicUsize,
     put_opts_attempts: AtomicUsize,
     put_opts_attempt_notify: Notify,
+    max_single_put_bytes: AtomicUsize,
+    put_multipart_attempts: AtomicUsize,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
     // Put options: if set, write succeeds but returns AlreadyExists error
@@ -461,6 +463,8 @@ impl FlakyObjectStore {
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
             put_opts_attempt_notify: Notify::new(),
+            max_single_put_bytes: AtomicUsize::new(0),
+            put_multipart_attempts: AtomicUsize::new(0),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
             put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
@@ -478,6 +482,12 @@ impl FlakyObjectStore {
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
         self.put_precondition_always.store(true, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn with_single_put_size_limit(self, max_single_put_bytes: usize) -> Self {
+        self.max_single_put_bytes
+            .store(max_single_put_bytes, Ordering::SeqCst);
         self
     }
 
@@ -514,6 +524,10 @@ impl FlakyObjectStore {
 
     pub(crate) fn put_attempts(&self) -> usize {
         self.put_opts_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn multipart_attempts(&self) -> usize {
+        self.put_multipart_attempts.load(Ordering::SeqCst)
     }
 
     pub(crate) async fn wait_for_put_attempts(&self, expected: usize) {
@@ -585,59 +599,50 @@ impl ObjectStore for FlakyObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
+        if options.head {
+            self.head_attempts.fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_first_head
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    if v > 0 {
+                        Some(v - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err(object_store::Error::Generic {
+                    store: "flaky_head",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "injected head timeout",
+                    )),
+                });
+            }
+        } else if options.range.is_some() {
+            self.get_range_attempts.fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_first_get_range
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    if v > 0 {
+                        Some(v - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err(object_store::Error::Generic {
+                    store: "flaky_get_range",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "injected get_range timeout",
+                    )),
+                });
+            }
+        }
         self.inner.get_opts(location, options).await
-    }
-
-    async fn get_range(
-        &self,
-        location: &Path,
-        range: std::ops::Range<u64>,
-    ) -> object_store::Result<Bytes> {
-        self.get_range_attempts.fetch_add(1, Ordering::SeqCst);
-        if self
-            .fail_first_get_range
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v > 0 {
-                    Some(v - 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok()
-        {
-            return Err(object_store::Error::Generic {
-                store: "flaky_get_range",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "injected get_range timeout",
-                )),
-            });
-        }
-        self.inner.get_range(location, range).await
-    }
-
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.head_attempts.fetch_add(1, Ordering::SeqCst);
-        if self
-            .fail_first_head
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v > 0 {
-                    Some(v - 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok()
-        {
-            return Err(object_store::Error::Generic {
-                store: "flaky_head",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "injected head timeout",
-                )),
-            });
-        }
-        self.inner.head(location).await
     }
 
     async fn put_opts(
@@ -648,6 +653,17 @@ impl ObjectStore for FlakyObjectStore {
     ) -> object_store::Result<PutResult> {
         self.put_opts_attempts.fetch_add(1, Ordering::SeqCst);
         self.put_opts_attempt_notify.notify_waiters();
+        let max_single_put_bytes = self.max_single_put_bytes.load(Ordering::SeqCst);
+        if max_single_put_bytes > 0 && payload.content_length() > max_single_put_bytes {
+            return Err(object_store::Error::Generic {
+                store: "flaky_single_put_limit",
+                source: Box::new(std::io::Error::other(format!(
+                    "single PUT payload of {} bytes exceeds limit of {} bytes",
+                    payload.content_length(),
+                    max_single_put_bytes
+                ))),
+            });
+        }
         if self.put_precondition_always.load(Ordering::SeqCst) {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),
@@ -692,23 +708,20 @@ impl ObjectStore for FlakyObjectStore {
         self.inner.put_opts(location, payload, opts).await
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.inner.put_multipart(location).await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
         opts: object_store::PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.put_multipart_attempts.fetch_add(1, Ordering::SeqCst);
         self.inner.put_multipart_opts(location, opts).await
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        self.inner.delete(location).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -768,20 +781,13 @@ impl ObjectStore for FlakyObjectStore {
         self.inner.list_with_delimiter(prefix).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy(from, to).await
-    }
-
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.rename(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.rename_if_not_exists(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 }
 
@@ -915,11 +921,13 @@ pub(crate) struct GatedObjectStore {
     pub(crate) get_opts_gate: Gate,
     pub(crate) head_gate: Gate,
     pub(crate) put_opts_gate: Gate,
-    pub(crate) put_multipart_gate: Gate,
     pub(crate) put_multipart_opts_gate: Gate,
-    pub(crate) delete_gate: Gate,
     pub(crate) copy_gate: Gate,
     pub(crate) rename_gate: Gate,
+    /// Gates each path emitted by `delete_stream`. Per-item gating preserves
+    /// the pre-0.13 single-call `delete` semantics now that callers go through
+    /// `ObjectStoreExt::delete`, which fans out into `delete_stream`.
+    pub(crate) delete_stream_gate: Arc<Gate>,
 }
 
 impl GatedObjectStore {
@@ -929,11 +937,10 @@ impl GatedObjectStore {
             get_opts_gate: Gate::default(),
             head_gate: Gate::default(),
             put_opts_gate: Gate::default(),
-            put_multipart_gate: Gate::default(),
             put_multipart_opts_gate: Gate::default(),
-            delete_gate: Gate::default(),
             copy_gate: Gate::default(),
             rename_gate: Gate::default(),
+            delete_stream_gate: Arc::new(Gate::default()),
         }
     }
 }
@@ -951,13 +958,12 @@ impl ObjectStore for GatedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
-        self.get_opts_gate.wait().await?;
+        if options.head {
+            self.head_gate.wait().await?;
+        } else {
+            self.get_opts_gate.wait().await?;
+        }
         self.inner.get_opts(location, options).await
-    }
-
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.head_gate.wait().await?;
-        self.inner.head(location).await
     }
 
     async fn put_opts(
@@ -970,14 +976,6 @@ impl ObjectStore for GatedObjectStore {
         self.inner.put_opts(location, payload, opts).await
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.put_multipart_gate.wait().await?;
-        self.inner.put_multipart(location).await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -987,9 +985,22 @@ impl ObjectStore for GatedObjectStore {
         self.inner.put_multipart_opts(location, opts).await
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        self.delete_gate.wait().await?;
-        self.inner.delete(location).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let gate = Arc::clone(&self.delete_stream_gate);
+        let gated = locations
+            .then(move |loc| {
+                let gate = Arc::clone(&gate);
+                async move {
+                    let loc = loc?;
+                    gate.wait().await?;
+                    Ok(loc)
+                }
+            })
+            .boxed();
+        self.inner.delete_stream(gated)
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -1008,24 +1019,24 @@ impl ObjectStore for GatedObjectStore {
         self.inner.list_with_delimiter(prefix).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
         self.copy_gate.wait().await?;
-        self.inner.copy(from, to).await
+        self.inner.copy_opts(from, to, options).await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: object_store::RenameOptions,
+    ) -> object_store::Result<()> {
         self.rename_gate.wait().await?;
-        self.inner.rename(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.copy_gate.wait().await?;
-        self.inner.copy_if_not_exists(from, to).await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.rename_gate.wait().await?;
-        self.inner.rename_if_not_exists(from, to).await
+        self.inner.rename_opts(from, to, options).await
     }
 }
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
-use crate::clone::CloneSource;
+use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
 use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::seq_tracker::SequenceTracker;
@@ -120,6 +120,50 @@ impl LsmTreeState {
             l0,
             compacted: compactor.compacted.clone(),
         }
+    }
+}
+
+/// Configuration controlling how a clone projection narrows a source manifest.
+///
+/// Composition rules used by [`Manifest::projected`]:
+/// - For each tree (the unsegmented `core.tree` participates as a logical
+///   segment with the empty prefix), `segment_filter` is consulted first.
+///   When it returns `false`, the tree is dropped entirely.
+/// - Otherwise, the effective range is `segment_projection(prefix)` (validated
+///   against `[prefix, prefix++)` with `Unbounded` ends resolved to the
+///   segment edges) intersected with `global_range`. Either input is treated
+///   as "no constraint" when absent.
+#[derive(Clone, Default)]
+pub(crate) struct ProjectionConfig {
+    pub(crate) global_range: Option<BytesRange>,
+    pub(crate) segment_filter: Option<SegmentFilterFn>,
+    pub(crate) segment_projection: Option<SegmentProjectionFn>,
+}
+
+/// Outcome of resolving a projection against a single tree.
+enum SegmentAction {
+    /// Filter rejected this segment — drop it from the projected manifest.
+    Drop,
+    /// Apply the carried range as the effective per-tree projection.
+    Project(BytesRange),
+    /// No projection applies — keep the tree as-is.
+    PassThrough,
+}
+
+impl ProjectionConfig {
+    #[cfg(test)]
+    pub(crate) fn from_global_range(range: BytesRange) -> Self {
+        Self {
+            global_range: Some(range),
+            segment_filter: None,
+            segment_projection: None,
+        }
+    }
+
+    pub(crate) fn is_noop(&self) -> bool {
+        self.global_range.is_none()
+            && self.segment_filter.is_none()
+            && self.segment_projection.is_none()
     }
 }
 
@@ -937,19 +981,56 @@ impl Manifest {
         }
     }
 
-    pub(crate) fn projected(source_manifest: &Manifest, range: BytesRange) -> Manifest {
+    /// Apply a `ProjectionConfig` to `source_manifest`, returning a new
+    /// manifest with each tree narrowed to the effective range derived from the
+    /// config. The unsegmented `core.tree` participates as a logical segment
+    /// with the empty prefix.
+    ///
+    /// Errors with `SlateDBError::InvalidProjection` when a closure-supplied
+    /// range falls outside the segment's `[prefix, prefix++)` bounds.
+    pub(crate) fn projected(
+        source_manifest: &Manifest,
+        config: &ProjectionConfig,
+    ) -> Result<Manifest, SlateDBError> {
+        if config.is_noop() {
+            return Ok(source_manifest.clone());
+        }
         let mut projected = source_manifest.clone();
-        Self::project_tree_in_place(Arc::make_mut(&mut projected.core.tree), &range);
-        // Project each segment's tree against the range; drop segments
-        // that become empty (no L0 and no compacted views remain). The
-        // projector is acting as the first writer of the resulting clone,
-        // so segments are derived from data: any source-side drain
+
+        // The unsegmented tree is treated as a logical segment with empty
+        // prefix. Filter+project it through the same path as named segments.
+        match Self::resolve_segment_action(b"", config)? {
+            SegmentAction::Drop => projected.core.tree = LsmTreeState::default(),
+            SegmentAction::Project(range) => {
+                Self::project_tree_in_place(&mut projected.core.tree, &range)
+            }
+            SegmentAction::PassThrough => {}
+        }
+
+        // For each named segment, resolve the action. If the segment is
+        // filtered out, drop it. Otherwise project in place (or leave as-is
+        // if no range applies) and drop segments that become empty.
+        //
+        // The projector is acting as the first writer of the resulting
+        // clone, so segments are derived from data: any source-side drain
         // marker carries no meaning in the new DB and is dropped along
         // with the segment.
-        projected.core.segments.retain_mut(|segment| {
-            Self::project_tree_in_place(Arc::make_mut(&mut segment.tree), &range);
-            !segment.tree.l0.is_empty() || !segment.tree.compacted.is_empty()
-        });
+        let segments = std::mem::take(&mut projected.core.segments);
+        let mut kept: Vec<Segment> = Vec::with_capacity(segments.len());
+        for mut segment in segments {
+            match Self::resolve_segment_action(&segment.prefix, config)? {
+                SegmentAction::Drop => { /* filtered out */ }
+                SegmentAction::Project(range) => {
+                    Self::project_tree_in_place(&mut segment.tree, &range);
+                    if !segment.tree.l0.is_empty() || !segment.tree.compacted.is_empty() {
+                        kept.push(segment);
+                    }
+                }
+                SegmentAction::PassThrough => kept.push(segment),
+            }
+        }
+        projected.core.segments = kept;
+
         // Drop unused external_dbs based on the surviving SST set across
         // every tree (unsegmented + segments).
         let used_sst_ids: HashSet<SsTableId> =
@@ -957,7 +1038,75 @@ impl Manifest {
         projected
             .external_dbs
             .retain(|e| e.sst_ids.iter().any(|id| used_sst_ids.contains(id)));
-        projected
+        Ok(projected)
+    }
+
+    /// Decide what to do with the tree at `prefix` given the projection config.
+    /// `Drop` means the filter rejected the segment; `Project` carries the
+    /// effective range to apply; `PassThrough` means no projection applies and
+    /// the tree is kept verbatim.
+    fn resolve_segment_action(
+        prefix: &[u8],
+        config: &ProjectionConfig,
+    ) -> Result<SegmentAction, SlateDBError> {
+        if let Some(filter) = &config.segment_filter {
+            if !filter(prefix) {
+                return Ok(SegmentAction::Drop);
+            }
+        }
+        let segment_range = if let Some(projection) = &config.segment_projection {
+            Some(Self::canonicalize_segment_range(
+                prefix,
+                projection(prefix)?,
+            )?)
+        } else {
+            None
+        };
+        let combined = match (segment_range, config.global_range.clone()) {
+            (Some(s), Some(g)) => s.intersect(&g),
+            (Some(s), None) => Some(s),
+            (None, Some(g)) => Some(g),
+            (None, None) => return Ok(SegmentAction::PassThrough),
+        };
+        match combined {
+            Some(range) => Ok(SegmentAction::Project(range)),
+            // Range constraints exist but produced an empty intersection:
+            // drop everything in the tree.
+            None => Ok(SegmentAction::Drop),
+        }
+    }
+
+    /// Validate a closure-supplied range against `[prefix, prefix++)`,
+    /// resolving `Unbounded` ends to the segment edges. Errors if the
+    /// resolved range is not a subset of the segment.
+    fn canonicalize_segment_range(
+        prefix: &[u8],
+        range: BytesRange,
+    ) -> Result<BytesRange, SlateDBError> {
+        let segment_range = BytesRange::from_prefix(prefix);
+        let start = match range.start_bound() {
+            Bound::Unbounded => segment_range.start_bound().cloned(),
+            other => other.cloned(),
+        };
+        let end = match range.end_bound() {
+            Bound::Unbounded => segment_range.end_bound().cloned(),
+            other => other.cloned(),
+        };
+        let resolved =
+            BytesRange::try_new(start, end).ok_or_else(|| SlateDBError::InvalidProjection {
+                prefix: Bytes::copy_from_slice(prefix),
+                reason: "empty range".into(),
+            })?;
+        // The resolved range must be a subset of the segment's keyspace:
+        // (resolved ∩ segment) == resolved.
+        let intersection = resolved.intersect(&segment_range);
+        if intersection.as_ref() != Some(&resolved) {
+            return Err(SlateDBError::InvalidProjection {
+                prefix: Bytes::copy_from_slice(prefix),
+                reason: format!("range {:?} is not contained in segment", resolved),
+            });
+        }
+        Ok(resolved)
     }
 
     /// Filter `tree.l0` and `tree.compacted` views against `range` in place.
@@ -1355,12 +1504,12 @@ mod tests {
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     use super::{ExternalDb, Manifest};
-    use crate::clone::CloneSource;
+    use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-    use crate::manifest::{LsmTreeState, ManifestCore, Segment};
+    use crate::manifest::{LsmTreeState, ManifestCore, ProjectionConfig, Segment};
     use crate::rand::DbRand;
     use crate::Checkpoint;
     use bytes::Bytes;
@@ -1695,8 +1844,9 @@ mod tests {
 
         let projected = Manifest::projected(
             &initial_manifest,
-            BytesRange::from_ref(test_case.visible_range),
-        );
+            &ProjectionConfig::from_global_range(BytesRange::from_ref(test_case.visible_range)),
+        )
+        .unwrap();
 
         let expected_manifest = build_manifest(&test_case.expected_manifest, |alias| {
             *sst_ids.get(alias).unwrap()
@@ -2931,7 +3081,11 @@ mod tests {
 
         assert_eq!(manifest.external_dbs.len(), 2);
 
-        let projected = Manifest::projected(&manifest, projection_range);
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(projection_range),
+        )
+        .unwrap();
 
         assert_eq!(projected.external_dbs.len(), 1);
         assert_eq!(projected.external_dbs[0].path, "/path/to/db1");
@@ -4076,7 +4230,11 @@ mod tests {
             BytesRange::from_ref("a".."m"),
         );
 
-        let projected = Manifest::projected(&manifest, BytesRange::from_ref("z"..));
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("z"..)),
+        )
+        .unwrap();
         assert!(projected.core.segments.is_empty());
         assert_eq!(
             projected.core.segment_extractor_name.as_deref(),
@@ -4155,7 +4313,11 @@ mod tests {
         ];
         let manifest = Manifest::initial(core);
 
-        let projected = Manifest::projected(&manifest, BytesRange::from_ref("a".."m"));
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("a".."m")),
+        )
+        .unwrap();
 
         assert_eq!(projected.core.segments.len(), 1);
         assert_eq!(
@@ -4175,7 +4337,11 @@ mod tests {
         let (manifest, _, _) =
             manifest_with_segment(b"", Some("legacy"), b"a", BytesRange::from_ref("a".."z"));
 
-        let projected = Manifest::projected(&manifest, BytesRange::from_ref("a".."m"));
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("a".."m")),
+        )
+        .unwrap();
         assert_eq!(
             projected.core.segment_extractor_name.as_deref(),
             Some("legacy")
@@ -4226,7 +4392,11 @@ mod tests {
             sst_ids: vec![l0_sst],
         });
 
-        let projected = Manifest::projected(&manifest, BytesRange::from_ref("a".."m"));
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("a".."m")),
+        )
+        .unwrap();
         assert!(
             projected
                 .external_dbs
@@ -4234,6 +4404,184 @@ mod tests {
                 .any(|db| db.sst_ids.contains(&l0_sst)),
             "external_db with segment-resident SST must be retained after projection"
         );
+    }
+
+    /// Build a multi-segment manifest where each segment owns a single L0 view
+    /// spanning the full `[prefix, prefix++)` range.
+    fn manifest_with_full_segments(extractor: &str, prefixes: &[&[u8]]) -> Manifest {
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some(extractor.to_string());
+        core.segments = prefixes
+            .iter()
+            .map(|p| {
+                let sst_id = SsTableId::Compacted(Ulid::new());
+                let full = BytesRange::from_prefix(p);
+                Segment {
+                    prefix: Bytes::copy_from_slice(p),
+                    tree: LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::from(vec![SsTableView::new_projected(
+                            sst_id.unwrap_compacted_id(),
+                            SsTableHandle::new(
+                                sst_id,
+                                SST_FORMAT_VERSION_LATEST,
+                                SsTableInfo {
+                                    first_entry: Some(Bytes::copy_from_slice(p)),
+                                    ..SsTableInfo::default()
+                                },
+                            ),
+                            Some(full),
+                        )]),
+                        compacted: vec![],
+                    },
+                }
+            })
+            .collect();
+        Manifest::initial(core)
+    }
+
+    #[test]
+    fn test_projected_segment_projection_applies_per_segment() {
+        // Two segments. Closure returns a narrowing range for the first and
+        // the full segment for the second. Each segment's L0 view should be
+        // narrowed accordingly.
+        let manifest = manifest_with_full_segments("hour", &[b"hour=11/", b"hour=12/"]);
+
+        let projector: SegmentProjectionFn = Arc::new(|prefix: &[u8]| {
+            Ok(if prefix == b"hour=11/" {
+                BytesRange::from_ref("hour=11/a".."hour=11/m")
+            } else {
+                BytesRange::from_prefix(prefix)
+            })
+        });
+        let config = ProjectionConfig {
+            global_range: None,
+            segment_filter: None,
+            segment_projection: Some(projector),
+        };
+
+        let projected = Manifest::projected(&manifest, &config).unwrap();
+        assert_eq!(projected.core.segments.len(), 2);
+        let s11 = &projected.core.segments[0];
+        let s12 = &projected.core.segments[1];
+        assert_eq!(s11.prefix.as_ref(), b"hour=11/");
+        assert_eq!(s12.prefix.as_ref(), b"hour=12/");
+        let s11_view = &s11.tree.l0[0];
+        let s12_view = &s12.tree.l0[0];
+        assert_eq!(
+            s11_view.visible_range().unwrap().start_bound(),
+            Bound::Included(&Bytes::from("hour=11/a"))
+        );
+        assert_eq!(
+            s11_view.visible_range().unwrap().end_bound(),
+            Bound::Excluded(&Bytes::from("hour=11/m"))
+        );
+        // s12 keeps the whole segment range.
+        assert_eq!(
+            s12_view.visible_range().unwrap().start_bound(),
+            Bound::Included(&Bytes::from("hour=12/"))
+        );
+    }
+
+    #[test]
+    fn test_projected_segment_filter_drops_named_segment() {
+        let manifest = manifest_with_full_segments("hour", &[b"hour=11/", b"hour=12/"]);
+        let filter: SegmentFilterFn = Arc::new(|p: &[u8]| p != b"hour=12/");
+        let config = ProjectionConfig {
+            global_range: None,
+            segment_filter: Some(filter),
+            segment_projection: None,
+        };
+        let projected = Manifest::projected(&manifest, &config).unwrap();
+        assert_eq!(projected.core.segments.len(), 1);
+        assert_eq!(projected.core.segments[0].prefix.as_ref(), b"hour=11/");
+    }
+
+    #[test]
+    fn test_projected_segment_filter_drops_unsegmented_tree() {
+        // Unsegmented DB with data in core.tree. Filter rejects the empty
+        // prefix, so core.tree is cleared.
+        let (manifest, _, _) =
+            manifest_with_segment(b"", None, b"a", BytesRange::from_ref("a".."z"));
+        let filter: SegmentFilterFn = Arc::new(|p: &[u8]| !p.is_empty());
+        let config = ProjectionConfig {
+            global_range: None,
+            segment_filter: Some(filter),
+            segment_projection: None,
+        };
+        let projected = Manifest::projected(&manifest, &config).unwrap();
+        assert!(projected.core.tree.l0.is_empty());
+        assert!(projected.core.tree.compacted.is_empty());
+    }
+
+    #[test]
+    fn test_projected_intersects_segment_projection_with_global_range() {
+        // Segment projection asks for [hour=11/a, hour=11/z), but the global
+        // range restricts to [hour=11/c, hour=11/m). The effective per-SST
+        // visible_range should be the intersection.
+        let manifest = manifest_with_full_segments("hour", &[b"hour=11/"]);
+        let projector: SegmentProjectionFn =
+            Arc::new(|_prefix: &[u8]| Ok(BytesRange::from_ref("hour=11/a".."hour=11/z")));
+        let config = ProjectionConfig {
+            global_range: Some(BytesRange::from_ref("hour=11/c".."hour=11/m")),
+            segment_filter: None,
+            segment_projection: Some(projector),
+        };
+        let projected = Manifest::projected(&manifest, &config).unwrap();
+        let view = &projected.core.segments[0].tree.l0[0];
+        assert_eq!(
+            view.visible_range().unwrap().start_bound(),
+            Bound::Included(&Bytes::from("hour=11/c"))
+        );
+        assert_eq!(
+            view.visible_range().unwrap().end_bound(),
+            Bound::Excluded(&Bytes::from("hour=11/m"))
+        );
+    }
+
+    #[test]
+    fn test_projected_drops_segment_when_projection_and_global_range_disjoint() {
+        // segment_projection narrows hour=11/ to a sub-range, but the global
+        // range only covers hour=12/. The hour=11/ intersection is empty, so
+        // it must be dropped. hour=12/ uses its full segment range and
+        // intersects with the global range to a non-empty result.
+        let manifest = manifest_with_full_segments("hour", &[b"hour=11/", b"hour=12/"]);
+        let projector: SegmentProjectionFn = Arc::new(|prefix: &[u8]| {
+            Ok(if prefix == b"hour=11/" {
+                BytesRange::from_ref("hour=11/a".."hour=11/m")
+            } else {
+                BytesRange::from_prefix(prefix)
+            })
+        });
+        let config = ProjectionConfig {
+            global_range: Some(BytesRange::from_ref("hour=12/a".."hour=12/z")),
+            segment_filter: None,
+            segment_projection: Some(projector),
+        };
+
+        let projected = Manifest::projected(&manifest, &config).unwrap();
+        assert_eq!(projected.core.segments.len(), 1);
+        assert_eq!(projected.core.segments[0].prefix.as_ref(), b"hour=12/");
+    }
+
+    #[test]
+    fn test_projected_errors_when_segment_range_outside_prefix() {
+        let manifest = manifest_with_full_segments("hour", &[b"hour=11/"]);
+        let projector: SegmentProjectionFn =
+            Arc::new(|_prefix: &[u8]| Ok(BytesRange::from_ref("a".."m")));
+        let config = ProjectionConfig {
+            global_range: None,
+            segment_filter: None,
+            segment_projection: Some(projector),
+        };
+        let err = Manifest::projected(&manifest, &config).unwrap_err();
+        match err {
+            SlateDBError::InvalidProjection { prefix, .. } => {
+                assert_eq!(prefix.as_ref(), b"hour=11/");
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
     }
 
     fn manifest_with_segments(prefixes: &[&[u8]]) -> super::VersionedManifest {

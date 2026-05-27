@@ -138,7 +138,7 @@ pub(crate) enum CliCommands {
 
     /// Runs a garbage collection for a specific resource type once
     RunGarbageCollection {
-        /// the type of resource to clean up (manifest, wal, compacted, compactions)
+        /// the type of resource to clean up (manifest, wal, wal-fence, compacted, compactions)
         #[arg(short, long)]
         resource: GcResource,
 
@@ -206,7 +206,7 @@ pub(crate) enum CliCommands {
     /// Schedules a period garbage collection job
     #[command(group(
         ArgGroup::new("gc_config")
-            .args(["manifest", "wal", "compacted", "compactions"])
+            .args(["manifest", "wal", "wal_fence", "compacted", "compactions"])
             .multiple(true)
             .required(true)
     ))]
@@ -224,6 +224,13 @@ pub(crate) enum CliCommands {
         /// the period is how often to attempt a GC
         #[arg(long, value_parser = parse_gc_schedule)]
         wal: Option<GcSchedule>,
+
+        /// Configuration for WAL fence garbage collection should be set in the
+        /// format min_age=<duration>,period=<duration> -- the min_age is the
+        /// minimum WAL fence age that should be considered for collection and
+        /// the period is how often to attempt a GC
+        #[arg(long, value_parser = parse_gc_schedule)]
+        wal_fence: Option<GcSchedule>,
 
         /// Configuration for compacted SST garbage collection should be set in the
         /// format min_age=<duration>,period=<duration> -- the min_age is the
@@ -245,6 +252,7 @@ pub(crate) enum CliCommands {
 pub(crate) enum GcResource {
     Manifest,
     Wal,
+    WalFence,
     Compacted,
     Compactions,
 }
@@ -304,7 +312,8 @@ fn parse_find_option(s: &str) -> Result<FindOption, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::args::parse_gc_schedule;
+    use super::{parse_gc_schedule, CliArgs, CliCommands, GcResource};
+    use clap::Parser;
     use rstest::rstest;
     use std::time::Duration;
 
@@ -360,6 +369,53 @@ mod tests {
             }
             // Any unexpected combination fails the test
             result => panic!("Unexpected test case result. {:?}", result),
+        }
+    }
+
+    #[test]
+    fn parses_wal_fence_gc_resource() {
+        let args = CliArgs::try_parse_from([
+            "slatedb",
+            "--path",
+            "/tmp/slatedb",
+            "run-garbage-collection",
+            "--resource",
+            "wal-fence",
+            "--min-age",
+            "1m",
+        ])
+        .unwrap();
+
+        match args.command {
+            CliCommands::RunGarbageCollection { resource, min_age } => {
+                assert!(matches!(resource, GcResource::WalFence));
+                assert_eq!(min_age, Duration::from_secs(60));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_wal_fence_gc_schedule() {
+        let args = CliArgs::try_parse_from([
+            "slatedb",
+            "--path",
+            "/tmp/slatedb",
+            "schedule-garbage-collection",
+            "--wal-fence",
+            "min_age=10m,period=1m",
+        ])
+        .unwrap();
+
+        match args.command {
+            CliCommands::ScheduleGarbageCollection {
+                wal_fence: Some(schedule),
+                ..
+            } => {
+                assert_eq!(schedule.min_age, Duration::from_secs(600));
+                assert_eq!(schedule.period, Duration::from_secs(60));
+            }
+            command => panic!("unexpected command: {command:?}"),
         }
     }
 }

@@ -318,12 +318,18 @@ final class TestSupport {
     }
 
     static ReadOptions readOptions() {
-        return new ReadOptions(DurabilityLevel.MEMORY, false, true);
+        return new ReadOptions(DurabilityLevel.MEMORY, false, true, null);
     }
 
     static ScanOptions scanOptions(long readAheadBytes, boolean cacheBlocks, long maxFetchTasks) {
         return new ScanOptions(
-                DurabilityLevel.MEMORY, false, readAheadBytes, cacheBlocks, maxFetchTasks, null);
+                DurabilityLevel.MEMORY,
+                false,
+                readAheadBytes,
+                cacheBlocks,
+                maxFetchTasks,
+                null,
+                null);
     }
 
     static ReaderOptions readerOptions(boolean skipWalReplay) {
