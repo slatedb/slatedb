@@ -603,9 +603,9 @@ handles skewed workloads naturally.
 
 ## References
 
-- [Issue #1669: Better Memory Management With A WriteBufferManager](https://github.com/slatedb/slatedb/issues/1669)
+- [Issue #1669: Better Memory Management With A ByteBufferManager](https://github.com/slatedb/slatedb/issues/1669)
 - [PR #1 (prototype): adding the primitive](https://github.com/zach-schoenberger/slatedb/pull/1)
-- RocksDB [`WriteBufferManager`](https://github.com/facebook/rocksdb/wiki/Write-Buffer-Manager)
+- RocksDB [`ByteBufferManager`](https://github.com/facebook/rocksdb/wiki/Write-Buffer-Manager)
   — prior art for global memtable memory budgeting in an LSM engine.
 
 ## Updates
