@@ -84,6 +84,22 @@ pub trait Histogram: Send + Sync {
 }
 
 /// Application-defined metrics recorder used to publish SlateDB metrics.
+//
+// `description` is `Option<String>` rather than `String` to dodge a
+// uniffi-bindgen-go callback crash (NordSecurity/uniffi-bindgen-go#83). Most
+// SlateDB metrics register with an empty description, and a top-level `String`
+// lowers across the FFI to a raw, length-prefix-free buffer: an empty string
+// becomes a capacity-0 `RustBuffer` whose `data` is Rust's dangling allocation
+// sentinel `0x1`. uniffi-bindgen-go passes that buffer by value into the
+// generated Go callback frame, where `data` is pointer-typed; when the Go GC
+// scans (or the runtime grows/copies) that goroutine stack mid-callback, it
+// rejects the `0x1` and aborts with "invalid pointer found on stack".
+//
+// An `Option` always lowers with a leading discriminant byte, so it never
+// produces a capacity-0 buffer and never carries the sentinel pointer. Empty
+// descriptions map to `None`; the recorder treats `None` as no description.
+// (`name` stays `String` because metric names are always non-empty constants,
+// so they never hit the empty-buffer path.)
 #[uniffi::export(with_foreign)]
 pub trait MetricsRecorder: Send + Sync {
     /// Registers a monotonically increasing counter.
