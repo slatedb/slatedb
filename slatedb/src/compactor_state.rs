@@ -814,7 +814,7 @@ impl CompactorState {
                 .first()
                 .expect("illegal: empty compaction spec");
 
-            let Some(tree_arc) = db_state.tree_for_segment_arc(&segment) else {
+            let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
                 error!(
                     "finish_compaction: target segment missing [segment={:?}, compaction_id={}]",
                     segment, compaction_id
@@ -827,8 +827,6 @@ impl CompactorState {
                 });
                 return;
             };
-
-            let mut tree = Arc::unwrap_or_clone(tree_arc);
 
             let new_l0: VecDeque<SsTableView> = tree
                 .l0
@@ -864,7 +862,6 @@ impl CompactorState {
             }
             tree.l0 = new_l0;
             tree.compacted = new_compacted;
-            db_state.replace_tree(&segment, Arc::new(tree));
             self.manifest.value.core = db_state;
             self.manifest.value.prune_external_sst_ids();
             self.update_compaction(&compaction_id, |c| {
@@ -921,7 +918,7 @@ impl CompactorState {
             .filter_map(|id| id.maybe_unwrap_sorted_run())
             .collect();
 
-        let Some(tree_arc) = db_state.tree_for_segment_arc(&segment) else {
+        let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
             error!(
                 "finish_drain_compaction: target segment missing [segment={:?}, compaction_id={}]",
                 segment, compaction_id
@@ -933,8 +930,6 @@ impl CompactorState {
             });
             return;
         };
-
-        let mut tree = Arc::unwrap_or_clone(tree_arc);
 
         // tree.l0 is sorted newest-first, so the first match is the newest L0
         // in `sources`. Per RFC-0024 the watermark advances to that L0 only;
@@ -951,7 +946,6 @@ impl CompactorState {
 
         tree.l0.retain(|view| !drained_l0_ids.contains(&view.id));
         tree.compacted.retain(|sr| !drained_sr_ids.contains(&sr.id));
-        db_state.replace_tree(&segment, Arc::new(tree));
 
         self.manifest.value.core = db_state;
         self.manifest.value.prune_external_sst_ids();

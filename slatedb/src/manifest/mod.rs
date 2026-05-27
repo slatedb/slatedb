@@ -452,39 +452,19 @@ impl ManifestCore {
         }
     }
 
-    /// Return a clone of the [`Arc`] wrapping the LSM tree for the given
-    /// segment prefix.  An empty `prefix` addresses the root tree; a
-    /// non-empty prefix addresses a named segment.  Returns `None` when no
-    /// segment with that prefix exists.
-    pub(crate) fn tree_for_segment_arc(&self, prefix: &[u8]) -> Option<Arc<LsmTreeState>> {
+    /// Return a mutable reference to the LSM tree for the given segment
+    /// prefix.  An empty `prefix` addresses the root tree; a non-empty
+    /// prefix addresses a named segment.  Returns `None` when no segment
+    /// with that prefix exists.
+    pub(crate) fn tree_for_segment_mut(&mut self, prefix: &[u8]) -> Option<&mut LsmTreeState> {
         if prefix.is_empty() {
-            Some(Arc::clone(&self.tree))
+            Some(Arc::make_mut(&mut self.tree))
         } else {
             let idx = self
                 .segments
                 .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
                 .ok()?;
-            Some(Arc::clone(&self.segments[idx].tree))
-        }
-    }
-
-    /// Replace the LSM tree for the given segment prefix.  An empty
-    /// `prefix` replaces the root tree; a non-empty prefix replaces the
-    /// named segment's tree.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `prefix` is non-empty and no segment with that prefix
-    /// exists.
-    pub(crate) fn replace_tree(&mut self, prefix: &[u8], tree: Arc<LsmTreeState>) {
-        if prefix.is_empty() {
-            self.tree = tree;
-        } else {
-            let idx = self
-                .segments
-                .binary_search_by(|s| s.prefix.as_ref().cmp(prefix))
-                .expect("replace_tree: segment not found");
-            self.segments[idx].tree = tree;
+            Some(Arc::make_mut(&mut self.segments[idx].tree))
         }
     }
 
