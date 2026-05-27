@@ -1,728 +1,1969 @@
 ---
 import SocialIcons from '../components/SocialIcons.astro';
 import ThemeProvider from '../components/ThemeProvider.astro';
-import TerminalContent from '../components/TerminalContent.astro';
 import barsIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/bars.svg?raw';
 import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.svg?raw';
+import { getStarsLabel } from '../lib/github-stars';
+import { highlight } from '../lib/highlight';
+
+const starsLabel = await getStarsLabel();
+
+// The "used by" companies — even row, all logos rendered at the same height.
+const usedBy = [
+    { name: 'Dropbox',    href: 'https://www.dropbox.com/',     logo: '/img/logos/dropbox.svg',    scale: 1.2 },
+    { name: 'TensorLake', href: 'https://www.tensorlake.ai/',   logo: '/img/logos/tensorlake.svg', scale: 1.2 },
+    { name: 'S2',         href: 'https://s2.dev/',                logo: '/img/logos/s2.svg' },
+    { name: 'Goldsky',    href: 'https://goldsky.com/',           logo: '/img/logos/goldsky.svg' },
+    { name: 'Gadget',     href: 'https://gadget.dev/',            logo: '/img/logos/gadget.svg' },
+    { name: 'MerkleMap',  href: 'https://merklemap.com/',        logo: '/img/logos/merklemap.svg' },
+    { name: 'OpenData',   href: 'https://opendata.dev/',         logo: '/img/logos/opendata.svg' },
+    { name: 'Massive',    href: 'https://massive.com/',           logo: '/img/logos/massive.png' },
+];
+
+// Quickstart language entries.
+const langs = [
+    {
+        id: 'rust',
+        label: 'rust',
+        install: 'cargo add slatedb tokio --features tokio/macros,tokio/rt-multi-thread',
+        code: `use slatedb::Db;
+use slatedb::object_store::memory::InMemory;
+
+let store = std::sync::Arc::new(InMemory::new());
+let db = Db::builder("demo", store).build().await?;
+
+db.put(b"hello", b"world").await?;
+let value = db.get(b"hello").await?;`,
+    },
+    {
+        id: 'go',
+        label: 'go',
+        install: 'go get slatedb.io/slatedb-go',
+        code: `store, _ := slatedb.ObjectStoreResolve("memory:///")
+builder := slatedb.NewDbBuilder("demo", store)
+db, _ := builder.Build()
+
+db.Put([]byte("hello"), []byte("world"))
+value, _ := db.Get([]byte("hello"))`,
+    },
+    {
+        id: 'java',
+        label: 'java',
+        install: "implementation 'io.slatedb:slatedb-uniffi'",
+        code: `ObjectStore store = ObjectStore.resolve("memory:///");
+DbBuilder builder = new DbBuilder("demo", store);
+Db db = builder.build().get();
+
+db.put("hello".getBytes(), "world".getBytes()).get();
+byte[] value = db.get("hello".getBytes()).get();`,
+    },
+    {
+        id: 'node',
+        label: 'node',
+        install: 'npm install @slatedb/uniffi',
+        code: `const store = ObjectStore.resolve("memory:///");
+const builder = new DbBuilder("demo", store);
+const db = await builder.build();
+
+await db.put(Buffer.from("hello"), Buffer.from("world"));
+const value = await db.get(Buffer.from("hello"));`,
+    },
+    {
+        id: 'python',
+        label: 'python',
+        install: 'pip install slatedb',
+        code: `store = ObjectStore.resolve("memory:///")
+builder = DbBuilder("demo", store)
+db = await builder.build()
+
+await db.put(b"hello", b"world")
+value = await db.get(b"hello")`,
+    },
+];
+
+// Four mechanism-named feature cells for the homepage engineering plate.
+const features = [
+    {
+        id: 'zero-disk',
+        figure: 'Fig. 1',
+        figureTitle: 'object storage native design',
+        name: 'Zero-disk architecture',
+        body: 'Persist data directly to object storage. Keep 99.999999999% durability and cost profile of S3-class storage without local disks or cross-AZ storage traffic.',
+        figureImg: '/img/feature-zero-disk.png',
+        figureScaled: true,
+    },
+    {
+        id: 'deployment',
+        figure: 'Fig. 2',
+        figureTitle: 'single-writer, multi-reader',
+        name: 'Flexible deployment',
+        body: 'SlateDB ensures a single writer through a formally verified manifest fencing protocol but supports multiple readers for read-side scaling. Compaction can run embedded or as a separate process to enforce separation of concerns.',
+        figureImg: '/img/feature-deployment.png',
+    },
+    {
+        id: 'semantics',
+        figure: 'Fig. 3',
+        figureTitle: 'suitable for OLTP workloads',
+        name: 'Transactional semantics',
+        body: 'Transactions, snapshots, and optimistic concurrency control mechanisms ensure that SlateDB is suitable for the most demanding transactional workloads.',
+        figureImg: '/img/feature-semantics.png',
+    },
+    {
+        id: 'performance',
+        figure: 'Fig. 4',
+        figureTitle: 'latency and cost controls',
+        name: 'Tunable performance',
+        body: 'Writes can trade between API request cost and durability latency while reads can leverage hybrid memory/disk caching to avoid cold latency penalties.',
+        figureImg: '/img/feature-performance.png',
+    },
+];
 ---
 
 <html lang="en">
-	<head>
-		<meta charset="UTF-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>SlateDB | Embedded DB Built on Object Storage</title>
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<meta name="description" content="An Embedded DB Built on Object Storage" />
-		<meta property="og:image" content="/img/slatedb-opengraph.jpg" />
-		<meta property="og:image:alt" content="SlateDB | Embedded DB Built on Object Storage" />
-	</head>
-	<body>
-		<ThemeProvider />
-		<div class="page">
-			<header class="header">
-				<div class="header-content">
-					<div class="title-wrapper">
-						<a href="/" class="site-title">
-							<img src="/img/logo-full.svg" alt="SlateDB" />
-						</a>
-					</div>
-					<div class="right-group">
-						<div class="header-links">
-							<a href="/docs/get-started/introduction/" class="header-link">docs</a>
-							<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">discord</a>
-							<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link" id="github-link">github</a>
-						</div>
-						<button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Toggle menu" aria-expanded="false">
-							<span class="menu-icon menu-icon-bars" set:html={barsIcon}></span>
-							<span class="menu-icon menu-icon-times" set:html={timesIcon}></span>
-						</button>
-					</div>
-					<div class="mobile-menu" id="mobile-menu">
-						<a href="/docs/get-started/introduction/" class="mobile-menu-link">docs</a>
-						<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">discord</a>
-						<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="mobile-menu-link" id="mobile-github-link">github</a>
-					</div>
-				</div>
-			</header>
-			<main class="main">
-                <h1>
-                    slatedb is an OSS embedded key-value database built on object storage
-                </h1>
-
-                <div class="terminal">
-                    <div class="terminal-header">
-                        <div class="terminal-buttons">
-                            <span class="terminal-button terminal-button-close"></span>
-                            <span class="terminal-button terminal-button-minimize"></span>
-                            <span class="terminal-button terminal-button-maximize"></span>
-                        </div>
-                        <div class="terminal-tabs">
-                            <button class="terminal-tab active" data-tab="rust">rust</button>
-                            <button class="terminal-tab" data-tab="golang">golang</button>
-                            <button class="terminal-tab" data-tab="node">node</button>
-                            <button class="terminal-tab" data-tab="python">python</button>
-                            <button class="terminal-tab" data-tab="java">java</button>
-                        </div>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>SlateDB — An embedded database built on object storage</title>
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <meta name="description" content="SlateDB is an embedded storage engine built on object storage. Use it as the storage core inside the database, cache, stream processor, or workflow engine you're building." />
+        <meta property="og:image" content="/img/slatedb-opengraph.jpg" />
+        <meta property="og:image:alt" content="SlateDB | An embedded database built on object storage" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            rel="stylesheet"
+            href="https://fonts.googleapis.com/css2?family=Marcellus&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        />
+    </head>
+    <body>
+        <ThemeProvider />
+        <div class="page">
+            <header class="header">
+                <div class="header-content">
+                    <a href="/" class="site-title">
+                        <img src="/img/logo-full.svg" alt="SlateDB" />
+                    </a>
+                    <div class="right-group">
+                        <nav class="header-links">
+                            <a href="/docs/get-started/introduction/" class="header-link">docs</a>
+                            <a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">discord</a>
+                            <a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link" id="github-link">github <span class="star-count"><span class="star-icon">★</span>{starsLabel}</span></a>
+                        </nav>
+                        <button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Toggle menu" aria-expanded="false">
+                            <span class="menu-icon menu-icon-bars" set:html={barsIcon}></span>
+                            <span class="menu-icon menu-icon-times" set:html={timesIcon}></span>
+                        </button>
                     </div>
-                    <div class="terminal-body">
-                        <TerminalContent
-                            language="rust"
-                            command="cargo add slatedb"
-                            docsUrl="/docs/get-started/introduction/"
-                            isDefault={true}
-                        />
-                        <TerminalContent
-                            language="golang"
-                            command="go get slatedb.io/slatedb-go"
-                            docsUrl="/docs/get-started/introduction/"
-                        />
-                        <TerminalContent
-                            language="node"
-                            command="npm install @slatedb/uniffi"
-                            docsUrl="https://github.com/slatedb/slatedb/blob/main/bindings/node/README.md"
-                        />
-                        <TerminalContent
-                            language="python"
-                            command="pip install slatedb"
-                            docsUrl="/docs/get-started/introduction/"
-                        />
-                        <TerminalContent
-                            language="java"
-                            command="implementation 'io.slatedb:slatedb-uniffi'"
-                            docsUrl="https://central.sonatype.com/artifact/io.slatedb/slatedb-uniffi"
-                        />
+                    <div class="mobile-menu" id="mobile-menu">
+                        <a href="/docs/get-started/introduction/" class="mobile-menu-link">docs</a>
+                        <a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">discord</a>
+                        <a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="mobile-menu-link" id="mobile-github-link">github <span class="star-count"><span class="star-icon">★</span>{starsLabel}</span></a>
                     </div>
                 </div>
-                <div class="bordered-section">
-                    <div class="section-title">used by</div>
-                    <div class="logos-section">
-                        <a href="https://www.dropbox.com/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/dropbox.svg" alt="Dropbox" />
-                        </a>
-                        <a href="https://www.tensorlake.ai/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/tensorlake.svg" alt="TensorLake" />
-                        </a>
-                        <a href="https://opendata.dev/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/opendata.svg" alt="OpenData" />
-                        </a>
-                        <a href="https://www.embucket.com/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/embucket.svg" alt="Embucket" />
-                        </a>
-                        <a href="https://merklemap.com/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/merklemap.svg" alt="MerkleMap" />
-                        </a>
-                        <a href="https://s2.dev/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/s2.svg" alt="S2" class="logo-tall" />
-                        </a>
-                        <a href="https://gadget.dev/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/gadget.svg" alt="Gadget" />
-                        </a>
-                        <a href="https://goldsky.com/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/goldsky.svg" alt="Goldsky" />
-                        </a>
-                        <a href="https://massive.com/" target="_blank" rel="noopener noreferrer">
-                            <img src="/img/logos/massive.png" alt="Massive" />
-                        </a>
-                    </div>
-                    <a href="https://github.com/slatedb/slatedb/issues/new?title=add%20%3Cmy%20company%3E%27s%20logo%20to%20used%20by&body=Please%20add%20%3Cmy%20company%3E%27s%20logo%20to%20the%20slatedb%20website.%0A%0A**Logo%20SVG%3A**%0A%0A**Company%20Link%3A**%0A%0A**How%20you%20use%20slatedb%3A**%0A" target="_blank" rel="noopener noreferrer" class="add-logo-link">+ add your logo</a>
-                </div>
+            </header>
 
-			</main>
-			<footer class="footer">
-				<div class="footer-content">
-					<div class="footer-icons">
-						<SocialIcons />
-					</div>
-					<div class="copyright-wrapper">
-            <p>
-                <img src="https://raw.githubusercontent.com/commonhaus/artwork/main/foundation/brand/svg/CF_logo_horizontal_single_default.svg" height="20"/><br />
-                Copyright © <a href="https://slatedb.io">SlateDB</a>. All rights reserved. For details on our trademarks, please visit our <a href="https://www.commonhaus.org/policies/trademark-policy/">Trademark Policy</a> and <a href="https://www.commonhaus.org/trademarks/">Trademark List</a>.<br/>
-                Trademarks of third parties are owned by their respective holders and their mention here does not suggest any endorsement or association.
-            </p>
-					</div>
-				</div>
-			</footer>
-		</div>
-	</body>
+            <main>
+                <!-- 1. Hero -->
+                <section class="hero">
+                    <div class="hero-text">
+                        <h1 class="hero-headline">
+                            Build reliably on
+                            <em>object&nbsp;storage.</em>
+                        </h1>
+                        <p class="hero-sub">
+                        SlateDB is an OSS embedded key-value database and LSM-engine built on object storage. 
+                        </p>
+                        <div class="hero-ctas">
+                            <a class="cta cta-primary" href="/docs/get-started/introduction/">Read the docs</a>
+                            <a class="cta cta-secondary" href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer">
+                                <span>GitHub</span>
+                            </a>
+                        </div>
+                    </div>
+                    <div class="hero-art" aria-hidden="true">
+                        <img src="/img/slate-atlas.png" alt="" width="1122" height="1402" loading="eager" decoding="async" />
+                    </div>
+                </section>
+
+                <!-- 2. Used by — evenly spaced, uniform-height logos -->
+                <section class="usedby" aria-label="Used by">
+                    <a
+                        class="add-logo"
+                        href="https://github.com/slatedb/slatedb/issues/new?title=add%20%3Cmy%20company%3E%27s%20logo%20to%20used%20by&body=Please%20add%20%3Cmy%20company%3E%27s%20logo%20to%20the%20slatedb%20website.%0A%0A**Logo%20SVG%3A**%0A%0A**Company%20Link%3A**%0A%0A**How%20you%20use%20slatedb%3A**%0A"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >+ add your logo</a>
+                    <div class="usedby-label">used by</div>
+                    <div class="usedby-row">
+                        {usedBy.map((c) => (
+                            <a href={c.href} target="_blank" rel="noopener noreferrer" class="usedby-logo" style={c.scale ? `--logo-scale: ${c.scale}` : undefined}>
+                                <img src={c.logo} alt={c.name} />
+                            </a>
+                        ))}
+                    </div>
+                </section>
+
+                <!-- 3. Editorial paragraph -->
+                <section class="prose">
+                    <p>
+                    Object storage is the foundation that holds up modern cloud-native systems: strongly consistent, absurdly durable, and priced like background noise. SlateDB <em>embeds within your system</em> and provides online, transactional access to object storage. Build a&nbsp;database, a&nbsp;cache, a&nbsp;feature store, a&nbsp;ledger, a&nbsp;workflow engine or anything on top of object storage and SlateDB is the layer that makes <em>the writes correct, the reads fast, and the ops boring.</em>
+                    </p>
+                </section>
+
+                <!-- 4. Feature plate -->
+                <section class="features" aria-label="Features">
+                    <div class="features-head">
+                        <h2 class="section-eyebrow">the engine</h2>
+                    </div>
+                    <div class="feature-plate" data-feature-plate>
+                        <div class="plate-main">
+                            <div class="plate-figure-stack" aria-label="Feature figure">
+                                {features.map((f, i) => (
+                                    <article
+                                        id={`feature-panel-${f.id}`}
+                                        class={`plate-panel ${i === 0 ? 'active' : ''}`}
+                                        role="tabpanel"
+                                        aria-labelledby={`feature-tab-${f.id}`}
+                                        data-feature-panel={f.id}
+                                    >
+                                        <span class="plate-figure-marker">{f.figure}</span>
+                                        {f.figureImg && (
+                                            <img class={`plate-figure-img ${f.figureScaled ? 'plate-figure-img--scaled' : ''}`} src={f.figureImg} alt="" aria-hidden="true" />
+                                        )}
+                                    </article>
+                                ))}
+                            </div>
+                            <div class="plate-copy-stack">
+                                <div class="plate-copy-panels">
+                                    {features.map((f, i) => (
+                                        <article
+                                            class={`plate-copy ${i === 0 ? 'active' : ''}`}
+                                            data-feature-copy={f.id}
+                                        >
+                                            <h3 class="feature-name">{f.name}</h3>
+                                            <p class="feature-body">{f.body}</p>
+                                        </article>
+                                    ))}
+                                </div>
+                                <div class="plate-tabs" role="tablist" aria-label="Feature figures">
+                                    {features.map((f, i) => (
+                                        <button
+                                            id={`feature-tab-${f.id}`}
+                                            class={`plate-tab ${i === 0 ? 'active' : ''}`}
+                                            type="button"
+                                            role="tab"
+                                            aria-selected={i === 0 ? 'true' : 'false'}
+                                            aria-controls={`feature-panel-${f.id}`}
+                                            data-feature-tab={f.id}
+                                        >
+                                            <span>
+                                                <span class="feature-index">{['I', 'II', 'III', 'IV'][i]}</span>
+                                                {f.name}
+                                            </span>
+                                            <span class="plate-tab-tag">{f.figureTitle}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 5. Quickstart -->
+                <section class="quickstart" aria-label="Quickstart">
+                    <div class="quickstart-head">
+                        <h2 class="section-eyebrow">quickstart</h2>
+                        <a class="quickstart-more" href="/docs/get-started/quickstart/">full quickstart →</a>
+                    </div>
+                    <div class="qs-card">
+                        <div class="qs-tabs" role="tablist">
+                            <div class="qs-dots" aria-hidden="true">
+                                <span></span><span></span><span></span>
+                            </div>
+                            {langs.map((l, i) => (
+                                <button
+                                    class={`qs-tab ${i === 0 ? 'active' : ''}`}
+                                    data-tab={l.id}
+                                    role="tab"
+                                    aria-selected={i === 0 ? 'true' : 'false'}
+                                >{l.label}</button>
+                            ))}
+                        </div>
+                        {langs.map((l, i) => (
+                            <div class={`qs-pane ${i === 0 ? 'active' : ''}`} data-content={l.id}>
+                                <div class="qs-install">
+                                    <span class="qs-prompt">$</span>
+                                    <code>{l.install}</code>
+                                    <button class="qs-copy" type="button" data-copy={l.install} aria-label="Copy install command">
+                                        <svg class="qs-copy-icon qs-copy-icon-clip" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                        <svg class="qs-copy-icon qs-copy-icon-check" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polyline points="20 6 9 17 4 12"></polyline>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <pre class="qs-code"><code set:html={highlight(l.code, l.id)}></code></pre>
+                            </div>
+                        ))}
+                    </div>
+                </section>
+
+                <!-- 6. Closing CTA -->
+                <section class="closing" aria-label="Read the docs">
+                    <!-- Doric colonnade flanking the closing block. Four
+                         distinct variants are arranged two per side; the right
+                         side is mirrored via CSS scaleX(-1) so the inner-facing
+                         edges of all four point toward the headline. -->
+                    <div class="closing-colonnade closing-colonnade-left" aria-hidden="true">
+                        <img src="/img/slate-doric.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                        <img src="/img/slate-doric-2.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                    </div>
+                    <div class="closing-colonnade closing-colonnade-right" aria-hidden="true">
+                        <img src="/img/slate-doric-3.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                        <img src="/img/slate-doric-4.png" alt="" width="1122" height="1402" loading="lazy" decoding="async" />
+                    </div>
+                    <div class="closing-text">
+                        <h2 class="closing-headline">Ready to build?</h2>
+                        <p class="closing-sub">
+                            The full reference covers architecture, operations, tutorials, and the RFC archive.
+                        </p>
+                        <div class="closing-ctas">
+                            <a class="cta cta-primary" href="/docs/get-started/introduction/">Read the docs</a>
+                            <a class="cta cta-secondary" href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer">
+                                <span>View on GitHub</span>
+                            </a>
+                        </div>
+                    </div>
+                </section>
+            </main>
+
+            <footer class="footer">
+                <div class="footer-content">
+                    <div class="footer-icons">
+                        <SocialIcons />
+                    </div>
+                    <div class="copyright-wrapper">
+                        <p>
+                            <img src="https://raw.githubusercontent.com/commonhaus/artwork/main/foundation/brand/svg/CF_logo_horizontal_single_default.svg" height="20" alt="Commonhaus Foundation"/><br />
+                            Copyright © <a href="https://slatedb.io">SlateDB</a>. All rights reserved. For details on our trademarks, please visit our <a href="https://www.commonhaus.org/policies/trademark-policy/">Trademark Policy</a> and <a href="https://www.commonhaus.org/trademarks/">Trademark List</a>.<br/>
+                            Trademarks of third parties are owned by their respective holders and their mention here does not suggest any endorsement or association.
+                        </p>
+                    </div>
+                </div>
+            </footer>
+        </div>
+    </body>
 </html>
 
 <style>
-	html,
-	body {
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-		margin: 0;
-		padding: 0;
-		height: 100%;
-	}
+    /* ---------------------------------------------------------------
+     * Tokens consumed from custom.css. Fallbacks defined here so the
+     * landing remains coherent if custom.css fails to load.
+     * ------------------------------------------------------------- */
+    :root {
+        --ink-1: #0f1620;
+        --ink-2: #1f2a37;
+        --ink-3: #3d4856;
+        --ink-4: #5e6878;
+        --ink-5: #8b94a3;
+        --ink-6: #c8cdd5;
+        --ink-7: #dfe2e8;
+        --surface-0: #f6f7f9;
+        --surface-1: #ffffff;
+        --surface-2: #eef0f3;
+        --surface-3: #e2e6eb;
+        --accent-high: #7a3e22;
+        --accent: #b26844;
+        --accent-low: #f3e3d8;
+    }
 
-	html {
-		height: 100%;
-	}
+    html, body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--surface-0);
+        color: var(--ink-2);
+        font-family:
+            'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+            'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+    }
 
-	body {
-		min-height: 100vh;
-	}
+    body { min-height: 100vh; }
 
-	.sr-only {
-		width: 1px;
-		height: 1px;
-		padding: 0;
-		margin: -1px;
-		overflow: hidden;
-		clip: rect(0, 0, 0, 0);
-		clip-path: inset(50%);
-		white-space: nowrap;
-		border-width: 0;
-	}
+    .page {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+        position: relative;
+        /* Cool off-white base + a faint terracotta glow radiating from the
+           top-right corner (anchored near the hero figure). Soft and small. */
+        background:
+            radial-gradient(circle at 100% 0%, rgba(178, 104, 68, 0.08), transparent 28%),
+            var(--surface-0);
+        isolation: isolate;
+    }
 
-	.page {
-		display: flex;
-		flex-direction: column;
-		min-height: 100vh;
-	}
+    /* Architectural-sketch bg currently hidden — atlas hero image carries the visual weight. */
 
-	.header {
-		z-index: 100;
-		position: fixed;
-		top: 0;
-		left: 0;
-		width: 100%;
-		max-width: 100%;
-		padding: 1rem 1.5rem;
-		background-color: white;
-		box-sizing: border-box;
-		overflow: visible;
-	}
+    /* ---------- Header ---------- */
 
-	.header-content {
-		display: flex;
-		gap: 1rem;
-		justify-content: space-between;
-		align-items: center;
-		height: 100%;
-		width: 100%;
-		max-width: 100%;
-		box-sizing: border-box;
-		position: relative;
-	}
+    .header {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        /* Translucent enough that the terracotta corner glow on .page tints
+           the navbar instead of being clipped at its lower edge. */
+        background-color: rgba(246, 247, 249, 0.45);
+        backdrop-filter: saturate(180%) blur(16px);
+        -webkit-backdrop-filter: saturate(180%) blur(16px);
+        /* Match main's scaling inline padding so the header tracks the
+           content's left/right edges as the viewport grows. */
+        padding: 1rem clamp(1.5rem, 4vw, 4rem);
+    }
 
-	.title-wrapper {
-		overflow: clip;
-		padding: 0.25rem;
-		margin: -0.25rem;
-		min-width: 0;
-		flex-shrink: 1;
-	}
+    .header-content {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        max-width: 72rem;
+        margin: 0 auto;
+        position: relative;
+    }
 
-	.site-title {
-		display: inline-flex;
-		align-items: center;
-		text-decoration: none;
-	}
+    .site-title { display: inline-flex; align-items: center; }
+    .site-title img { height: 1.6rem; width: auto; }
 
-	.site-title img {
-		height: calc((4rem - 2rem) * 0.8);
-		width: auto;
-		max-width: 100%;
-	}
+    .right-group {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
 
-	.right-group {
-		display: flex;
-		align-items: center;
-		flex-shrink: 0;
-		margin-left: auto;
-	}
+    .header-links {
+        display: flex;
+        gap: 1.5rem;
+        align-items: center;
+    }
 
-	.header-links {
-		display: flex;
-		gap: 1.5rem;
-		align-items: center;
-	}
+    .header-link {
+        font-size: 0.8125rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: var(--ink-2);
+        text-decoration: none;
+        transition: color 0.15s ease;
+        display: inline-flex;
+        align-items: center;
+    }
+    .header-link:hover { color: var(--accent); }
+    .header-link .star-count,
+    .mobile-menu-link .star-count {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.2rem;
+        margin-left: 0.55rem;
+        padding: 0.12rem 0.45rem;
+        background-color: var(--surface-1);
+        border: 1px solid var(--ink-6);
+        border-radius: 0.4rem;
+        color: var(--ink-2);
+        font-size: 0.72rem;
+        font-weight: 500;
+        line-height: 1;
+        transition: border-color 0.15s ease, background-color 0.15s ease;
+    }
+    .header-link:hover .star-count,
+    .mobile-menu-link:hover .star-count {
+        border-color: var(--ink-4);
+    }
+    .header-link .star-count .star-icon,
+    .mobile-menu-link .star-count .star-icon {
+        color: var(--accent);
+        font-size: 0.8rem;
+        line-height: 1;
+    }
 
-	.header-link {
-		font-size: 0.875rem;
-		font-family: monospace;
-		color: #000;
-		text-decoration: none;
-		transition: color 0.2s ease;
-	}
+    .mobile-menu-toggle {
+        display: none;
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0.5rem;
+        margin: -0.5rem;
+        position: relative;
+        width: 2rem;
+        height: 2rem;
+        color: var(--ink-2);
+    }
 
-	.header-link:hover {
-		color: #666;
-	}
+    .menu-icon {
+        position: absolute;
+        inset: 0.5rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: opacity 0.15s ease;
+    }
+    .menu-icon svg { width: 1rem; height: 1rem; fill: currentColor; }
+    .menu-icon-times { opacity: 0; }
+    .mobile-menu-toggle[aria-expanded='true'] .menu-icon-bars { opacity: 0; }
+    .mobile-menu-toggle[aria-expanded='true'] .menu-icon-times { opacity: 1; }
 
-	.header-link .star-count {
-		display: inline-block;
-		color: #666 !important;
-		font-weight: normal;
-		margin-left: 0.25rem;
-		transition: none !important;
-	}
+    .mobile-menu {
+        display: none;
+        flex-direction: column;
+        gap: 0.5rem;
+        padding: 1rem 1.5rem;
+        background-color: var(--surface-0);
+        border-top: 1px solid var(--ink-6);
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+    }
+    .mobile-menu.open { display: flex; }
+    .mobile-menu-link {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.875rem;
+        color: var(--ink-2);
+        text-decoration: none;
+        padding: 0.5rem 0;
+    }
 
-	.header-link:hover .star-count {
-		color: #666 !important;
-	}
+    @media (max-width: 768px) {
+        .header-links { display: none; }
+        .mobile-menu-toggle { display: flex; }
+    }
 
-	#github-link .star-count {
-		color: #666 !important;
-	}
+    /* ---------- Hero ---------- */
 
-	.mobile-menu-toggle {
-		display: none;
-		background: none;
-		border: none;
-		cursor: pointer;
-		padding: 0.5rem;
-		margin: -0.5rem;
-		align-items: center;
-		justify-content: center;
-		position: relative;
-		width: 2rem;
-		height: 2rem;
-	}
+    main {
+        max-width: 72rem;
+        margin: 0 auto;
+        /* Inline padding scales with viewport so content keeps breathing room
+           on both sides instead of going flush at widths near max-width. */
+        padding: 0 clamp(1.5rem, 4vw, 4rem);
+        width: 100%;
+        box-sizing: border-box;
+    }
 
-	.menu-icon {
-		position: absolute;
-		width: 1.0rem;
-		height: 1.0rem;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: opacity 0.2s ease;
-	}
+    .hero {
+        padding: 7rem 0 5rem;
+        position: relative;
+        isolation: isolate;
+    }
+    /* Faint grid that fades to nothing at the edges. Sits behind everything in
+       the hero (Atlas figure, text). */
+    .hero::before {
+        content: "";
+        position: absolute;
+        /* Extend the grid down past the hero (negative bottom inset) so it
+           continues through the "used by" + prose sections instead of cutting
+           off at the hero's edge. */
+        inset: 0 0 -28rem 0;
+        pointer-events: none;
+        opacity: 0.18;
+        background-image:
+            linear-gradient(rgba(80, 70, 55, 0.16) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(80, 70, 55, 0.16) 1px, transparent 1px);
+        background-size: 72px 72px;
+        /* Mask is biased upward (28% from top) so the brightest patch still
+           sits around the hero text now that the element is taller. */
+        -webkit-mask-image: radial-gradient(ellipse 60% 65% at 50% 28%, black 0%, transparent 100%);
+        mask-image: radial-gradient(ellipse 60% 65% at 50% 28%, black 0%, transparent 100%);
+        z-index: -1;
+    }
+    .hero-text {
+        max-width: 36rem;
+        position: relative;
+        z-index: 1;
+    }
+    /* Atlas sits to the right like a background image — absolutely positioned
+       so it never adds vertical height to the hero. Anchored to the top so the
+       figure isn't clipped above the hero. Slightly transparent so it reads
+       as art rather than a foreground subject. */
+    .hero-art {
+        position: absolute;
+        top: 0rem;
+        right: -3rem;
+        /* Hold a generous minimum so the figure doesn't visibly shrink with the
+           viewport until the container actually crowds it. clamp(min, preferred, max). */
+        width: clamp(40rem, 50vw, 50rem);
+        max-width: 60%;
+        pointer-events: none;
+        z-index: 0;
+        opacity: 0.8;
+        filter: blur(0.25px);
+    }
+    .hero-art img {
+        width: 100%;
+        height: auto;
+        display: block;
+        opacity: 0.6;
+    }
+    @media (max-width: 767px) {
+        .hero { padding: 5rem 0 4rem; }
+        .hero-art { display: none; }
+    }
 
-	.menu-icon svg {
-		width: 100%;
-		height: 100%;
-		fill: currentColor;
-	}
+    .hero-headline {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-weight: 400;
+        font-size: clamp(2.25rem, 5.5vw, 4rem);
+        line-height: 1.1;
+        letter-spacing: -0.005em;
+        color: var(--ink-1);
+        margin: 0;
+    }
+    /* Marcellus has no italic style — convey emphasis via color, not slant
+       (browser faux-italic looks rough on classical inscriptional faces). */
+    .hero-headline em {
+        font-style: normal;
+        color: var(--accent-high);
+    }
 
-	.menu-icon-bars {
-		opacity: 1;
-	}
+    .hero-sub {
+        margin: 1.5rem 0 0;
+        font-size: 1.0625rem;
+        line-height: 1.6;
+        color: var(--ink-3);
+        max-width: 36rem;
+    }
+    /* On medium screens the atlas is still visible on the right, so tighten the
+       subtitle's max-width to push the wrap earlier and keep text clear of the figure. */
+    @media (max-width: 1199px) {
+        .hero-sub { max-width: 26rem; }
+    }
+    @media (max-width: 991px) {
+        .hero-sub { max-width: 20rem; }
+    }
 
-	.menu-icon-times {
-		opacity: 0;
-	}
+    .hero-ctas {
+        display: flex;
+        gap: 0.75rem;
+        margin-top: 2rem;
+        flex-wrap: wrap;
+    }
 
-	.mobile-menu-toggle[aria-expanded="true"] .menu-icon-bars {
-		opacity: 0;
-	}
+    .cta {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8125rem;
+        padding: 0.7rem 1.1rem;
+        border-radius: 0.5rem;
+        text-decoration: none;
+        transition: all 0.15s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+    }
+    .cta-primary {
+        background-color: var(--ink-1);
+        color: var(--surface-0);
+    }
+    .cta-primary:hover {
+        background-color: var(--accent-high);
+    }
+    .cta-secondary {
+        background-color: transparent;
+        color: var(--ink-2);
+        border: 1px solid var(--ink-6);
+    }
+    .cta-secondary:hover {
+        border-color: var(--ink-4);
+        color: var(--ink-1);
+    }
+    /* ---------- Used-by — evenly spaced, uniform-height logos ---------- */
 
-	.mobile-menu-toggle[aria-expanded="true"] .menu-icon-times {
-		opacity: 1;
-	}
+    .usedby {
+        padding: 1.5rem 1.25rem 1.25rem;
+        margin: 0 -1.25rem;
+        border-top: 1px solid var(--ink-6);
+        border-bottom: 1px solid var(--ink-6);
+        position: relative;
+        background-color: rgba(246, 247, 249, 0.6);
+        backdrop-filter: blur(14px) saturate(140%);
+        -webkit-backdrop-filter: blur(14px) saturate(140%);
+    }
 
-	.mobile-menu {
-		display: none;
-		flex-direction: column;
-		gap: 1rem;
-		padding: 1rem 0;
-		border-top: 1px solid #e2e8f0;
-		background-color: white;
-		position: absolute;
-		top: 100%;
-		left: -1.5rem;
-		right: -1.5rem;
-		z-index: 1000;
-		box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-		padding-left: 1.5rem;
-		padding-right: 1.5rem;
-	}
+    /* "used by" sits inline with the top border (left), "+ add your logo" mirrors
+       it on the right. Both visually break the border line, like ruled labels on
+       an engineering drawing. */
+    .usedby-label,
+    .add-logo {
+        position: absolute;
+        top: -0.65rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.7rem;
+        background-color: var(--surface-0);
+        padding: 0 0.5rem;
+        text-decoration: none;
+        line-height: 1.2;
+    }
 
-	.mobile-menu.open {
-		display: flex;
-	}
+    .usedby-label {
+        left: 0;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
 
-	.mobile-menu-link {
-		font-size: 0.875rem;
-		font-family: monospace;
-		color: #000;
-		text-decoration: none;
-		transition: color 0.2s ease;
-		padding: 0.5rem 0;
-	}
+    .add-logo {
+        right: 0;
+        color: var(--ink-3);
+        transition: color 0.15s ease;
+    }
+    .add-logo:hover { color: var(--accent); }
 
-	.mobile-menu-link:hover {
-		color: #666;
-	}
+    /* Even-width cells via grid; each logo fills its cell at uniform height.
+       auto-fit packs as many ~100px cells as the viewport allows. */
+    .usedby-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+        gap: 0.75rem 1.25rem;
+        align-items: center;
+        justify-items: center;
+    }
 
-	.mobile-menu-link .star-count {
-		display: inline-block;
-		color: #666 !important;
-		font-weight: normal;
-		margin-left: 0.25rem;
-		transition: none !important;
-	}
+    .usedby-logo {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 1.6rem;
+        width: 100%;
+    }
+    .usedby-logo img {
+        height: 100%;
+        width: auto;
+        max-width: 100%;
+        object-fit: contain;
+        transform: scale(var(--logo-scale, 1));
+        transform-origin: center;
+        filter: grayscale(100%);
+        opacity: 0.55;
+        transition: opacity 0.2s ease, filter 0.2s ease;
+    }
+    .usedby-logo:hover img {
+        opacity: 0.95;
+        filter: grayscale(0%);
+    }
 
-	@media (max-width: 768px) {
-		.header-links {
-			display: none;
-		}
+    /* ---------- Editorial prose ---------- */
 
-		.mobile-menu-toggle {
-			display: flex;
-		}
-	}
+    .prose {
+        padding: 6rem 0;
+        position: relative;
+    }
+    /* Soft "vellum" backdrop: the Atlas figure bleeds down out of the hero, so
+       a feathered surface-0 wash + backdrop-blur sits behind the editorial line
+       to keep it legible. Radial mask = no visible rectangle, just a gentle
+       focus zone. Knobs: alpha (0.55) for wash intensity, blur(18px) for how
+       softly the figure dissolves, mask radii (75%/85%) for feather size. */
+    .prose::before {
+        content: "";
+        position: absolute;
+        inset: 0rem 2rem;
+        background-color: rgba(246, 247, 249, 0.55);
+        backdrop-filter: blur(1px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        -webkit-mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
+        mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
+        z-index: 0;
+        pointer-events: none;
+    }
+    .prose p {
+        position: relative;
+        z-index: 1;
+        font-family:
+            'Source Serif 4', ui-serif, Georgia, serif;
+        font-weight: 500;
+        font-size: clamp(1.125rem, 2.6vw, 1.5rem);
+        line-height: 1.55;
+        color: var(--ink-1);
+        margin: 0;
+        font-variation-settings: 'opsz' 24;
+        letter-spacing: -0.005em;
+    }
+    .prose em {
+        font-style: italic;
+        font-weight: 500;
+        color: var(--accent-high);
+    }
 
-	.main {
-		display: flex;
-		flex-direction: column;
-		justify-content: center;
-		align-items: center;
-		padding-top: 8rem;
-		padding-bottom: 4rem;
-		max-width: 80%;
-		margin: 0 auto;
-		box-sizing: border-box;
-		gap: 1.5rem;
-        min-height: 50rem;
-	}
+    /* ---------- Section eyebrows ---------- */
 
-	.main h1 {
-        font-family: monospace;
-		font-size: 1.5rem;
-		margin: 0;
-        max-width: 600px;
-	}
+    .section-eyebrow {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.7rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+        margin: 0 0 1.5rem;
+        font-weight: 500;
+    }
 
-	.bordered-section {
-		width: 100%;
-		max-width: 600px;
-		display: flex;
-		flex-direction: column;
-		border: 1px solid #666;
-		position: relative;
-		padding: 1rem;
-	}
+    /* ---------- Feature grid ---------- */
 
-	.section-title {
-		font-family: monospace;
-		font-size: 0.75rem;
-		color: #666;
-		position: absolute;
-		top: -0.5rem;
-		left: 1rem;
-		background-color: white;
-		padding: 0 0.1rem;
-		white-space: nowrap;
-	}
+    .features {
+        padding: 0 0 6rem;
+    }
+    .features-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1px;
+        background-color: var(--ink-6);
+         border: 1px solid var(--ink-6);
+        border-radius: 0.75rem;
+        overflow: hidden;
+        margin-top: 1.5rem;
+    }
+    @media (max-width: 900px) {
+        .features-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 560px) {
+        .features-grid { grid-template-columns: 1fr; }
+    }
 
-	.add-logo-link {
-		font-family: monospace;
-		font-size: 0.75rem;
-		color: #666;
-		position: absolute;
-		bottom: -0.5rem;
-		right: -0.5rem;
-		background-color: white;
-		padding: 0.25rem 0.5rem;
-		white-space: nowrap;
-		text-decoration: none;
-		border: 1px solid #666;
-		box-shadow:
-			1px 1px 0px 0px rgba(100, 100, 100, 0.3),
-			2px 2px 0px 0px rgba(100, 100, 100, 0.2),
-			3px 3px 0px 0px rgba(100, 100, 100, 0.1);
-		transition: all 0.2s ease;
-		display: inline-block;
-	}
-
-	.add-logo-link:hover {
-		color: #000;
-		transform: translate(-1px, -1px);
-		box-shadow:
-			2px 2px 0px 0px rgba(100, 100, 100, 0.3),
-			3px 3px 0px 0px rgba(100, 100, 100, 0.2),
-			4px 4px 0px 0px rgba(100, 100, 100, 0.1);
-	}
-
-	.logos-section {
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		align-items: center;
-		gap: 0.5rem;
+    .feature {
+        /* Each tile's hover glow points back toward the grid's center, so
+           the six glows together read as one shared light source. Per-tile
+           coordinates set below via :nth-child(), adjusted per breakpoint. */
+        --glow-x: 50%;
+        --glow-y: 50%;
+        background-color: var(--surface-1);
+        padding: 1.75rem 1.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        position: relative;
+        transition: background 0.2s ease;
+    }
+    .feature:hover {
+        background:
+            radial-gradient(circle at var(--glow-x) var(--glow-y), rgba(178, 104, 68, 0.12), transparent 75%),
+            var(--surface-1);
+    }
+    /* 3 cols × 2 rows — grid center sits between cols 2&3 and rows 1&2. */
+    .features-grid > :nth-child(1) { --glow-x: 100%; --glow-y: 100%; }
+    .features-grid > :nth-child(2) { --glow-x: 50%;  --glow-y: 100%; }
+    .features-grid > :nth-child(3) { --glow-x: 0%;   --glow-y: 100%; }
+    .features-grid > :nth-child(4) { --glow-x: 100%; --glow-y: 0%; }
+    .features-grid > :nth-child(5) { --glow-x: 50%;  --glow-y: 0%; }
+    .features-grid > :nth-child(6) { --glow-x: 0%;   --glow-y: 0%; }
+    @media (max-width: 900px) {
+        /* 2 cols × 3 rows */
+        .features-grid > :nth-child(1) { --glow-x: 100%; --glow-y: 100%; }
+        .features-grid > :nth-child(2) { --glow-x: 0%;   --glow-y: 100%; }
+        .features-grid > :nth-child(3) { --glow-x: 100%; --glow-y: 50%; }
+        .features-grid > :nth-child(4) { --glow-x: 0%;   --glow-y: 50%; }
+        .features-grid > :nth-child(5) { --glow-x: 100%; --glow-y: 0%; }
+        .features-grid > :nth-child(6) { --glow-x: 0%;   --glow-y: 0%; }
+    }
+    @media (max-width: 560px) {
+        /* 1 col × 6 rows — center is between rows 3 and 4 */
+        .features-grid > :nth-child(1),
+        .features-grid > :nth-child(2),
+        .features-grid > :nth-child(3) { --glow-x: 50%; --glow-y: 100%; }
+        .features-grid > :nth-child(4),
+        .features-grid > :nth-child(5),
+        .features-grid > :nth-child(6) { --glow-x: 50%; --glow-y: 0%; }
+    }
+    .feature-tag {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.7rem;
+        color: var(--ink-4);
+        margin-bottom: 0.25rem;
         padding-bottom: 0.5rem;
-		width: 100%;
-	}
+        position: relative;
+        transition: color 0.15s ease;
+    }
+    /* Short rule under each feature's tag — picks up the "engineering plate"
+       feel from the .usedby border-labels. Color and width animate on hover
+       to track the tile's own hover state. */
+    .feature-tag::after {
+        content: '';
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        width: 1.25rem;
+        height: 1px;
+        background-color: var(--ink-6);
+        transition: background-color 0.2s ease, width 0.2s ease;
+    }
+    .feature:hover .feature-tag {
+        color: var(--accent);
+    }
+    .feature:hover .feature-tag::after {
+        background-color: var(--accent);
+        width: 2rem;
+    }
+    /* Roman-numeral plate marker. Marcellus to echo the hero/closing headlines,
+       sat opposite the .feature-tag so the two labelling systems (engineering
+       comment vs. classical numeral) bracket the tile. */
+    .feature-numeral {
+        position: absolute;
+        top: 1.4rem;
+        right: 1.5rem;
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-size: 1rem;
+        line-height: 1;
+        letter-spacing: 0.08em;
+        color: var(--ink-6);
+        user-select: none;
+        transition: color 0.2s ease;
+    }
+    .feature:hover .feature-numeral {
+        color: var(--accent);
+    }
+    .feature-name {
+        font-family: 'Inter', system-ui, sans-serif;
+        font-weight: 600;
+        font-size: 1.0625rem;
+        color: var(--ink-1);
+        letter-spacing: -0.01em;
+        margin: 0;
+    }
+    .feature-body {
+        font-size: 0.9375rem;
+        line-height: 1.55;
+        color: var(--ink-3);
+        margin: 0;
+    }
 
-	.logos-section a {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		text-decoration: none;
-	}
+    /* ---------- Feature plate prototype ---------- */
 
-	@media (max-width: 768px) {
-		.logos-section {
-			grid-template-columns: repeat(2, 1fr);
-		}
-	}
+    .features-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(18rem, 31rem);
+        gap: 2rem;
+        align-items: end;
+        margin-bottom: 1.5rem;
+    }
+    .features-head .section-eyebrow {
+        margin: 0;
+    }
+    .features-summary {
+        margin: 0;
+        font-family:
+            'Source Serif 4', ui-serif, Georgia, serif;
+        font-size: 1.125rem;
+        line-height: 1.55;
+        color: var(--ink-2);
+        font-variation-settings: 'opsz' 18;
+    }
 
-	.logos-section img {
-		height: 2.5rem;
-		width: auto;
-		max-width: 100px;
-		object-fit: contain;
-		opacity: 0.6;
-		transition: opacity 0.2s ease;
-		filter: grayscale(100%);
-	}
+    .feature-plate {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(24rem, 0.95fr);
+        border: 1px solid var(--ink-6);
+        overflow: hidden;
+    }
 
-	.logos-section a:hover img {
-		opacity: 1;
-	}
+    .plate-figure {
+        min-height: 31rem;
+        padding: 1.5rem;
+        border-right: 1px solid var(--ink-6);
+        display: flex;
+        flex-direction: column;
+        position: relative;
+        background:
+            linear-gradient(rgba(80, 70, 55, 0.08) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(80, 70, 55, 0.08) 1px, transparent 1px),
+            var(--surface-0);
+        background-size: 36px 36px, 36px 36px, auto;
+    }
 
-	.logos-section img.logo-tall {
-		height: 1.5rem;
-	}
+    .plate-label,
+    .plate-footnotes,
+    .feature-meta,
+    .feature-points {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
 
-	.terminal {
-		width: 100%;
-		max-width: 600px;
-		background-color: #1e1e1e;
-		border-radius: 8px;
-		overflow: hidden;
-		box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
-        margin-top: 1rem;
-        margin-bottom: 1rem;
-	}
+    .plate-label {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding-bottom: 0.85rem;
+        border-bottom: 1px solid rgba(200, 205, 213, 0.85);
+        font-size: 0.7rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
 
-	.terminal-header {
-		background-color: #2d2d2d;
-		padding: 0.5rem 1rem;
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		border-bottom: 1px solid #3d3d3d;
-	}
+    .lsm-diagram {
+        flex: 1;
+        display: grid;
+        grid-template-columns: minmax(10rem, 1fr) minmax(6rem, 0.45fr) minmax(10rem, 1fr);
+        gap: 1rem;
+        align-items: center;
+        padding: 2rem 0;
+        min-height: 20rem;
+    }
 
-	.terminal-buttons {
-		display: flex;
-		gap: 0.5rem;
-	}
+    .diagram-node {
+        min-height: 8.5rem;
+        padding: 1.1rem;
+        border: 1px solid var(--ink-6);
+        border-radius: 0.5rem;
+        background-color: rgba(255, 255, 255, 0.76);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.55rem;
+        box-shadow: 0 1px 2px rgba(27, 36, 47, 0.03);
+    }
+    .diagram-node strong {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-size: 1.6rem;
+        font-weight: 400;
+        line-height: 1;
+        color: var(--ink-1);
+    }
+    .diagram-node span:not(.diagram-kicker) {
+        font-size: 0.875rem;
+        line-height: 1.45;
+        color: var(--ink-3);
+    }
+    .diagram-kicker {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.68rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+    .diagram-store {
+        border-color: rgba(122, 62, 34, 0.36);
+    }
 
-	.terminal-button {
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		display: inline-block;
-	}
+    .diagram-link {
+        position: relative;
+        display: grid;
+        gap: 0.35rem;
+        justify-items: center;
+        align-content: center;
+        min-height: 10rem;
+        color: var(--ink-4);
+    }
+    .diagram-link::before {
+        content: '';
+        position: absolute;
+        left: -1.25rem;
+        right: -1.25rem;
+        top: 50%;
+        height: 1px;
+        background: linear-gradient(90deg, var(--ink-6), var(--accent), var(--ink-6));
+    }
+    .diagram-link::after {
+        content: '';
+        position: absolute;
+        right: -1.35rem;
+        top: calc(50% - 0.22rem);
+        width: 0.45rem;
+        height: 0.45rem;
+        border-top: 1px solid var(--accent);
+        border-right: 1px solid var(--accent);
+        transform: rotate(45deg);
+        background-color: transparent;
+    }
+    .diagram-link span {
+        position: relative;
+        z-index: 1;
+        padding: 0.12rem 0.3rem;
+        background-color: var(--surface-0);
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.68rem;
+        line-height: 1.2;
+    }
 
-	.terminal-button-close {
-		background-color: #ff5f57;
-	}
+    .plate-footnotes {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.75rem;
+        padding-top: 0.85rem;
+        border-top: 1px solid rgba(200, 205, 213, 0.85);
+        font-size: 0.68rem;
+        color: var(--ink-4);
+    }
 
-	.terminal-button-minimize {
-		background-color: #ffbd2e;
-	}
+    .feature-callouts {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1px;
+        background-color: var(--ink-6);
+    }
 
-	.terminal-button-maximize {
-		background-color: #28ca42;
-	}
+    .feature-callouts .feature {
+        --glow-x: 100%;
+        --glow-y: 0%;
+        background-color: var(--surface-1);
+        padding: 1.35rem 1.25rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        min-height: 13.5rem;
+        position: relative;
+        transition: background 0.2s ease;
+    }
+    .feature-callouts .feature:hover {
+        background:
+            radial-gradient(circle at var(--glow-x) var(--glow-y), rgba(178, 104, 68, 0.12), transparent 70%),
+            var(--surface-1);
+    }
 
-	.terminal-tabs {
-		display: flex;
-		gap: 0.25rem;
-		margin-left: 1rem;
-	}
+    .feature-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        padding-bottom: 0.65rem;
+        border-bottom: 1px solid var(--ink-7);
+        font-size: 0.68rem;
+        color: var(--ink-4);
+    }
+    .feature-index {
+        color: var(--accent-high);
+    }
+    .feature-callouts .feature-tag {
+        color: var(--ink-4);
+        margin: 0;
+        padding: 0;
+        position: static;
+    }
+    .feature-callouts .feature-tag::after {
+        content: none;
+    }
+    .feature-callouts .feature-name {
+        letter-spacing: 0;
+    }
+    .feature-callouts .feature-body {
+        font-size: 0.9rem;
+        line-height: 1.58;
+    }
+    .feature-points {
+        list-style: none;
+        margin: auto 0 0;
+        padding: 0;
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.68rem;
+        color: var(--ink-4);
+    }
+    .feature-points li {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        min-width: 0;
+    }
+    .feature-points li::before {
+        content: '';
+        flex: 0 0 0.75rem;
+        height: 1px;
+        background-color: var(--accent);
+        opacity: 0.7;
+    }
 
-	@media (max-width: 768px) {
-		.terminal-header {
-			flex-direction: column;
-			align-items: flex-start;
-			gap: 1.5rem;
-			padding: 0.75rem 1rem;
-		}
+    @media (max-width: 980px) {
+        .features-head,
+        .feature-plate {
+            grid-template-columns: 1fr;
+        }
+        .plate-figure {
+            border-right: 0;
+            border-bottom: 1px solid var(--ink-6);
+            min-height: 27rem;
+        }
+    }
 
-		.terminal-tabs {
-			margin-left: 0;
-			width: 100%;
-			justify-content: flex-start;
-		}
-	}
+    @media (max-width: 640px) {
+        .features-summary {
+            font-size: 1rem;
+        }
+        .plate-figure {
+            min-height: auto;
+        }
+        .plate-label {
+            display: grid;
+            gap: 0.35rem;
+        }
+        .plate-footnotes {
+            grid-template-columns: 1fr;
+        }
+        .lsm-diagram {
+            grid-template-columns: 1fr;
+            min-height: auto;
+            padding: 1.5rem 0;
+        }
+        .diagram-link {
+            min-height: 4rem;
+        }
+        .diagram-link::before {
+            left: 50%;
+            right: auto;
+            top: -0.25rem;
+            bottom: -0.25rem;
+            width: 1px;
+            height: auto;
+            background: linear-gradient(var(--ink-6), var(--accent), var(--ink-6));
+        }
+        .diagram-link::after {
+            right: auto;
+            left: calc(50% - 0.22rem);
+            top: auto;
+            bottom: -0.25rem;
+            transform: rotate(135deg);
+        }
+        .feature-callouts {
+            grid-template-columns: 1fr;
+        }
+        .feature-callouts .feature {
+            min-height: auto;
+        }
+    }
 
-	.terminal-tab {
-		background: none;
-		border: none;
-		border-bottom: 2px solid transparent;
-		color: #666;
-		font-size: 0.875rem;
-		font-family: monospace;
-		cursor: pointer;
-		padding: 0.5rem 0.75rem;
-		border-radius: 4px 4px 0 0;
-		transition: all 0.2s ease;
-		position: relative;
-	}
+    /* ---------- Selectable feature plate ---------- */
 
-	.terminal-tab:hover {
-		background-color: #2d2d2d;
-		color: #d4d4d4;
-		border-bottom-color: #555;
-	}
+    .feature-plate {
+        display: block;
+    }
 
-	.terminal-tab.active {
-		background-color: #1e1e1e;
-		color: #4ec9b0;
-		border-bottom-color: #4ec9b0;
-	}
+    .plate-main {
+        display: grid;
+        grid-template-columns: minmax(20rem, 0.8fr) minmax(0, 1fr);
+        min-height: 34rem;
+    }
 
-	.terminal-body {
-		padding: 1.5rem 1.25rem;
-		background-color: #1e1e1e;
-		min-height: 30px;
-	}
+    .plate-figure-stack {
+        position: relative;
+        order: 2;
+        min-height: 34rem;
+        border-left: 1px solid var(--ink-6);
+        background:
+            linear-gradient(rgba(122, 62, 34, 0.05) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(122, 62, 34, 0.05) 1px, transparent 1px),
+            #f8f6f3;
+        background-size: 36px 36px, 36px 36px, auto;
+    }
 
-	.footer {
-		width: 100%;
-		max-width: 100%;
-		border-top: 1px solid #e2e8f0;
-		padding: 1rem 1.5rem;
-		background-color: white;
-		margin-top: auto;
-		box-sizing: border-box;
-		overflow: hidden;
-	}
+    .plate-panel {
+        position: relative;
+        min-height: 34rem;
+        padding: 0.5rem;
+        display: none;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    .plate-panel.active {
+        display: flex;
+    }
+    .plate-figure-marker {
+        position: absolute;
+        top: 1.25rem;
+        right: 1.25rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.7rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+    .plate-figure-img {
+        flex: 1;
+        min-height: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        pointer-events: none;
+    }
+    .plate-figure-img--scaled {
+        transform: translateY(2rem) scale(1.15);
+        transform-origin: center;
+    }
 
-	.footer-content {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-		align-items: center;
-		height: calc(1.5 * var(--sl-nav-height));
-		width: 100%;
-		max-width: 100%;
-		box-sizing: border-box;
-	}
+    .plate-copy-stack {
+        position: relative;
+        order: 1;
+        display: flex;
+        flex-direction: column;
+    }
+    .plate-copy-panels {
+        position: relative;
+        flex: 1;
+    }
 
-	.footer-icons {
-		display: flex;
-		gap: 1rem;
-		align-items: center;
-		justify-content: center;
-		order: 1;
-	}
+    .plate-copy {
+        padding: 2rem;
+        display: none;
+        flex-direction: column;
+        gap: 0.9rem;
+    }
+    .plate-copy.active {
+        display: flex;
+    }
 
-	.copyright-wrapper {
-		font-size: .75rem;
-		font-family: monospace;
-		order: 2;
-		text-align: center;
-		line-height: 140%;
-		color: #999;
-		a { color: #999; }
-	}
+    .plate-copy .feature-tag {
+        color: var(--ink-4);
+        margin: 0;
+        padding: 0;
+        position: static;
+    }
+    .plate-copy .feature-tag::after {
+        content: none;
+    }
+    .plate-copy .feature-name {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-weight: 400;
+        font-size: 1.6rem;
+        letter-spacing: 0;
+    }
+    .plate-copy .feature-body {
+        font-size: 1rem;
+        line-height: 1.62;
+    }
 
-	@media (min-width: 50rem) {
-		.header,
-		.footer {
-			padding: 1rem 2rem;
-		}
+    .plate-diagram {
+        flex: 1;
+        display: grid;
+        align-items: center;
+        gap: 1rem;
+        padding: 2rem 0;
+        min-height: 22rem;
+    }
 
-		.footer-content {
-			flex-direction: row;
-			justify-content: space-between;
-			align-items: center;
-		}
+    .diagram-zero {
+        grid-template-columns: minmax(10rem, 1fr) minmax(6rem, 0.45fr) minmax(10rem, 1fr);
+    }
 
-		.footer-icons {
-			order: 2;
-		}
+    .diagram-deployment {
+        grid-template-columns: minmax(10rem, 0.9fr) minmax(9rem, 0.75fr) minmax(9rem, 0.9fr);
+    }
+    .diagram-hub {
+        min-height: 8.5rem;
+        padding: 1rem;
+        border: 1px solid rgba(122, 62, 34, 0.36);
+        border-radius: 50%;
+        background-color: rgba(255, 255, 255, 0.78);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        gap: 0.45rem;
+        position: relative;
+    }
+    .diagram-hub::before,
+    .diagram-hub::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        width: 2rem;
+        height: 1px;
+        background-color: var(--accent);
+        opacity: 0.7;
+    }
+    .diagram-hub::before { right: 100%; }
+    .diagram-hub::after { left: 100%; }
+    .diagram-hub strong {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-size: 1.35rem;
+        font-weight: 400;
+        line-height: 1;
+        color: var(--ink-1);
+    }
 
-		.copyright-wrapper {
-			order: 1;
-			text-align: left;
-		}
-	}
+    .reader-grid,
+    .perf-rail {
+        display: grid;
+        gap: 0.65rem;
+    }
+    .mini-node {
+        padding: 0.8rem 0.85rem;
+        border: 1px solid var(--ink-6);
+        border-radius: 0.45rem;
+        background-color: rgba(255, 255, 255, 0.74);
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.72rem;
+        color: var(--ink-3);
+    }
+
+    .diagram-semantics {
+        grid-template-columns: minmax(12rem, 1fr) minmax(11rem, 0.72fr);
+    }
+    .semantic-stack {
+        display: grid;
+        gap: 0.75rem;
+    }
+    .semantic-row {
+        padding: 0.95rem 1rem;
+        border: 1px solid var(--ink-6);
+        border-radius: 0.45rem;
+        background-color: rgba(255, 255, 255, 0.74);
+        display: grid;
+        gap: 0.35rem;
+    }
+    .semantic-row span {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.68rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+    .semantic-row strong {
+        font-size: 0.95rem;
+        color: var(--ink-1);
+    }
+    .semantic-gate {
+        min-height: 12rem;
+        padding: 1.1rem;
+        border: 1px solid rgba(122, 62, 34, 0.36);
+        border-radius: 0.5rem;
+        background-color: rgba(255, 255, 255, 0.78);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.55rem;
+    }
+    .semantic-gate strong {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-size: 1.55rem;
+        font-weight: 400;
+        color: var(--ink-1);
+    }
+    .semantic-gate span:not(.diagram-kicker) {
+        color: var(--ink-3);
+        line-height: 1.45;
+    }
+
+    .diagram-performance {
+        grid-template-columns: minmax(8rem, 0.7fr) minmax(11rem, 1fr) minmax(8rem, 0.7fr);
+    }
+    .perf-core {
+        border-color: rgba(122, 62, 34, 0.36);
+    }
+
+    .plate-tabs {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 1px;
+        background-color: var(--ink-6);
+        border-top: 1px solid var(--ink-6);
+    }
+    .plate-tab {
+        min-width: 0;
+        padding: 0.95rem 1rem;
+        border: 0;
+        border-radius: 0;
+        background-color: var(--surface-0);
+        color: var(--ink-3);
+        cursor: pointer;
+        text-align: left;
+        display: grid;
+        gap: 0.35rem;
+        transition: background-color 0.15s ease, color 0.15s ease;
+    }
+    .plate-tab:hover {
+        background-color: var(--surface-1);
+        color: var(--ink-1);
+    }
+    .plate-tab.active {
+        background-color: var(--ink-1);
+        color: var(--surface-0);
+    }
+    .plate-tab span:first-child {
+        min-width: 0;
+        font-family:
+            'Inter', ui-sans-serif, system-ui, sans-serif;
+        font-size: 0.86rem;
+        font-weight: 600;
+        line-height: 1.25;
+    }
+    .plate-tab .feature-index {
+        margin-right: 0.45rem;
+    }
+    .plate-tab.active .feature-index {
+        color: var(--accent-low);
+    }
+    .plate-tab-tag {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.66rem;
+        line-height: 1.25;
+        color: var(--ink-4);
+    }
+    .plate-tab.active .plate-tab-tag {
+        color: var(--ink-6);
+    }
+
+    @media (max-width: 980px) {
+        .plate-main {
+            grid-template-columns: 1fr;
+        }
+        .plate-figure-stack {
+            border-left: 0;
+            border-top: 1px solid var(--ink-6);
+            min-height: 18rem;
+        }
+        .plate-panel {
+            min-height: 18rem;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .plate-figure-stack {
+            display: none;
+        }
+        .plate-copy {
+            padding: 1.25rem;
+        }
+        .plate-diagram,
+        .diagram-zero,
+        .diagram-deployment,
+        .diagram-semantics,
+        .diagram-performance {
+            grid-template-columns: 1fr;
+            min-height: auto;
+        }
+        .diagram-link {
+            min-height: 4rem;
+        }
+        .diagram-hub {
+            border-radius: 0.5rem;
+        }
+        .diagram-hub::before,
+        .diagram-hub::after {
+            display: none;
+        }
+        .plate-tabs {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    /* ---------- Quickstart ---------- */
+
+    .quickstart {
+        padding: 0 0 6rem;
+    }
+    .quickstart-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 1.5rem;
+    }
+    .quickstart-more {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8125rem;
+        color: var(--accent);
+        text-decoration: none;
+    }
+    .quickstart-more:hover { color: var(--accent-high); }
+
+    .qs-card {
+        border: 1px solid var(--ink-6);
+        border-radius: 0.75rem;
+        overflow: hidden;
+        background-color: var(--surface-1);
+        box-shadow: 0 1px 2px rgba(27, 36, 47, 0.04),
+                    0 6px 16px rgba(27, 36, 47, 0.04);
+    }
+
+    .qs-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0;
+        padding: 0 0.5rem;
+        border-bottom: 1px solid var(--ink-6);
+        background-color: var(--surface-0);
+    }
+    .qs-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0 0.75rem 0 0.4rem;
+        margin-right: 0.35rem;
+        align-self: stretch;
+        border-right: 1px solid var(--ink-6);
+    }
+    .qs-dots span {
+        display: block;
+        width: 0.6rem;
+        height: 0.6rem;
+        border-radius: 50%;
+        border: 1px solid var(--ink-5);
+        background-color: transparent;
+        box-sizing: border-box;
+    }
+    .qs-dots span:nth-child(1) {
+        background-color: var(--accent);
+        border-color: var(--accent);
+    }
+    .qs-tab {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8125rem;
+        background: none;
+        border: none;
+        padding: 0.85rem 1rem;
+        color: var(--ink-4);
+        cursor: pointer;
+        position: relative;
+        transition: color 0.15s ease;
+        white-space: nowrap;
+    }
+    .qs-tab:hover { color: var(--ink-2); }
+    .qs-tab.active { color: var(--ink-1); }
+    .qs-tab.active::after {
+        content: '';
+        position: absolute;
+        left: 0.5rem;
+        right: 0.5rem;
+        bottom: -1px;
+        height: 2px;
+        background-color: var(--accent);
+    }
+
+    .qs-pane { display: none; }
+    .qs-pane.active { display: block; }
+
+    .qs-install {
+        position: relative;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.825rem;
+        padding: 1rem 3rem 1rem 1.25rem;
+        color: var(--ink-2);
+        background-color: var(--surface-0);
+        border-bottom: 1px solid var(--ink-6);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+    .qs-install .qs-prompt {
+        color: var(--ink-4);
+        margin-right: 0.6rem;
+        user-select: none;
+    }
+    .qs-copy {
+        position: absolute;
+        top: 0.5rem;
+        right: 0.5rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.75rem;
+        height: 1.75rem;
+        padding: 0;
+        background: none;
+        border: 1px solid transparent;
+        border-radius: 0.375rem;
+        color: var(--ink-4);
+        cursor: pointer;
+        transition: color 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
+    }
+    .qs-copy:hover {
+        color: var(--ink-2);
+        background-color: var(--surface-1);
+        border-color: var(--ink-6);
+    }
+    .qs-copy-icon-check { display: none; }
+    .qs-copy.copied .qs-copy-icon-clip { display: none; }
+    .qs-copy.copied .qs-copy-icon-check { display: inline-block; color: var(--accent); }
+
+    .qs-code {
+        margin: 0;
+        padding: 1.25rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.825rem;
+        line-height: 1.65;
+        color: var(--ink-1);
+        background-color: var(--surface-1);
+        overflow-x: auto;
+    }
+    .qs-code code { background: none; padding: 0; font-family: inherit; }
+    /* Hand-rolled monochrome highlighter (see src/lib/highlight.ts): only
+       language keywords are colored, in the page accent. Everything else
+       inherits the default ink color for a single-hue look. The :global() is
+       required because `set:html` injects spans that don't carry Astro's
+       scoped-component class, so the selector must escape the component scope. */
+    .qs-code :global(.kw) { color: var(--accent); }
+
+    /* ---------- Closing CTA ---------- */
+
+    .closing {
+        position: relative;
+        padding: 6rem 0 7rem;
+        text-align: center;
+        border-top: 1px solid var(--sl-color-hairline, rgba(15, 22, 32, 0.08));
+        margin-top: 4rem;
+        isolation: isolate;
+    }
+    /* Doric columns flanking the closing CTA. Same ambient treatment as the
+       hero atlas — slight transparency + minimal blur so the figures read as
+       background art rather than foreground content. Right column mirrored
+       below via scaleX(-1). */
+    .closing-colonnade {
+        position: absolute;
+        top: 50%;
+        display: flex;
+        align-items: end;
+        pointer-events: none;
+        z-index: 0;
+    }
+    .closing-colonnade img {
+        /* Fixed height so the columns stay visually stable as the viewport
+           narrows — the colonnade is hidden below 767px anyway, so there's no
+           tight range that needs adaptive scaling. */
+        height: 18rem;
+        width: auto;
+        opacity: 0.48;
+        filter: blur(0.5px);
+    }
+    /* Spacing between the two columns within a pair. Negative pulls them
+       together (their raster has whitespace padding); positive pushes them
+       apart. Tune to taste. */
+    .closing-colonnade img + img {
+        margin-inline-start: -8rem;
+    }
+    /* Push each pair outward into main's inline padding so the gap between
+       the left pair and right pair (around the text) opens up. */
+    .closing-colonnade-left {
+        left: -2rem;
+        transform: translateY(-50%);
+    }
+    .closing-colonnade-right {
+        right: -2rem;
+        transform: translateY(-50%) scaleX(-1);
+    }
+    /* Constrain the text column so it sits clear of the colonnade with
+       comfortable breathing room on either side. */
+    .closing-text {
+        position: relative;
+        z-index: 1;
+        max-width: 30rem;
+        margin-inline: auto;
+    }
+    /* Same "vellum" trick used for the editorial prose: a translucent
+       surface-0 wash + backdrop-blur with a feathered radial mask sits behind
+       the text, so when the colonnade visually overlaps the headline the text
+       still reads cleanly. No visible card edges. */
+    .closing-text::before {
+        content: "";
+        position: absolute;
+        inset: -1.5rem -2rem;
+        background-color: rgba(246, 247, 249, 0.55);
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        -webkit-mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
+        mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
+        z-index: -1;
+        pointer-events: none;
+    }
+    @media (max-width: 767px) {
+        .closing-colonnade { display: none; }
+    }
+    .closing-headline {
+        font-family:
+            'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+        font-weight: 400;
+        font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+        line-height: 1.15;
+        letter-spacing: -0.005em;
+        color: var(--ink-1);
+        margin: 0;
+    }
+    .closing-sub {
+        max-width: 36rem;
+        margin: 1rem auto 0;
+        font-size: 1rem;
+        line-height: 1.6;
+        color: var(--ink-3);
+    }
+    .closing-ctas {
+        margin-top: 2rem;
+        display: flex;
+        justify-content: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+    }
+
+    /* ---------- Footer (Commonhaus block preserved) ---------- */
+
+    .footer {
+        width: 100%;
+        border-top: 1px solid var(--ink-6);
+        /* Match main + header so the footer's inner edges line up at all widths. */
+        padding: 1.25rem clamp(1.5rem, 4vw, 4rem);
+        background-color: var(--surface-0);
+        margin-top: auto;
+        box-sizing: border-box;
+    }
+    .footer-content {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        align-items: center;
+        max-width: 72rem;
+        margin: 0 auto;
+    }
+    .footer-icons {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        order: 1;
+    }
+    .copyright-wrapper {
+        font-size: 0.7rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        order: 2;
+        text-align: center;
+        line-height: 1.5;
+        color: var(--ink-4);
+    }
+    .copyright-wrapper a { color: var(--ink-4); }
+    .copyright-wrapper a:hover { color: var(--ink-2); }
+
+    @media (min-width: 50rem) {
+        .footer { padding: 1.25rem 2rem; }
+        .footer-content {
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .footer-icons { order: 2; }
+        .copyright-wrapper { order: 1; text-align: left; }
+    }
 </style>
 
 <script>
-	document.addEventListener('DOMContentLoaded', () => {
-		const tabs = document.querySelectorAll('.terminal-tab');
-		const contents = document.querySelectorAll('.terminal-content');
+    // Astro <script> blocks are emitted as type=module and defer, so by the time
+    // they execute, DOMContentLoaded may already have fired — guard against that.
+    const onReady = (fn: () => void) => {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', fn);
+        } else {
+            fn();
+        }
+    };
+    onReady(() => {
+        // Feature plate tabs
+        const featurePlate = document.querySelector('[data-feature-plate]');
+        if (featurePlate) {
+            const featureTabs = Array.from(featurePlate.querySelectorAll<HTMLButtonElement>('[data-feature-tab]'));
+            const featurePanels = Array.from(featurePlate.querySelectorAll<HTMLElement>('[data-feature-panel]'));
+            const featureCopies = Array.from(featurePlate.querySelectorAll<HTMLElement>('[data-feature-copy]'));
+            const activateFeature = (id: string, focus = false) => {
+                featureTabs.forEach((tab) => {
+                    const matches = tab.dataset.featureTab === id;
+                    tab.classList.toggle('active', matches);
+                    tab.setAttribute('aria-selected', matches ? 'true' : 'false');
+                    if (matches && focus) tab.focus();
+                });
+                featurePanels.forEach((panel) => {
+                    panel.classList.toggle('active', panel.dataset.featurePanel === id);
+                });
+                featureCopies.forEach((copy) => {
+                    copy.classList.toggle('active', copy.dataset.featureCopy === id);
+                });
+            };
 
-		tabs.forEach(tab => {
-			tab.addEventListener('click', () => {
-				const targetTab = tab.getAttribute('data-tab');
+            featureTabs.forEach((tab, index) => {
+                tab.addEventListener('click', () => {
+                    const id = tab.dataset.featureTab;
+                    if (id) activateFeature(id);
+                });
+                tab.addEventListener('keydown', (event) => {
+                    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                    event.preventDefault();
+                    const offset = event.key === 'ArrowRight' ? 1 : -1;
+                    const next = featureTabs[(index + offset + featureTabs.length) % featureTabs.length];
+                    const id = next?.dataset.featureTab;
+                    if (id) activateFeature(id, true);
+                });
+            });
+        }
 
-				// Remove active class from all tabs
-				tabs.forEach(t => t.classList.remove('active'));
+        // Quickstart language tabs
+        const tabs = document.querySelectorAll('.qs-tab');
+        const panes = document.querySelectorAll('.qs-pane');
+        tabs.forEach((tab) => {
+            tab.addEventListener('click', () => {
+                const id = tab.getAttribute('data-tab');
+                tabs.forEach((t) => {
+                    t.classList.remove('active');
+                    t.setAttribute('aria-selected', 'false');
+                });
+                tab.classList.add('active');
+                tab.setAttribute('aria-selected', 'true');
+                panes.forEach((p) => {
+                    if (p instanceof HTMLElement) {
+                        const matches = p.getAttribute('data-content') === id;
+                        p.classList.toggle('active', matches);
+                    }
+                });
+            });
+        });
 
-				// Hide all content
-				contents.forEach(c => {
-					if (c instanceof HTMLElement) {
-						c.style.display = 'none';
-					}
-				});
+        // Mobile menu
+        const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+        const mobileMenu = document.getElementById('mobile-menu');
+        if (mobileMenuToggle && mobileMenu) {
+            mobileMenuToggle.addEventListener('click', () => {
+                const isOpen = mobileMenuToggle.getAttribute('aria-expanded') === 'true';
+                mobileMenuToggle.setAttribute('aria-expanded', (!isOpen).toString());
+                mobileMenu.classList.toggle('open', !isOpen);
+            });
+            mobileMenu.querySelectorAll('.mobile-menu-link').forEach((link) => {
+                link.addEventListener('click', () => {
+                    mobileMenuToggle.setAttribute('aria-expanded', 'false');
+                    mobileMenu.classList.remove('open');
+                });
+            });
+        }
 
-				// Activate clicked tab
-				tab.classList.add('active');
+        // Copy-to-clipboard buttons on each quickstart install row
+        document.querySelectorAll<HTMLButtonElement>('.qs-copy').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const text = btn.getAttribute('data-copy') ?? '';
+                try {
+                    await navigator.clipboard.writeText(text);
+                } catch {
+                    // Older browsers / non-secure contexts: fall back to execCommand.
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                btn.classList.add('copied');
+                setTimeout(() => btn.classList.remove('copied'), 1500);
+            });
+        });
 
-				// Show corresponding content
-				const targetContent = document.querySelector(`[data-content="${targetTab}"]`);
-				if (targetContent && targetContent instanceof HTMLElement) {
-					targetContent.style.display = 'flex';
-				}
-			});
-		});
-
-		// Mobile menu toggle
-		const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
-		const mobileMenu = document.getElementById('mobile-menu');
-		
-		if (mobileMenuToggle && mobileMenu) {
-			mobileMenuToggle.addEventListener('click', () => {
-				const isExpanded = mobileMenuToggle.getAttribute('aria-expanded') === 'true';
-				mobileMenuToggle.setAttribute('aria-expanded', (!isExpanded).toString());
-				mobileMenu.classList.toggle('open', !isExpanded);
-			});
-
-			// Close menu when clicking on a link
-			const mobileMenuLinks = mobileMenu.querySelectorAll('.mobile-menu-link');
-			mobileMenuLinks.forEach(link => {
-				link.addEventListener('click', () => {
-					mobileMenuToggle.setAttribute('aria-expanded', 'false');
-					mobileMenu.classList.remove('open');
-				});
-			});
-		}
-
-		// Fetch GitHub star count
-		const githubLink = document.getElementById('github-link');
-		const mobileGithubLink = document.getElementById('mobile-github-link');
-		
-		const updateGithubLinks = (stars: number) => {
-			let formattedStars;
-			
-			if (stars >= 1000) {
-				formattedStars = (stars / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
-			} else {
-				formattedStars = stars.toString();
-			}
-			
-			const starHtml = `github <span class="star-count">[${formattedStars}★]</span>`;
-			
-			if (githubLink) {
-				githubLink.innerHTML = starHtml;
-			}
-			
-			if (mobileGithubLink) {
-				mobileGithubLink.innerHTML = starHtml;
-			}
-		};
-
-		if (githubLink || mobileGithubLink) {
-			fetch('https://api.github.com/repos/slatedb/slatedb')
-				.then(response => response.json())
-				.then(data => {
-					if (data.stargazers_count) {
-						updateGithubLinks(data.stargazers_count);
-					}
-				})
-				.catch(error => {
-					console.error('Failed to fetch GitHub stars:', error);
-				});
-		}
-	});
+        // GitHub stars are fetched at build time (src/lib/github-stars.ts) and
+        // rendered statically — no runtime fetch, no layout jitter on load.
+    });
 </script>

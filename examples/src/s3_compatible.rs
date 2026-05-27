@@ -1,4 +1,3 @@
-use object_store::aws::S3ConditionalPut;
 use slatedb::Db;
 use std::sync::Arc;
 
@@ -13,7 +12,6 @@ async fn main() -> anyhow::Result<()> {
             .with_secret_access_key("test")
             .with_bucket_name("slatedb")
             .with_region("us-east-1")
-            .with_conditional_put(S3ConditionalPut::ETagMatch)
             .build()?,
     );
 

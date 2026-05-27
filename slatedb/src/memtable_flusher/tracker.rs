@@ -16,6 +16,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::debug;
+use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
@@ -29,6 +30,42 @@ use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+
+macro_rules! memtable_flush_stat_name {
+    ($suffix:expr) => {
+        concat!("slatedb.memtable_flush.", $suffix)
+    };
+}
+
+pub(crate) const MEMTABLE_FREEZE_COUNT: &str = memtable_flush_stat_name!("memtable_freeze_count");
+pub(crate) const CHECKPOINT_REQUEST_COUNT: &str =
+    memtable_flush_stat_name!("checkpoint_request_count");
+pub(crate) const FLUSH_REQUEST_COUNT: &str = memtable_flush_stat_name!("flush_request_count");
+pub(crate) const L0_UPLOAD_COUNT: &str = memtable_flush_stat_name!("l0_upload_count");
+pub(crate) const L0_FLUSH_COUNT: &str = memtable_flush_stat_name!("l0_flush_count");
+pub(crate) const MANIFEST_REFRESH_COUNT: &str = memtable_flush_stat_name!("manifest_refresh_count");
+
+pub(crate) struct FlushTrackerStats {
+    pub(crate) memtable_freeze_count: Arc<dyn CounterFn>,
+    pub(crate) checkpoint_request_count: Arc<dyn CounterFn>,
+    pub(crate) flush_request_count: Arc<dyn CounterFn>,
+    pub(crate) l0_upload_count: Arc<dyn CounterFn>,
+    pub(crate) l0_flush_count: Arc<dyn CounterFn>,
+    pub(crate) manifest_refresh_count: Arc<dyn CounterFn>,
+}
+
+impl FlushTrackerStats {
+    pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
+        Self {
+            memtable_freeze_count: recorder.counter(MEMTABLE_FREEZE_COUNT).register(),
+            checkpoint_request_count: recorder.counter(CHECKPOINT_REQUEST_COUNT).register(),
+            flush_request_count: recorder.counter(FLUSH_REQUEST_COUNT).register(),
+            l0_upload_count: recorder.counter(L0_UPLOAD_COUNT).register(),
+            l0_flush_count: recorder.counter(L0_FLUSH_COUNT).register(),
+            manifest_refresh_count: recorder.counter(MANIFEST_REFRESH_COUNT).register(),
+        }
+    }
+}
 
 /// Unified message type for the flush tracker's event loop.
 pub(crate) enum TrackerMessage {
@@ -84,6 +121,7 @@ pub(super) struct FlushTracker {
     uploader: Uploader,
     manifest_writer: ManifestWriter,
     frontier: TrackedImmFrontier,
+    stats: FlushTrackerStats,
 }
 
 impl FlushTracker {
@@ -92,11 +130,13 @@ impl FlushTracker {
         uploader: Uploader,
         manifest_writer: ManifestWriter,
     ) -> Self {
+        let stats = FlushTrackerStats::new(&inner.recorder);
         Self {
             inner,
             uploader,
             manifest_writer,
             frontier: TrackedImmFrontier::new(),
+            stats,
         }
     }
 }
@@ -105,8 +145,12 @@ impl FlushTracker {
 impl MessageHandler<TrackerMessage> for FlushTracker {
     async fn handle(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
         match message {
-            TrackerMessage::MemtableFrozen => self.reconcile_and_dispatch().await,
+            TrackerMessage::MemtableFrozen => {
+                self.stats.memtable_freeze_count.increment(1);
+                self.reconcile_and_dispatch().await
+            }
             TrackerMessage::FlushRequest { target, sender } => {
+                self.stats.flush_request_count.increment(1);
                 self.handle_flush_request(target, sender).await
             }
             TrackerMessage::CheckpointRequest {
@@ -114,15 +158,23 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 options,
                 sender,
             } => {
+                self.stats.checkpoint_request_count.increment(1);
                 self.handle_checkpoint_request(target, options, sender)
                     .await
             }
-            TrackerMessage::UploadComplete(uploaded) => self.handle_uploaded(uploaded).await,
+            TrackerMessage::UploadComplete(uploaded) => {
+                self.stats.l0_upload_count.increment(1);
+                self.handle_uploaded(uploaded).await
+            }
             TrackerMessage::FlushComplete { through_seq } => {
+                self.stats.l0_flush_count.increment(1);
                 self.frontier.retire_through(through_seq);
                 self.reconcile_and_dispatch().await
             }
-            TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
+            TrackerMessage::ManifestRefreshed => {
+                self.stats.manifest_refresh_count.increment(1);
+                self.reconcile_and_dispatch().await
+            }
             TrackerMessage::PollManifest { sender } => self.manifest_writer.send_poll(sender),
         }
     }
