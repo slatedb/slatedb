@@ -7,7 +7,7 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::{Manifest, ManifestCore};
+use crate::manifest::{Manifest, ManifestCore, ProjectionConfig};
 use crate::object_stores::ObjectStoreType::{Main, Wal};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
@@ -23,6 +23,18 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// User-supplied predicate deciding whether a segment is included in the
+/// clone. Receives the segment's prefix (the unsegmented tree participates as
+/// the empty prefix). Returning `false` drops the segment entirely.
+pub(crate) type SegmentFilterFn = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
+
+/// User-supplied projector returning the effective range for a segment. The
+/// returned range's bounded ends must fall within `[prefix, prefix++)`;
+/// `Unbounded` ends resolve to the segment edges. Empty ranges surface to the
+/// caller as `SlateDBError::InvalidProjection`.
+pub(crate) type SegmentProjectionFn =
+    Arc<dyn Fn(&[u8]) -> Result<BytesRange, SlateDBError> + Send + Sync>;
+
 pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
     clone_sources: Vec<CloneSourceSpec<R>>,
     clone_path: P,
@@ -31,6 +43,8 @@ pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
     projection_range: Option<R>,
+    segment_filter: Option<SegmentFilterFn>,
+    segment_projection: Option<SegmentProjectionFn>,
 ) -> Result<(), SlateDBError> {
     let clone_path = clone_path.into();
 
@@ -44,6 +58,8 @@ pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
         rand,
         fp_registry.clone(),
         projection_range,
+        segment_filter,
+        segment_projection,
     )
     .await?;
 
@@ -80,6 +96,8 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
     rand: Arc<DbRand>,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
     projection_range: Option<R>,
+    segment_filter: Option<SegmentFilterFn>,
+    segment_projection: Option<SegmentProjectionFn>,
 ) -> Result<StoredManifest, SlateDBError> {
     let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
 
@@ -121,6 +139,8 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                     &system_clock,
                     &rand,
                     &projection_range,
+                    segment_filter.as_ref(),
+                    segment_projection.as_ref(),
                 )
                 .await?;
 
@@ -206,7 +226,8 @@ pub(crate) struct CloneSource {
 
 /// Builds a list of clone sources from the provided specifications. For each source spec, a
 /// manifest at the specified checkpoint is loaded (if the checkpoint is not specified then it is
-/// created). Additionally, if projection_range is specified then it is applied to the returned
+/// created). Additionally, if any of `projection_range`, `segment_filter`, or
+/// `segment_projection` are specified then they are applied to the returned
 /// manifests using `Manifest::projected`.
 async fn build_sources<R: RangeBounds<Bytes> + Clone>(
     source_specs: &Vec<CloneSourceSpec<R>>,
@@ -214,6 +235,8 @@ async fn build_sources<R: RangeBounds<Bytes> + Clone>(
     system_clock: &Arc<dyn SystemClock>,
     rand: &Arc<DbRand>,
     projection_range: &Option<R>,
+    segment_filter: Option<&SegmentFilterFn>,
+    segment_projection: Option<&SegmentProjectionFn>,
 ) -> Result<Vec<CloneSource>, SlateDBError> {
     let mut result: Vec<CloneSource> = vec![];
     for source in source_specs {
@@ -233,9 +256,15 @@ async fn build_sources<R: RangeBounds<Bytes> + Clone>(
             (None, None) => None,
         };
 
-        manifest_at_checkpoint = match range {
-            Some(range) => Manifest::projected(&manifest_at_checkpoint, range),
-            None => manifest_at_checkpoint,
+        let config = ProjectionConfig {
+            global_range: range,
+            segment_filter: segment_filter.cloned(),
+            segment_projection: segment_projection.cloned(),
+        };
+        manifest_at_checkpoint = if config.is_noop() {
+            manifest_at_checkpoint
+        } else {
+            Manifest::projected(&manifest_at_checkpoint, &config)?
         };
 
         result.push(CloneSource {
@@ -454,7 +483,6 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::SystemClock;
     use std::collections::BTreeMap;
-    #[cfg(feature = "wal_disable")]
     use std::ops::Bound;
     use std::ops::{RangeBounds, RangeFull};
     use std::sync::Arc;
@@ -482,6 +510,8 @@ mod tests {
             fp_registry,
             system_clock,
             rand,
+            None,
+            None,
             None,
         )
         .await
@@ -1222,6 +1252,8 @@ mod tests {
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
             projection,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1266,6 +1298,94 @@ mod tests {
             &mut iter,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn should_filter_segments_via_clone_builder() {
+        // Drop the `bbb` segment using filter_segments; verify only `aaa` and
+        // `ddd` remain in the clone.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_seg_filter");
+        let clone_path = Path::from("/tmp/test_clone_seg_filter");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let table = segmented_table();
+
+        build_segmented_parent(
+            &parent_path,
+            object_store.clone(),
+            extractor.clone(),
+            Settings::default(),
+            &table,
+        )
+        .await;
+
+        crate::db::builder::CloneBuilder::new(
+            clone_path.clone(),
+            CloneSourceSpec::new(parent_path.clone()),
+            object_store.clone(),
+        )
+        .with_wal_object_store(object_store.clone())
+        .with_segment_filter(|prefix| prefix != b"bbb")
+        .build()
+        .await
+        .unwrap();
+
+        assert_clone_segments(&clone_path, object_store.clone(), &[b"aaa", b"ddd"]).await;
+    }
+
+    #[tokio::test]
+    async fn should_apply_segment_projection_via_clone_builder() {
+        // Narrow the `aaa` segment to only keys >= "aaa-002" via
+        // with_segment_projection; other segments retain full ranges.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_seg_proj");
+        let clone_path = Path::from("/tmp/test_clone_seg_proj");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let table = segmented_table();
+
+        build_segmented_parent(
+            &parent_path,
+            object_store.clone(),
+            extractor.clone(),
+            Settings::default(),
+            &table,
+        )
+        .await;
+
+        crate::db::builder::CloneBuilder::new(
+            clone_path.clone(),
+            CloneSourceSpec::new(parent_path.clone()),
+            object_store.clone(),
+        )
+        .with_wal_object_store(object_store.clone())
+        .with_segment_projection(|prefix| {
+            if prefix == b"aaa" {
+                let mut start = prefix.to_vec();
+                start.extend_from_slice(b"-002");
+                (Bound::Included(Bytes::from(start)), Bound::Unbounded)
+            } else {
+                (Bound::Unbounded, Bound::Unbounded)
+            }
+        })
+        .build()
+        .await
+        .unwrap();
+
+        let clone_db = open_segmented_clone(
+            &clone_path,
+            object_store.clone(),
+            extractor,
+            Settings::default(),
+        )
+        .await;
+        // aaa-001 was filtered out by the projection; aaa-003 remains. Other
+        // segments are untouched.
+        let mut expected = table.clone();
+        expected.remove(&Bytes::from_static(b"aaa-001"));
+        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        clone_db.close().await.unwrap();
     }
 
     #[tokio::test]
