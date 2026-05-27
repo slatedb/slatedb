@@ -510,8 +510,9 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 
 Phases:
 1. **Schema extension:** add `WorkerSpec` containing `worker_id` and `last_heartbeat_ms` to `Compaction` in `compactor.fbs`.
-2. **Worker implementation:** implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`. Move `max_concurrent_compactions` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
-3. **Failure detection:** heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
+2. **Manifest Commit Protocol:** coordinator merges compactions with `Compacted` status from remote workers, transitions them to either `Failed` or `Completed`, and commits their output to the manifest.
+3. **Worker implementation:** implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`. Move `max_concurrent_compactions` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
+4. **Failure detection:** heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
 
 ### Docs Updates
 
