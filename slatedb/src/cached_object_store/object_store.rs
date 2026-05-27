@@ -446,9 +446,8 @@ impl CachedObjectStore {
                 .await
             {
                 // Clean up any parts that were written before the error
-                let end_part_number =
-                    usize::try_from((range.end + part_size_bytes_u64 - 1) / part_size_bytes_u64)
-                        .unwrap_or(start_part_number);
+                let end_part_number = usize::try_from(range.end.div_ceil(part_size_bytes_u64))
+                    .unwrap_or(start_part_number);
                 for part_number in start_part_number..end_part_number {
                     let _ = entry.delete_part(part_number).await;
                 }
@@ -897,7 +896,11 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
+    use futures::StreamExt;
+    use object_store::{
+        path::Path, GetOptions, GetRange, GetResult, GetResultPayload, ObjectStore, ObjectStoreExt,
+        PutPayload,
+    };
     use rand::Rng;
 
     use super::CachedObjectStore;
@@ -2185,5 +2188,321 @@ mod tests {
         let parts1 = entry1.cached_parts().await.unwrap();
         assert_eq!(parts1.len(), 0, "{parts1:?}");
         assert_eq!(cache_storage.file_handle_cache_population(), 3);
+    }
+
+    // --- Range bounds validation tests ---
+
+    #[tokio::test]
+    async fn test_save_parts_stream_exceeds_range() {
+        // Create a stream that produces more bytes than the range allows.
+        let part_size = 1024;
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        let location = Path::from("/data/range_exceed_test");
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+
+        // Range says 100 bytes, but stream produces 200 bytes.
+        let range = 0u64..100u64;
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from(vec![0u8; 80])),
+            Ok(Bytes::from(vec![0u8; 120])), // total 200 > 100
+        ]);
+
+        let result = cached_store
+            .save_parts_stream(entry.as_ref(), stream, 0, range)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Stream exceeded range bounds"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Verify nothing was persisted to cache (no bad file written).
+        let cached_parts = entry.cached_parts().await.unwrap();
+        assert_eq!(cached_parts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_save_parts_stream_under_range() {
+        // Create a stream that produces fewer bytes than the range requires.
+        let part_size = 1024;
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        let location = Path::from("/data/range_under_test");
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+
+        // Range says 200 bytes, but stream produces only 100 bytes.
+        let range = 0u64..200u64;
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from(vec![0u8; 50])),
+            Ok(Bytes::from(vec![0u8; 50])), // total 100 < 200
+        ]);
+
+        let result = cached_store
+            .save_parts_stream(entry.as_ref(), stream, 0, range)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Stream range bounds not met"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Verify nothing was persisted to cache (no bad file written).
+        let cached_parts = entry.cached_parts().await.unwrap();
+        assert_eq!(cached_parts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_save_parts_stream_exact_range() {
+        // Stream produces exactly the right number of bytes - should succeed.
+        let part_size = 1024;
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        let location = Path::from("/data/range_exact_test");
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+
+        // Range says 150 bytes, stream produces exactly 150 bytes.
+        let range = 10u64..160u64;
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from(vec![1u8; 75])),
+            Ok(Bytes::from(vec![2u8; 75])), // total 150 == 150
+        ]);
+
+        let result = cached_store
+            .save_parts_stream(entry.as_ref(), stream, 0, range)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 150);
+    }
+
+    /// An ObjectStore wrapper that truncates the bytes returned by `get_opts`
+    /// to simulate a corrupted or short response.
+    #[derive(Debug)]
+    struct TruncatingObjectStore {
+        inner: Arc<dyn ObjectStore>,
+        /// Maximum number of bytes to return from get_opts, regardless of the
+        /// requested range.
+        max_bytes: usize,
+    }
+
+    impl TruncatingObjectStore {
+        fn new(inner: Arc<dyn ObjectStore>, max_bytes: usize) -> Self {
+            Self { inner, max_bytes }
+        }
+    }
+
+    impl std::fmt::Display for TruncatingObjectStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TruncatingObjectStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for TruncatingObjectStore {
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let result = self.inner.get_opts(location, options).await?;
+            let meta = result.meta.clone();
+            let attrs = result.attributes.clone();
+            let range = result.range.clone();
+            let bytes = result.bytes().await?;
+
+            // Truncate the bytes.
+            let truncated = bytes.slice(..self.max_bytes.min(bytes.len()));
+
+            Ok(GetResult {
+                payload: GetResultPayload::Stream(
+                    futures::stream::once(async move { Ok(truncated) }).boxed(),
+                ),
+                meta,
+                attributes: attrs,
+                range,
+            })
+        }
+
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_offset(
+            &self,
+            prefix: Option<&Path>,
+            offset: &Path,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list_with_offset(prefix, offset)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_part_bytes_too_short_for_range() {
+        // Simulate an object store returning fewer bytes than requested,
+        // which should trigger the range validation error in read_part.
+        let part_size = 1024;
+        let inner_store = Arc::new(object_store::memory::InMemory::new());
+
+        // Write a file large enough for at least one full part.
+        let location = Path::from("data/truncated_test");
+        let payload = gen_rand_bytes(part_size * 2);
+        inner_store
+            .put(&location, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+
+        // Wrap with a truncating store that only returns 500 bytes max.
+        let truncating_store: Arc<dyn ObjectStore> =
+            Arc::new(TruncatingObjectStore::new(inner_store, 500));
+
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            truncating_store,
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        // Request a full part (range 0..1024) but the store only returns 500 bytes.
+        // read_part requests range_in_part = 0..1024, so bytes.len() (500) < range_in_part.len() (1024).
+        let result = cached_store.read_part(&location, 0, 0..part_size).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Fetched part bytes do not cover the requested range"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Verify that the truncated data was NOT written to cache.
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+        let cached_parts = entry.cached_parts().await.unwrap();
+        assert_eq!(cached_parts.len(), 0);
     }
 }
