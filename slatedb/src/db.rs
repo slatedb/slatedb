@@ -2846,6 +2846,7 @@ mod tests {
     async fn test_scan_prefix_by_recency_errors_on_multi_segment_prefix() {
         use crate::manifest::{LsmTreeState, Segment};
         use std::collections::VecDeque;
+        use std::sync::Arc;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::builder("/tmp/test_recency_multi_segment", object_store)
@@ -2864,21 +2865,21 @@ mod tests {
             core.segments = vec![
                 Segment {
                     prefix: Bytes::from_static(b"hour=12/"),
-                    tree: LsmTreeState {
+                    tree: Arc::new(LsmTreeState {
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::new(),
                         compacted: vec![],
-                    },
+                    }),
                 },
                 Segment {
                     prefix: Bytes::from_static(b"hour=13/"),
-                    tree: LsmTreeState {
+                    tree: Arc::new(LsmTreeState {
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::new(),
                         compacted: vec![],
-                    },
+                    }),
                 },
             ];
         });

@@ -1331,16 +1331,14 @@ mod tests {
 
         // Create a manifest
         let mut state = ManifestCore::new();
-        state
-            .tree
+        Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(l0_sst_handle.clone()));
-        state
-            .tree
+        Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(active_expired_l0_sst_handle.clone()));
         // Dont' push inactive_expired_l0_sst_handle
-        state.tree.compacted.push(SortedRun {
+        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
             id: 1,
             // Don't add inactive_expired_sst_handle
             sst_views: vec![
@@ -1452,18 +1450,19 @@ mod tests {
 
         // Create an initial manifest with active and active checkpoint tables
         let mut state = ManifestCore::new();
-        state
-            .tree
+        Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(active_l0_sst_handle.clone()));
-        state.tree.l0.push_back(SsTableView::identity(
-            active_checkpoint_l0_sst_handle.clone(),
-        ));
-        state.tree.compacted.push(SortedRun {
+        Arc::make_mut(&mut state.tree)
+            .l0
+            .push_back(SsTableView::identity(
+                active_checkpoint_l0_sst_handle.clone(),
+            ));
+        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(active_sst_handle.clone())],
         });
-        state.tree.compacted.push(SortedRun {
+        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
             id: 2,
             sst_views: vec![SsTableView::identity(active_checkpoint_sst_handle.clone())],
         });
@@ -1481,8 +1480,10 @@ mod tests {
 
         // Now drop the active tables from the checkpoint
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.tree.l0.truncate(1);
-        dirty.value.core.tree.compacted.truncate(1);
+        Arc::make_mut(&mut dirty.value.core.tree).l0.truncate(1);
+        Arc::make_mut(&mut dirty.value.core.tree)
+            .compacted
+            .truncate(1);
         stored_manifest.update(dirty).await.unwrap();
 
         // Start the garbage collector
@@ -2105,11 +2106,10 @@ mod tests {
         let inactive_expired_handle = create_sst(table_store.clone(), expired_ms).await;
 
         let mut state = ManifestCore::new();
-        state
-            .tree
+        Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(active_l0_handle));
-        state.tree.compacted.push(SortedRun {
+        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
             id: 1,
             sst_views: vec![SsTableView::identity(active_handle)],
         });
@@ -2251,8 +2251,7 @@ mod tests {
         let mut state = ManifestCore::new();
         state.replay_after_wal_id = 4;
         state.next_wal_sst_id = 5;
-        state
-            .tree
+        Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(active_l0_handle));
         let mut stored_manifest = StoredManifest::create_new_db(
