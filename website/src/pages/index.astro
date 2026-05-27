@@ -91,6 +91,7 @@ const features = [
         body: 'Persist data directly to object storage. Keep 99.999999999% durability and cost profile of S3-class storage without local disks or cross-AZ storage traffic.',
         figureImg: '/img/feature-zero-disk.png',
         figureScaled: true,
+        href: '/docs/design/overview/',
     },
     {
         id: 'deployment',
@@ -99,6 +100,7 @@ const features = [
         name: 'Flexible deployment',
         body: 'SlateDB ensures a single writer through a formally verified manifest fencing protocol but supports multiple readers for read-side scaling. Compaction can run embedded or as a separate process to enforce separation of concerns.',
         figureImg: '/img/feature-deployment.png',
+        href: '/docs/design/readers/',
     },
     {
         id: 'semantics',
@@ -107,6 +109,7 @@ const features = [
         name: 'Transactional semantics',
         body: 'Transactions, snapshots, and optimistic concurrency control mechanisms ensure that SlateDB is suitable for the most demanding transactional workloads.',
         figureImg: '/img/feature-semantics.png',
+        href: '/docs/design/consistency/',
     },
     {
         id: 'performance',
@@ -115,6 +118,16 @@ const features = [
         name: 'Tunable performance',
         body: 'Writes can trade between API request cost and durability latency while reads can leverage hybrid memory/disk caching to avoid cold latency penalties.',
         figureImg: '/img/feature-performance.png',
+        href: '/docs/operations/tuning/',
+    },
+    {
+        id: 'clones',
+        figure: 'Fig. 5',
+        figureTitle: 'zero-copy operations',
+        name: 'Clones, branches & rescaling',
+        body: 'Checkpointing is a zero-copy operation and functions as the basis for a clone or fork. Rescaling is also zero-copy, enabling <code>O(1)</code> splits and merges of Slates.',
+        figureImg: '/img/feature-clones.png',
+        href: '/docs/design/clones/',
     },
 ];
 ---
@@ -230,6 +243,13 @@ const features = [
                                         {f.figureImg && (
                                             <img class={`plate-figure-img ${f.figureScaled ? 'plate-figure-img--scaled' : ''}`} src={f.figureImg} alt="" aria-hidden="true" />
                                         )}
+                                        {f.href && (
+                                            <a class="plate-figure-ref" href={f.href}>
+                                                <span class="plate-figure-ref-label">ref</span>
+                                                <span class="plate-figure-ref-path">{f.href}</span>
+                                                <span class="plate-figure-ref-arrow" aria-hidden="true">→</span>
+                                            </a>
+                                        )}
                                     </article>
                                 ))}
                             </div>
@@ -241,7 +261,14 @@ const features = [
                                             data-feature-copy={f.id}
                                         >
                                             <h3 class="feature-name">{f.name}</h3>
-                                            <p class="feature-body">{f.body}</p>
+                                            <p class="feature-body" set:html={f.body}></p>
+                                            {f.href && (
+                                                <a class="plate-copy-ref" href={f.href}>
+                                                    <span class="plate-figure-ref-label">ref</span>
+                                                    <span class="plate-figure-ref-path">{f.href}</span>
+                                                    <span class="plate-figure-ref-arrow" aria-hidden="true">→</span>
+                                                </a>
+                                            )}
                                         </article>
                                     ))}
                                 </div>
@@ -257,7 +284,7 @@ const features = [
                                             data-feature-tab={f.id}
                                         >
                                             <span>
-                                                <span class="feature-index">{['I', 'II', 'III', 'IV'][i]}</span>
+                                                <span class="feature-index">{['I', 'II', 'III', 'IV', 'V'][i]}</span>
                                                 {f.name}
                                             </span>
                                             <span class="plate-tab-tag">{f.figureTitle}</span>
@@ -1250,6 +1277,7 @@ const features = [
     .plate-figure-stack {
         position: relative;
         order: 2;
+        display: grid;
         min-height: 34rem;
         border-left: 1px solid var(--ink-6);
         background:
@@ -1261,6 +1289,7 @@ const features = [
 
     .plate-panel {
         position: relative;
+        grid-area: 1 / 1;
         min-height: 34rem;
         padding: 0.5rem;
         display: none;
@@ -1293,6 +1322,64 @@ const features = [
         transform: translateY(2rem) scale(1.15);
         transform-origin: center;
     }
+    .plate-figure-ref {
+        position: absolute;
+        top: 1.25rem;
+        left: 1.25rem;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.7rem;
+        letter-spacing: 0.04em;
+        color: var(--ink-3);
+        text-decoration: none;
+        transition: color 0.15s ease;
+    }
+    .plate-figure-ref-label {
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--ink-4);
+    }
+    .plate-figure-ref-path {
+        color: var(--accent);
+        font-weight: 500;
+        transition: color 0.15s ease;
+    }
+    .plate-figure-ref:hover .plate-figure-ref-path {
+        color: var(--accent-high);
+    }
+    .plate-figure-ref-arrow {
+        color: var(--accent);
+        transition: transform 0.15s ease, color 0.15s ease;
+    }
+    .plate-figure-ref:hover .plate-figure-ref-arrow {
+        color: var(--accent-high);
+        transform: translateX(0.2rem);
+    }
+
+    /* Inline ref shown only on mobile, where the figure (and its ref) is hidden. */
+    .plate-copy-ref {
+        display: none;
+        align-items: center;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.7rem;
+        letter-spacing: 0.04em;
+        color: var(--ink-3);
+        text-decoration: none;
+    }
+    .plate-copy-ref:hover .plate-figure-ref-path,
+    .plate-copy-ref:hover .plate-figure-ref-arrow {
+        color: var(--accent-high);
+    }
+    .plate-copy-ref:hover .plate-figure-ref-arrow {
+        transform: translateX(0.2rem);
+    }
 
     .plate-copy-stack {
         position: relative;
@@ -1303,16 +1390,19 @@ const features = [
     .plate-copy-panels {
         position: relative;
         flex: 1;
+        display: grid;
     }
 
     .plate-copy {
+        grid-area: 1 / 1;
         padding: 2rem;
-        display: none;
+        display: flex;
         flex-direction: column;
         gap: 0.9rem;
+        visibility: hidden;
     }
     .plate-copy.active {
-        display: flex;
+        visibility: visible;
     }
 
     .plate-copy .feature-tag {
@@ -1334,6 +1424,17 @@ const features = [
     .plate-copy .feature-body {
         font-size: 1rem;
         line-height: 1.62;
+    }
+    .plate-copy .feature-body :global(code) {
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.85em;
+        padding: 0.1em 0.35em;
+        border: 1px solid var(--ink-6);
+        border-radius: 0.25rem;
+        background-color: var(--surface-2);
+        color: var(--accent-high);
+        white-space: nowrap;
     }
 
     .plate-diagram {
@@ -1533,6 +1634,9 @@ const features = [
         }
         .plate-copy {
             padding: 1.25rem;
+        }
+        .plate-copy-ref {
+            display: inline-flex;
         }
         .plate-diagram,
         .diagram-zero,
