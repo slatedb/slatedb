@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
 use bytes::Bytes;
-use log::{error, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -721,6 +721,11 @@ impl CompactorState {
                 Entry::Occupied(mut o) => {
                     if matches!(compaction.status(), CompactionStatus::Compacted) {
                         o.insert(compaction.clone());
+                    } else {
+                        debug!(
+                            "ignoring remote compaction update with non-Compacted status [compaction={:?}]",
+                            compaction,
+                        );
                     }
                 }
             }
