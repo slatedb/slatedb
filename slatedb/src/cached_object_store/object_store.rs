@@ -4,7 +4,7 @@ use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
 use crate::rand::DbRand;
 use bytes::{Bytes, BytesMut};
-use futures::{stream, stream::BoxStream, StreamExt};
+use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
 use object_store::{
     Attributes, CopyOptions, GetRange, GetResultPayload, PutMultipartOptions, PutResult,
@@ -483,13 +483,14 @@ impl CachedObjectStore {
             total_bytes += chunk.len();
 
             if total_bytes > range_len {
+                let msg = format!(
+                    "Stream exceeded range bounds: {} bytes read, but range is {}..{} ({} bytes)",
+                    total_bytes, range.start, range.end, range_len
+                );
+                warn!("{}", msg);
                 return Err(object_store::Error::Generic {
                     store: "cached_object_store",
-                    source: format!(
-                        "Stream exceeded range bounds: {} bytes read, but range is {}..{} ({} bytes)",
-                        total_bytes, range.start, range.end, range_len
-                    )
-                    .into(),
+                    source: msg.into(),
                 });
             }
 
@@ -500,6 +501,19 @@ impl CachedObjectStore {
                 entry.save_part(part_number, to_write.into()).await?;
                 part_number += 1;
             }
+        }
+
+        // No point in saving an invalid file so return early.
+        if total_bytes != range_len {
+            let msg = format!(
+                "Stream range bounds not met: {} bytes read, but range is {}..{} ({} bytes)",
+                total_bytes, range.start, range.end, range_len
+            );
+            warn!("{}", msg);
+            return Err(object_store::Error::Generic {
+                store: "cached_object_store",
+                source: msg.into(),
+            });
         }
 
         // Save any remaining bytes as the last part
@@ -603,19 +617,31 @@ impl CachedObjectStore {
                         None
                     };
 
-                    // Save the head and the part to cache for future accesses. Just read the bytes
-                    // if we still can't derive a canonical cache key.
-                    let bytes = if let Some(entry) = cache_entry {
-                        // Save the head and the part to cache for future accesses.
-                        let meta = get_result.meta.clone();
-                        let attrs = get_result.attributes.clone();
-                        let bytes = get_result.bytes().await?;
+                    // Read bytes and validate the range before caching.
+                    let meta = get_result.meta.clone();
+                    let attrs = get_result.attributes.clone();
+                    let bytes = get_result.bytes().await?;
+                    if bytes.len() < range_in_part.len() {
+                        let msg = format!(
+                            "Fetched part bytes do not cover the requested range: \
+                             part has {} bytes, but range_in_part is {}..{}",
+                            bytes.len(),
+                            range_in_part.start,
+                            range_in_part.end
+                        );
+                        warn!("{}", msg);
+                        return Err(object_store::Error::Generic {
+                            store: "cached_object_store",
+                            source: msg.into(),
+                        });
+                    }
+
+                    // Save the head and the part to cache for future accesses.
+                    // Skip if we can't derive a canonical cache key.
+                    if let Some(entry) = cache_entry {
                         entry.save_head((&meta, &attrs)).await.ok();
                         entry.save_part(part_id, bytes.clone()).await.ok();
-                        bytes
-                    } else {
-                        get_result.bytes().await?
-                    };
+                    }
 
                     Ok::<_, object_store::Error>(bytes)
                 })
