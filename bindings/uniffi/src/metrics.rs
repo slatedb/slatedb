@@ -90,7 +90,7 @@ pub trait MetricsRecorder: Send + Sync {
     fn register_counter(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
     ) -> Arc<dyn Counter>;
 
@@ -98,7 +98,7 @@ pub trait MetricsRecorder: Send + Sync {
     fn register_gauge(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
     ) -> Arc<dyn Gauge>;
 
@@ -106,7 +106,7 @@ pub trait MetricsRecorder: Send + Sync {
     fn register_up_down_counter(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
     ) -> Arc<dyn UpDownCounter>;
 
@@ -114,7 +114,7 @@ pub trait MetricsRecorder: Send + Sync {
     fn register_histogram(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
         boundaries: Vec<f64>,
     ) -> Arc<dyn Histogram>;
@@ -181,55 +181,66 @@ impl MetricsRecorder for DefaultMetricsRecorder {
     fn register_counter(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
     ) -> Arc<dyn Counter> {
         let label_refs = to_label_refs(&labels);
         Arc::new(CoreCounterHandle {
-            inner: self
-                .inner
-                .register_counter(&name, &description, &label_refs),
+            inner: self.inner.register_counter(
+                &name,
+                description.as_deref().unwrap_or(""),
+                &label_refs,
+            ),
         })
     }
 
     fn register_gauge(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
     ) -> Arc<dyn Gauge> {
         let label_refs = to_label_refs(&labels);
         Arc::new(CoreGaugeHandle {
-            inner: self.inner.register_gauge(&name, &description, &label_refs),
+            inner: self.inner.register_gauge(
+                &name,
+                description.as_deref().unwrap_or(""),
+                &label_refs,
+            ),
         })
     }
 
     fn register_up_down_counter(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
     ) -> Arc<dyn UpDownCounter> {
         let label_refs = to_label_refs(&labels);
         Arc::new(CoreUpDownCounterHandle {
-            inner: self
-                .inner
-                .register_up_down_counter(&name, &description, &label_refs),
+            inner: self.inner.register_up_down_counter(
+                &name,
+                description.as_deref().unwrap_or(""),
+                &label_refs,
+            ),
         })
     }
 
     fn register_histogram(
         &self,
         name: String,
-        description: String,
+        description: Option<String>,
         labels: Vec<MetricLabel>,
         boundaries: Vec<f64>,
     ) -> Arc<dyn Histogram> {
         let label_refs = to_label_refs(&labels);
         Arc::new(CoreHistogramHandle {
-            inner: self
-                .inner
-                .register_histogram(&name, &description, &label_refs, &boundaries),
+            inner: self.inner.register_histogram(
+                &name,
+                description.as_deref().unwrap_or(""),
+                &label_refs,
+                &boundaries,
+            ),
         })
     }
 }
@@ -256,7 +267,7 @@ impl core_metrics::MetricsRecorder for MetricsRecorderAdapter {
         Arc::new(CounterAdapter {
             inner: self.inner.register_counter(
                 name.to_owned(),
-                description.to_owned(),
+                (!description.is_empty()).then(|| description.to_owned()),
                 to_metric_labels(labels),
             ),
         })
@@ -271,7 +282,7 @@ impl core_metrics::MetricsRecorder for MetricsRecorderAdapter {
         Arc::new(GaugeAdapter {
             inner: self.inner.register_gauge(
                 name.to_owned(),
-                description.to_owned(),
+                (!description.is_empty()).then(|| description.to_owned()),
                 to_metric_labels(labels),
             ),
         })
@@ -286,7 +297,7 @@ impl core_metrics::MetricsRecorder for MetricsRecorderAdapter {
         Arc::new(UpDownCounterAdapter {
             inner: self.inner.register_up_down_counter(
                 name.to_owned(),
-                description.to_owned(),
+                (!description.is_empty()).then(|| description.to_owned()),
                 to_metric_labels(labels),
             ),
         })
@@ -302,7 +313,7 @@ impl core_metrics::MetricsRecorder for MetricsRecorderAdapter {
         Arc::new(HistogramAdapter {
             inner: self.inner.register_histogram(
                 name.to_owned(),
-                description.to_owned(),
+                (!description.is_empty()).then(|| description.to_owned()),
                 to_metric_labels(labels),
                 boundaries.to_vec(),
             ),
@@ -489,7 +500,7 @@ mod tests {
         fn register_counter(
             &self,
             name: String,
-            _description: String,
+            _description: Option<String>,
             labels: Vec<MetricLabel>,
         ) -> Arc<dyn Counter> {
             let key = metric_key(&name, &labels);
@@ -508,7 +519,7 @@ mod tests {
         fn register_gauge(
             &self,
             name: String,
-            _description: String,
+            _description: Option<String>,
             labels: Vec<MetricLabel>,
         ) -> Arc<dyn Gauge> {
             let key = metric_key(&name, &labels);
@@ -527,7 +538,7 @@ mod tests {
         fn register_up_down_counter(
             &self,
             name: String,
-            _description: String,
+            _description: Option<String>,
             labels: Vec<MetricLabel>,
         ) -> Arc<dyn UpDownCounter> {
             let key = metric_key(&name, &labels);
@@ -546,7 +557,7 @@ mod tests {
         fn register_histogram(
             &self,
             name: String,
-            _description: String,
+            _description: Option<String>,
             labels: Vec<MetricLabel>,
             _boundaries: Vec<f64>,
         ) -> Arc<dyn Histogram> {
