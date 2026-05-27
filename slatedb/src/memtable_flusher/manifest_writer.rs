@@ -137,10 +137,19 @@ impl ManifestWriter {
         through_seq: Option<u64>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx.send(ManifestWriterCommand::AwaitFlush {
-            through_seq,
-            sender,
-        })
+        match self
+            .commands_tx
+            .send_recovering(ManifestWriterCommand::AwaitFlush {
+                through_seq,
+                sender,
+            }) {
+            Ok(()) => Ok(()),
+            Err((ManifestWriterCommand::AwaitFlush { sender, .. }, err)) => {
+                let _ = sender.send(Err(err.clone()));
+                Err(err)
+            }
+            Err((_, err)) => Err(err),
+        }
     }
 
     /// Sends a checkpoint request to the manifest_writer. The manifest_writer will write
@@ -152,12 +161,20 @@ impl ManifestWriter {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx
-            .send(ManifestWriterCommand::CreateCheckpoint {
+        match self
+            .commands_tx
+            .send_recovering(ManifestWriterCommand::CreateCheckpoint {
                 through_seq,
                 options,
                 sender,
-            })
+            }) {
+            Ok(()) => Ok(()),
+            Err((ManifestWriterCommand::CreateCheckpoint { sender, .. }, err)) => {
+                let _ = sender.send(Err(err.clone()));
+                Err(err)
+            }
+            Err((_, err)) => Err(err),
+        }
     }
 
     /// Enqueues a manifest poll; the result is delivered to `sender` on completion.
@@ -165,8 +182,17 @@ impl ManifestWriter {
         &self,
         sender: oneshot::Sender<Result<(), SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx
-            .send(ManifestWriterCommand::PollManifest { done: Some(sender) })
+        match self
+            .commands_tx
+            .send_recovering(ManifestWriterCommand::PollManifest { done: Some(sender) })
+        {
+            Ok(()) => Ok(()),
+            Err((ManifestWriterCommand::PollManifest { done: Some(sender) }, err)) => {
+                let _ = sender.send(Err(err.clone()));
+                Err(err)
+            }
+            Err((_, err)) => Err(err),
+        }
     }
 
     pub(crate) async fn shutdown(executor: &crate::dispatcher::MessageHandlerExecutor) {
@@ -190,6 +216,7 @@ struct ManifestWriterHandler {
     db_status_rx: watch::Receiver<crate::db_status::DbStatus>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
+    pending_manifest_refreshes: Vec<oneshot::Sender<Result<(), SlateDBError>>>,
 }
 
 #[async_trait]
@@ -247,7 +274,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
         let mut commands = commands.fuse();
         let close_result = self.try_graceful_cleanup(&mut commands, &result).await;
         // Drain any commands not consumed by graceful cleanup, collecting
-        // flush/checkpoint waiters so they receive a proper error.
+        // waiters so they receive a proper error.
         while let Some(command) = commands.next().await {
             self.collect_pending_waiter(command);
         }
@@ -258,6 +285,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
             .unwrap_or(SlateDBError::Closed);
         self.fail_pending_flushes(&error);
         self.fail_pending_checkpoints(&error);
+        self.fail_pending_manifest_refreshes(&error);
         close_result
     }
 }
@@ -281,6 +309,7 @@ impl ManifestWriterHandler {
             durable_seq,
             db_status_rx,
             pending_checkpoints: Vec::new(),
+            pending_manifest_refreshes: Vec::new(),
         }
     }
 
@@ -730,8 +759,16 @@ impl ManifestWriterHandler {
         }
     }
 
-    /// Extract flush/checkpoint waiters from a command without processing
-    /// uploads. Used during error shutdown to ensure waiters get a proper error.
+    /// Fail remaining manifest refresh waiters on exit. If a poll request was
+    /// queued but never processed, callers still need the terminal DB error.
+    fn fail_pending_manifest_refreshes(&mut self, err: &SlateDBError) {
+        for sender in self.pending_manifest_refreshes.drain(..) {
+            let _ = sender.send(Err(err.clone()));
+        }
+    }
+
+    /// Extract waiters from a command without processing uploads. Used during
+    /// error shutdown to ensure waiters get a proper error.
     fn collect_pending_waiter(&mut self, command: ManifestWriterCommand) {
         match command {
             ManifestWriterCommand::AwaitFlush {
@@ -753,6 +790,9 @@ impl ManifestWriterHandler {
                     options,
                     sender,
                 });
+            }
+            ManifestWriterCommand::PollManifest { done: Some(sender) } => {
+                self.pending_manifest_refreshes.push(sender);
             }
             _ => {}
         }
@@ -813,7 +853,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, ManifestWriterHandler, TrackerMessage};
+    use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -1460,6 +1500,153 @@ mod tests {
         );
 
         started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_manifest_refresh_waiter_receives_error_on_fenced_shutdown() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_pending_poll_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let mut handler = new_handler_from_harness(harness);
+
+        let (tx, rx) = oneshot::channel();
+        let messages =
+            futures::stream::iter(vec![ManifestWriterCommand::PollManifest { done: Some(tx) }]);
+        crate::dispatcher::MessageHandler::cleanup(
+            &mut handler,
+            Box::pin(messages),
+            Err(SlateDBError::Fenced),
+        )
+        .await
+        .unwrap();
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_refresh_waiter_receives_error_when_manifest_writer_channel_closed() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_closed_poll_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        started
+            .closed_result
+            .write_result(Err(SlateDBError::Fenced));
+        started.shutdown().await;
+
+        let (tx, rx) = oneshot::channel();
+        let err = started.send_poll(tx).unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::Fenced),
+            "expected Fenced, got {:?}",
+            err
+        );
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_waiter_receives_error_when_manifest_writer_channel_closed() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_closed_flush_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        started
+            .closed_result
+            .write_result(Err(SlateDBError::Fenced));
+        started.shutdown().await;
+
+        let (tx, rx) = oneshot::channel();
+        let err = started.send_flush(Some(1), tx).unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::Fenced),
+            "expected Fenced, got {:?}",
+            err
+        );
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_waiter_receives_error_when_manifest_writer_channel_closed() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_closed_checkpoint_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        started
+            .closed_result
+            .write_result(Err(SlateDBError::Fenced));
+        started.shutdown().await;
+
+        let (tx, rx) = oneshot::channel();
+        let err = started
+            .send_checkpoint(Some(1), CheckpointOptions::default(), tx)
+            .unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::Fenced),
+            "expected Fenced, got {:?}",
+            err
+        );
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
     }
 
     #[tokio::test]
