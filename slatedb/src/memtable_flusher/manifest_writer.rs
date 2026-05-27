@@ -137,19 +137,17 @@ impl ManifestWriter {
         through_seq: Option<u64>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        match self
-            .commands_tx
-            .send_recovering(ManifestWriterCommand::AwaitFlush {
+        self.commands_tx.send_with_failure_callback(
+            ManifestWriterCommand::AwaitFlush {
                 through_seq,
                 sender,
-            }) {
-            Ok(()) => Ok(()),
-            Err((ManifestWriterCommand::AwaitFlush { sender, .. }, err)) => {
-                let _ = sender.send(Err(err.clone()));
-                Err(err)
-            }
-            Err((_, err)) => Err(err),
-        }
+            },
+            |message, err| {
+                if let ManifestWriterCommand::AwaitFlush { sender, .. } = message {
+                    let _ = sender.send(Err(err.clone()));
+                }
+            },
+        )
     }
 
     /// Sends a checkpoint request to the manifest_writer. The manifest_writer will write
@@ -161,20 +159,18 @@ impl ManifestWriter {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        match self
-            .commands_tx
-            .send_recovering(ManifestWriterCommand::CreateCheckpoint {
+        self.commands_tx.send_with_failure_callback(
+            ManifestWriterCommand::CreateCheckpoint {
                 through_seq,
                 options,
                 sender,
-            }) {
-            Ok(()) => Ok(()),
-            Err((ManifestWriterCommand::CreateCheckpoint { sender, .. }, err)) => {
-                let _ = sender.send(Err(err.clone()));
-                Err(err)
-            }
-            Err((_, err)) => Err(err),
-        }
+            },
+            |message, err| {
+                if let ManifestWriterCommand::CreateCheckpoint { sender, .. } = message {
+                    let _ = sender.send(Err(err.clone()));
+                }
+            },
+        )
     }
 
     /// Enqueues a manifest poll; the result is delivered to `sender` on completion.
@@ -182,17 +178,14 @@ impl ManifestWriter {
         &self,
         sender: oneshot::Sender<Result<(), SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        match self
-            .commands_tx
-            .send_recovering(ManifestWriterCommand::PollManifest { done: Some(sender) })
-        {
-            Ok(()) => Ok(()),
-            Err((ManifestWriterCommand::PollManifest { done: Some(sender) }, err)) => {
-                let _ = sender.send(Err(err.clone()));
-                Err(err)
-            }
-            Err((_, err)) => Err(err),
-        }
+        self.commands_tx.send_with_failure_callback(
+            ManifestWriterCommand::PollManifest { done: Some(sender) },
+            |message, err| {
+                if let ManifestWriterCommand::PollManifest { done: Some(sender) } = message {
+                    let _ = sender.send(Err(err.clone()));
+                }
+            },
+        )
     }
 
     pub(crate) async fn shutdown(executor: &crate::dispatcher::MessageHandlerExecutor) {
