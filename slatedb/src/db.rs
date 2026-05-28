@@ -3202,6 +3202,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_memtable_write_bytes_matches_batch_payload() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_write_bytes_matches_batch_payload",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024 * 1024, None))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"hello", b"world!").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len()) as i64,
+        );
+
+        db.put(b"k2", b"v2").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len()) as i64,
+        );
+
+        // Deletes count only the key length.
+        db.delete(b"k3").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len() + b"k3".len()) as i64,
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtable_write_bytes_matches_batch_payload_with_merges() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_write_bytes_matches_batch_payload_with_merges",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024 * 1024, None))
+        .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // A single merge per key is not folded by the merge iterator, so the
+        // tracked size matches key + value.
+        db.merge(b"k1", b"a").await.unwrap();
+        let mut expected = (b"k1".len() + b"a".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        // Multiple merges for the same key in a single batch are folded by the
+        // merge iterator before counting. memtable_write_bytes reflects the merged
+        // output (key + "abc"), not the sum of raw inputs (3 * key + "a" + "b" + "c").
+        let mut batch = WriteBatch::new();
+        batch.merge(b"k2", b"a");
+        batch.merge(b"k2", b"b");
+        batch.merge(b"k2", b"c");
+        db.write(batch).await.unwrap();
+        expected += (b"k2".len() + b"abc".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        // Merges to distinct keys in one batch are not folded, so each entry
+        // contributes its raw key + value.
+        let mut batch = WriteBatch::new();
+        batch.merge(b"k3", b"x");
+        batch.merge(b"k4", b"yy");
+        db.write(batch).await.unwrap();
+        expected += (b"k3".len() + b"x".len() + b"k4".len() + b"yy".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wal_flush_bytes_after_explicit_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db_options = {
+            let mut db_options = test_db_options(0, 1024 * 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder(
+            "/tmp/test_wal_flush_bytes_after_explicit_flush",
+            object_store,
+        )
+        .with_settings(db_options)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put_with_options(
+            b"hello",
+            b"world",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap_or(0),
+            0,
+        );
+
+        db.flush().await.unwrap();
+
+        let wal_bytes = lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap();
+        let memtable_bytes =
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap();
+        // WAL SST framing/footer makes the encoded payload at least as large as
+        // the memtable payload if no compression is used.
+        assert!(
+            wal_bytes >= memtable_bytes,
+            "wal_bytes={wal_bytes} memtable_bytes={memtable_bytes}",
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_get_with_durability_level_when_wal_disabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
