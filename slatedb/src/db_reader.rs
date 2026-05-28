@@ -237,7 +237,6 @@ impl DbReaderInner {
                     db_state: db_state.as_ref(),
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix,
                 },
             )

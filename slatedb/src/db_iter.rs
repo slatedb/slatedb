@@ -13,82 +13,35 @@ use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
-use std::sync::Arc;
 
-/// [`DbIteratorRangeTracker'] is used to track the range of keys accessed by a [`DbIterator`].  For
-/// Serializable Snapshot Isolation, we need to track the read keys during the transaction to detect
-/// read-write conflicts with recent committed transactions.
+/// [`DbIteratorRangeTracker`] records the *requested* scan range of a
+/// [`DbIterator`] so that the transaction manager can detect read-write
+/// conflicts under Serializable Snapshot Isolation.
 ///
-/// A naive implementation is to maintain a set of read keys, but this may suffers phantom read conflicts.
-/// For example, if transaction A reads a range `["key01", "key10"]` and transaction B writes to `"key05"`
-/// which falls within that range, we cannot detect this conflict and abort one of the transactions to
-/// maintain serializability.
+/// The tracker holds the range the caller asked to scan — not the bounding
+/// box of keys the iterator happened to yield. Tracking the requested range
+/// is required for correctness: an empty scan still establishes a read
+/// dependency on every key in that range (and a concurrent insert anywhere
+/// inside it is a phantom), and a partial scan or a scan whose tombstones
+/// were skipped likewise depends on the whole requested range.
 ///
-/// To mitigate this, we could use a range tracker to track the range of keys accessed by the iterator,
-/// and check if the write key falls within the range.
-///
-/// A [`DbIteratorRangeTracker`] can be passed to [`DbIterator`] optionally. If it's passed, you can retrieve
-/// the range of keys scanned by [`DbIterator`] from it.
+/// Early termination via [`DbIterator::seek`] does not narrow the registered
+/// range: the transaction has already taken a logical read dependency on the
+/// whole requested range when the scan was issued.
 #[derive(Debug)]
 pub(crate) struct DbIteratorRangeTracker {
-    inner: Mutex<DbIteratorRangeTrackerInner>,
-}
-
-#[derive(Debug)]
-struct DbIteratorRangeTrackerInner {
-    first_key: Option<Bytes>,
-    last_key: Option<Bytes>,
-    has_data: bool,
+    requested_range: BytesRange,
 }
 
 impl DbIteratorRangeTracker {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: Mutex::new(DbIteratorRangeTrackerInner {
-                first_key: None,
-                last_key: None,
-                has_data: false,
-            }),
-        }
+    pub(crate) fn new(requested_range: BytesRange) -> Self {
+        Self { requested_range }
     }
 
-    fn track_key(&self, key: &Bytes) {
-        let mut inner = self.inner.lock();
-
-        inner.first_key = Some(match &inner.first_key {
-            Some(first) if key < first => key.clone(),
-            Some(first) => first.clone(),
-            None => key.clone(),
-        });
-
-        inner.last_key = Some(match &inner.last_key {
-            Some(last) if key > last => key.clone(),
-            Some(last) => last.clone(),
-            None => key.clone(),
-        });
-
-        inner.has_data = true;
-    }
-
-    pub(crate) fn get_range(&self) -> Option<BytesRange> {
-        let inner = self.inner.lock();
-        match (&inner.first_key, &inner.last_key) {
-            (Some(first), Some(last)) => {
-                use std::ops::Bound;
-                Some(BytesRange::from((
-                    Bound::Included(first.clone()),
-                    Bound::Included(last.clone()),
-                )))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn has_data(&self) -> bool {
-        self.inner.lock().has_data
+    pub(crate) fn get_range(&self) -> BytesRange {
+        self.requested_range.clone()
     }
 }
 
@@ -230,7 +183,6 @@ pub struct DbIterator {
     iter: Box<dyn RowEntryIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
-    range_tracker: Option<Arc<DbIteratorRangeTracker>>,
 }
 
 impl DbIterator {
@@ -240,7 +192,6 @@ impl DbIterator {
         mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
         segment_iter: Box<dyn RowEntryIterator + 'static>,
         max_seq: Option<u64>,
-        range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         merge_operator: Option<MergeOperatorType>,
         order: IterationOrder,
     ) -> Result<Self, SlateDBError> {
@@ -302,7 +253,6 @@ impl DbIterator {
             iter,
             invalidated_error: None,
             last_key: None,
-            range_tracker,
         })
     }
 
@@ -346,10 +296,6 @@ impl DbIterator {
             let result = self.maybe_invalidate(result);
             if let Ok(Some(ref entry)) = result {
                 self.last_key = Some(entry.key.clone());
-                // Track the key in range tracker if present
-                if let Some(tracker) = &self.range_tracker {
-                    tracker.track_key(&entry.key);
-                }
             }
             result
         }
@@ -512,7 +458,6 @@ mod tests {
             Box::new(EmptyIterator::new()),
             None,
             None,
-            None,
             IterationOrder::Ascending,
         )
         .await
@@ -553,7 +498,6 @@ mod tests {
             Box::new(EmptyIterator::new()),
             Some(100),
             None,
-            None,
             IterationOrder::Ascending,
         )
         .await
@@ -582,7 +526,6 @@ mod tests {
             None,
             vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             Box::new(EmptyIterator::new()),
-            None,
             None,
             None,
             IterationOrder::Ascending,
@@ -631,7 +574,6 @@ mod tests {
             Some(wb_iter),
             mem_iters,
             Box::new(EmptyIterator::new()),
-            None,
             None,
             None,
             IterationOrder::Ascending,
