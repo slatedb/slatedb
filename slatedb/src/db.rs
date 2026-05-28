@@ -52,6 +52,7 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::{DbIterator, DbRecencyIterator};
+use crate::db_memtable::DbMemtable;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -291,6 +292,23 @@ impl DbInner {
         self.reader
             .scan_prefix_by_recency_with_options(prefix, options, &db_state)
             .await
+    }
+
+    pub(crate) fn memtables(&self) -> Vec<DbMemtable> {
+        let guard = self.state.write();
+        let mut memtables = Vec::new();
+
+        if let Some(memtable) = DbMemtable::from_table(guard.memtable().table().clone()) {
+            memtables.push(memtable);
+        }
+
+        for imm_memtable in guard.state().imm_memtable.iter() {
+            if let Some(memtable) = DbMemtable::from_table(imm_memtable.table()) {
+                memtables.push(memtable);
+            }
+        }
+
+        memtables
     }
 
     #[allow(unused_variables)]
@@ -1344,6 +1362,45 @@ impl Db {
             .scan_prefix_by_recency_with_options(prefix, options)
             .await
             .map_err(Into::into)
+    }
+
+    /// Return point-in-time wrappers around the current non-empty memtables.
+    ///
+    /// The returned memtables are ordered newest-first: active memtable first,
+    /// followed by immutable memtables from newest to oldest. Each wrapper
+    /// exposes raw rows from exactly one in-memory memtable. Rows inserted
+    /// after this method returns will not appear through the returned
+    /// [`DbMemtable`]s.
+    ///
+    /// ## Returns
+    /// - `Vec<DbMemtable>`: point-in-time wrappers around the current non-empty
+    ///   memtables. Returns an empty vector if there are no in-memory rows.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///
+    ///     let memtables = db.memtables();
+    ///     assert_eq!(memtables.len(), 1);
+    ///
+    ///     let mut iter = memtables[0].get(b"key");
+    ///     let entry = iter.next_entry().await?.unwrap();
+    ///     assert_eq!(entry.key.as_ref(), b"key");
+    ///     assert_eq!(entry.value.as_bytes().unwrap().as_ref(), b"value");
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn memtables(&self) -> Vec<DbMemtable> {
+        self.inner.memtables()
     }
 
     /// Write a value into the database with default `WriteOptions`.
@@ -2501,6 +2558,179 @@ mod tests {
             crate::types::ValueDeletable::Value(v) => assert_eq!(v.as_ref(), expected),
             other => panic!("expected Value({expected:?}), got {other:?}"),
         }
+    }
+
+    async fn collect_recency_entries(mut iter: DbRecencyIterator) -> Vec<RowEntry> {
+        let mut entries = Vec::new();
+        while let Some(entry) = iter.next_entry().await.unwrap() {
+            entries.push(entry);
+        }
+        entries
+    }
+
+    #[tokio::test]
+    async fn test_memtables_filters_empty_memtables() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_memtables_filters_empty_memtables", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        assert!(db.memtables().is_empty());
+
+        db.put(b"key", b"value").await.unwrap();
+        assert_eq!(db.memtables().len(), 1);
+
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        assert!(db.memtables().is_empty());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtable_get_returns_snapshot_versions_for_key() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_get_returns_snapshot_versions_for_key",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 64 * 1024, None))
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"key", b"old").await.unwrap();
+        db.put(b"key", b"new").await.unwrap();
+        let memtable = db.memtables().into_iter().next().unwrap();
+
+        db.put(b"key", b"after_snapshot").await.unwrap();
+        db.put(b"other", b"other_after_snapshot").await.unwrap();
+
+        let entries = collect_recency_entries(memtable.get(b"key")).await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key.as_ref(), b"key");
+        assert_value(&entries[0], b"new");
+        assert_eq!(entries[1].key.as_ref(), b"key");
+        assert_value(&entries[1], b"old");
+        assert!(entries[0].seq > entries[1].seq);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtable_scan_uses_range_and_snapshot_bound() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_scan_uses_range_and_snapshot_bound",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 64 * 1024, None))
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"a", b"va").await.unwrap();
+        db.put(b"b", b"vb").await.unwrap();
+        db.put(b"c", b"vc").await.unwrap();
+        let memtable = db.memtables().into_iter().next().unwrap();
+
+        db.put(b"b", b"vb_after_snapshot").await.unwrap();
+        db.put(b"d", b"vd_after_snapshot").await.unwrap();
+
+        let entries =
+            collect_recency_entries(memtable.scan::<Vec<u8>, _>(b"b".to_vec()..=b"c".to_vec()))
+                .await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key.as_ref(), b"b");
+        assert_value(&entries[0], b"vb");
+        assert_eq!(entries[1].key.as_ref(), b"c");
+        assert_value(&entries[1], b"vc");
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtables_returns_active_then_immutable_newest_first() {
+        let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(base_store));
+        let object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let mut settings = test_db_options(0, 64 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(
+            "/tmp/test_memtables_returns_active_then_immutable_newest_first",
+            object_store,
+        )
+        .with_settings(settings)
+        .build()
+        .await
+        .unwrap();
+
+        gated_store.put_opts_gate.close();
+
+        db.put_with_options(
+            b"old",
+            b"old_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.inner.freeze_current_memtable().unwrap();
+
+        db.put_with_options(
+            b"middle",
+            b"middle_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.inner.freeze_current_memtable().unwrap();
+
+        db.put_with_options(
+            b"active",
+            b"active_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let memtables = db.memtables();
+        assert_eq!(memtables.len(), 3);
+
+        let active_entries = collect_recency_entries(memtables[0].scan::<Vec<u8>, _>(..)).await;
+        assert_eq!(active_entries.len(), 1);
+        assert_eq!(active_entries[0].key.as_ref(), b"active");
+        assert_value(&active_entries[0], b"active_value");
+
+        let newest_imm_entries = collect_recency_entries(memtables[1].scan::<Vec<u8>, _>(..)).await;
+        assert_eq!(newest_imm_entries.len(), 1);
+        assert_eq!(newest_imm_entries[0].key.as_ref(), b"middle");
+        assert_value(&newest_imm_entries[0], b"middle_value");
+
+        let oldest_imm_entries = collect_recency_entries(memtables[2].scan::<Vec<u8>, _>(..)).await;
+        assert_eq!(oldest_imm_entries.len(), 1);
+        assert_eq!(oldest_imm_entries[0].key.as_ref(), b"old");
+        assert_value(&oldest_imm_entries[0], b"old_value");
+
+        drop(memtables);
+        gated_store.put_opts_gate.release();
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
