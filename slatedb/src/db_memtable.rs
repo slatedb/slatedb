@@ -7,7 +7,34 @@ use bytes::Bytes;
 use crate::bytes_range::BytesRange;
 use crate::db_iter::{apply_filters, DbRecencyIterator};
 use crate::iter::IterationOrder;
-use crate::mem_table::KVTable;
+use crate::mem_table::{KVTable, KVTableMetadata};
+
+/// Metadata for a point-in-time [`DbMemtable`] wrapper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DbMemtableMetadata {
+    /// The number of raw row entries in the memtable.
+    pub entry_num: usize,
+    /// The estimated size of the memtable's raw row entries in bytes.
+    pub entries_size_in_bytes: usize,
+    /// The timestamp of the most recent modifying operation on the memtable.
+    pub last_tick: i64,
+    /// The sequence number of the most recent operation on the memtable.
+    pub last_seq: u64,
+    /// The sequence number of the oldest entry in the memtable.
+    pub first_seq: u64,
+}
+
+impl DbMemtableMetadata {
+    fn from_kv_table_metadata(metadata: KVTableMetadata) -> Self {
+        Self {
+            entry_num: metadata.entry_num,
+            entries_size_in_bytes: metadata.entries_size_in_bytes,
+            last_tick: metadata.last_tick,
+            last_seq: metadata.last_seq,
+            first_seq: metadata.first_seq,
+        }
+    }
+}
 
 /// A point-in-time wrapper around one in-memory memtable returned by
 /// [`Db::memtables`](crate::Db::memtables).
@@ -18,12 +45,21 @@ use crate::mem_table::KVTable;
 pub struct DbMemtable {
     table: Arc<KVTable>,
     max_seq: u64,
+    metadata: DbMemtableMetadata,
 }
 
 impl DbMemtable {
     pub(crate) fn from_table(table: Arc<KVTable>) -> Option<Self> {
-        let max_seq = table.last_seq()?;
-        Some(Self { table, max_seq })
+        let metadata = table.metadata();
+        if metadata.entry_num == 0 {
+            return None;
+        }
+        let max_seq = metadata.last_seq;
+        Some(Self {
+            table,
+            max_seq,
+            metadata: DbMemtableMetadata::from_kv_table_metadata(metadata),
+        })
     }
 
     pub(crate) fn from_tables<I>(active: Arc<KVTable>, immutable: I) -> Vec<Self>
@@ -36,6 +72,37 @@ impl DbMemtable {
         }
         memtables.extend(immutable.into_iter().filter_map(Self::from_table));
         memtables
+    }
+
+    /// Return metadata for this memtable snapshot.
+    ///
+    /// The returned metadata was captured when this `DbMemtable` was created.
+    /// Rows inserted after creation are not reflected.
+    ///
+    /// ## Returns
+    /// - `DbMemtableMetadata`: metadata for this memtable snapshot
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///
+    ///     let memtable = db.memtables().into_iter().next().unwrap();
+    ///     let metadata = memtable.metadata();
+    ///     assert_eq!(metadata.entry_num, 1);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn metadata(&self) -> DbMemtableMetadata {
+        self.metadata
     }
 
     /// Get all raw entries for a key from this memtable snapshot.
@@ -163,6 +230,26 @@ mod tests {
         let table = Arc::new(KVTable::new());
 
         assert!(DbMemtable::from_table(table).is_none());
+    }
+
+    #[test]
+    fn test_metadata_returns_snapshot() {
+        let table = table_with([
+            RowEntry::new_value(b"key", b"old", 1),
+            RowEntry::new_value(b"key", b"new", 2),
+        ]);
+        let memtable = DbMemtable::from_table(table.clone()).unwrap();
+        let metadata = memtable.metadata();
+
+        table.put(RowEntry::new_value(b"key", b"after_snapshot", 3));
+        table.put(RowEntry::new_value(b"other", b"other_after_snapshot", 4));
+
+        assert_eq!(metadata, memtable.metadata());
+        assert_eq!(metadata.entry_num, 2);
+        assert_eq!(metadata.first_seq, 1);
+        assert_eq!(metadata.last_seq, 2);
+        assert_eq!(table.metadata().entry_num, 4);
+        assert_eq!(table.metadata().last_seq, 4);
     }
 
     #[tokio::test]
