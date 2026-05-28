@@ -330,7 +330,7 @@ impl WriteBatch {
     /// mergeable entries.
     ///
     /// Also returning the size of keys and values in the batch
-    /// after merge iterator.
+    /// after merge iterator and overwrites are collapsed.
     ///
     /// When `extractor` is `Some`, the same iteration also derives
     /// each entry's segment prefix (RFC-0024) and accumulates the

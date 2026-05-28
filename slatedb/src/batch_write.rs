@@ -195,7 +195,7 @@ impl DbInner {
             self.write_entries_to_memtable(entries, touched_segments)
         };
         // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
-        // after merge operators are collapsed together
+        // after merge operators and overwrites are collapsed
         self.db_stats.memtable_write_bytes.increment(entries_size);
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
