@@ -56,9 +56,9 @@ prefixes for WAL-replayed entries.
 
 ## Motivation
 
-This RFC is motivated from our use of slateDB segments in OpenData's
+This RFC is motivated from our use of SlateDB segments in OpenData's
 Timeseries database. However, the use case is general enough to be
-useful for other systems based on slateDB.
+useful for other systems based on SlateDB.
 
 In _Timeseries_, we organize the timeseries data in
 time buckets. A time bucket consists of a start time and a duration.
@@ -76,7 +76,7 @@ is created or deleted a merge operand is added to the global record.
 Added merge operands contain the start time and the duration of the
 time bucket that is updated. That is the same information
 that is contained in the segment name for each bucket. So, if
-we could list the segments that exist in slateDB, we could get rid
+we could list the segments that exist in SlateDB, we could get rid
 of the global record with all its merge overhead. Additionally,
 time buckets would be self-contained which might be a useful property
 for application of retention constraints and merging time buckets.
@@ -85,7 +85,7 @@ By using segment names directly and avoiding the global record, the
 compactor does not need to look into the user data, but only into the
 database state to execute retention and merges during compaction.
 
-We believe this use case is general enough for a change in slateDB,
+We believe this use case is general enough for a change in SlateDB,
 because the use case might apply to every database that organizes its data
 into buckets -- be it time-based buckets or buckets based on other
 criteria.
@@ -98,7 +98,7 @@ criteria.
   (the read-only handle), through the existing `DbMetadataOps` trait.
 - List existing segments that are persisted but also the ones that only exist
   in memory.
-- Allow to list only the persisted segments, but also the segments the just
+- Allow to list only the persisted segments, but also the segments that just
   exist in memory before they are flushed. Re-use the existing `DurabilityLevel`
   enum to distinguish between the two sets of segments.
 - Re-use the touched-segment bookkeeping the write path already maintains
