@@ -356,10 +356,18 @@ impl CachedObjectStore {
             let payload_len = payload.content_length() as u64;
             let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
 
-            // Save parts only, ignoring errors (cache failures shouldn't fail the PUT operation)
-            self.save_parts_stream(entry.as_ref(), stream, 0, 0..payload_len)
+            // Save parts only; on error, clean up any partially-written parts.
+            if let Err(_e) = self
+                .save_parts_stream(entry.as_ref(), stream, 0, 0..payload_len)
                 .await
-                .ok();
+            {
+                let part_size_bytes_u64 = self.part_size_bytes as u64;
+                let end_part_number =
+                    usize::try_from(payload_len.div_ceil(part_size_bytes_u64)).unwrap_or(0);
+                for part_number in 0..end_part_number {
+                    let _ = entry.delete_part(part_number).await;
+                }
+            }
         }
 
         Ok(result)
