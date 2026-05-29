@@ -9099,6 +9099,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_reject_batch_local_merges_across_differing_ttls() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_reject_batch_local_merges_across_differing_ttls",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_merge_operator(Arc::new(StringConcatMergeOperator))
+        .build()
+        .await
+        .unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(3600),
+            },
+        );
+        batch.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(7200),
+            },
+        );
+
+        let err = db.write(batch).await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert!(
+            err.to_string()
+                .contains("only one merge TTL per-key allowed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(db.get(b"key1").await.unwrap(), None);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_should_record_total_mem_size_bytes() {
         // given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

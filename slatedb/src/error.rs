@@ -166,6 +166,15 @@ pub(crate) enum SlateDBError {
     #[error("merge operator missing. A merge operator is required to read merge operands")]
     MergeOperatorMissing,
 
+    #[error(
+        "only one merge TTL per-key allowed in a batch. key={key:?}, previous=`{previous_expire_ts:?}`, current=`{current_expire_ts:?}`"
+    )]
+    IncompatibleMergeTtls {
+        key: Bytes,
+        previous_expire_ts: Option<i64>,
+        current_expire_ts: Option<i64>,
+    },
+
     #[error("checkpoint missing. checkpoint_id=`{0}`")]
     CheckpointMissing(Uuid),
 
@@ -610,6 +619,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
+            SlateDBError::IncompatibleMergeTtls { .. } => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
             SlateDBError::InvalidSequenceOrder { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),

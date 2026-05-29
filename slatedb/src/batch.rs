@@ -369,9 +369,24 @@ impl WriteBatch {
             ));
         }
 
-        let mut entries = Vec::new();
+        let mut entries: Vec<RowEntry> = Vec::new();
         let mut touched_segments: BTreeSet<Bytes> = BTreeSet::new();
         while let Some(entry) = it.next().await? {
+            // Verify that user has not supplied merge entries with different TTLs.
+            // This is not allowed. See #1581 for details.
+            match entries.last() {
+                Some(previous) if previous.key == entry.key => {
+                    if previous.expire_ts == entry.expire_ts {
+                        panic!("iterator emitted duplicate keys [key={:?}]", entry.key);
+                    }
+                    return Err(SlateDBError::IncompatibleMergeTtls {
+                        key: entry.key.clone(),
+                        previous_expire_ts: previous.expire_ts,
+                        current_expire_ts: entry.expire_ts,
+                    });
+                }
+                _ => {}
+            }
             if let Some(ext) = extractor {
                 match ext.prefix_len(&PrefixTarget::Point(entry.key.clone())) {
                     Some(0) | None => {
@@ -1360,6 +1375,155 @@ mod tests {
             result[0].value,
             ValueDeletable::Merge(Bytes::from_static(b"merge1merge2merge3"))
         );
+    }
+
+    #[tokio::test]
+    async fn should_extract_same_key_merges_with_same_effective_ttl() {
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(3600),
+            },
+        );
+        batch.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAt(4600),
+            },
+        );
+
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let (result, _, _) = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key, Bytes::from_static(b"key1"));
+        assert_eq!(
+            result[0].value,
+            ValueDeletable::Merge(Bytes::from_static(b"ab"))
+        );
+        assert_eq!(result[0].expire_ts, Some(4600));
+    }
+
+    #[tokio::test]
+    async fn should_error_extracting_same_key_merges_with_different_ttls() {
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(3600),
+            },
+        );
+        batch.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(7200),
+            },
+        );
+
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let err = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
+            .await
+            .unwrap_err();
+
+        match err {
+            SlateDBError::IncompatibleMergeTtls {
+                key,
+                previous_expire_ts,
+                current_expire_ts,
+            } => {
+                assert_eq!(key, Bytes::from_static(b"key1"));
+                assert_eq!(previous_expire_ts, Some(8200));
+                assert_eq!(current_expire_ts, Some(4600));
+            }
+            other => panic!("expected IncompatibleMergeTtls, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn should_allow_different_keys_with_different_merge_ttls() {
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(3600),
+            },
+        );
+        batch.merge_with_options(
+            b"key2",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(7200),
+            },
+        );
+
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let (result, _, _) = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].key, Bytes::from_static(b"key1"));
+        assert_eq!(result[0].expire_ts, Some(4600));
+        assert_eq!(result[1].key, Bytes::from_static(b"key2"));
+        assert_eq!(result[1].expire_ts, Some(8200));
+    }
+
+    #[tokio::test]
+    async fn should_error_extracting_put_then_merge_with_different_ttls() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"base");
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(7200),
+            },
+        );
+
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let err = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, SlateDBError::IncompatibleMergeTtls { .. }));
+    }
+
+    #[tokio::test]
+    async fn should_error_extracting_delete_then_merge_with_different_ttls() {
+        let mut batch = WriteBatch::new();
+        batch.delete(b"key1");
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(7200),
+            },
+        );
+
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let err = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, SlateDBError::IncompatibleMergeTtls { .. }));
     }
 
     #[tokio::test]
