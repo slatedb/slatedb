@@ -366,17 +366,9 @@ impl CachedObjectStore {
             let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
 
             // Save parts only; on error, clean up any partially-written parts.
-            if let Err(_e) = self
-                .save_parts_stream(entry.as_ref(), stream, 0, 0..payload_len)
-                .await
-            {
-                let part_size_bytes_u64 = self.part_size_bytes as u64;
-                let end_part_number =
-                    usize::try_from(payload_len.div_ceil(part_size_bytes_u64)).unwrap_or(0);
-                for part_number in 0..end_part_number {
-                    let _ = entry.delete_part(part_number).await;
-                }
-            }
+            let _ = self
+                .save_parts_stream_with_cleanup(entry.as_ref(), stream, 0, 0..payload_len)
+                .await;
         }
 
         Ok(result)
@@ -458,21 +450,44 @@ impl CachedObjectStore {
 
             let stream = result.into_stream();
 
-            if let Err(e) = self
-                .save_parts_stream(entry.as_ref(), stream, start_part_number, range.clone())
-                .await
-            {
-                // Clean up any parts that were written before the error
-                let end_part_number = usize::try_from(range.end.div_ceil(part_size_bytes_u64))
-                    .unwrap_or(start_part_number);
-                for part_number in start_part_number..end_part_number {
-                    let _ = entry.delete_part(part_number).await;
-                }
-                return Err(e);
-            }
+            self.save_parts_stream_with_cleanup(
+                entry.as_ref(),
+                stream,
+                start_part_number,
+                range.clone(),
+            )
+            .await?;
         }
 
         Ok(object_size)
+    }
+
+    /// Calls `save_parts_stream` and, on error, deletes any partially-written parts
+    /// before returning the error.
+    async fn save_parts_stream_with_cleanup<S>(
+        &self,
+        entry: &dyn LocalCacheEntry,
+        stream: S,
+        start_part_number: usize,
+        range: Range<u64>,
+    ) -> object_store::Result<usize>
+    where
+        S: stream::Stream<Item = Result<Bytes, object_store::Error>> + Unpin,
+    {
+        let result = self
+            .save_parts_stream(entry, stream, start_part_number, range.clone())
+            .await;
+
+        if result.is_err() {
+            let part_size_bytes_u64 = self.part_size_bytes as u64;
+            let end_part_number = usize::try_from(range.end.div_ceil(part_size_bytes_u64))
+                .unwrap_or(start_part_number);
+            for part_number in start_part_number..end_part_number {
+                let _ = entry.delete_part(part_number).await;
+            }
+        }
+
+        result
     }
 
     /// Save a stream of bytes to cache as parts, starting from the specified part number.
