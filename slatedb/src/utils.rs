@@ -721,24 +721,57 @@ impl<T> SafeSender<T> {
         (Self::new(tx, closed), rx)
     }
 
+    /// Returns the DB's terminal error for a failed channel send.
+    ///
+    /// Panics if the channel is closed before the DB close result is recorded,
+    /// which indicates a lifecycle ordering bug.
+    #[allow(clippy::panic)]
+    fn closed_send_error(&self, channel_error: String) -> SlateDBError {
+        if let Some(result) = self.closed.read() {
+            match result {
+                Ok(()) => SlateDBError::Closed,
+                Err(err) => err,
+            }
+        } else {
+            panic!(
+                "Failed to send message to unbounded channel: {}",
+                channel_error
+            );
+        }
+    }
+
     /// Attempts to send a message. If the channel is closed, returns the
     /// DB's closed result error, or [`SlateDBError::Closed`] if it was a
     /// clean shutdown. Panics if the channel is closed but no closed result
     /// has been set (indicates a bug).
     #[inline]
-    #[allow(clippy::panic, clippy::disallowed_methods)]
     pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {
         match self.tx.try_send(message) {
             Ok(_) => Ok(()),
+            Err(e) => Err(self.closed_send_error(e.to_string())),
+        }
+    }
+
+    /// Like [`Self::send`], but invokes `on_closed` with the rejected message
+    /// and closed result so callers can fail embedded response channels
+    /// explicitly.
+    #[inline]
+    pub(crate) fn send_or_handle_closed<F>(
+        &self,
+        message: T,
+        on_closed: F,
+    ) -> Result<(), SlateDBError>
+    where
+        F: FnOnce(T, &SlateDBError),
+    {
+        match self.tx.try_send(message) {
+            Ok(_) => Ok(()),
             Err(e) => {
-                if let Some(result) = self.closed.read() {
-                    match result {
-                        Ok(()) => Err(SlateDBError::Closed),
-                        Err(err) => Err(err),
-                    }
-                } else {
-                    panic!("Failed to send message to unbounded channel: {}", e);
-                }
+                let channel_error = e.to_string();
+                let message = e.into_inner();
+                let err = self.closed_send_error(channel_error);
+                on_closed(message, &err);
+                Err(err)
             }
         }
     }

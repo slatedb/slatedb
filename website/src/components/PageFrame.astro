@@ -19,8 +19,10 @@ const { hasSidebar } = Astro.locals.starlightRoute;
 			</nav>
 		)
 	}
-	<div class="main-frame"><slot /></div>
-	<Footer />
+	<div class="main-frame">
+		<slot />
+		<Footer />
+	</div>
 </div>
 
 <style>
@@ -37,7 +39,6 @@ const { hasSidebar } = Astro.locals.starlightRoute;
 			inset-block-start: 0;
 			width: 100%;
 			height: var(--sl-nav-height);
-			border-bottom: 1px solid var(--sl-color-hairline-shade);
 			padding: var(--sl-nav-pad-y) var(--sl-nav-pad-x);
 			padding-inline-end: var(--sl-nav-pad-x);
 			background-color: var(--sl-color-bg-nav);
@@ -80,6 +81,9 @@ const { hasSidebar } = Astro.locals.starlightRoute;
 		}
 
 		.main-frame {
+			display: flex;
+			flex-direction: column;
+			flex: 1;
 			padding-top: calc(var(--sl-nav-height) + var(--sl-mobile-toc-height));
 			padding-inline-start: var(--sl-content-inline-start);
 		}

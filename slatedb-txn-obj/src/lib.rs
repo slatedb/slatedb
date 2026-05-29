@@ -186,7 +186,7 @@ impl From<MonotonicId> for u64 {
 
 /// Generic file metadata for versioned objects
 #[derive(Debug)]
-pub struct GenericObjectMetadata<Id: Copy = MonotonicId> {
+pub struct GenericObjectMetadata<Id = MonotonicId> {
     pub id: Id,
     pub location: Path,
     pub last_modified: chrono::DateTime<Utc>,
@@ -196,7 +196,7 @@ pub struct GenericObjectMetadata<Id: Copy = MonotonicId> {
 
 /// A local view of a transactional object, possibly with local mutations
 #[derive(Clone, Debug)]
-pub struct DirtyObject<T, Id: Copy = MonotonicId> {
+pub struct DirtyObject<T, Id = MonotonicId> {
     /// The version ID that this dirty object is based on.
     pub id: Id,
     /// The value of the object, possibly with local mutations.
@@ -206,7 +206,7 @@ pub struct DirtyObject<T, Id: Copy = MonotonicId> {
 /// An in-memory datum that is backed by durable storage and can be
 /// transactionally updated.
 #[async_trait::async_trait]
-pub trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
+pub trait TransactionalObject<T: Clone, Id = MonotonicId> {
     /// Returns the version ID of the in-memory view of the object
     fn id(&self) -> Id;
 
@@ -263,7 +263,7 @@ pub trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
 /// it is never reset. Before any update, and after every refresh, this type checks whether the
 /// epoch stored in the object is higher than the epoch stored in `init`. If it is, then the
 /// corresponding `update` or `refresh` fails with`Fenced`.
-pub struct FenceableTransactionalObject<T: Clone, Id: Copy = MonotonicId> {
+pub struct FenceableTransactionalObject<T: Clone, Id = MonotonicId> {
     delegate: SimpleTransactionalObject<T, Id>,
     local_epoch: u64,
     get_epoch: fn(&T) -> u64,
@@ -451,13 +451,13 @@ impl<T: Clone + Send + Sync> TransactionalObject<T>
 /// A basic transactional object that uses `TransactionalStorageProtocol` to provide transactional
 /// updates to an object.
 #[derive(Clone)]
-pub struct SimpleTransactionalObject<T, Id: Copy = MonotonicId> {
+pub struct SimpleTransactionalObject<T, Id = MonotonicId> {
     id: Id,
     object: T,
     ops: Arc<dyn TransactionalStorageProtocol<T, Id>>,
 }
 
-impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
+impl<T: Clone, Id> SimpleTransactionalObject<T, Id> {
     pub async fn init(
         store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
         value: T,
@@ -506,11 +506,11 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
 }
 
 #[async_trait::async_trait]
-impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalObject<T, Id>
+impl<T: Clone + Send + Sync, Id: Clone + PartialEq + Send + Sync> TransactionalObject<T, Id>
     for SimpleTransactionalObject<T, Id>
 {
     fn id(&self) -> Id {
-        self.id
+        self.id.clone()
     }
 
     fn object(&self) -> &T {
@@ -519,7 +519,7 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 
     fn prepare_dirty(&self) -> Result<DirtyObject<T, Id>, TransactionalObjectError> {
         Ok(DirtyObject {
-            id: self.id,
+            id: self.id.clone(),
             value: self.object.clone(),
         })
     }
@@ -548,7 +548,7 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 /// the expected latest version ID and fail if the current version ID in durable storage does not
 /// match.
 #[async_trait]
-pub trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
+pub trait TransactionalStorageProtocol<T, Id>: Send + Sync {
     /// Write the object given the expected current version ID. If the version ID is None then
     /// `write` expects that no object currently exists in durable storage. If the version condition
     /// fails then this fn returns `ObjectVersionExists`. Sequenced implementations also return

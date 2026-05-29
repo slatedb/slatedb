@@ -2,7 +2,7 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::rand::DbRand;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use log::{debug, warn};
+use log::{debug, error, warn};
 use lru::LruCache;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
@@ -185,6 +185,11 @@ impl FsCacheStorage {
             file_handle_cache,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn file_handle_cache_population(&self) -> usize {
+        self.file_handle_cache.inner.lock().unwrap().len()
+    }
 }
 
 #[async_trait::async_trait]
@@ -236,7 +241,7 @@ impl FsCacheEntry {
             // If the evictor is backpressured, skip this cache write to avoid
             // stalling foreground PUTs. Cache writes are best-effort.
             if !evictor
-                .track_entry_accessed(path.clone(), buf.len(), true)
+                .track_entry_accessed(path.clone(), EntryAccess::Write(buf.len()))
                 .await
             {
                 return Ok(());
@@ -327,6 +332,28 @@ impl LocalCacheEntry for FsCacheEntry {
         self.atomic_write(part_path, buf).await
     }
 
+    async fn delete_part(&self, part_number: usize) -> object_store::Result<()> {
+        let part_path = Self::make_part_path(
+            self.root_folder.clone(),
+            &self.location,
+            part_number,
+            self.part_size,
+        );
+
+        let file_cache = self.file_handle_cache.clone();
+        #[allow(clippy::disallowed_methods)]
+        tokio::task::spawn_blocking(move || {
+            let result = match std::fs::remove_file(&part_path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(wrap_io_err(err)),
+            };
+            file_cache.invalidate(&part_path);
+            result
+        })
+        .await?
+    }
+
     async fn read_part(
         &self,
         part_number: usize,
@@ -369,7 +396,7 @@ impl LocalCacheEntry for FsCacheEntry {
         if result.is_some() {
             if let Some(evictor) = &self.evictor {
                 evictor
-                    .track_entry_accessed(part_path, self.part_size, false)
+                    .track_entry_accessed(part_path, EntryAccess::Read(self.part_size))
                     .await;
             }
         }
@@ -495,7 +522,7 @@ impl LocalCacheEntry for FsCacheEntry {
             if let Some(evictor) = &self.evictor {
                 let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
                 evictor
-                    .track_entry_accessed(head_path, head_size_bytes, false)
+                    .track_entry_accessed(head_path, EntryAccess::Read(head_size_bytes))
                     .await;
             }
             Ok(Some((meta, attributes)))
@@ -503,9 +530,36 @@ impl LocalCacheEntry for FsCacheEntry {
             Ok(None)
         }
     }
+
+    async fn delete(&self) {
+        let Some(path) = Self::make_head_path(self.root_folder.clone(), &self.location)
+            .parent()
+            .map(std::path::PathBuf::from)
+        else {
+            error!(
+                "failed to obtain cache entry directory for {}",
+                self.location
+            );
+            return;
+        };
+
+        if let Some(evictor) = &self.evictor {
+            evictor
+                .track_entry_accessed(path, EntryAccess::Delete)
+                .await;
+        } else {
+            delete_cache_entry(path, self.file_handle_cache.clone()).await;
+        }
+    }
 }
 
-type FsCacheEvictorWork = (std::path::PathBuf, usize, bool);
+enum EntryAccess {
+    Read(usize),
+    Write(usize),
+    Delete,
+}
+
+type FsCacheEvictorWork = (std::path::PathBuf, EntryAccess);
 // Minimum time between aggregated "evictor queue is full" warnings.
 const QUEUE_FULL_LOG_INTERVAL_MS: i64 = 30_000;
 
@@ -604,11 +658,21 @@ impl FsCacheEvictor {
     ) {
         loop {
             match rx.recv().await {
-                Some((path, bytes, evict)) => {
-                    inner
-                        .track_entry_accessed(path, bytes, system_clock.now(), evict)
-                        .await;
-                }
+                Some((path, access)) => match access {
+                    EntryAccess::Read(bytes) => {
+                        inner
+                            .track_entry_accessed(path, bytes, system_clock.now(), false)
+                            .await;
+                    }
+                    EntryAccess::Write(bytes) => {
+                        inner
+                            .track_entry_accessed(path, bytes, system_clock.now(), true)
+                            .await;
+                    }
+                    EntryAccess::Delete => {
+                        inner.delete_entry(path).await;
+                    }
+                },
                 None => return,
             }
         }
@@ -633,17 +697,12 @@ impl FsCacheEvictor {
     // sender and receiver. It doesn't close the channel, and both sender and receiver are dropped
     // when the evictor is dropped.
     #[allow(clippy::disallowed_methods)]
-    async fn track_entry_accessed(
-        &self,
-        path: std::path::PathBuf,
-        bytes: usize,
-        evict: bool,
-    ) -> bool {
+    async fn track_entry_accessed(&self, path: std::path::PathBuf, access: EntryAccess) -> bool {
         if !self.started() {
             return true;
         }
 
-        match self.tx.try_send((path, bytes, evict)) {
+        match self.tx.try_send((path, access)) {
             Ok(()) => true,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.queue_full_count.fetch_add(1, Ordering::AcqRel);
@@ -679,6 +738,22 @@ struct CacheEntry {
 struct CacheState {
     entries: HashMap<std::path::PathBuf, CacheEntry>,
     keys: Vec<std::path::PathBuf>,
+}
+
+impl CacheState {
+    fn remove_entry(&mut self, path: &std::path::PathBuf) -> Option<CacheEntry> {
+        let removed = self.entries.remove(path);
+        if let Some(removed) = &removed {
+            self.keys.swap_remove(removed.key_index);
+            if removed.key_index < self.keys.len() {
+                let swapped_key = self.keys[removed.key_index].clone();
+                if let Some(swapped) = self.entries.get_mut(&swapped_key) {
+                    swapped.key_index = removed.key_index;
+                }
+            }
+        }
+        removed
+    }
 }
 
 /// FsCacheEvictorInner manages the cache entries in `CacheState`, and evict the cache entries
@@ -884,14 +959,7 @@ impl FsCacheEvictorInner {
             let mut total_bytes: usize = 0;
 
             for (target, target_bytes) in deleted_targets.iter() {
-                if let Some(removed) = cache_state.entries.remove(target) {
-                    cache_state.keys.swap_remove(removed.key_index);
-                    if removed.key_index < cache_state.keys.len() {
-                        let swapped_key = cache_state.keys[removed.key_index].clone();
-                        if let Some(swapped) = cache_state.entries.get_mut(&swapped_key) {
-                            swapped.key_index = removed.key_index;
-                        }
-                    }
+                if cache_state.remove_entry(target).is_some() {
                     self.cache_size_bytes
                         .fetch_sub(*target_bytes as u64, Ordering::SeqCst);
                     total_bytes += target_bytes;
@@ -914,6 +982,33 @@ impl FsCacheEvictorInner {
             .set(self.cache_size_bytes.load(Ordering::Relaxed) as i64);
 
         total_evicted_bytes
+    }
+
+    async fn delete_entry(&self, path: std::path::PathBuf) {
+        let deleted_entries = delete_cache_entry(path, self.file_handle_cache.clone()).await;
+        if deleted_entries.is_empty() {
+            return;
+        }
+
+        let _track_guard = self.track_lock.lock().await;
+
+        // Untrack the deleted entries.
+        let entry_count = {
+            let mut cache_state = self.cache_state.lock().await;
+            for deleted_entry in deleted_entries {
+                if let Some(removed) = cache_state.remove_entry(&deleted_entry) {
+                    self.cache_size_bytes
+                        .fetch_sub(removed.size_bytes as u64, Ordering::SeqCst);
+                }
+            }
+            cache_state.entries.len()
+        };
+
+        // Update the stats.
+        self.stats.object_store_cache_keys.set(entry_count as i64);
+        self.stats
+            .object_store_cache_bytes
+            .set(self.cache_size_bytes.load(Ordering::Relaxed) as i64);
     }
 
     /// Pick multiple eviction targets in a single pass using pick-of-2 strategy, which is an approximation
@@ -1025,6 +1120,70 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
     }
 }
 
+async fn delete_cache_entry(
+    path: std::path::PathBuf,
+    file_handle_cache: FileHandleCache,
+) -> Vec<std::path::PathBuf> {
+    // Run deletion as a single blocking task rather than jumping back and
+    // forth to the same blocking thread pool tokio uses under the hood.
+    #[allow(clippy::disallowed_methods)]
+    let result = tokio::task::spawn_blocking(move || {
+        let result = std::fs::read_dir(&path);
+        match result {
+            Ok(read_dir) => {
+                let mut deleted_entries = Vec::with_capacity(32);
+
+                // Delete the head and the parts.
+                for entry in read_dir {
+                    match entry {
+                        Ok(entry) => {
+                            let entry_path = entry.path();
+                            let result = std::fs::remove_file(&entry_path);
+                            match result {
+                                Ok(()) => {
+                                    file_handle_cache.invalidate(&entry_path);
+                                    deleted_entries.push(entry_path);
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    file_handle_cache.invalidate(&entry_path);
+                                    deleted_entries.push(entry_path);
+                                }
+                                Err(e) => {
+                                    file_handle_cache.invalidate(&entry_path);
+                                    error!("FS cache failed to delete {entry_path:?}: {e:?}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("FS cache failed to iterate read_dir {path:?}: {e:?}");
+                            continue;
+                        }
+                    }
+                }
+
+                // Delete the entry directory itself.
+                let result = std::fs::remove_dir(&path);
+                if let Err(e) = result {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        error!("FS cache failed to delete {path:?}: {e:?}");
+                    }
+                }
+
+                deleted_entries
+            }
+            Err(e) => {
+                error!("FS cache failed to read_dir {path:?}: {e:?}");
+                vec![]
+            }
+        }
+    })
+    .await;
+    result.unwrap_or_else(|e| {
+        error!("FS cache failed to join deletion task: {e:?}");
+        vec![]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,13 +1270,16 @@ mod tests {
 
         for idx in 0..100 {
             let accepted = evictor
-                .track_entry_accessed(std::path::PathBuf::from(format!("file{idx}")), 1, true)
+                .track_entry_accessed(
+                    std::path::PathBuf::from(format!("file{idx}")),
+                    EntryAccess::Write(1),
+                )
                 .await;
             assert!(accepted);
         }
 
         let accepted = evictor
-            .track_entry_accessed(std::path::PathBuf::from("overflow"), 1, true)
+            .track_entry_accessed(std::path::PathBuf::from("overflow"), EntryAccess::Write(1))
             .await;
         assert!(!accepted);
     }

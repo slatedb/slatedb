@@ -737,7 +737,7 @@ impl<'a> StateModifier<'a> {
             crate::manifest::merge_segments_from_compactor(&my_db_state.segments, &remote.segments);
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
-            tree,
+            tree: Arc::new(tree),
             segments,
             // Segment configuration is stable; the writer is the source of truth.
             segment_extractor_name: my_db_state.segment_extractor_name.clone(),
@@ -794,6 +794,7 @@ mod tests {
     use std::collections::Bound::Included;
     use std::collections::VecDeque;
     use std::ops::RangeBounds;
+    use std::sync::Arc;
 
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
@@ -830,12 +831,12 @@ mod tests {
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
         compactor_state.value.core = db_state.state.core().clone();
-        let last_compacted = compactor_state.value.core.tree.l0.pop_back().unwrap();
-        compactor_state
-            .value
-            .core
-            .tree
-            .last_compacted_l0_sst_view_id = Some(last_compacted.id);
+        let last_compacted = Arc::make_mut(&mut compactor_state.value.core.tree)
+            .l0
+            .pop_back()
+            .unwrap();
+        Arc::make_mut(&mut compactor_state.value.core.tree).last_compacted_l0_sst_view_id =
+            Some(last_compacted.id);
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());
@@ -902,12 +903,12 @@ mod tests {
             core.segment_extractor_name = Some("hour-bucket".to_string());
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v1.clone()]),
                     compacted: vec![],
-                },
+                }),
             }];
         });
 
@@ -956,12 +957,12 @@ mod tests {
             core.segment_extractor_name = Some("hour".into());
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v2.clone(), v1.clone()]),
                     compacted: vec![],
-                },
+                }),
             }];
         });
 
@@ -970,12 +971,12 @@ mod tests {
         remote_state.value.core = db_state.state.core().clone();
         remote_state.value.core.segments = vec![Segment {
             prefix: Bytes::from_static(b"hour=12/"),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: Some(v1.id),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: vec![],
-            },
+            }),
         }];
 
         db_state.merge_remote_manifest(remote_state);
@@ -1041,7 +1042,9 @@ mod tests {
             );
             let view: SsTableView = SsTableView::identity(handle);
             db_state.modify(|modifier| {
-                modifier.state.manifest.value.core.tree.l0.push_front(view);
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .push_front(view);
                 modifier.state.manifest.value.core.replay_after_wal_id =
                     imm.recent_flushed_wal_id();
             });

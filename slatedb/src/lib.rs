@@ -164,6 +164,7 @@ mod transaction_manager;
 mod types;
 mod utils;
 
+mod fence;
 mod wal;
 mod wal_buffer;
 mod wal_id;

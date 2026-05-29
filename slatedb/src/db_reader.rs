@@ -31,12 +31,12 @@ use futures::stream::BoxStream;
 use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use slatedb_common::clock::SystemClock;
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use uuid::Uuid;
@@ -82,7 +82,7 @@ struct CheckpointState {
     last_remote_persisted_seq: u64,
 }
 
-static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
+static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
 
 impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
@@ -237,7 +237,6 @@ impl DbReaderInner {
                     db_state: db_state.as_ref(),
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix,
                 },
             )
@@ -289,8 +288,11 @@ impl DbReaderInner {
         if self.options.skip_wal_replay {
             return Ok(());
         }
-        let last_seen_wal_id = self.table_store.last_seen_wal_id().await?;
         let last_replayed_wal_id = self.state.read().last_wal_id;
+        let last_seen_wal_id = self
+            .table_store
+            .last_seen_wal_id(last_replayed_wal_id)
+            .await?;
         if last_seen_wal_id > last_replayed_wal_id {
             let current_checkpoint = Arc::clone(&self.state.read());
             let mut imm_memtable = current_checkpoint.imm_memtable().clone();
@@ -477,7 +479,7 @@ impl DbReaderInner {
                 (core.replay_after_wal_id, core.last_l0_seq)
             };
         let wal_id_end = if replay_new_wals {
-            table_store.last_seen_wal_id().await? + 1
+            table_store.last_seen_wal_id(replay_after_wal_id).await? + 1
         } else {
             core.next_wal_sst_id
         };
@@ -1616,7 +1618,10 @@ mod tests {
 
     #[test]
     fn has_not_found_object_store_error_should_ignore_non_not_found_errors() {
-        let err = SlateDBError::from(object_store::Error::NotImplemented);
+        let err = SlateDBError::from(object_store::Error::NotImplemented {
+            operation: "test".to_string(),
+            implementer: "test".to_string(),
+        });
 
         assert!(!super::has_not_found_object_store_error(&err));
     }
@@ -1833,7 +1838,7 @@ mod tests {
 
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
@@ -1956,14 +1961,14 @@ mod tests {
             .unwrap()
             .id;
 
-        // Inject a failpoint on WAL listing before flushing so it is active
+        // Inject a failpoint on WAL probing before flushing so it is active
         // when the poller fires. With the buggy replay_new_wals=true,
-        // reestablish_checkpoint calls last_seen_wal_id() which lists WAL SSTs
+        // reestablish_checkpoint calls last_seen_wal_id() which probes WAL SSTs
         // and hits this failpoint. With the fix (replay_new_wals=false), the
-        // WAL listing is skipped entirely.
+        // WAL probing is skipped entirely.
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
@@ -2399,7 +2404,7 @@ mod tests {
         fn segment_with(prefix: &'static [u8], tree: LsmTreeState) -> Segment {
             Segment {
                 prefix: Bytes::from_static(prefix),
-                tree,
+                tree: Arc::new(tree),
             }
         }
         fn tree_l0(views: Vec<SsTableView>) -> LsmTreeState {
