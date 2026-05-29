@@ -80,7 +80,6 @@ impl StoredCompactions {
         self.inner.id().into()
     }
 
-    #[cfg(test)]
     pub(crate) fn compactions(&self) -> &Compactions {
         self.inner.object()
     }

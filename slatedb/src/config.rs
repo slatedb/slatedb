@@ -1146,6 +1146,13 @@ pub struct CompactionWorkerOptions {
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub heartbeat_min_interval: Duration,
+
+    /// Maximum size of an output SST before a new one is rolled.
+    pub max_sst_size: usize,
+
+    /// Maximum number of concurrent tasks for fetching SST blocks during
+    /// compaction. Higher values can improve throughput but use more resources.
+    pub max_fetch_tasks: usize,
 }
 
 /// Default options for the compaction worker.
@@ -1157,6 +1164,8 @@ impl Default for CompactionWorkerOptions {
             compactions_poll_interval: Duration::from_secs(5),
             heartbeat_bytes: 5_242_880,
             heartbeat_min_interval: Duration::from_secs(5),
+            max_sst_size: 256 * 1024 * 1024,
+            max_fetch_tasks: 4,
         }
     }
 }
