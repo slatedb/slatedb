@@ -203,6 +203,13 @@ pub struct DirtyObject<T, Id = MonotonicId> {
     pub value: T,
 }
 
+/// A predicate over a dirty value and the current committed value that must hold before the dirty
+/// value is committed. The closure receives `(dirty, current)` and returns `Err` to abort the
+/// pending update; the error is surfaced wrapped in [`TransactionalObjectError::CallbackError`].
+/// Registered via [`SimpleTransactionalObject::with_invariants`] and checked in `update`.
+pub type Invariant<T> =
+    Arc<dyn Fn(&T, &T) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync>;
+
 /// An in-memory datum that is backed by durable storage and can be
 /// transactionally updated.
 #[async_trait::async_trait]
@@ -455,9 +462,18 @@ pub struct SimpleTransactionalObject<T, Id = MonotonicId> {
     id: Id,
     object: T,
     ops: Arc<dyn TransactionalStorageProtocol<T, Id>>,
+    /// Predicates evaluated against a dirty value before each `update`. Empty by default.
+    invariants: Vec<Invariant<T>>,
 }
 
 impl<T: Clone, Id> SimpleTransactionalObject<T, Id> {
+    /// Register invariants that are checked against the dirty value before every `update`. The
+    /// first failing invariant aborts the write with its error wrapped in `CallbackError`.
+    pub fn with_invariants(mut self, invariants: Vec<Invariant<T>>) -> Self {
+        self.invariants = invariants;
+        self
+    }
+
     pub async fn init(
         store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
         value: T,
@@ -467,6 +483,7 @@ impl<T: Clone, Id> SimpleTransactionalObject<T, Id> {
             id,
             object: value,
             ops: store,
+            invariants: Vec::new(),
         })
     }
 
@@ -489,6 +506,7 @@ impl<T: Clone, Id> SimpleTransactionalObject<T, Id> {
             id,
             object: val,
             ops: store,
+            invariants: Vec::new(),
         }))
     }
 
@@ -536,6 +554,9 @@ impl<T: Clone + Send + Sync, Id: Clone + PartialEq + Send + Sync> TransactionalO
     async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), TransactionalObjectError> {
         if dirty.id != self.id {
             return Err(TransactionalObjectError::ObjectVersionExists);
+        }
+        for invariant in &self.invariants {
+            invariant(&dirty.value, &self.object).map_err(CallbackError)?;
         }
         self.id = self.ops.write(Some(dirty.id), &dirty.value).await?;
         self.object = dirty.value;
@@ -716,9 +737,9 @@ mod tests {
     use crate::object_store::ObjectStoreSequencedStorageProtocol;
     use crate::TransactionalObjectError;
     use crate::{
-        BoundaryObject, FenceableTransactionalObject, GenericObjectMetadata, MonotonicId,
-        ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
-        TransactionalStorageProtocol,
+        BoundaryObject, FenceableTransactionalObject, GenericObjectMetadata, Invariant,
+        MonotonicId, ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject,
+        TransactionalObject, TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -1131,6 +1152,7 @@ mod tests {
             id: stale_base_id,
             object,
             ops,
+            invariants: Vec::new(),
         };
         let attempts = AtomicU64::new(0);
 
@@ -1209,6 +1231,7 @@ mod tests {
             id: stale_base_id,
             object,
             ops,
+            invariants: Vec::new(),
         };
 
         let fenceable = FenceableTransactionalObject::init(
@@ -1246,6 +1269,7 @@ mod tests {
             id: id_b,
             object: val_b,
             ops: Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            invariants: Vec::new(),
         };
 
         // A updates first
@@ -1338,6 +1362,7 @@ mod tests {
             id: id_b,
             object: val_b,
             ops: Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            invariants: Vec::new(),
         };
         let mut fb = FenceableTransactionalObject::init(
             sb,
@@ -1413,5 +1438,90 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(TransactionalObjectError::Fenced)));
+    }
+
+    /// Test invariant: fails when the dirty value's `payload` exceeds `ceiling`, and records every
+    /// invocation so tests can assert short-circuit behavior. Demonstrates carrying per-invariant
+    /// state (`ceiling`, `label`, `calls`) by closure capture rather than a struct.
+    fn ceiling_invariant(
+        ceiling: u64,
+        label: &'static str,
+        calls: Arc<AtomicU64>,
+    ) -> Invariant<TestVal> {
+        Arc::new(move |dirty: &TestVal, _current: &TestVal| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if dirty.payload > ceiling {
+                return Err(format!(
+                    "{label}: payload {} exceeds ceiling {ceiling}",
+                    dirty.payload
+                )
+                .into());
+            }
+            Ok(())
+        })
+    }
+
+    #[tokio::test]
+    async fn test_update_runs_invariants_and_allows_passing_write() {
+        let store = new_store();
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut sr = SimpleTransactionalObject::<TestVal>::init(
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap()
+        .with_invariants(vec![ceiling_invariant(100, "only", Arc::clone(&calls))]);
+
+        let mut dirty = sr.prepare_dirty().unwrap();
+        dirty.value.payload = 42;
+        sr.update(dirty).await.unwrap();
+
+        assert_eq!(1, calls.load(Ordering::SeqCst));
+        assert_eq!(
+            42,
+            store.try_read_latest().await.unwrap().unwrap().1.payload
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_invariant_failure_aborts_write_and_short_circuits() {
+        let store = new_store();
+        let first_calls = Arc::new(AtomicU64::new(0));
+        let second_calls = Arc::new(AtomicU64::new(0));
+        let mut sr = SimpleTransactionalObject::<TestVal>::init(
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap()
+        .with_invariants(vec![
+            // Fails first, so the second invariant must never run.
+            ceiling_invariant(5, "first", Arc::clone(&first_calls)),
+            ceiling_invariant(1000, "second", Arc::clone(&second_calls)),
+        ]);
+
+        let mut dirty = sr.prepare_dirty().unwrap();
+        dirty.value.payload = 10;
+        let err = sr.update(dirty).await.unwrap_err();
+
+        match err {
+            TransactionalObjectError::CallbackError(e) => {
+                assert!(e.to_string().contains("first"), "unexpected error: {e}");
+            }
+            other => panic!("expected CallbackError, got {other:?}"),
+        }
+        // first invariant ran and failed; second short-circuited.
+        assert_eq!(1, first_calls.load(Ordering::SeqCst));
+        assert_eq!(0, second_calls.load(Ordering::SeqCst));
+        // write was aborted: id unchanged and stored value still the original.
+        assert_eq!(1, sr.id());
+        assert_eq!(1, store.try_read_latest().await.unwrap().unwrap().1.payload);
     }
 }
