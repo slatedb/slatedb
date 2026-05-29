@@ -1418,6 +1418,7 @@ impl From<CompactionStatus> for FbCompactionStatus {
     fn from(value: CompactionStatus) -> Self {
         match value {
             CompactionStatus::Submitted => FbCompactionStatus::Submitted,
+            CompactionStatus::Scheduled => FbCompactionStatus::Scheduled,
             CompactionStatus::Running => FbCompactionStatus::Running,
             CompactionStatus::Compacted => FbCompactionStatus::Compacted,
             CompactionStatus::Completed => FbCompactionStatus::Completed,
@@ -1430,6 +1431,7 @@ impl From<FbCompactionStatus> for CompactionStatus {
     fn from(value: FbCompactionStatus) -> Self {
         match value {
             FbCompactionStatus::Submitted => CompactionStatus::Submitted,
+            FbCompactionStatus::Scheduled => CompactionStatus::Scheduled,
             FbCompactionStatus::Running => CompactionStatus::Running,
             FbCompactionStatus::Compacted => CompactionStatus::Compacted,
             FbCompactionStatus::Completed => CompactionStatus::Completed,

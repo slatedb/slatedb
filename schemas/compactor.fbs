@@ -18,6 +18,10 @@ enum CompactionStatus : byte {
     /// The worker finished execution and wrote its final output SSTs; the
     /// compaction coordinator has not yet committed the result to the manifest.
     Compacted,
+    /// The coordinator has validated the spec against the current manifest and
+    /// promoted the entry; the job is ready to be claimed by a worker. Only the
+    /// coordinator writes this state.
+    Scheduled,
 }
 
 table TieredCompactionSpec {

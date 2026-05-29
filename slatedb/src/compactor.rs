@@ -541,6 +541,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                     }
                 }
                 self.maybe_schedule_compactions().await?;
+                self.maybe_validate_submitted_compactions().await?;
                 self.maybe_start_compactions().await?;
             }
             CompactorMessage::CompactionJobProgress {
@@ -722,6 +723,7 @@ impl CompactorEventHandler {
             self.state_writer.refresh().await?;
             self.commit_compacted_entries().await?;
             self.maybe_schedule_compactions().await?;
+            self.maybe_validate_submitted_compactions().await?;
             self.maybe_start_compactions().await?;
         }
         Ok(())
@@ -1064,83 +1066,34 @@ impl CompactorEventHandler {
         Ok(())
     }
 
-    /// Starts (valid) submitted compactions up to the max concurrency limit. Invalid
-    /// compactions are marked as failed. Successfully started compactions are marked
-    /// as running. State changes are persisted after processing all submitted
-    /// compactions. Drain specs mutate the manifest directly (no executor merge),
-    /// so the persistence step writes both the manifest and the compactions file
-    /// when any submission was a drain; otherwise it writes the compactions file alone.
-    async fn maybe_start_compactions(&mut self) -> Result<(), SlateDBError> {
+    /// Validates every `Submitted` compaction against the current manifest and
+    /// promotes the valid tiered specs to `Scheduled` — the coordinator's
+    /// "ready for a worker to claim" state. Drain specs short-circuit the
+    /// executor and are applied directly to the in-memory manifest (→
+    /// `Completed`). Invalid specs are marked `Failed`. State changes are
+    /// persisted before any worker (including the local executor) can act on
+    /// them: when any submission was a drain the manifest and `.compactions`
+    /// are written together, otherwise `.compactions` alone.
+    ///
+    /// Workers exclusively claim `Scheduled` entries; they never act on
+    /// `Submitted`. Routing validation through this single chokepoint keeps
+    /// the coordinator the gatekeeper for spec-against-manifest validity and
+    /// guarantees the coordinator has the entry in local state before any
+    /// remote worker can transition it onward.
+    async fn maybe_validate_submitted_compactions(&mut self) -> Result<(), SlateDBError> {
         let submitted_compactions = self
             .state()
             .compactions_with_status(CompactionStatus::Submitted)
             .cloned()
             .collect::<Vec<_>>();
-        let any_drain = submitted_compactions.iter().any(|c| c.spec().is_drain());
 
-        let result = self
-            .start_submitted_compactions(&submitted_compactions)
-            .await;
-
-        // For a remote executor, non-drain compactions are left as `Submitted` for
-        // workers to CAS-claim. `start_submitted_compactions` made no state changes for
-        // them, so writing back the coordinator's in-memory view would overwrite any
-        // `Running` or `Compacted` state the worker already wrote — preventing commits.
-        let has_local_mutations =
-            !submitted_compactions.is_empty() && (any_drain || !self.executor.is_remote());
-        if has_local_mutations {
-            if any_drain {
-                self.state_writer.write_state_safely().await?;
-            } else {
-                self.state_writer.write_compactions_safely().await?;
-            }
+        if submitted_compactions.is_empty() {
+            return Ok(());
         }
 
-        result
-    }
+        let any_drain = submitted_compactions.iter().any(|c| c.spec().is_drain());
 
-    /// Starts (valid) submitted compactions up to the max concurrency limit. Invalid
-    /// compactions are marked as failed. Successfully started compactions are marked
-    /// as running. Drain compactions short-circuit the executor (they perform no merge)
-    /// and are applied directly to the in-memory manifest, transitioning straight to
-    /// Completed. This function modifies the state directly but does not persist it;
-    /// the caller is responsible for persisting state after this function returns.
-    async fn start_submitted_compactions(
-        &mut self,
-        submitted_compactions: &[Compaction],
-    ) -> Result<(), SlateDBError> {
-        for compaction in submitted_compactions {
-            assert!(
-                compaction.status() == CompactionStatus::Submitted,
-                "expected submitted compaction, got {:?}",
-                compaction.status()
-            );
-
-            // With a remote executor, tiered compactions are executed by
-            // CompactionWorkers. The coordinator leaves them as `Submitted` and
-            // lets workers claim them via the optimistic CAS protocol. Drain
-            // specs are still applied locally because they mutate the manifest
-            // directly without any merge work.
-            if self.executor.is_remote() && !compaction.spec().is_drain() {
-                continue;
-            }
-
-            // Capacity gates only tiered compactions, which run on the
-            // executor. Drain specs mutate the manifest directly and never
-            // enter `Running`, so they bypass the check.
-            if !compaction.spec().is_drain() {
-                let running_compaction_count = self.running_compaction_count();
-                if running_compaction_count >= self.options.max_concurrent_compactions {
-                    debug!(
-                        "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
-                        running_compaction_count,
-                        self.options.max_concurrent_compactions,
-                        compaction
-                    );
-                    continue;
-                }
-            }
-
+        for compaction in &submitted_compactions {
             // Validate the candidate compaction; mark as failed if invalid.
             if let Err(e) = self.validate_compaction(compaction.spec()) {
                 error!(
@@ -1153,27 +1106,102 @@ impl CompactorEventHandler {
                 continue;
             }
 
-            // Drain specs apply the watermark advance and SR removal
-            // directly, marking the compaction Completed. Tiered specs
-            // dispatch to the executor.
+            // Drain specs apply the watermark advance and SR removal directly,
+            // marking the compaction Completed. They never enter Scheduled
+            // because no worker runs them. Tiered specs become Scheduled so a
+            // worker can claim them.
             if compaction.spec().is_drain() {
                 self.state_mut().finish_drain_compaction(compaction.id());
             } else {
-                match self
-                    .start_compaction(compaction.id(), compaction.clone())
-                    .await
-                {
-                    Ok(_) => {
-                        self.state_mut().update_compaction(&compaction.id(), |c| {
-                            c.set_status(CompactionStatus::Running)
-                        });
-                    }
-                    Err(e) => {
-                        self.state_mut().update_compaction(&compaction.id(), |c| {
-                            c.set_status(CompactionStatus::Failed)
-                        });
-                        return Err(e);
-                    }
+                self.state_mut().update_compaction(&compaction.id(), |c| {
+                    c.set_status(CompactionStatus::Scheduled)
+                });
+            }
+        }
+
+        if any_drain {
+            self.state_writer.write_state_safely().await?;
+        } else {
+            self.state_writer.write_compactions_safely().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Dispatches `Scheduled` compactions to the executor up to the concurrency
+    /// limit and transitions them to `Running`. In single-process embedded mode
+    /// the coordinator is also the worker, so this method is what claims the
+    /// jobs published by [`Self::maybe_validate_submitted_compactions`]; in
+    /// distributed mode remote workers can also claim `Scheduled` entries
+    /// independently.
+    ///
+    /// Spec-against-manifest validity has already been established in the
+    /// validation step, so this method does not re-validate. State changes are
+    /// persisted to `.compactions` after processing.
+    async fn maybe_start_compactions(&mut self) -> Result<(), SlateDBError> {
+        let scheduled_compactions = self
+            .state()
+            .compactions_with_status(CompactionStatus::Scheduled)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if scheduled_compactions.is_empty() {
+            return Ok(());
+        }
+
+        let result = self
+            .start_scheduled_compactions(&scheduled_compactions)
+            .await;
+
+        self.state_writer.write_compactions_safely().await?;
+
+        result
+    }
+
+    /// Dispatches `Scheduled` compactions to the executor up to the concurrency
+    /// limit. Successfully dispatched compactions are marked `Running`. This
+    /// function modifies the state directly but does not persist it; the caller
+    /// is responsible for persisting state after this function returns.
+    async fn start_scheduled_compactions(
+        &mut self,
+        scheduled_compactions: &[Compaction],
+    ) -> Result<(), SlateDBError> {
+        for compaction in scheduled_compactions {
+            assert!(
+                compaction.status() == CompactionStatus::Scheduled,
+                "expected scheduled compaction, got {:?}",
+                compaction.status()
+            );
+            assert!(
+                !compaction.spec().is_drain(),
+                "drain spec reached Scheduled — drains short-circuit to Completed in the validation step"
+            );
+
+            let running_compaction_count = self.running_compaction_count();
+            if running_compaction_count >= self.options.max_concurrent_compactions {
+                debug!(
+                    "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
+                    running_compaction_count,
+                    self.options.max_concurrent_compactions,
+                    compaction
+                );
+                continue;
+            }
+
+            match self
+                .start_compaction(compaction.id(), compaction.clone())
+                .await
+            {
+                Ok(_) => {
+                    self.state_mut().update_compaction(&compaction.id(), |c| {
+                        c.set_status(CompactionStatus::Running)
+                    });
+                }
+                Err(e) => {
+                    self.state_mut().update_compaction(&compaction.id(), |c| {
+                        c.set_status(CompactionStatus::Failed)
+                    });
+                    return Err(e);
                 }
             }
         }
@@ -1270,6 +1298,7 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.state_writer.write_state_safely().await?;
         self.maybe_schedule_compactions().await?;
+        self.maybe_validate_submitted_compactions().await?;
         self.maybe_start_compactions().await?;
         self.stats
             .last_compaction_ts
@@ -4874,6 +4903,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_promotes_to_scheduled() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        // No executor work yet — Scheduled is "ready to claim", not "running".
+        assert_eq!(fixture.executor.pop_jobs().len(), 0);
+        let compactions = &fixture.handler.state_writer.state.compactions().value;
+        assert_eq!(
+            compactions
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Scheduled
+        );
+        // Scheduled is persisted so remote workers (and a restarted coordinator)
+        // observe the same view.
+        let stored_compactions = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored_compactions
+                .get(&compaction_id)
+                .expect("missing stored compaction")
+                .status(),
+            CompactionStatus::Scheduled
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_marks_invalid_failed() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(
+                compaction_id,
+                CompactionSpec::new(Vec::new(), 0), // invalid: no sources
+            ))
+            .expect("failed to add compaction");
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        assert_eq!(fixture.executor.pop_jobs().len(), 0);
+        let compactions = &fixture.handler.state_writer.state.compactions().value;
+        assert_eq!(
+            compactions
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn test_maybe_start_compactions_starts_submitted() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0().await;
@@ -4886,6 +4991,11 @@ mod tests {
             .add_compaction(Compaction::new(compaction_id, spec))
             .expect("failed to add compaction");
 
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
         fixture.handler.maybe_start_compactions().await.unwrap();
 
         let jobs = fixture.executor.pop_jobs();
@@ -4937,6 +5047,11 @@ mod tests {
             .add_compaction(Compaction::new(second_id, spec_alt))
             .expect("failed to add compaction");
 
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
         fixture.handler.maybe_start_compactions().await.unwrap();
 
         let jobs = fixture.executor.pop_jobs();
@@ -4949,12 +5064,15 @@ mod tests {
                 .status(),
             CompactionStatus::Running
         );
+        // Second compaction was validated but couldn't be dispatched due to
+        // capacity. Workers may still claim it from `.compactions`; locally
+        // it remains queued.
         assert_eq!(
             compactions
                 .get(&second_id)
                 .expect("missing second compaction")
                 .status(),
-            CompactionStatus::Submitted
+            CompactionStatus::Scheduled
         );
     }
 
@@ -4971,6 +5089,11 @@ mod tests {
             ))
             .expect("failed to add compaction");
 
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
         fixture.handler.maybe_start_compactions().await.unwrap();
 
         assert_eq!(fixture.executor.pop_jobs().len(), 0);

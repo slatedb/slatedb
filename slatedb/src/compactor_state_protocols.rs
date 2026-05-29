@@ -144,11 +144,16 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Move running compactions back to submitted so we can resume them after restart.
-        // Submitted compactions are left intact for future scheduling.
-        // Keep only the most recent finished compaction for GC safety (#1044).
+        // Move running and scheduled compactions back to submitted so we can resume them
+        // after restart. Re-routing through Submitted forces re-validation against the
+        // post-restart manifest before any worker can claim them again. Submitted
+        // compactions are left intact for future scheduling. Keep only the most recent
+        // finished compaction for GC safety (#1044).
         dirty_compactions.value.iter_mut().for_each(|c| {
-            if matches!(c.status(), CompactionStatus::Running) {
+            if matches!(
+                c.status(),
+                CompactionStatus::Running | CompactionStatus::Scheduled
+            ) {
                 c.set_status(CompactionStatus::Submitted);
             }
         });

@@ -225,20 +225,32 @@ impl Display for CompactionSpec {
 ///
 /// State transitions:
 /// ```text
-/// Submitted <-> Running --> Compacted --> Completed
-///     |             |           |
-///     |             v           |
-///     +----------> Failed <-----+
+/// Submitted --> Scheduled <-> Running --> Compacted --> Completed
+///     |             |             |           |
+///     |             |             v           |
+///     +-------------+----------> Failed <-----+
 /// ```
 ///
 /// `Completed` and `Failed` are terminal states. `Compacted` is the
 /// distributed-compaction intermediate state where the worker has written its
 /// final output SSTs but the coordinator has not yet committed the result to
-/// the manifest. See RFC-0025.
+/// the manifest. `Scheduled` is the coordinator's "ready for a worker to claim"
+/// state: only the coordinator promotes `Submitted → Scheduled`, and only after
+/// the spec has been validated against the current manifest. Workers exclusively
+/// claim `Scheduled` entries — they never act on `Submitted` — which keeps the
+/// coordinator the single gatekeeper for validation and ensures the coordinator
+/// has the entry in local state before any worker can transition it onward.
+/// See RFC-0025.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CompactionStatus {
-    /// The compaction has been submitted but not yet started.
+    /// The compaction has been submitted but the coordinator has not yet
+    /// validated it. May originate from the internal scheduler, an admin
+    /// submission, or a reload of `.compactions`.
     Submitted,
+    /// The coordinator has validated the spec against the current manifest
+    /// and promoted it; the job is ready to be claimed by a worker. Only the
+    /// coordinator writes this state.
+    Scheduled,
     /// The compaction is currently running.
     Running,
     /// The worker finished execution and wrote its output SSTs; the
@@ -254,7 +266,10 @@ impl CompactionStatus {
     fn active(self) -> bool {
         matches!(
             self,
-            CompactionStatus::Submitted | CompactionStatus::Running | CompactionStatus::Compacted
+            CompactionStatus::Submitted
+                | CompactionStatus::Scheduled
+                | CompactionStatus::Running
+                | CompactionStatus::Compacted
         )
     }
 
@@ -703,10 +718,20 @@ impl CompactorState {
             merged.insert(compaction.id(), compaction.clone());
         }
 
-        // For compactions not in local state (Vacant), only accept `Submitted` since
-        // execution hasn't started so it's safe to adopt. For known compactions (Occupied),
-        // only accept `Compacted`, the worker's signal that execution finished and the
-        // coordinator should commit the manifest.
+        // For compactions not in local state (Vacant), only accept `Submitted`. This
+        // is the only state the coordinator hasn't authored yet (external submissions,
+        // admin tools, reloaded `.compactions`). All later states (`Scheduled`,
+        // `Running`, `Compacted`, `Completed`, `Failed`) are downstream of the
+        // coordinator having seen the entry as `Submitted` and promoted it to
+        // `Scheduled`, so a Vacant entry in any of those states is anomalous and
+        // logged.
+        //
+        // For known compactions (Occupied), only accept `Compacted` — the worker's
+        // signal that execution finished and the coordinator should commit the
+        // manifest. Other remote updates (e.g., a worker's `Scheduled → Running`
+        // claim) are visible to the coordinator only as a side-effect of the next
+        // refresh and don't need to overwrite the coordinator's local view of the
+        // entry.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
                 Entry::Vacant(v) => {
