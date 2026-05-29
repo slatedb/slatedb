@@ -339,6 +339,7 @@ impl WriteBatch {
     /// or absent prefix for any key.
     ///
     /// When `extractor` is `None`, the returned prefix set is empty.
+    #[allow(clippy::panic)]
     pub(crate) async fn extract_entries(
         &self,
         seq: u64,
