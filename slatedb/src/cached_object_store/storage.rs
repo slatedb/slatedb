@@ -80,6 +80,8 @@ pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + Display + 'static {
 pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
     async fn save_part(&self, part_number: PartID, buf: Bytes) -> object_store::Result<()>;
 
+    async fn delete_part(&self, part_number: PartID) -> object_store::Result<()>;
+
     async fn read_part(
         &self,
         part_number: PartID,
