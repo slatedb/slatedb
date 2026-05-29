@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -46,6 +46,7 @@ pub struct DbMemtable {
     table: Arc<KVTable>,
     max_seq: u64,
     metadata: DbMemtableMetadata,
+    touched_segments: BTreeSet<Bytes>,
 }
 
 impl DbMemtable {
@@ -55,10 +56,12 @@ impl DbMemtable {
             return None;
         }
         let max_seq = metadata.last_seq;
+        let touched_segments = table.touched_segments();
         Some(Self {
             table,
             max_seq,
             metadata: DbMemtableMetadata::from_kv_table_metadata(metadata),
+            touched_segments,
         })
     }
 
@@ -72,37 +75,6 @@ impl DbMemtable {
         }
         memtables.extend(immutable.into_iter().filter_map(Self::from_table));
         memtables
-    }
-
-    /// Return metadata for this memtable snapshot.
-    ///
-    /// The returned metadata was captured when this `DbMemtable` was created.
-    /// Rows inserted after creation are not reflected.
-    ///
-    /// ## Returns
-    /// - `DbMemtableMetadata`: metadata for this memtable snapshot
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, Error};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"key", b"value").await?;
-    ///
-    ///     let memtable = db.memtables().into_iter().next().unwrap();
-    ///     let metadata = memtable.metadata();
-    ///     assert_eq!(metadata.entry_num, 1);
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn metadata(&self) -> DbMemtableMetadata {
-        self.metadata
     }
 
     /// Get all raw entries for a key from this memtable snapshot.
@@ -195,6 +167,23 @@ impl DbMemtable {
         let filtered = apply_filters(std::iter::once(iter), Some(self.max_seq));
         DbRecencyIterator::new(VecDeque::from(filtered))
     }
+
+    /// Return metadata for this memtable snapshot.
+    ///
+    /// The returned metadata was captured when this `DbMemtable` was created.
+    /// Rows inserted after creation are not reflected.
+    pub fn metadata(&self) -> DbMemtableMetadata {
+        self.metadata
+    }
+
+    /// Return the segment prefixes touched by this memtable snapshot.
+    ///
+    /// The returned set was captured when this `DbMemtable` was created. Segment
+    /// prefixes recorded after creation are not reflected. Returns an empty set
+    /// when no segment extractor is configured.
+    pub fn touched_segments(&self) -> BTreeSet<Bytes> {
+        self.touched_segments.clone()
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +197,13 @@ mod tests {
             table.put(row);
         }
         table
+    }
+
+    fn touched(prefixes: &[&[u8]]) -> BTreeSet<Bytes> {
+        prefixes
+            .iter()
+            .map(|prefix| Bytes::copy_from_slice(prefix))
+            .collect()
     }
 
     fn assert_value(entry: &RowEntry, expected: &[u8]) {
@@ -250,6 +246,20 @@ mod tests {
         assert_eq!(metadata.last_seq, 2);
         assert_eq!(table.metadata().entry_num, 4);
         assert_eq!(table.metadata().last_seq, 4);
+    }
+
+    #[test]
+    fn test_touched_segments_returns_snapshot() {
+        let table = table_with([RowEntry::new_value(b"key", b"value", 1)]);
+        table.record_touched_segments(touched(&[b"abc", b"xyz"]));
+        let memtable = DbMemtable::from_table(table.clone()).unwrap();
+        let touched_segments = memtable.touched_segments();
+
+        table.record_touched_segments(touched(&[b"zzz"]));
+
+        assert_eq!(touched_segments, memtable.touched_segments());
+        assert_eq!(touched_segments, touched(&[b"abc", b"xyz"]));
+        assert_eq!(table.touched_segments(), touched(&[b"abc", b"xyz", b"zzz"]));
     }
 
     #[tokio::test]

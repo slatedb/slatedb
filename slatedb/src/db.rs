@@ -1361,8 +1361,8 @@ impl Db {
     /// followed by immutable memtables from newest to oldest. Each wrapper
     /// exposes raw rows from exactly one in-memory memtable. Rows inserted
     /// after this method returns will not appear through the returned
-    /// [`DbMemtable`]s. Each wrapper's metadata is captured while the database
-    /// state lock is held.
+    /// [`DbMemtable`]s. Each wrapper's metadata and touched segments are
+    /// captured while the database state lock is held.
     ///
     /// ## Returns
     /// - `Vec<DbMemtable>`: point-in-time wrappers around the current non-empty
