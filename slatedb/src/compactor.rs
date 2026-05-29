@@ -5963,7 +5963,7 @@ mod tests {
             .collect();
         let destination = 0u32;
         let spec = CompactionSpec::new(sources, destination);
-        let compaction_id = Ulid::new();
+        let compaction_id = Ulid::from_parts(1, 0);
         let output_sst = fake_output_sst();
         let compaction = Compaction::new(compaction_id, spec)
             .with_status(CompactionStatus::Compacted)
@@ -6010,7 +6010,7 @@ mod tests {
 
         // given: a Compacted SR0→SR1 compaction to validate the SR source path removed when not in L0
         let sr1_output_sst = fake_output_sst();
-        let sr_compaction_id = Ulid::new();
+        let sr_compaction_id = Ulid::from_parts(2, 0);
         let sr_compaction = Compaction::new(
             sr_compaction_id,
             CompactionSpec::new(vec![SourceId::SortedRun(0)], 1),
