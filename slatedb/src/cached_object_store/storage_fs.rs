@@ -351,8 +351,7 @@ impl LocalCacheEntry for FsCacheEntry {
             file_cache.invalidate(&part_path);
             result
         })
-        .await
-        .map_err(wrap_io_err)?
+        .await?
     }
 
     async fn read_part(
