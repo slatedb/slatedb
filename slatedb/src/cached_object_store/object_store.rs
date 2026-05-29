@@ -366,9 +366,9 @@ impl CachedObjectStore {
             let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
 
             // Save parts only; on error, clean up any partially-written parts.
-            let _ = self
-                .save_parts_stream_with_cleanup(entry.as_ref(), stream, 0, 0..payload_len)
-                .await;
+            self.save_parts_stream_with_cleanup(entry.as_ref(), stream, 0, 0..payload_len)
+                .await
+                .ok();
         }
 
         Ok(result)
