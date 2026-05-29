@@ -1959,6 +1959,49 @@ mod tests {
         assert_eq!(db.get(b"counter").await.unwrap(), None);
     }
 
+    #[tokio::test]
+    async fn test_txn_commit_rejects_same_key_merge_different_ttls() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder(
+            "test_txn_commit_rejects_same_key_merge_different_ttls",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_merge_operator(Arc::new(CounterMergeOperator))
+        .build()
+        .await
+        .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.merge_with_options(
+            b"counter",
+            1u64.to_le_bytes(),
+            &MergeOptions {
+                ttl: crate::config::Ttl::ExpireAfter(3600),
+            },
+        )
+        .unwrap();
+        txn.merge_with_options(
+            b"counter",
+            2u64.to_le_bytes(),
+            &MergeOptions {
+                ttl: crate::config::Ttl::ExpireAfter(7200),
+            },
+        )
+        .unwrap();
+
+        let err = txn.commit().await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert!(
+            err.to_string()
+                .contains("only one merge TTL per-key allowed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(db.get(b"counter").await.unwrap(), None);
+
+        db.close().await.unwrap();
+    }
+
     fn test_db_options(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
