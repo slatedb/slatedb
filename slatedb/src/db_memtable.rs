@@ -12,6 +12,8 @@ use crate::mem_table::{KVTable, KVTableMetadata};
 /// Metadata for a point-in-time [`DbMemtable`] wrapper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DbMemtableMetadata {
+    /// Whether this was the active memtable when captured.
+    pub active: bool,
     /// The number of raw row entries in the memtable.
     pub entry_num: usize,
     /// The estimated size of the memtable's raw row entries in bytes.
@@ -25,8 +27,9 @@ pub struct DbMemtableMetadata {
 }
 
 impl DbMemtableMetadata {
-    fn from_kv_table_metadata(metadata: KVTableMetadata) -> Self {
+    fn from_kv_table_metadata(metadata: KVTableMetadata, active: bool) -> Self {
         Self {
+            active,
             entry_num: metadata.entry_num,
             entries_size_in_bytes: metadata.entries_size_in_bytes,
             last_tick: metadata.last_tick,
@@ -50,7 +53,7 @@ pub struct DbMemtable {
 }
 
 impl DbMemtable {
-    pub(crate) fn from_table(table: Arc<KVTable>) -> Option<Self> {
+    pub(crate) fn from_table(table: Arc<KVTable>, active: bool) -> Option<Self> {
         let metadata = table.metadata();
         if metadata.entry_num == 0 {
             return None;
@@ -60,7 +63,7 @@ impl DbMemtable {
         Some(Self {
             table,
             max_seq,
-            metadata: DbMemtableMetadata::from_kv_table_metadata(metadata),
+            metadata: DbMemtableMetadata::from_kv_table_metadata(metadata, active),
             touched_segments,
         })
     }
@@ -70,10 +73,14 @@ impl DbMemtable {
         I: IntoIterator<Item = Arc<KVTable>>,
     {
         let mut memtables = Vec::new();
-        if let Some(memtable) = Self::from_table(active) {
+        if let Some(memtable) = Self::from_table(active, true) {
             memtables.push(memtable);
         }
-        memtables.extend(immutable.into_iter().filter_map(Self::from_table));
+        memtables.extend(
+            immutable
+                .into_iter()
+                .filter_map(|table| Self::from_table(table, false)),
+        );
         memtables
     }
 
@@ -225,7 +232,7 @@ mod tests {
     fn test_from_table_filters_empty_table() {
         let table = Arc::new(KVTable::new());
 
-        assert!(DbMemtable::from_table(table).is_none());
+        assert!(DbMemtable::from_table(table, true).is_none());
     }
 
     #[test]
@@ -234,7 +241,7 @@ mod tests {
             RowEntry::new_value(b"key", b"old", 1),
             RowEntry::new_value(b"key", b"new", 2),
         ]);
-        let memtable = DbMemtable::from_table(table.clone()).unwrap();
+        let memtable = DbMemtable::from_table(table.clone(), true).unwrap();
         let metadata = memtable.metadata();
 
         table.put(RowEntry::new_value(b"key", b"after_snapshot", 3));
@@ -252,7 +259,7 @@ mod tests {
     fn test_touched_segments_returns_snapshot() {
         let table = table_with([RowEntry::new_value(b"key", b"value", 1)]);
         table.record_touched_segments(touched(&[b"abc", b"xyz"]));
-        let memtable = DbMemtable::from_table(table.clone()).unwrap();
+        let memtable = DbMemtable::from_table(table.clone(), true).unwrap();
         let touched_segments = memtable.touched_segments();
 
         table.record_touched_segments(touched(&[b"zzz"]));
@@ -268,7 +275,7 @@ mod tests {
             RowEntry::new_value(b"key", b"old", 1),
             RowEntry::new_value(b"key", b"new", 2),
         ]);
-        let memtable = DbMemtable::from_table(table.clone()).unwrap();
+        let memtable = DbMemtable::from_table(table.clone(), true).unwrap();
 
         table.put(RowEntry::new_value(b"key", b"after_snapshot", 3));
         table.put(RowEntry::new_value(b"other", b"other_after_snapshot", 4));
@@ -289,7 +296,7 @@ mod tests {
             RowEntry::new_value(b"b", b"vb", 2),
             RowEntry::new_value(b"c", b"vc", 3),
         ]);
-        let memtable = DbMemtable::from_table(table.clone()).unwrap();
+        let memtable = DbMemtable::from_table(table.clone(), true).unwrap();
 
         table.put(RowEntry::new_value(b"b", b"vb_after_snapshot", 4));
         table.put(RowEntry::new_value(b"d", b"vd_after_snapshot", 5));
@@ -313,6 +320,9 @@ mod tests {
         let memtables =
             DbMemtable::from_tables(active, [empty_imm, newest_imm, oldest_imm].into_iter());
         assert_eq!(memtables.len(), 3);
+        assert!(memtables[0].metadata().active);
+        assert!(!memtables[1].metadata().active);
+        assert!(!memtables[2].metadata().active);
 
         let active_entries = collect_entries(memtables[0].scan::<Vec<u8>, _>(..)).await;
         assert_eq!(active_entries.len(), 1);
