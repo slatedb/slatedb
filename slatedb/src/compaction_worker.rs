@@ -27,9 +27,8 @@ use ulid::Ulid;
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
-use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{
-    CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
+    CompactionExecutor, ExecutorMessage, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
 };
 use crate::compactor_state::{Compaction, CompactionStatus, SourceId, WorkerSpec};
@@ -49,6 +48,48 @@ use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use slatedb_common::metrics::{MetricLevel, MetricsRecorder, MetricsRecorderHelper};
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
+
+#[derive(Debug)]
+pub(crate) enum WorkerMessage {
+    /// Signals that a compaction job has finished execution.
+    CompactionJobFinished {
+        /// Job id (distinct from the canonical compaction id).
+        id: Ulid,
+        /// Output SR on success, or the compaction error.
+        result: Result<crate::db_state::SortedRun, SlateDBError>,
+    },
+    /// Periodic progress update from the [`CompactionExecutor`].
+    // Fields are unused until heartbeat emission is wired in the failure-detection follow-up.
+    #[allow(dead_code)]
+    CompactionJobProgress {
+        /// The job id associated with this progress report.
+        id: Ulid,
+        /// The total number of bytes processed so far (estimate).
+        bytes_processed: u64,
+        /// The output SSTs produced so far (including previous runs).
+        output_ssts: Vec<crate::db_state::SsTableHandle>,
+    },
+    /// Ticker-triggered message to poll `.compactions` for claimable jobs.
+    PollCompactions,
+}
+
+impl ExecutorMessage for WorkerMessage {
+    fn job_finished(id: Ulid, result: Result<crate::db_state::SortedRun, SlateDBError>) -> Self {
+        WorkerMessage::CompactionJobFinished { id, result }
+    }
+
+    fn job_progress(
+        id: Ulid,
+        bytes_processed: u64,
+        output_ssts: Vec<crate::db_state::SsTableHandle>,
+    ) -> Self {
+        WorkerMessage::CompactionJobProgress {
+            id,
+            bytes_processed,
+            output_ssts,
+        }
+    }
+}
 
 /// Stateless executor of compaction jobs claimed from `.compactions`.
 ///
@@ -513,18 +554,18 @@ impl CompactionWorkerHandler {
 }
 
 #[async_trait]
-impl MessageHandler<CompactorMessage> for CompactionWorkerHandler {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<CompactorMessage>>)> {
+impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
+    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<WorkerMessage>>)> {
         vec![(
             self.options.compactions_poll_interval,
-            Box::new(|| CompactorMessage::PollCompactions),
+            Box::new(|| WorkerMessage::PollCompactions),
         )]
     }
 
-    async fn handle(&mut self, message: CompactorMessage) -> Result<(), SlateDBError> {
+    async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
         match message {
-            CompactorMessage::PollCompactions => self.poll_and_claim().await?,
-            CompactorMessage::CompactionJobFinished { id, result } => {
+            WorkerMessage::PollCompactions => self.poll_and_claim().await?,
+            WorkerMessage::CompactionJobFinished { id, result } => {
                 self.handle_finished(id, result).await?;
                 // Opportunistically claim more after freeing capacity.
                 self.poll_and_claim().await?;
@@ -532,15 +573,14 @@ impl MessageHandler<CompactorMessage> for CompactionWorkerHandler {
             // Heartbeat emission is added in the failure-detection follow-up;
             // for now progress messages are ignored. The executor still
             // produces them; we just drop them.
-            CompactorMessage::CompactionJobProgress { .. } => {}
-            CompactorMessage::LogStats | CompactorMessage::PollManifest => {}
+            WorkerMessage::CompactionJobProgress { .. } => {}
         }
         Ok(())
     }
 
     async fn cleanup(
         &mut self,
-        _messages: BoxStream<'async_trait, CompactorMessage>,
+        _messages: BoxStream<'async_trait, WorkerMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
         // Stop accepting new work, then release any active claims so other
@@ -588,15 +628,15 @@ pub(crate) fn build_handler(
     >,
 ) -> (
     CompactionWorkerHandler,
-    async_channel::Receiver<CompactorMessage>,
+    async_channel::Receiver<WorkerMessage>,
 ) {
-    let (tx, rx) = async_channel::unbounded();
+    let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
     let executor_compactor_options = Arc::new(CompactorOptions {
         max_sst_size: options.max_sst_size,
         max_fetch_tasks: options.max_fetch_tasks,
         ..CompactorOptions::default()
     });
-    let executor = Arc::new(TokioCompactionExecutor::new(
+    let executor = Arc::new(TokioCompactionExecutor::<WorkerMessage>::new(
         TokioCompactionExecutorOptions {
             handle: worker_runtime.clone(),
             options: executor_compactor_options,
@@ -876,7 +916,7 @@ mod tests {
         assert_eq!(fx.handler.active_jobs.len(), 1);
 
         // cleanup mirrors graceful shutdown.
-        let empty: BoxStream<'_, CompactorMessage> = futures::stream::empty().boxed();
+        let empty: BoxStream<'_, WorkerMessage> = futures::stream::empty().boxed();
         fx.handler.cleanup(empty, Ok(())).await.unwrap();
 
         let c = fx.read_compaction(id).await.expect("compaction missing");

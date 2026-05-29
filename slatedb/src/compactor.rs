@@ -290,8 +290,6 @@ pub(crate) enum CompactorMessage {
     LogStats,
     /// Ticker-triggered message to refresh the manifest and schedule compactions.
     PollManifest,
-    /// Ticker-triggered message to poll `.compactions` for claimable jobs.
-    PollCompactions,
 }
 
 /// The compactor is responsible for taking groups of sorted runs (this doc uses the term
@@ -508,7 +506,6 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
         match message {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await?,
-            CompactorMessage::PollCompactions => {}
             CompactorMessage::CompactionJobFinished { id, result } => {
                 match result {
                     Ok(sr) => self.finish_compaction(id, sr).await?,

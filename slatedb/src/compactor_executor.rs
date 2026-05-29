@@ -14,7 +14,6 @@ use crate::compaction_filter::CompactionFilterSupplier;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter_iterator::CompactionFilterIterator;
 use crate::compactor::CompactorMessage;
-use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
@@ -180,11 +179,31 @@ pub(crate) trait CompactionExecutor {
     fn is_stopped(&self) -> bool;
 }
 
+/// Implemented by message types that the executor sends on job completion and progress.
+pub(crate) trait ExecutorMessage: Send + 'static {
+    fn job_finished(id: Ulid, result: Result<SortedRun, SlateDBError>) -> Self;
+    fn job_progress(id: Ulid, bytes_processed: u64, output_ssts: Vec<SsTableHandle>) -> Self;
+}
+
+impl ExecutorMessage for CompactorMessage {
+    fn job_finished(id: Ulid, result: Result<SortedRun, SlateDBError>) -> Self {
+        CompactorMessage::CompactionJobFinished { id, result }
+    }
+
+    fn job_progress(id: Ulid, bytes_processed: u64, output_ssts: Vec<SsTableHandle>) -> Self {
+        CompactorMessage::CompactionJobProgress {
+            id,
+            bytes_processed,
+            output_ssts,
+        }
+    }
+}
+
 /// Options for creating a [`TokioCompactionExecutor`].
-pub(crate) struct TokioCompactionExecutorOptions {
+pub(crate) struct TokioCompactionExecutorOptions<M = CompactorMessage> {
     pub handle: tokio::runtime::Handle,
     pub options: Arc<CompactorOptions>,
-    pub worker_tx: async_channel::Sender<CompactorMessage>,
+    pub worker_tx: async_channel::Sender<M>,
     pub table_store: Arc<TableStore>,
     pub rand: Arc<DbRand>,
     pub stats: Arc<CompactionStats>,
@@ -195,12 +214,12 @@ pub(crate) struct TokioCompactionExecutorOptions {
     pub compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
-pub(crate) struct TokioCompactionExecutor {
-    inner: Arc<TokioCompactionExecutorInner>,
+pub(crate) struct TokioCompactionExecutor<M = CompactorMessage> {
+    inner: Arc<TokioCompactionExecutorInner<M>>,
 }
 
-impl TokioCompactionExecutor {
-    pub(crate) fn new(opts: TokioCompactionExecutorOptions) -> Self {
+impl<M: ExecutorMessage> TokioCompactionExecutor<M> {
+    pub(crate) fn new(opts: TokioCompactionExecutorOptions<M>) -> Self {
         let stats = opts.stats;
         let merge_operator = opts.merge_operator.map(|merge_operator| {
             instrument_merge_operator(
@@ -229,7 +248,7 @@ impl TokioCompactionExecutor {
     }
 }
 
-impl CompactionExecutor for TokioCompactionExecutor {
+impl<M: ExecutorMessage> CompactionExecutor for TokioCompactionExecutor<M> {
     fn start_compaction_job(&self, compaction: StartCompactionJobArgs) {
         self.inner.start_compaction_job(compaction);
     }
@@ -247,10 +266,10 @@ struct TokioCompactionTask {
     task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
-pub(crate) struct TokioCompactionExecutorInner {
+pub(crate) struct TokioCompactionExecutorInner<M = CompactorMessage> {
     options: Arc<CompactorOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: async_channel::Sender<CompactorMessage>,
+    worker_tx: async_channel::Sender<M>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
@@ -263,7 +282,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
-impl TokioCompactionExecutorInner {
+impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
     /// Builds input iterators for all sources (L0 and SR) and wraps them with optional
     /// merge, retention, and compaction filter logic.
     async fn load_iterators<'a>(
@@ -372,11 +391,7 @@ impl TokioCompactionExecutorInner {
         #[allow(clippy::disallowed_methods)]
         if let Err(e) = self
             .worker_tx
-            .try_send(CompactorMessage::CompactionJobProgress {
-                id,
-                bytes_processed,
-                output_ssts: output_ssts.to_vec(),
-            })
+            .try_send(M::job_progress(id, bytes_processed, output_ssts.to_vec()))
         {
             debug!(
                 "failed to send compaction progress (likely DB shutdown) [error={:?}]",
@@ -493,7 +508,7 @@ impl TokioCompactionExecutorInner {
                 #[allow(clippy::disallowed_methods)]
                 if let Err(e) = this_cleanup
                     .worker_tx
-                    .try_send(CompactionJobFinished { id, result })
+                    .try_send(M::job_finished(id, result))
                 {
                     debug!(
                         "failed to send compaction finished msg (likely DB shutdown) [error={:?}]",
@@ -994,7 +1009,7 @@ mod tests {
     ) {
         let handle = tokio::runtime::Handle::current();
         let options = Arc::new(CompactorOptions::default());
-        let (tx, _rx) = async_channel::unbounded();
+        let (tx, _rx) = async_channel::unbounded::<CompactorMessage>();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let root_path = Path::from("testdb-load-iterators");
         let clock = Arc::new(DefaultSystemClock::new());
@@ -1202,7 +1217,7 @@ mod tests {
                     ..Default::default()
                 };
                 let options = Arc::new(options);
-                let (tx, _rx) = async_channel::unbounded();
+                let (tx, _rx) = async_channel::unbounded::<CompactorMessage>();
                 let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
                 let root_path = Path::from("testdb-exec-resume");
                 let clock = Arc::new(DefaultSystemClock::new());
