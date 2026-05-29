@@ -416,6 +416,175 @@ In today's manifest encoding, that means the scan either walks only the compatib
 
 **Implications for existing APIs.** `scan`, `scan_prefix`, `scan_with_options`, and `scan_prefix_with_options` on `Db`, `DbReader`, `DbSnapshot`, and `DbTransaction` pick up segment-aware routing automatically — they all resolve to a range scan internally, and the routing lives beneath that. No API additions are required.
 
+### Listing Segments
+
+Listing segments is useful if data is organized into buckets (e.g. time buckets) and each bucket maps to one segment.
+If a query engine knows about the existing segments, it is able to read entries relevant to a query from
+segments that actually exist. The query engine does not need to compute all possible segments for a query and probe
+those segments for existence. For persisted data, existing segments can be read from the manifest.
+However, for existing segments that only exist in memory, an API is required.
+
+For listing existing segments, a new method is declared on `DbMetadataOps` (in `slatedb/src/ops.rs`):
+
+```rust
+struct Segments {
+    segments: Vec<Bytes>,
+}
+
+fn list_segments(
+    &self,
+    durability_filter: DurabilityLevel,
+) -> Result<Segments, crate::Error>;
+```
+
+`Db` and `DbReader` implement it. Each also exposes a matching method
+so callers who have not imported the trait can use it directly:
+
+```rust
+impl Db {
+    pub fn list_segments(
+        &self,
+        durability_filter: DurabilityLevel,
+    ) -> Result<Segments, crate::Error>;
+}
+
+impl DbReader {
+    pub fn list_segments(
+        &self,
+        durability_filter: DurabilityLevel,
+    ) -> Result<Segments, crate::Error>;
+}
+```
+
+The returned `Vec<Bytes>` in `Segments` is:
+
+- deduplicated — a prefix appearing in more than one source (e.g. both
+  the manifest and the active memtable) appears once,
+- sorted in ascending prefix order (`Bytes::cmp`),
+- empty when the database is unsegmented (no extractor was ever
+  configured on the writer).
+
+The `DurabilityLevel` argument is required (no default). The enum is
+reused unchanged from the read path: `Remote` and `Memory`.
+
+#### Durability semantics
+
+`DurabilityLevel` selects which sources contribute prefixes:
+
+- `DurabilityLevel::Remote` — only segments persisted in the manifest
+  (`ManifestCore::segments`). These prefixes are durable in object
+  storage.
+- `DurabilityLevel::Memory` — Remote, plus prefixes touched by writes
+  still held in the active and immutable in-memory memtables (the
+  `touched_segments` set maintained by the write path, RFC-0024).
+
+A prefix present in both sources is reported once.
+
+#### Reader-side extractor
+
+`DbReaderBuilder` gains an optional `with_segment_extractor` method that
+mirrors the writer's:
+
+```rust
+impl<P: Into<Path>> DbReaderBuilder<P> {
+    pub fn with_segment_extractor(
+        self,
+        extractor: Arc<dyn PrefixExtractor>,
+    ) -> Self;
+}
+```
+
+The reader uses the extractor for one purpose: when WAL-replayed entries
+land in an immutable memtable, the reader re-derives each entry's prefix
+through the extractor and records the touched-segment set on the table,
+exactly as the writer's startup replay does.
+
+At open time, the reader validates a configured extractor against the
+manifest's persisted `segment_extractor_name` by calling
+`ManifestCore::validate_extractor_configuration(Some(extractor))`. The
+rule matches the writer's:
+
+- the configured name must equal the persisted name, and
+- every persisted segment prefix must still be recognized by the
+  configured extractor.
+
+Unlike the writer, the reader is permitted to open a segmented database
+*without* an extractor. The reader can still serve reads (read routing
+uses the manifest's segment list, not the extractor), and
+`DurabilityLevel::Remote` listings still work; only the in-memory side
+of the listing is affected. The validation is therefore guarded:
+
+```rust
+if let Some(extractor) = segment_extractor.as_deref() {
+    manifest
+        .db_state()
+        .validate_extractor_configuration(Some(extractor))?;
+}
+```
+
+#### Memory level without an extractor
+
+A reader that has no extractor configured cannot truthfully fulfil
+`DurabilityLevel::Memory`: its WAL-replayed memtables carry no touched
+prefixes, so the returned list would silently omit unpersisted segments.
+The implementation therefore rejects this combination with a typed
+error:
+
+```rust
+if durability_filter == DurabilityLevel::Memory
+    && self.inner.segment_extractor.is_none()
+{
+    return Err(SlateDBError::SegmentExtractorRequired.into());
+}
+```
+
+A new error variant is added:
+
+```rust
+#[error("listing in-memory segments requires a configured segment extractor")]
+SegmentExtractorRequired,
+```
+
+This variant maps to `ErrorKind::Invalid` via `Error::invalid(msg)`,
+matching the other extractor-related variants.
+
+The writer (`Db`) never raises this error. The writer's open-time
+validation in `DbBuilder::build` already guarantees that a segmented
+database has its extractor configured; an unsegmented writer
+legitimately returns an empty list at any durability level.
+`Db::list_segments` is always `Ok`.
+
+#### Examples
+
+A writer with the 3-byte fixed extractor, segments persisted for `aaa`,
+unpersisted writes to `bbb`:
+
+```rust
+db.list_segments(DurabilityLevel::Remote)?; // -> [b"aaa"]
+db.list_segments(DurabilityLevel::Memory)?; // -> [b"aaa", b"bbb"]
+```
+
+An unsegmented writer:
+
+```rust
+db.list_segments(DurabilityLevel::Remote)?; // -> []
+db.list_segments(DurabilityLevel::Memory)?; // -> []
+```
+
+A reader opened with no extractor against the same segmented database:
+
+```rust
+reader.list_segments(DurabilityLevel::Remote)?; // -> [b"aaa"]
+reader.list_segments(DurabilityLevel::Memory)
+// -> Err(SegmentExtractorRequired) [ErrorKind::Invalid]
+```
+
+A reader opened with the matching extractor:
+
+```rust
+reader.list_segments(DurabilityLevel::Memory)?; // -> [b"aaa", b"bbb"]
+```
+
 ### Compaction
 
 Segmentation extends the existing compaction model in two small ways:
