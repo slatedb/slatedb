@@ -25,6 +25,15 @@ use log::warn;
 use crate::utils::build_concurrent;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
+/// Specifies how `verify_size` should compare actual vs expected bytes.
+#[derive(Debug, Clone, Copy)]
+enum SizeCheck {
+    /// Actual must be ≤ expected (used while a stream is still producing chunks).
+    AtMost,
+    /// Actual must be exactly equal to expected (used after a stream is fully consumed).
+    Exact,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
@@ -489,17 +498,7 @@ impl CachedObjectStore {
             let chunk = chunk?;
             total_bytes += chunk.len();
 
-            if total_bytes > range_len {
-                let msg = format!(
-                    "Stream exceeded range bounds: {} bytes read, but range is {}..{} ({} bytes)",
-                    total_bytes, range.start, range.end, range_len
-                );
-                warn!("{}", msg);
-                return Err(object_store::Error::Generic {
-                    store: "cached_object_store",
-                    source: msg.into(),
-                });
-            }
+            Self::verify_size(total_bytes, range_len, SizeCheck::AtMost)?;
 
             buffer.extend_from_slice(&chunk);
 
@@ -511,17 +510,7 @@ impl CachedObjectStore {
         }
 
         // No point in saving an invalid file so return early.
-        if total_bytes != range_len {
-            let msg = format!(
-                "Stream range bounds not met: {} bytes read, but range is {}..{} ({} bytes)",
-                total_bytes, range.start, range.end, range_len
-            );
-            warn!("{}", msg);
-            return Err(object_store::Error::Generic {
-                store: "cached_object_store",
-                source: msg.into(),
-            });
-        }
+        Self::verify_size(total_bytes, range_len, SizeCheck::Exact)?;
 
         // Save any remaining bytes as the last part
         if !buffer.is_empty() {
@@ -628,20 +617,7 @@ impl CachedObjectStore {
                     let meta = get_result.meta.clone();
                     let attrs = get_result.attributes.clone();
                     let bytes = get_result.bytes().await?;
-                    if bytes.len() < range_in_part.len() {
-                        let msg = format!(
-                            "Fetched part bytes do not cover the requested range: \
-                             part has {} bytes, but range_in_part is {}..{}",
-                            bytes.len(),
-                            range_in_part.start,
-                            range_in_part.end
-                        );
-                        warn!("{}", msg);
-                        return Err(object_store::Error::Generic {
-                            store: "cached_object_store",
-                            source: msg.into(),
-                        });
-                    }
+                    Self::verify_size(bytes.len(), range_in_part.len(), SizeCheck::Exact)?;
 
                     // Save the head and the part to cache for future accesses.
                     // Skip if we can't derive a canonical cache key.
@@ -725,6 +701,29 @@ impl CachedObjectStore {
                 GetRange::Offset(offset_aligned)
             }
         }
+    }
+
+    fn verify_size(
+        total_bytes: usize,
+        range_len: usize,
+        check: SizeCheck,
+    ) -> object_store::Result<()> {
+        let failed = match check {
+            SizeCheck::AtMost => total_bytes > range_len,
+            SizeCheck::Exact => total_bytes != range_len,
+        };
+        if failed {
+            let msg = format!(
+                "Size check ({:?}) failed: {} bytes read, but range is {} bytes",
+                check, total_bytes, range_len
+            );
+            warn!("{}", msg);
+            return Err(object_store::Error::Generic {
+                store: "cached_object_store",
+                source: msg.into(),
+            });
+        }
+        Ok(())
     }
 
     fn align_range(&self, range: &Range<u64>, alignment: usize) -> Range<u64> {
@@ -2243,7 +2242,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Stream exceeded range bounds"),
+            err.contains("Size check (AtMost) failed"),
             "unexpected error: {}",
             err
         );
@@ -2296,7 +2295,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Stream range bounds not met"),
+            err.contains("Size check (Exact) failed"),
             "unexpected error: {}",
             err
         );
@@ -2503,7 +2502,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Fetched part bytes do not cover the requested range"),
+            err.contains("Size check (Exact) failed"),
             "unexpected error: {}",
             err
         );
