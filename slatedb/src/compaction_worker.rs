@@ -55,20 +55,8 @@ pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 /// Build one with [`CompactionWorkerBuilder`] and drive its event loop with
 /// [`CompactionWorker::run`]. Call [`CompactionWorker::stop`] to gracefully
 /// release any in-flight claims.
-#[derive(Clone)]
 pub struct CompactionWorker {
-    manifest_store: Arc<ManifestStore>,
-    compactions_store: Arc<CompactionsStore>,
-    table_store: Arc<TableStore>,
-    options: Arc<CompactionWorkerOptions>,
     task_executor: Arc<MessageHandlerExecutor>,
-    worker_runtime: Handle,
-    rand: Arc<DbRand>,
-    stats: Arc<CompactionStats>,
-    system_clock: Arc<dyn SystemClock>,
-    merge_operator: Option<MergeOperatorType>,
-    #[cfg(feature = "compaction_filters")]
-    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl CompactionWorker {
@@ -76,27 +64,7 @@ impl CompactionWorker {
     /// `.compactions` every [`CompactionWorkerOptions::compactions_poll_interval`],
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
     /// executes them, and writes `Compacted` back to `.compactions`.
-    pub async fn run(&self) -> Result<(), crate::Error> {
-        let (handler, rx) = build_handler(
-            self.manifest_store.clone(),
-            self.compactions_store.clone(),
-            self.table_store.clone(),
-            self.options.clone(),
-            self.worker_runtime.clone(),
-            self.rand.clone(),
-            self.stats.clone(),
-            self.system_clock.clone(),
-            self.merge_operator.clone(),
-            self.compaction_filter_supplier.clone(),
-        );
-        self.task_executor
-            .add_handler(
-                COMPACTION_WORKER_TASK_NAME.to_string(),
-                Box::new(handler),
-                rx,
-                &Handle::current(),
-            )
-            .expect("failed to spawn compaction worker task");
+    pub async fn run(&mut self) -> Result<(), crate::Error> {
         self.task_executor.monitor_on(&Handle::current())?;
         self.task_executor
             .join_task(COMPACTION_WORKER_TASK_NAME)
@@ -199,25 +167,34 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             None,
         ));
         let stats = Arc::new(CompactionStats::new(&self.recorder));
+        let options = Arc::new(self.options);
         let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             closed_result,
             self.system_clock.clone(),
         ));
-        Ok(CompactionWorker {
+        let (handler, rx) = build_handler(
             manifest_store,
             compactions_store,
             table_store,
-            options: Arc::new(self.options),
-            task_executor,
-            worker_runtime: self.worker_runtime,
-            rand: self.rand,
+            options,
+            self.worker_runtime,
+            self.rand,
             stats,
-            system_clock: self.system_clock,
-            merge_operator: self.merge_operator,
+            self.system_clock,
+            self.merge_operator,
             #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: self.compaction_filter_supplier,
-        })
+            self.compaction_filter_supplier,
+        );
+        task_executor
+            .add_handler(
+                COMPACTION_WORKER_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to spawn compaction worker task");
+        Ok(CompactionWorker { task_executor })
     }
 }
 
