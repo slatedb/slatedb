@@ -1139,6 +1139,15 @@ impl CompactorEventHandler {
     /// validation step, so this method does not re-validate. State changes are
     /// persisted to `.compactions` after processing.
     async fn maybe_start_compactions(&mut self) -> Result<(), SlateDBError> {
+        // With a remote executor, workers (embedded or out-of-process) claim
+        // `Scheduled` entries and drive the `Scheduled → Running` transition via
+        // the CAS protocol on `.compactions`. The coordinator must not dispatch
+        // them here: marking them `Running` and writing back its in-memory view
+        // would overwrite the worker's claim and prevent commits.
+        if self.executor.is_remote() {
+            return Ok(());
+        }
+
         let scheduled_compactions = self
             .state()
             .compactions_with_status(CompactionStatus::Scheduled)
