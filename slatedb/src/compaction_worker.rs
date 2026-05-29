@@ -77,7 +77,18 @@ impl CompactionWorker {
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
     /// executes them, and writes `Compacted` back to `.compactions`.
     pub async fn run(&self) -> Result<(), crate::Error> {
-        let (handler, rx) = self.build_handler();
+        let (handler, rx) = build_handler(
+            self.manifest_store.clone(),
+            self.compactions_store.clone(),
+            self.table_store.clone(),
+            self.options.clone(),
+            self.worker_runtime.clone(),
+            self.rand.clone(),
+            self.stats.clone(),
+            self.system_clock.clone(),
+            self.merge_operator.clone(),
+            self.compaction_filter_supplier.clone(),
+        );
         self.task_executor
             .add_handler(
                 COMPACTION_WORKER_TASK_NAME.to_string(),
@@ -100,55 +111,6 @@ impl CompactionWorker {
             .shutdown_task(COMPACTION_WORKER_TASK_NAME)
             .await
             .map_err(|e| e.into())
-    }
-
-    /// Builds the worker's [`CompactionWorkerHandler`] and the receiver that
-    /// the handler reads completion messages from. Shared between the
-    /// standalone `run()` path and the embedded-worker path in `Compactor::run`.
-    pub(crate) fn build_handler(
-        &self,
-    ) -> (
-        CompactionWorkerHandler,
-        async_channel::Receiver<CompactorMessage>,
-    ) {
-        let (tx, rx) = async_channel::unbounded();
-        let executor_compactor_options = Arc::new(CompactorOptions {
-            max_sst_size: self.options.max_sst_size,
-            max_fetch_tasks: self.options.max_fetch_tasks,
-            ..CompactorOptions::default()
-        });
-        let executor = Arc::new(TokioCompactionExecutor::new(
-            TokioCompactionExecutorOptions {
-                handle: self.worker_runtime.clone(),
-                options: executor_compactor_options,
-                worker_tx: tx,
-                table_store: self.table_store.clone(),
-                rand: self.rand.clone(),
-                stats: self.stats.clone(),
-                clock: self.system_clock.clone(),
-                manifest_store: self.manifest_store.clone(),
-                merge_operator: self.merge_operator.clone(),
-                #[cfg(feature = "compaction_filters")]
-                compaction_filter_supplier: self.compaction_filter_supplier.clone(),
-            },
-        ));
-
-        let worker_id = self
-            .rand
-            .rng()
-            .gen_ulid(self.system_clock.as_ref())
-            .to_string();
-        info!("starting compaction worker [worker_id={}]", worker_id);
-
-        let handler = CompactionWorkerHandler::new(
-            worker_id,
-            self.options.clone(),
-            self.compactions_store.clone(),
-            self.manifest_store.clone(),
-            executor,
-            self.system_clock.clone(),
-        );
-        (handler, rx)
     }
 }
 
@@ -631,22 +593,14 @@ impl MessageHandler<CompactorMessage> for CompactionWorkerHandler {
     }
 }
 
-// ---- internal helpers for the embedded-worker path used by `Compactor::run` ----
-
-/// Construct a worker with pre-built stores and stats, used by the
-/// embedded-worker path inside [`crate::compactor::Compactor::run`] to avoid
-/// double-instantiating the manifest / compactions / table stores or building
-/// a second [`MessageHandlerExecutor`]. The worker shares the coordinator's
-/// stats so per-worker metrics are observable through the same recorder.
-// Wired into `Compactor::run` by a later commit; kept here so the worker
-// module compiles standalone on this branch.
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_embedded_worker(
+/// Builds the worker's [`CompactionWorkerHandler`] and the receiver that
+/// the handler reads completion messages from. Shared between the
+/// standalone `run()` path and the embedded-worker path in `Compactor::run`.
+pub(crate) fn build_handler(
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
-    options: CompactionWorkerOptions,
+    options: Arc<CompactionWorkerOptions>,
     worker_runtime: Handle,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
@@ -655,29 +609,44 @@ pub(crate) fn build_embedded_worker(
     #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
         Arc<dyn CompactionFilterSupplier>,
     >,
-) -> CompactionWorker {
-    // The embedded worker shares the coordinator's `MessageHandlerExecutor`,
-    // so the local one constructed here is unused — kept only so the
-    // `CompactionWorker` struct shape is identical to the standalone path.
-    let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-    let task_executor = Arc::new(MessageHandlerExecutor::new(
-        closed_result,
-        system_clock.clone(),
+) -> (
+    CompactionWorkerHandler,
+    async_channel::Receiver<CompactorMessage>,
+) {
+    let (tx, rx) = async_channel::unbounded();
+    let executor_compactor_options = Arc::new(CompactorOptions {
+        max_sst_size: options.max_sst_size,
+        max_fetch_tasks: options.max_fetch_tasks,
+        ..CompactorOptions::default()
+    });
+    let executor = Arc::new(TokioCompactionExecutor::new(
+        TokioCompactionExecutorOptions {
+            handle: worker_runtime.clone(),
+            options: executor_compactor_options,
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: rand.clone(),
+            stats: stats.clone(),
+            clock: system_clock.clone(),
+            manifest_store: manifest_store.clone(),
+            merge_operator: merge_operator.clone(),
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: compaction_filter_supplier.clone(),
+        },
     ));
-    CompactionWorker {
-        manifest_store,
-        compactions_store,
-        table_store,
-        options: Arc::new(options),
-        task_executor,
-        worker_runtime,
-        rand,
-        stats,
-        system_clock,
-        merge_operator,
-        #[cfg(feature = "compaction_filters")]
-        compaction_filter_supplier,
-    }
+
+    let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
+    info!("starting compaction worker [worker_id={}]", worker_id);
+
+    let handler = CompactionWorkerHandler::new(
+        worker_id,
+        options.clone(),
+        compactions_store.clone(),
+        manifest_store.clone(),
+        executor,
+        system_clock.clone(),
+    );
+    (handler, rx)
 }
 
 #[cfg(test)]
