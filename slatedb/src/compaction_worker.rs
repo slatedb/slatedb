@@ -314,18 +314,37 @@ impl CompactionWorkerHandler {
             return Ok(());
         }
 
+        let manifest = self.manifest_store.read_latest_manifest().await?;
+        let db_state = manifest.core();
+
         // CAS loop: read latest, identify candidates, attempt write.
         let claimed = loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let mut dirty_compactions = stored.prepare_dirty()?;
-            let to_claim: Vec<Compaction> = dirty_compactions
+
+            // Build the job args while selecting candidates so we only ever
+            // claim compactions we can actually run. Invalid specs (drain
+            // specs, or sources missing from the manifest) are skipped here
+            // rather than claimed and then released.
+            let mut to_claim: Vec<(Compaction, StartCompactionJobArgs)> = Vec::new();
+            for c in dirty_compactions
                 .value
                 .iter_with_status(CompactionStatus::Submitted)
                 .filter(|c| c.worker().is_none())
-                .take(capacity)
-                .cloned()
-                .collect();
+            {
+                if to_claim.len() >= capacity {
+                    break;
+                }
+                match Self::build_job_args(c, db_state, &self.worker_id) {
+                    Ok(args) => to_claim.push((c.clone(), args)),
+                    Err(e) => warn!(
+                        "skipping unrunnable compaction [id={}, error={:?}]",
+                        c.id(),
+                        e
+                    ),
+                }
+            }
             if to_claim.is_empty() {
                 return Ok(());
             }
@@ -333,7 +352,7 @@ impl CompactionWorkerHandler {
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
 
-            for c in &to_claim {
+            for (c, _) in &to_claim {
                 dirty_compactions.value.insert(
                     c.clone()
                         .with_status(CompactionStatus::Running)
@@ -350,28 +369,14 @@ impl CompactionWorkerHandler {
             }
         };
 
-        let manifest = self.manifest_store.read_latest_manifest().await?;
-        let db_state = manifest.core();
-        for compaction in claimed {
-            match Self::build_job_args(&compaction, db_state, &self.worker_id) {
-                Ok(args) => {
-                    info!(
-                        "claimed compaction [worker_id={}, id={}]",
-                        self.worker_id,
-                        compaction.id()
-                    );
-                    self.active_jobs.insert(compaction.id());
-                    Self::dispatch_to_executor(&self.executor, args).await?;
-                }
-                Err(e) => {
-                    warn!(
-                        "invalid compaction; releasing claim [id={}, error={:?}]",
-                        compaction.id(),
-                        e
-                    );
-                    self.release_claim(compaction.id()).await?;
-                }
-            }
+        for (compaction, args) in claimed {
+            info!(
+                "claimed compaction [worker_id={}, id={}]",
+                self.worker_id,
+                compaction.id()
+            );
+            self.active_jobs.insert(compaction.id());
+            Self::dispatch_to_executor(&self.executor, args).await?;
         }
         Ok(())
     }
@@ -940,11 +945,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_worker_invalid_spec_releases_claim() {
+    async fn test_worker_skips_unrunnable_spec() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
         // Source view ID that does not exist in the manifest — build_job_args
-        // should reject this and the claim should be released.
+        // should reject this so the worker never claims it, leaving it
+        // Submitted for the coordinator to reschedule.
         let ghost = Ulid::from_parts(u64::MAX, 0);
         fx.seed_submitted_compaction(id, vec![SourceId::SstView(ghost)])
             .await;
