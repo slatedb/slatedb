@@ -155,5 +155,10 @@ name = "block_iterator_v2"
 harness = false
 required-features = ["bench-internal"]
 
+[[bench]]
+name = "write_batch"
+harness = false
+required-features = ["bench-internal"]
+
 [lints]
 workspace = true

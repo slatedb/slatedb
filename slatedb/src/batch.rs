@@ -407,6 +407,33 @@ impl WriteBatch {
     }
 }
 
+#[cfg(feature = "bench-internal")]
+pub mod benches {
+    use super::WriteBatch;
+    use crate::{Error, MergeOperator, PrefixExtractor, RowEntry};
+    use bytes::Bytes;
+    use std::collections::{BTreeSet, HashSet};
+    use std::sync::Arc;
+
+    pub fn keys(batch: &WriteBatch) -> HashSet<Bytes> {
+        batch.keys()
+    }
+
+    pub async fn extract_entries(
+        batch: &WriteBatch,
+        seq: u64,
+        now: i64,
+        default_ttl: Option<u64>,
+        merger: Option<Arc<dyn MergeOperator + Send + Sync>>,
+        extractor: Option<&dyn PrefixExtractor>,
+    ) -> Result<(Vec<RowEntry>, BTreeSet<Bytes>, u64), Error> {
+        batch
+            .extract_entries(seq, now, default_ttl, merger, extractor)
+            .await
+            .map_err(Into::into)
+    }
+}
+
 /// Iterator over `WriteBatch` entries.
 pub(crate) struct WriteBatchIterator {
     iter: Peekable<Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync>>,
