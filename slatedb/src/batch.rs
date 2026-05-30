@@ -415,15 +415,17 @@ impl WriteBatch {
     pub(crate) fn estimated_size(&self) -> usize {
         let mut size = 0;
         for entry in self.ops.iter() {
-            size += entry.0.user_key.len() + entry.1.value_size();
-            // Add size for sequence number
-            size += std::mem::size_of::<u64>();
-
-            // Add size for timestamps. Conservatively assume they are present
-            // for create_ts in RowEntry
-            size += std::mem::size_of::<i64>();
-            // for expire_ts in RowEntry
-            size += std::mem::size_of::<i64>();
+            // The raw byte lengths of key and value data.
+            size += entry.0.user_key.len();
+            let value_size = entry.1.value_size();
+            if value_size > 0 {
+                size += value_size;
+                // The two `Bytes` structs (key + value) stored in the RowEntry.
+                size += std::mem::size_of::<Bytes>() * 2;
+            } else {
+                // The `Bytes` struct (key) stored in the RowEntry.
+                size += std::mem::size_of::<Bytes>();
+            }
         }
         size
     }

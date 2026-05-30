@@ -431,6 +431,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::byte_buffer_manager::ByteBufferManager;
     use crate::merge_operator::{
         MergeOperator, MergeOperatorError, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
@@ -519,7 +520,7 @@ mod tests {
             ));
 
             Self {
-                memtable: Arc::new(KVTable::new()),
+                memtable: Arc::new(KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX))),
                 imm_memtable: VecDeque::new(),
                 core: ManifestCore::new(),
                 table_store,

@@ -97,6 +97,7 @@ mod block_iterator_v2;
 #[cfg(feature = "bench-internal")]
 pub use block_iterator_v2::benches as block_iterator_v2_benches;
 mod byte_buffer_manager;
+pub use byte_buffer_manager::ByteBufferManager;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;

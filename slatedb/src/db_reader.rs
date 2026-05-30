@@ -1,3 +1,4 @@
+use crate::byte_buffer_manager::ByteBufferManager;
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -82,7 +83,8 @@ struct CheckpointState {
     last_remote_persisted_seq: u64,
 }
 
-static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
+static EMPTY_TABLE: LazyLock<Arc<KVTable>> =
+    LazyLock::new(|| Arc::new(KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX))));
 
 impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
@@ -497,6 +499,7 @@ impl DbReaderInner {
             core,
             replay_options,
             Arc::clone(&table_store),
+            ByteBufferManager::new(usize::MAX, usize::MAX),
         )
         .await?;
 

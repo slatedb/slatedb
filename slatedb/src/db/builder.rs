@@ -150,6 +150,7 @@ use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
+use crate::mem_table::KVTable;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::object_stores::ObjectStoreType;
@@ -234,6 +235,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets a custom [`WriteBufferManager`] for controlling the memory
     /// budget of in-flight writes. If not set, a default manager is
     /// created with a budget equal to `max_unflushed_bytes`.
+    ///
+    /// The capacity must be at least [`KVTable::MIN_WRITE_BUFFER_SIZE`](crate::mem_table::KVTable::MIN_WRITE_BUFFER_SIZE)
+    /// or [`build`](Self::build) will return an error.
     pub fn with_write_buffer_manager(mut self, write_buffer_manager: ByteBufferManager) -> Self {
         self.write_buffer_manager = Some(write_buffer_manager);
         self
@@ -598,15 +602,15 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.settings.max_unflushed_bytes,
             )
         });
-        // if write_buffer_manager.capacity() < self.settings.l0_sst_size_bytes * 2 {
-        //     return Err(crate::Error::invalid(
-        //         format!(
-        //             "invalid configuration: write_buffer_manager capacity ({}) must be at least 2 x l0_sst_size_bytes ({})",
-        //             write_buffer_manager.capacity(),
-        //             self.settings.l0_sst_size_bytes * 2,
-        //         )
-        //     ));
-        // }
+        if write_buffer_manager.capacity() < KVTable::MIN_WRITE_BUFFER_SIZE {
+            return Err(crate::Error::invalid(
+                format!(
+                    "invalid configuration: write_buffer_manager capacity ({}) must be at least KVTable::MIN_WRITE_BUFFER_SIZE ({})",
+                    write_buffer_manager.capacity(),
+                    KVTable::MIN_WRITE_BUFFER_SIZE,
+                )
+            ));
+        }
         let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
         let inner = Arc::new(
             DbInner::new(

@@ -1,3 +1,4 @@
+use crate::byte_buffer_manager::ByteBufferManager;
 use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
@@ -622,6 +623,7 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
+    buffer_manager: ByteBufferManager,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -659,13 +661,15 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
+    pub(crate) fn new(manifest: DirtyObject<Manifest>, buffer_manager: ByteBufferManager) -> Self {
+        let memtable = WritableKVTable::with_buffer_manager(buffer_manager.clone());
         Self {
-            memtable: WritableKVTable::new(),
+            memtable,
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
+            buffer_manager,
         }
     }
 
@@ -685,7 +689,8 @@ impl DbState {
     }
 
     pub(crate) fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) {
-        let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
+        let new_memtable = WritableKVTable::with_buffer_manager(self.buffer_manager.clone());
+        let old_memtable = std::mem::replace(&mut self.memtable, new_memtable);
         self.modify(|modifier| {
             modifier
                 .state
@@ -776,6 +781,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 
 #[cfg(test)]
 mod tests {
+    use crate::byte_buffer_manager::ByteBufferManager;
     use crate::bytes_range::BytesRange;
     use crate::checkpoint::Checkpoint;
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -799,7 +805,10 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(
+            new_dirty_manifest(),
+            ByteBufferManager::new(usize::MAX, usize::MAX),
+        );
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.value.core = db_state.state.core().clone();
@@ -826,7 +835,10 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(
+            new_dirty_manifest(),
+            ByteBufferManager::new(usize::MAX, usize::MAX),
+        );
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
@@ -864,7 +876,10 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(
+            new_dirty_manifest(),
+            ByteBufferManager::new(usize::MAX, usize::MAX),
+        );
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().tree.l0.clone();
 
@@ -897,7 +912,10 @@ mod tests {
         let v1 = view(1);
 
         // Local writer has a segment extractor configured and a populated segment.
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(
+            new_dirty_manifest(),
+            ByteBufferManager::new(usize::MAX, usize::MAX),
+        );
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.segment_extractor_name = Some("hour-bucket".to_string());
@@ -951,7 +969,10 @@ mod tests {
         let v2 = view(2); // backfill, written after compactor's snapshot.
 
         // Local writer: v1 (already absorbed by compactor) and v2 (backfill).
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(
+            new_dirty_manifest(),
+            ByteBufferManager::new(usize::MAX, usize::MAX),
+        );
         db_state.modify(|m| {
             let core = &mut m.state.manifest.value.core;
             core.segment_extractor_name = Some("hour".into());
@@ -989,7 +1010,10 @@ mod tests {
 
     #[test]
     fn test_should_keep_local_sequence_tracker_on_merge() {
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(
+            new_dirty_manifest(),
+            ByteBufferManager::new(usize::MAX, usize::MAX),
+        );
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.last_l0_seq = 3;

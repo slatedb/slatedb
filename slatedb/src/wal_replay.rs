@@ -1,3 +1,4 @@
+use crate::byte_buffer_manager::ByteBufferManager;
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::iter::{EmptyIterator, RowEntryIterator};
@@ -86,6 +87,7 @@ pub(crate) struct WalReplayIterator {
     options: WalReplayOptions,
     wal_id_range: Range<u64>,
     table_store: Arc<TableStore>,
+    buffer_manager: ByteBufferManager,
     current_iter: IteratorHolder<WalIdAndIter>,
     next_iters: VecDeque<JoinHandle<Result<Option<WalIdAndIter>, SlateDBError>>>,
     last_tick: i64,
@@ -100,6 +102,7 @@ impl WalReplayIterator {
         db_state: &ManifestCore,
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
+        buffer_manager: ByteBufferManager,
     ) -> Result<Self, SlateDBError> {
         let sst_batch_size = options.sst_batch_size;
         if sst_batch_size < 1 {
@@ -119,6 +122,7 @@ impl WalReplayIterator {
             options,
             wal_id_range,
             table_store: Arc::clone(&table_store),
+            buffer_manager,
             current_iter: IteratorHolder::new(),
             next_iters: VecDeque::new(),
             last_tick,
@@ -225,7 +229,7 @@ impl WalReplayIterator {
             return Ok(None);
         }
 
-        let table = WritableKVTable::new();
+        let table = WritableKVTable::with_buffer_manager(self.buffer_manager.clone());
         let mut last_wal_id = 0;
 
         while !self.current_iter.is_finished() {
@@ -275,6 +279,7 @@ impl WalReplayIterator {
 #[cfg(test)]
 mod tests {
     use super::{WalReplayIterator, WalReplayOptions};
+    use crate::byte_buffer_manager::ByteBufferManager;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
@@ -308,7 +313,14 @@ mod tests {
                 .last_seen_wal_id(db_state.replay_after_wal_id)
                 .await?;
             let wal_id_range = wal_id_start..(wal_id_end + 1);
-            Self::range(wal_id_range, db_state, options, table_store).await
+            Self::range(
+                wal_id_range,
+                db_state,
+                options,
+                table_store,
+                ByteBufferManager::new(usize::MAX, usize::MAX),
+            )
+            .await
         }
     }
 
@@ -446,7 +458,8 @@ mod tests {
         .await
         .unwrap();
 
-        let full_replayed_table = WritableKVTable::new();
+        let full_replayed_table =
+            WritableKVTable::with_buffer_manager(ByteBufferManager::new(usize::MAX, usize::MAX));
         let mut last_wal_id = 0;
         let mut replayed_entry_count = 0;
 

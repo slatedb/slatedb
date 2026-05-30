@@ -302,7 +302,7 @@ impl DbInner {
         let memtable = guard.memtable();
         memtable.record_touched_segments(touched_segments);
         entries.into_iter().for_each(|entry| memtable.put(entry));
-        write_buffer_permit.map(|permit| memtable.add_write_permit(permit));
+        write_buffer_permit.map(|permit| memtable.add_write_permit(&permit));
         memtable.table().durable_watcher()
     }
 

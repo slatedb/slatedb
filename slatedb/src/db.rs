@@ -155,7 +155,7 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let db_state = DbState::new(manifest);
+        let db_state = DbState::new(manifest, write_buffer_manager.clone());
         let state = Arc::new(RwLock::new(db_state));
 
         let db_stats = DbStats::new(&recorder);
@@ -579,6 +579,7 @@ impl DbInner {
             &db_state,
             replay_options,
             Arc::clone(&self.table_store),
+            self.write_buffer_manager.clone(),
         )
         .await?;
 
@@ -641,7 +642,7 @@ impl DbInner {
             let permit = self
                 .write_buffer_manager
                 .force_acquire(metadata.entries_size_in_bytes);
-            replayed_table.table.add_write_permit(Arc::new(permit));
+            replayed_table.table.add_write_permit(&permit);
             self.replay_memtable(replayed_table)?;
             self.maybe_apply_backpressure().await?;
         }
@@ -5126,7 +5127,7 @@ mod tests {
             .with_settings(options)
             .with_fp_registry(fp_registry.clone())
             .with_metrics_recorder(metrics_recorder.clone())
-            .with_write_buffer_manager(ByteBufferManager::new(1000, 1000))
+            .with_write_buffer_manager(ByteBufferManager::new(1024 * 1024, 1024 * 1024))
             .build()
             .await
             .unwrap();
@@ -5286,15 +5287,16 @@ mod tests {
         // Large enough that the unflushed-bytes backpressure path is never hit.
         options.max_unflushed_bytes = 1024 * 1024;
 
-        // high_watermark = 1024: a small put (~50-100 bytes) won't trigger
-        // at_capacity(), but a subsequent force_acquire will.
+        // high_watermark set above the per-table fixed overhead (SEQ_TRACKER ~128KiB
+        // + SKIPMAP_ENTRY overhead per entry). A small put won't trigger at_capacity(),
+        // but a subsequent force_acquire will push past it.
         let db = Db::builder(
             "/tmp/test_write_buffer_backpressure_waiter_exits_when_db_is_fenced",
             object_store,
         )
         .with_settings(options)
         .with_fp_registry(fp_registry.clone())
-        .with_write_buffer_manager(ByteBufferManager::new(1024 * 1024, 1024))
+        .with_write_buffer_manager(ByteBufferManager::new(1024 * 1024, 512 * 1024))
         .build()
         .await
         .unwrap();
@@ -5317,7 +5319,7 @@ mod tests {
 
         // Manually push the write buffer above the high_watermark so that
         // at_capacity() returns true. Hold the permit to keep it allocated.
-        let _pressure_permit = db.inner.write_buffer_manager.force_acquire(2048);
+        let _pressure_permit = db.inner.write_buffer_manager.force_acquire(512 * 1024);
 
         // Set up a deterministic notification for when backpressure is applied.
         let backpressure_notify = Arc::new(tokio::sync::Notify::new());
@@ -7239,9 +7241,14 @@ mod tests {
 
         let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
         let object_store = Arc::new(InMemory::new());
+        // The ByteBufferManager capacity (max_unflushed_bytes) must exceed
+        // KVTable::MIN_WRITE_BUFFER_SIZE or the first put will deadlock on
+        // backpressure.
+        use crate::mem_table::KVTable;
+        let min_memtable_overhead = KVTable::MIN_WRITE_BUFFER_SIZE + 64; // batch estimated size headroom
         let settings = Settings {
-            l0_sst_size_bytes: 4 * 1024,   // Smaller to trigger flush more easily
-            max_unflushed_bytes: 2 * 1024, // Smaller to trigger flush more easily
+            l0_sst_size_bytes: 4 * 1024,
+            max_unflushed_bytes: min_memtable_overhead + 1,
             min_filter_keys: 0,
             flush_interval: Some(Duration::from_millis(100)),
             ..Default::default()
@@ -8192,12 +8199,22 @@ mod tests {
         options.max_unflushed_bytes = MAX_UNFLUSHED_BYTES;
         options.l0_max_ssts = 16;
 
+        // The ByteBufferManager capacity must exceed KVTable::MIN_WRITE_BUFFER_SIZE
+        // or the first put deadlocks on backpressure. We keep max_unflushed_bytes
+        // small so the *unflushed-data* backpressure path still triggers when
+        // the 16KB frozen memtable exceeds it.
+        use crate::mem_table::KVTable;
+        let min_buffer_capacity = KVTable::MIN_WRITE_BUFFER_SIZE + LARGE_VALUE_BYTES * 2; // headroom for data
         let db = Db::builder(
             "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
             object_store,
         )
         .with_seed(REPRO_SEED)
         .with_settings(options)
+        .with_write_buffer_manager(ByteBufferManager::new(
+            min_buffer_capacity,
+            min_buffer_capacity,
+        ))
         .build()
         .await
         .unwrap();
