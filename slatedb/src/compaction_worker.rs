@@ -281,6 +281,8 @@ impl CompactionWorkerHandler {
         }
     }
 
+    const EXPECT_LOADED: &str = "ensure_loaded should have set stored compactions";
+
     /// Loads `.compactions` on first use; subsequent calls reuse the cached
     /// handle. Returns `Ok(false)` if the file does not yet exist (worker
     /// started before the coordinator).
@@ -306,9 +308,6 @@ impl CompactionWorkerHandler {
     /// Scans `.compactions` for `Submitted` entries without a worker, claims up
     /// to remaining capacity via CAS, and dispatches each to the executor.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
-        if !self.ensure_loaded().await? {
-            return Ok(());
-        }
         let capacity = self.capacity();
         if capacity == 0 {
             return Ok(());
@@ -316,10 +315,7 @@ impl CompactionWorkerHandler {
 
         // CAS loop: read latest, identify candidates, attempt write.
         let claimed = loop {
-            let stored = self
-                .stored
-                .as_mut()
-                .expect("ensure_loaded set stored to Some");
+            let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let to_claim: Vec<Compaction> = stored
                 .compactions()
@@ -469,11 +465,8 @@ impl CompactionWorkerHandler {
         compaction_id: Ulid,
         output_ssts: Vec<crate::db_state::SsTableHandle>,
     ) -> Result<(), SlateDBError> {
-        if !self.ensure_loaded().await? {
-            return Ok(());
-        }
         loop {
-            let stored = self.stored.as_mut().expect("ensure_loaded set stored");
+            let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let Some(existing) = stored.compactions().get(&compaction_id).cloned() else {
                 info!(
@@ -507,16 +500,26 @@ impl CompactionWorkerHandler {
     /// Returns a claim to `Submitted` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
-        if !self.ensure_loaded().await? {
-            return Ok(());
-        }
+        let worker_id = self.worker_id.as_str();
         loop {
-            let stored = self.stored.as_mut().expect("ensure_loaded set stored");
+            let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let Some(existing) = stored.compactions().get(&compaction_id).cloned() else {
+                info!(
+                    "compaction no longer exists, no claim to release [worker_id]={} [compaction_id]={}",
+                    worker_id,
+                    compaction_id
+                );
                 return Ok(());
             };
-            if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
+            let compaction_owner = existing.worker().map(|w| w.worker_id.as_str());
+            if compaction_owner != Some(worker_id) {
+                info!(
+                    "compaction is not owned by this worker, no claim to release [worker_id]={} [compaction_id]={} [owner]={:?}",
+                    worker_id,
+                    compaction_id,
+                    compaction_owner
+                );
                 return Ok(());
             }
             let updated = existing
@@ -563,6 +566,9 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
     }
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
+        if !self.ensure_loaded().await? {
+            return Ok(());
+        }
         match message {
             WorkerMessage::PollCompactions => self.poll_and_claim().await?,
             WorkerMessage::CompactionJobFinished { id, result } => {
@@ -755,7 +761,7 @@ mod tests {
                 .unwrap();
 
             let executor = Arc::new(NoopExecutor::new());
-            let handler = CompactionWorkerHandler::new(
+            let mut handler = CompactionWorkerHandler::new(
                 worker_id.to_string(),
                 Arc::new(CompactionWorkerOptions::default()),
                 compactions_store.clone(),
@@ -763,6 +769,13 @@ mod tests {
                 executor.clone(),
                 clock,
             );
+            // `handle()` lazily loads `.compactions` on the first message; the
+            // tests below drive the child fns (poll_and_claim, handle_finished,
+            // cleanup) directly, so load it here to match that entry path.
+            handler
+                .ensure_loaded()
+                .await
+                .expect("compactions file seeded above");
 
             Self {
                 compactions_store,
