@@ -12,8 +12,7 @@ use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
     Attribute, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload,
-    PutResult, RenameOptions,
+    ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 
 use crate::rand::DbRand;
@@ -375,22 +374,32 @@ impl ObjectStore for RetryingObjectStore {
         let inner = Arc::clone(&self.inner);
         let sleeper = self.sleeper();
         let retry_builder = Self::retry_builder();
-        locations
-            .then(move |loc| {
-                let inner = Arc::clone(&inner);
-                let sleeper = sleeper.clone();
-                async move {
-                    let loc = loc?;
-                    (|| async { inner.delete(&loc).await })
-                        .retry(retry_builder)
-                        .sleep(sleeper)
-                        .notify(Self::notify)
-                        .when(Self::should_retry)
-                        .await?;
-                    Ok(loc)
+
+        stream::once(async move {
+            let paths: Vec<Path> = locations.try_collect().await?;
+
+            (|| async {
+                let locs = stream::iter(paths.clone().into_iter().map(Ok)).boxed();
+                let results: Vec<object_store::Result<Path>> =
+                    inner.delete_stream(locs).collect().await;
+                let mut res = Vec::with_capacity(results.len());
+                for r in results {
+                    match r {
+                        Err(e) if Self::should_retry(&e) => return Err(e),
+                        other => res.push(other),
+                    }
                 }
+                Ok::<Vec<object_store::Result<Path>>, object_store::Error>(res)
             })
-            .boxed()
+            .retry(retry_builder)
+            .sleep(sleeper)
+            .notify(Self::notify)
+            .when(Self::should_retry)
+            .await
+        })
+        .map_ok(stream::iter)
+        .try_flatten()
+        .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -512,7 +521,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::test_utils::FlakyObjectStore;
     use bytes::Bytes;
-    use futures::TryStreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
@@ -943,5 +952,55 @@ mod tests {
             .attributes
             .get(&Attribute::Metadata(Cow::Borrowed(super::PUT_ID_ATTRIBUTE)))
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_delete_stream_batch_level_retry() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let paths = vec![Path::from("/d/a"), Path::from("/d/b"), Path::from("/d/c")];
+        for p in &paths {
+            inner
+                .put(p, PutPayload::from_bytes(Bytes::from_static(b"x")))
+                .await
+                .unwrap();
+        }
+        let count = paths.len();
+
+        // Fail the first 2 delete batches with a retryable error, then succeed.
+        let flaky = Arc::new(FlakyObjectStore::new(inner.clone(), 0).with_delete_failures(2));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+
+        let input =
+            futures::stream::iter(paths.into_iter().map(Ok::<Path, object_store::Error>)).boxed();
+        let results: Vec<_> = retrying.delete_stream(input).collect().await;
+
+        // Every path ultimately deletes successfully.
+        assert_eq!(results.len(), count);
+        assert!(results.iter().all(|r| r.is_ok()));
+        // 2 failed batches + 1 successful batch — the retry is at batch granularity.
+        assert_eq!(flaky.delete_stream_attempts(), 3);
+        // The objects are actually gone from the backing store.
+        assert_eq!(inner.list(None).count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_stream_not_found_is_not_retried() {
+        // Azure/GCP return NotFound (not Ok) when deleting an already-gone object.
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_delete_not_found());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+
+        let paths = vec![Path::from("/d/a"), Path::from("/d/b"), Path::from("/d/c")];
+        let count = paths.len();
+        let input =
+            futures::stream::iter(paths.into_iter().map(Ok::<Path, object_store::Error>)).boxed();
+        let results: Vec<_> = retrying.delete_stream(input).collect().await;
+
+        assert_eq!(results.len(), count);
+        assert!(results
+            .iter()
+            .all(|r| matches!(r, Err(object_store::Error::NotFound { .. }))));
+        // and NotFound is on the should_retry exclusion list → exactly one attempt.
+        assert_eq!(flaky.delete_stream_attempts(), 1);
     }
 }

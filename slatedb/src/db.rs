@@ -6454,7 +6454,7 @@ mod tests {
         );
 
         probe_table_store
-            .delete_sst(&SsTableId::Wal(1))
+            .delete_ssts(&[SsTableId::Wal(1)])
             .await
             .unwrap();
         gated_store.head_gate.release();
@@ -6520,7 +6520,7 @@ mod tests {
             .await;
 
         probe_table_store
-            .delete_sst(&SsTableId::Wal(1))
+            .delete_ssts(&[SsTableId::Wal(1)])
             .await
             .unwrap();
         gated_store.head_gate.release();

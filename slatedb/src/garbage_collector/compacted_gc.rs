@@ -224,16 +224,25 @@ impl GcTask for CompactedGcTask {
                 sst_ids_to_delete.len()
             );
         }
-        for id in sst_ids_to_delete {
-            if self.compacted_options.dry_run {
+        if self.compacted_options.dry_run {
+            for id in &sst_ids_to_delete {
                 log::debug!("dry run: would delete SST but skipped [id={:?}]", id);
-                continue;
             }
-            log::info!("deleting SST [id={:?}]", id);
-            if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("error deleting SST [id={:?}, error={}]", id, e);
-            } else {
-                self.stats.gc_compacted_count.increment(1);
+        } else {
+            log::info!(
+                "deleting compacted SSTs [count={}]",
+                sst_ids_to_delete.len()
+            );
+            match self.table_store.delete_ssts(&sst_ids_to_delete).await {
+                Ok(()) => self
+                    .stats
+                    .gc_compacted_count
+                    .increment(sst_ids_to_delete.len() as u64),
+                Err(e) => error!(
+                    "error deleting compacted SSTs [count={}, error={}]",
+                    sst_ids_to_delete.len(),
+                    e
+                ),
             }
         }
 

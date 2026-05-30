@@ -135,22 +135,29 @@ impl GcTask for WalGcTask {
                 );
             }
         }
-        for id in sst_ids_to_delete {
-            if self.wal_options.dry_run {
+        if self.wal_options.dry_run {
+            for id in &sst_ids_to_delete {
                 log::debug!(
                     "dry run: would delete {} but skipped [id={:?}]",
                     self.resource(),
                     id
                 );
-                continue;
             }
-            if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("error deleting WAL SST [id={:?}, error={}]", id, e);
-            } else {
-                match self.mode {
-                    WalGcMode::Regular => self.stats.gc_wal_count.increment(1),
-                    WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(1),
+        } else {
+            match self.table_store.delete_ssts(&sst_ids_to_delete).await {
+                Ok(()) => {
+                    let n = sst_ids_to_delete.len() as u64;
+                    match self.mode {
+                        WalGcMode::Regular => self.stats.gc_wal_count.increment(n),
+                        WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(n),
+                    }
                 }
+                Err(e) => error!(
+                    "error deleting {} [count={}, error={}]",
+                    self.resource(),
+                    sst_ids_to_delete.len(),
+                    e
+                ),
             }
         }
 

@@ -657,9 +657,9 @@ mod tests {
         db.evict_cached_sst(sst_id).await.expect("evict");
         db.inner
             .table_store
-            .delete_sst(&sst_id)
+            .delete_ssts(&[sst_id])
             .await
-            .expect("delete_sst");
+            .expect("delete_ssts");
 
         // when: we warm a target whose underlying IO will fail
         let result = db

@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
+use std::future::ready;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
-use futures::{future::join_all, StreamExt};
+use futures::{future::join_all, StreamExt, TryStreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
@@ -426,12 +427,38 @@ impl TableStore {
         decoded
     }
 
-    /// Delete an SSTable from the object store.
-    pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
-        let object_store = self.object_stores.store_for(id);
-        let path = self.path(id);
-        debug!("deleting SST [path={}]", path);
-        object_store.delete(&path).await.map_err(SlateDBError::from)
+    /// Delete a batch of SSTables from the object store in a single
+    /// `delete_stream` call.
+    ///
+    /// All `ids` in one call must be of the same kind (all
+    /// [`SsTableId::Compacted`] or all [`SsTableId::Wal`]) so they route to the
+    /// same store; the GC `collect` functions that call this always satisfy
+    /// that. Forwarding the whole batch lets backends that support bulk delete
+    /// (S3, Azure) collapse thousands of deletes into a handful of API calls.
+    ///
+    /// `NotFound` is treated as success — the object is already gone, so the
+    /// deletion goal is met (idempotent across S3/Azure/GCP, where deleting a
+    /// missing object yields `NotFound` rather than `Ok`).
+    pub(crate) async fn delete_ssts(&self, ids: &[SsTableId]) -> Result<(), SlateDBError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // ids in a single call are all the same kind, so they route to one store.
+        let object_store = self.object_stores.store_for(&ids[0]);
+        let paths: Vec<Path> = ids.iter().map(|id| self.path(id)).collect();
+        debug!("deleting {} SSTs", paths.len());
+        let path_stream =
+            futures::stream::iter(paths.into_iter().map(Ok::<Path, object_store::Error>)).boxed();
+        object_store
+            .delete_stream(path_stream)
+            // NotFound = object already gone = deletion goal met (idempotent across
+            // S3/Azure/GCP) -> filter it out so it doesn't short-circuit the stream.
+            .filter(|r| ready(!matches!(r, Err(object_store::Error::NotFound { .. }))))
+            // delete_stream yields Ok(path) per deleted location; we don't need the
+            // receipts, only whether any delete failed, so drop them here.
+            .try_for_each(|_path| ready(Ok(())))
+            .await?;
+        Ok(())
     }
 
     /// Reads metadata for a specific SST object (WAL or compacted).
@@ -2235,7 +2262,7 @@ mod tests {
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        ts.delete_sst(&id1).await.unwrap();
+        ts.delete_ssts(&[id1]).await.unwrap();
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
@@ -2289,7 +2316,7 @@ mod tests {
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        ts.delete_sst(&id1).await.unwrap();
+        ts.delete_ssts(&[id1]).await.unwrap();
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
