@@ -148,8 +148,8 @@ impl ByteBufferPermit {
             match other.reserved_bytes.compare_exchange_weak(
                 other_bytes,
                 0,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                Ordering::Release,
+                Ordering::Acquire,
             ) {
                 Ok(_) => {
                     break;
@@ -178,6 +178,7 @@ impl Drop for ByteBufferPermit {
 struct ByteBudgetSemaphore {
     notify: Notify,
     allocated_bytes: AtomicUsize,
+    waiter_cnt: AtomicUsize,
     capacity: usize,
 }
 
@@ -187,6 +188,7 @@ impl ByteBudgetSemaphore {
         Self {
             notify: Notify::new(),
             allocated_bytes: AtomicUsize::new(0),
+            waiter_cnt: AtomicUsize::new(0),
             capacity,
         }
     }
@@ -194,18 +196,19 @@ impl ByteBudgetSemaphore {
     /// Reserves `num_bytes`, blocking until allocated bytes drop below
     /// capacity. Uses a CAS loop with a `Notify` to avoid spinning.
     async fn acquire(&self, num_bytes: usize) {
+        let _ = self.waiter_cnt.fetch_add(1, Ordering::Release);
         let mut current = self.allocated_bytes.load(Ordering::Relaxed);
         let notify_fut = self.notify.notified();
         tokio::pin!(notify_fut);
-        notify_fut.as_mut().enable();
 
         loop {
+            notify_fut.as_mut().enable();
             if current < self.capacity {
                 match self.allocated_bytes.compare_exchange_weak(
                     current,
                     current + num_bytes,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
+                    Ordering::Release,
+                    Ordering::Acquire,
                 ) {
                     Ok(_) => {
                         break;
@@ -217,21 +220,22 @@ impl ByteBudgetSemaphore {
             } else {
                 notify_fut.as_mut().await;
                 notify_fut.set(self.notify.notified());
-                current = self.allocated_bytes.load(Ordering::Relaxed);
+                current = self.allocated_bytes.load(Ordering::Acquire);
             }
         }
+        let _ = self.waiter_cnt.fetch_sub(1, Ordering::Release);
     }
 
     /// Unconditionally adds `num_bytes` to the allocated count without
     /// waiting. This can push `allocated_bytes` above `capacity`.
     fn force_acquire(&self, num_bytes: usize) {
-        self.allocated_bytes.fetch_add(num_bytes, Ordering::Relaxed);
+        self.allocated_bytes.fetch_add(num_bytes, Ordering::Release);
     }
 
     /// Attempts to reserve `num_bytes` without blocking. Returns `true` if
     /// the reservation succeeded, `false` if the budget is exhausted.
     fn try_acquire(&self, num_bytes: usize) -> bool {
-        let mut current = self.allocated_bytes.load(Ordering::Relaxed);
+        let mut current = self.allocated_bytes.load(Ordering::Acquire);
         loop {
             if current >= self.capacity {
                 return false;
@@ -239,8 +243,8 @@ impl ByteBudgetSemaphore {
             match self.allocated_bytes.compare_exchange_weak(
                 current,
                 current + num_bytes,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                Ordering::Release,
+                Ordering::Acquire,
             ) {
                 Ok(_) => return true,
                 Err(cur) => current = cur,
@@ -255,36 +259,23 @@ impl ByteBudgetSemaphore {
     ///
     /// Panics if `num_bytes` exceeds the currently allocated count.
     fn release(&self, num_bytes: usize) {
-        let mut current = self.allocated_bytes.load(Ordering::Relaxed);
-        loop {
-            assert!(
-                current >= num_bytes,
-                "cannot release more bytes than were reserved"
-            );
-            match self.allocated_bytes.compare_exchange_weak(
-                current,
-                current - num_bytes,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    break;
-                }
-                Err(cur) => {
-                    current = cur;
-                }
-            }
-        }
+        let prev = self.allocated_bytes.fetch_sub(num_bytes, Ordering::AcqRel);
+        assert!(
+            prev >= num_bytes,
+            "cannot release more bytes than were reserved"
+        );
 
-        if (current - num_bytes) < self.capacity {
-            self.notify.notify_waiters();
+        if self.waiter_cnt.load(Ordering::Acquire) > 0 {
+            if (prev - num_bytes) < self.capacity {
+                self.notify.notify_waiters();
+            }
         }
     }
 
     /// Returns the number of unreserved bytes (capacity minus allocated),
     /// clamped to zero when over-allocated via `force_acquire`.
     fn available(&self) -> usize {
-        let current = self.allocated_bytes.load(Ordering::Relaxed);
+        let current = self.allocated_bytes.load(Ordering::Acquire);
         if current < self.capacity {
             self.capacity - current
         } else {
@@ -294,30 +285,32 @@ impl ByteBudgetSemaphore {
 
     /// Returns the total number of bytes currently allocated.
     fn allocated(&self) -> usize {
-        self.allocated_bytes.load(Ordering::Relaxed)
+        self.allocated_bytes.load(Ordering::Acquire)
     }
 
     /// Blocks until allocated bytes drop below `num_bytes`. Does not reserve
     /// any capacity — callers must handle TOCTOU races.
     async fn wait_for_allocated_below(&self, num_bytes: usize) {
-        let mut current = self.allocated_bytes.load(Ordering::Relaxed);
+        let _ = self.waiter_cnt.fetch_add(1, Ordering::Release);
+        let mut current = self.allocated_bytes.load(Ordering::Acquire);
         if current < num_bytes {
             return;
         }
 
         let notify_fut = self.notify.notified();
         tokio::pin!(notify_fut);
-        notify_fut.as_mut().enable();
-
         loop {
+            notify_fut.as_mut().enable();
             if current < num_bytes {
                 break;
             } else {
                 notify_fut.as_mut().await;
                 notify_fut.set(self.notify.notified());
-                current = self.allocated_bytes.load(Ordering::Relaxed);
+                current = self.allocated_bytes.load(Ordering::Acquire);
             }
         }
+
+        let _ = self.waiter_cnt.fetch_sub(1, Ordering::Release);
     }
 }
 
