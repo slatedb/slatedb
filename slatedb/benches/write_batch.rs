@@ -96,12 +96,23 @@ fn make_batch_with_merges() -> WriteBatch {
     batch
 }
 
+fn make_batch_with_repeated_overwrites() -> WriteBatch {
+    let mut batch = WriteBatch::new();
+    let options = put_options();
+    let key = Bytes::from_static(b"repeated-overwrite-key");
+    for index in 0..EXTRACT_ENTRY_COUNT {
+        batch.put_bytes_with_options(key.clone(), value(index), &options);
+    }
+    batch
+}
+
 fn bench_write_batch(c: &mut Criterion) {
     let runtime = Runtime::new().expect("failed to create runtime");
     let put_options = put_options();
     let merge_options = merge_options();
     let batch_without_merges = make_batch_without_merges();
     let batch_with_merges = make_batch_with_merges();
+    let batch_with_repeated_overwrites = make_batch_with_repeated_overwrites();
 
     let mut group = c.benchmark_group("write_batch");
     group.sample_size(1_000);
@@ -117,7 +128,7 @@ fn bench_write_batch(c: &mut Criterion) {
             },
             |(mut batch, key, value)| {
                 batch.put_bytes_with_options(key, value, &put_options);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::SmallInput,
         );
@@ -134,7 +145,7 @@ fn bench_write_batch(c: &mut Criterion) {
             },
             |(mut batch, key, value)| {
                 batch.put_bytes_with_options(key, value, &put_options);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::LargeInput,
         );
@@ -151,7 +162,7 @@ fn bench_write_batch(c: &mut Criterion) {
             },
             |(mut batch, key, value)| {
                 batch.put_bytes_with_options(key, value, &put_options);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::LargeInput,
         );
@@ -168,7 +179,7 @@ fn bench_write_batch(c: &mut Criterion) {
             },
             |(mut batch, key, value)| {
                 batch.merge_with_options(key, value, &merge_options);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::SmallInput,
         );
@@ -185,7 +196,7 @@ fn bench_write_batch(c: &mut Criterion) {
             },
             |(mut batch, key, value)| {
                 batch.merge_with_options(key, value, &merge_options);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::LargeInput,
         );
@@ -202,7 +213,7 @@ fn bench_write_batch(c: &mut Criterion) {
             },
             |(mut batch, key, value)| {
                 batch.merge_with_options(key, value, &merge_options);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::LargeInput,
         );
@@ -213,7 +224,7 @@ fn bench_write_batch(c: &mut Criterion) {
             || (WriteBatch::new(), Bytes::from_static(b"write_batch_key")),
             |(mut batch, key)| {
                 batch.delete(key);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::SmallInput,
         );
@@ -224,7 +235,7 @@ fn bench_write_batch(c: &mut Criterion) {
             || (batch_without_merges.clone(), key(EXTRACT_ENTRY_COUNT + 1)),
             |(mut batch, key)| {
                 batch.delete(key);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::LargeInput,
         );
@@ -235,7 +246,7 @@ fn bench_write_batch(c: &mut Criterion) {
             || (batch_with_merges.clone(), key(0)),
             |(mut batch, key)| {
                 batch.delete(key);
-                black_box(batch);
+                black_box(batch)
             },
             BatchSize::LargeInput,
         );
@@ -257,7 +268,7 @@ fn bench_write_batch(c: &mut Criterion) {
                     write_batch_benches::extract_entries(&batch, 100, 1_000, None, None, None)
                         .await
                         .expect("extract_entries failed"),
-                );
+                )
             },
             BatchSize::SmallInput,
         );
@@ -278,9 +289,33 @@ fn bench_write_batch(c: &mut Criterion) {
                     )
                     .await
                     .expect("extract_entries failed"),
-                );
+                )
             },
             BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("drop/no_merges", |b| {
+        b.iter_batched(
+            || batch_without_merges.clone(),
+            |batch| drop(black_box(batch)),
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.bench_function("drop/with_merges", |b| {
+        b.iter_batched(
+            || batch_with_merges.clone(),
+            |batch| drop(black_box(batch)),
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.bench_function("drop/repeated_overwrites", |b| {
+        b.iter_batched(
+            || batch_with_repeated_overwrites.clone(),
+            |batch| drop(black_box(batch)),
+            BatchSize::LargeInput,
         );
     });
 

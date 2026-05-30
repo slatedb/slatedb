@@ -160,5 +160,9 @@ name = "write_batch"
 harness = false
 required-features = ["bench-internal"]
 
+[[bench]]
+name = "db_transaction"
+harness = false
+
 [lints]
 workspace = true
