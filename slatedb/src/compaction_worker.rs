@@ -131,7 +131,7 @@ impl CompactionWorker {
 pub struct CompactionWorkerBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
-    worker_runtime: Handle,
+    worker_runtime: Option<Handle>,
     options: CompactionWorkerOptions,
     rand: Arc<DbRand>,
     recorder: MetricsRecorderHelper,
@@ -146,7 +146,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         Self {
             path,
             main_object_store,
-            worker_runtime: Handle::current(),
+            worker_runtime: None,
             options: CompactionWorkerOptions::default(),
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
@@ -163,7 +163,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     }
 
     pub fn with_runtime(mut self, runtime: Handle) -> Self {
-        self.worker_runtime = runtime;
+        self.worker_runtime = Some(runtime);
         self
     }
 
@@ -208,6 +208,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             None,
         ));
         let stats = Arc::new(CompactionStats::new(&self.recorder));
+        let worker_runtime = self.worker_runtime.unwrap_or_else(Handle::current);
         let options = Arc::new(self.options);
         let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
         let task_executor = Arc::new(MessageHandlerExecutor::new(
@@ -219,7 +220,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             compactions_store,
             table_store,
             options,
-            self.worker_runtime,
+            worker_runtime,
             self.rand,
             stats,
             self.system_clock,
@@ -317,8 +318,9 @@ impl CompactionWorkerHandler {
         let claimed = loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
-            let to_claim: Vec<Compaction> = stored
-                .compactions()
+            let mut dirty_compactions = stored.prepare_dirty()?;
+            let to_claim: Vec<Compaction> = dirty_compactions
+                .value
                 .iter_with_status(CompactionStatus::Submitted)
                 .filter(|c| c.worker().is_none())
                 .take(capacity)
@@ -331,15 +333,14 @@ impl CompactionWorkerHandler {
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
 
-            let mut dirty = stored.prepare_dirty()?;
             for c in &to_claim {
-                dirty.value.insert(
+                dirty_compactions.value.insert(
                     c.clone()
                         .with_status(CompactionStatus::Running)
                         .with_worker(Some(worker_spec.clone())),
                 );
             }
-            match stored.update(dirty).await {
+            match stored.update(dirty_compactions).await {
                 Ok(()) => break to_claim,
                 Err(e) if e.is_sequenced_write_conflict() => {
                     debug!("claim conflict on .compactions; refreshing and retrying");
