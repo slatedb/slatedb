@@ -105,7 +105,7 @@ impl CompactionWorker {
     /// `.compactions` every [`CompactionWorkerOptions::compactions_poll_interval`],
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
     /// executes them, and writes `Compacted` back to `.compactions`.
-    pub async fn run(&mut self) -> Result<(), crate::Error> {
+    pub async fn run(&self) -> Result<(), crate::Error> {
         self.task_executor.monitor_on(&Handle::current())?;
         self.task_executor
             .join_task(COMPACTION_WORKER_TASK_NAME)
