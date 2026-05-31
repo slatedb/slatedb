@@ -97,6 +97,8 @@ impl ExecutorMessage for WorkerMessage {
 /// Build one with [`CompactionWorkerBuilder`] and drive its event loop with
 /// [`CompactionWorker::run`]. Call [`CompactionWorker::stop`] to gracefully
 /// release any in-flight claims.
+///
+#[derive(Clone)]
 pub struct CompactionWorker {
     task_executor: Arc<MessageHandlerExecutor>,
 }
