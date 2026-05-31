@@ -35,6 +35,7 @@ impl<T: RowEntryIterator> CompactionFilterIterator<T> {
                     seq: entry.seq,
                     create_ts: entry.create_ts,
                     expire_ts,
+                    permit: None,
                 }))
             }
         }
@@ -206,6 +207,7 @@ mod tests {
             seq,
             create_ts: None,
             expire_ts: None,
+            permit: None,
         }
     }
 
@@ -216,6 +218,7 @@ mod tests {
             seq,
             create_ts: None,
             expire_ts: None,
+            permit: None,
         }
     }
 
@@ -226,6 +229,7 @@ mod tests {
             seq,
             create_ts: None,
             expire_ts: None,
+            permit: None,
         }
     }
 
@@ -236,6 +240,7 @@ mod tests {
             seq,
             create_ts: None,
             expire_ts: Some(expire_ts),
+            permit: None,
         }
     }
 

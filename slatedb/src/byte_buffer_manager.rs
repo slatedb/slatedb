@@ -148,8 +148,8 @@ impl ByteBufferPermit {
             match other.reserved_bytes.compare_exchange_weak(
                 other_bytes,
                 0,
-                Ordering::Release,
-                Ordering::Acquire,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => {
                     break;
@@ -163,6 +163,19 @@ impl ByteBufferPermit {
         self.reserved_bytes
             .fetch_add(other_bytes, Ordering::Relaxed);
     }
+
+    pub fn take(&self, num_bytes: usize) -> Self {
+        self.reserved_bytes.fetch_sub(num_bytes, Ordering::Relaxed);
+        Self {
+            reserved_bytes: AtomicUsize::new(num_bytes),
+            semaphore: self.semaphore.clone(),
+        }
+    }
+
+    // pub fn force_acquire(&self, num_bytes: usize) {
+    //     self.reserved_bytes.fetch_add(num_bytes, Ordering::Relaxed);
+    //     self.semaphore.force_acquire(num_bytes);
+    // }
 }
 
 impl Drop for ByteBufferPermit {

@@ -167,6 +167,7 @@ pub(crate) fn decode_codec_entries(
             seq: sst_row_entry.seq,
             create_ts: sst_row_entry.create_ts,
             expire_ts: sst_row_entry.expire_ts,
+            permit: None,
         };
         entries.push(row_entry);
     }

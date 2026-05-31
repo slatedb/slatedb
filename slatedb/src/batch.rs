@@ -8,7 +8,7 @@ use crate::byte_buffer_manager::ByteBufferPermit;
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
+use crate::mem_table::{KVTable, KVTableInternalKeyRange, SequencedKey};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::{RowEntry, ValueDeletable};
@@ -70,11 +70,93 @@ impl Default for WriteBatch {
 }
 
 /// A write operation in a batch.
-#[derive(PartialEq, Clone)]
 pub(crate) enum WriteOp {
-    Put(Bytes, Bytes, PutOptions),
-    Delete(Bytes),
-    Merge(Bytes, Bytes, MergeOptions),
+    Put {
+        key: Bytes,
+        value: Bytes,
+        options: PutOptions,
+        permit: Option<ByteBufferPermit>,
+    },
+    Delete {
+        key: Bytes,
+        permit: Option<ByteBufferPermit>,
+    },
+    Merge {
+        key: Bytes,
+        value: Bytes,
+        options: MergeOptions,
+        permit: Option<ByteBufferPermit>,
+    },
+}
+
+impl Clone for WriteOp {
+    fn clone(&self) -> Self {
+        match self {
+            WriteOp::Put {
+                key,
+                value,
+                options,
+                ..
+            } => WriteOp::Put {
+                key: key.clone(),
+                value: value.clone(),
+                options: options.clone(),
+                permit: None,
+            },
+            WriteOp::Delete { key, .. } => WriteOp::Delete {
+                key: key.clone(),
+                permit: None,
+            },
+            WriteOp::Merge {
+                key,
+                value,
+                options,
+                ..
+            } => WriteOp::Merge {
+                key: key.clone(),
+                value: value.clone(),
+                options: options.clone(),
+                permit: None,
+            },
+        }
+    }
+}
+
+impl PartialEq for WriteOp {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                WriteOp::Put {
+                    key: k1,
+                    value: v1,
+                    options: o1,
+                    ..
+                },
+                WriteOp::Put {
+                    key: k2,
+                    value: v2,
+                    options: o2,
+                    ..
+                },
+            ) => k1 == k2 && v1 == v2 && o1 == o2,
+            (WriteOp::Delete { key: k1, .. }, WriteOp::Delete { key: k2, .. }) => k1 == k2,
+            (
+                WriteOp::Merge {
+                    key: k1,
+                    value: v1,
+                    options: o1,
+                    ..
+                },
+                WriteOp::Merge {
+                    key: k2,
+                    value: v2,
+                    options: o2,
+                    ..
+                },
+            ) => k1 == k2 && v1 == v2 && o1 == o2,
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Debug for WriteOp {
@@ -88,16 +170,26 @@ impl std::fmt::Debug for WriteOp {
         }
 
         match self {
-            WriteOp::Put(key, value, options) => {
+            WriteOp::Put {
+                key,
+                value,
+                options,
+                ..
+            } => {
                 let key = trunc(key);
                 let value = trunc(value);
                 write!(f, "Put({key}, {value}, {:?})", options)
             }
-            WriteOp::Delete(key) => {
+            WriteOp::Delete { key, .. } => {
                 let key = trunc(key);
                 write!(f, "Delete({key})")
             }
-            WriteOp::Merge(key, value, options) => {
+            WriteOp::Merge {
+                key,
+                value,
+                options,
+                ..
+            } => {
                 let key = trunc(key);
                 let value = trunc(value);
                 write!(f, "Merge({key}, {value}, {:?})", options)
@@ -107,40 +199,42 @@ impl std::fmt::Debug for WriteOp {
 }
 
 impl WriteOp {
-    /// Convert WriteOp to RowEntry for queries
+    /// Convert WriteOp to RowEntry, transferring the permit.
     pub(crate) fn to_row_entry(
-        &self,
+        &mut self,
         seq: u64,
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> RowEntry {
         match self {
-            WriteOp::Put(key, value, _options) => {
-                // For queries, we don't need to compute expiration time here
-                // since these are uncommitted writes. The expiration will be
-                // computed when the batch is actually written.
-                RowEntry::new(
-                    key.clone(),
-                    ValueDeletable::Value(value.clone()),
-                    seq,
-                    create_ts,
-                    expire_ts,
-                )
-            }
-            WriteOp::Delete(key) => RowEntry::new(
-                key.clone(),
-                ValueDeletable::Tombstone,
+            WriteOp::Put {
+                key, value, permit, ..
+            } => RowEntry {
+                key: key.clone(),
+                value: ValueDeletable::Value(value.clone()),
                 seq,
                 create_ts,
                 expire_ts,
-            ),
-            WriteOp::Merge(key, value, _options) => RowEntry::new(
-                key.clone(),
-                ValueDeletable::Merge(value.clone()),
+                permit: permit.take(),
+            },
+            WriteOp::Delete { key, permit, .. } => RowEntry {
+                key: key.clone(),
+                value: ValueDeletable::Tombstone,
                 seq,
                 create_ts,
                 expire_ts,
-            ),
+                permit: permit.take(),
+            },
+            WriteOp::Merge {
+                key, value, permit, ..
+            } => RowEntry {
+                key: key.clone(),
+                value: ValueDeletable::Merge(value.clone()),
+                seq,
+                create_ts,
+                expire_ts,
+                permit: permit.take(),
+            },
         }
     }
 
@@ -148,9 +242,9 @@ impl WriteOp {
     /// or zero for deletes.
     pub(crate) fn value_size(&self) -> usize {
         match self {
-            WriteOp::Put(_key, value, _options) => value.len(),
-            WriteOp::Delete(_key) => 0,
-            WriteOp::Merge(_key, value, _options) => value.len(),
+            WriteOp::Put { value, .. } => value.len(),
+            WriteOp::Delete { .. } => 0,
+            WriteOp::Merge { value, .. } => value.len(),
         }
     }
 }
@@ -181,7 +275,7 @@ impl WriteBatch {
 
         // Remove them
         for k in keys_to_remove {
-            if let Some(WriteOp::Merge(..)) = self.ops.remove(&k) {
+            if let Some(WriteOp::Merge { .. }) = self.ops.remove(&k) {
                 self.merge_op_count -= 1
             }
         }
@@ -278,7 +372,12 @@ impl WriteBatch {
         self.remove_ops_by_key(&key);
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Put(key, value, options.clone()),
+            WriteOp::Put {
+                key,
+                value,
+                options: options.clone(),
+                permit: None,
+            },
         );
 
         self.write_idx += 1;
@@ -304,7 +403,12 @@ impl WriteBatch {
         let key = Bytes::copy_from_slice(key.as_ref());
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Merge(key, Bytes::copy_from_slice(value.as_ref()), options.clone()),
+            WriteOp::Merge {
+                key,
+                value: Bytes::copy_from_slice(value.as_ref()),
+                options: options.clone(),
+                permit: None,
+            },
         );
 
         self.merge_op_count += 1;
@@ -322,7 +426,7 @@ impl WriteBatch {
         self.remove_ops_by_key(&key);
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Delete(key),
+            WriteOp::Delete { key, permit: None },
         );
 
         self.write_idx += 1;
@@ -355,7 +459,7 @@ impl WriteBatch {
     ///
     /// When `extractor` is `None`, the returned prefix set is empty.
     pub(crate) async fn extract_entries(
-        &self,
+        &mut self,
         seq: u64,
         now: i64,
         default_ttl: Option<u64>,
@@ -368,7 +472,7 @@ impl WriteBatch {
         }
 
         let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new_with_seq_and_ttl(
-            self,
+            &mut *self,
             ..,
             IterationOrder::Ascending,
             seq,
@@ -406,34 +510,48 @@ impl WriteBatch {
     }
 
     pub(crate) fn set_write_buffer(&mut self, permit: Arc<ByteBufferPermit>) {
+        for op in self.ops.values_mut() {
+            let value_size = op.value_size();
+            let mut entry_budget = KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE;
+            match op {
+                WriteOp::Put { key, permit: p, .. } | WriteOp::Merge { key, permit: p, .. } => {
+                    entry_budget += key.len();
+                    if value_size > 0 {
+                        entry_budget += value_size + std::mem::size_of::<Bytes>() * 2;
+                    } else {
+                        entry_budget += std::mem::size_of::<Bytes>();
+                    }
+                    *p = Some(permit.take(entry_budget));
+                }
+                WriteOp::Delete { key, permit: p } => {
+                    entry_budget += key.len() + std::mem::size_of::<Bytes>();
+                    *p = Some(permit.take(entry_budget));
+                }
+            }
+        }
         self.write_buffer_permit = Some(permit);
     }
 
     /// Returns a conservative estimate of the in-memory byte footprint
     /// this batch will occupy once written to the memtable. Includes
-    /// key bytes, value bytes, sequence numbers, and timestamps.
+    /// key bytes, value bytes, and the per-entry structural overhead
+    /// (SkipMap node + SequencedKey). This budget is allocated upfront
+    /// so that `put_prebudgeted` can insert entries without additional
+    /// semaphore operations.
     pub(crate) fn estimated_size(&self) -> usize {
         let mut size = 0;
-        for entry in self.ops.iter() {
-            // The raw byte lengths of key and value data.
-            size += entry.0.user_key.len();
-            let value_size = entry.1.value_size();
+        for (seq_key, op) in self.ops.iter() {
+            size += seq_key.user_key.len();
+            let value_size = op.value_size();
             if value_size > 0 {
                 size += value_size;
-                // The two `Bytes` structs (key + value) stored in the RowEntry.
                 size += std::mem::size_of::<Bytes>() * 2;
             } else {
-                // The `Bytes` struct (key) stored in the RowEntry.
                 size += std::mem::size_of::<Bytes>();
             }
+            size += KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE;
         }
         size
-    }
-
-    /// Returns a clone of this batch's write-buffer permit, if one
-    /// has been acquired.
-    pub(crate) fn write_buffer_permit(&self) -> Option<Arc<ByteBufferPermit>> {
-        self.write_buffer_permit.as_ref().map(Arc::clone)
     }
 }
 
@@ -453,7 +571,7 @@ impl WriteBatchIterator {
         let mut entries: Vec<(SequencedKey, RowEntry)> = batch
             .ops
             .range(range)
-            .map(|(k, v)| (k.clone(), v.to_row_entry(u64::MAX, None, None)))
+            .map(|(k, v)| (k.clone(), v.clone().to_row_entry(u64::MAX, None, None)))
             .collect();
 
         if matches!(ordering, IterationOrder::Descending) {
@@ -470,7 +588,7 @@ impl WriteBatchIterator {
     }
 
     pub(crate) fn new_with_seq_and_ttl(
-        batch: &WriteBatch,
+        batch: &mut WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
         seq: u64,
@@ -480,12 +598,12 @@ impl WriteBatchIterator {
         let range = KVTableInternalKeyRange::from(range);
         let mut entries: Vec<(SequencedKey, RowEntry)> = batch
             .ops
-            .range(range)
+            .range_mut(range)
             .map(|(k, v)| {
                 let expire_ts = match v {
-                    WriteOp::Put(_, _, opts) => opts.expire_ts_from(default_ttl, now),
-                    WriteOp::Merge(_, _, opts) => opts.expire_ts_from(default_ttl, now),
-                    WriteOp::Delete(_) => None,
+                    WriteOp::Put { options, .. } => options.expire_ts_from(default_ttl, now),
+                    WriteOp::Merge { options, .. } => options.expire_ts_from(default_ttl, now),
+                    WriteOp::Delete { .. } => None,
                 };
                 (k.clone(), v.to_row_entry(seq, Some(now), expire_ts))
             })
@@ -594,17 +712,21 @@ mod tests {
                 );
                 expected_ops.insert(
                     SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
-                    WriteOp::Put(
-                        Bytes::from(test_case.key),
-                        Bytes::from(value),
-                        test_case.options,
-                    ),
+                    WriteOp::Put {
+                        key: Bytes::from(test_case.key),
+                        value: Bytes::from(value),
+                        options: test_case.options,
+                        permit: None,
+                    },
                 );
             } else {
                 batch.delete(test_case.key.as_slice());
                 expected_ops.insert(
                     SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
-                    WriteOp::Delete(Bytes::from(test_case.key)),
+                    WriteOp::Delete {
+                        key: Bytes::from(test_case.key),
+                        permit: None,
+                    },
                 );
             }
         }
@@ -623,7 +745,7 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match op {
-            WriteOp::Put(_, value, _) => assert_eq!(value.as_ref(), b"value2"),
+            WriteOp::Put { value, .. } => assert_eq!(value.as_ref(), b"value2"),
             _ => panic!("Expected Put operation"),
         }
     }
@@ -875,7 +997,12 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match op {
-            WriteOp::Merge(key, value, options) => {
+            WriteOp::Merge {
+                key,
+                value,
+                options,
+                ..
+            } => {
                 assert_eq!(key.as_ref(), b"key1");
                 assert_eq!(value.as_ref(), b"value1");
                 assert_eq!(options, &MergeOptions::default());
@@ -902,7 +1029,12 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match op {
-            WriteOp::Merge(key, value, options) => {
+            WriteOp::Merge {
+                key,
+                value,
+                options,
+                ..
+            } => {
                 assert_eq!(key.as_ref(), b"key1");
                 assert_eq!(value.as_ref(), b"value1");
                 assert_eq!(options.ttl, Ttl::ExpireAfter(3600));
@@ -939,7 +1071,11 @@ mod tests {
             .unwrap();
 
         match (op1, op2, op3) {
-            (WriteOp::Merge(_, v1, _), WriteOp::Merge(_, v2, _), WriteOp::Merge(_, v3, _)) => {
+            (
+                WriteOp::Merge { value: v1, .. },
+                WriteOp::Merge { value: v2, .. },
+                WriteOp::Merge { value: v3, .. },
+            ) => {
                 assert_eq!(v1.as_ref(), b"value1");
                 assert_eq!(v2.as_ref(), b"value2");
                 assert_eq!(v3.as_ref(), b"value3");
@@ -1029,7 +1165,7 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match put_op {
-            WriteOp::Put(key, value, _) => {
+            WriteOp::Put { key, value, .. } => {
                 assert_eq!(key.as_ref(), b"key1");
                 assert_eq!(value.as_ref(), b"put_value");
             }
@@ -1042,7 +1178,7 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match merge_op {
-            WriteOp::Merge(key, value, _) => {
+            WriteOp::Merge { key, value, .. } => {
                 assert_eq!(key.as_ref(), b"key1");
                 assert_eq!(value.as_ref(), b"merge_value");
             }
@@ -1068,7 +1204,7 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match delete_op {
-            WriteOp::Delete(key) => {
+            WriteOp::Delete { key, .. } => {
                 assert_eq!(key.as_ref(), b"key1");
             }
             _ => panic!("Expected Delete operation"),
@@ -1080,7 +1216,7 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match merge_op {
-            WriteOp::Merge(key, value, _) => {
+            WriteOp::Merge { key, value, .. } => {
                 assert_eq!(key.as_ref(), b"key1");
                 assert_eq!(value.as_ref(), b"merge_value");
             }
@@ -1105,7 +1241,7 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match op {
-            WriteOp::Put(key, value, _) => {
+            WriteOp::Put { key, value, .. } => {
                 assert_eq!(key.as_ref(), b"key1");
                 assert_eq!(value.as_ref(), b"put_value");
             }
@@ -1130,7 +1266,7 @@ mod tests {
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match op {
-            WriteOp::Delete(key) => {
+            WriteOp::Delete { key, .. } => {
                 assert_eq!(key.as_ref(), b"key1");
             }
             _ => panic!("Expected Delete operation"),

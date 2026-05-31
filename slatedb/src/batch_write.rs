@@ -38,7 +38,6 @@ use std::collections::BTreeSet;
 
 use bytes::Bytes;
 
-use crate::byte_buffer_manager::ByteBufferPermit;
 use crate::config::WriteOptions;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
@@ -128,7 +127,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
 impl DbInner {
     #[allow(clippy::panic)]
     #[instrument(level = "trace", skip_all, fields(batch_size = batch.ops.len()))]
-    async fn write_batch(&self, batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
+    async fn write_batch(&self, mut batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
         let _options = options;
         #[cfg(not(dst))]
         let now = self.mono_clock.now().await?;
@@ -171,7 +170,6 @@ impl DbInner {
                 self.segment_extractor.as_deref(),
             )
             .await?;
-        let write_buffer_permit = batch.write_buffer_permit();
 
         // RFC-0024 route-consistency: when a segment extractor is
         // configured, every write must extract a prefix that does
@@ -190,11 +188,11 @@ impl DbInner {
             self.wal_buffer.maybe_trigger_flush()?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
-            self.write_entries_to_memtable(entries, touched_segments, write_buffer_permit);
+            self.write_entries_to_memtable(entries, touched_segments);
             wal_watcher
         } else {
             // if WAL is disabled, we just write the entries to memtable.
-            self.write_entries_to_memtable(entries, touched_segments, write_buffer_permit)
+            self.write_entries_to_memtable(entries, touched_segments)
         };
         // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
         // after merge operators and overwrites are collapsed
@@ -289,20 +287,20 @@ impl DbInner {
     }
 
     /// Write entries to the currently active memtable and record
-    /// the batch's touched-segment prefixes on it. Returns a durable
-    /// watcher for the memtable. When no extractor is configured,
-    /// `touched_segments` is empty and recording is a no-op.
+    /// the batch's touched-segment prefixes on it. Each entry carries
+    /// its own write-buffer permit which is merged into the table
+    /// during `put`. Returns a durable watcher for the memtable.
+    /// When no extractor is configured, `touched_segments` is empty
+    /// and recording is a no-op.
     fn write_entries_to_memtable(
         &self,
         entries: Vec<RowEntry>,
         touched_segments: BTreeSet<Bytes>,
-        write_buffer_permit: Option<Arc<ByteBufferPermit>>,
     ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         let guard = self.state.read();
         let memtable = guard.memtable();
         memtable.record_touched_segments(touched_segments);
         entries.into_iter().for_each(|entry| memtable.put(entry));
-        write_buffer_permit.map(|permit| memtable.add_write_permit(&permit));
         memtable.table().durable_watcher()
     }
 

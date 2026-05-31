@@ -353,6 +353,16 @@ impl ImmutableMemtable {
                 new_table.put(entry);
             }
         }
+        // Allocate budget for all entries that were inserted: data bytes
+        // (tracked by entries_size_in_bytes) plus structural overhead.
+        let metadata = new_table.metadata();
+        if metadata.entry_num > 0 {
+            let budget = metadata.entries_size_in_bytes
+                + metadata.entry_num
+                    * (KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE);
+            let permit = self.table.buffer_manager().force_acquire(budget);
+            new_table.add_write_permit(&permit);
+        }
         // Preserve the touched-segment set on the filtered table:
         // filtering by seq can remove rows but never changes which
         // segment prefixes the imm's surviving keys could route to,
@@ -405,10 +415,10 @@ impl KVTable {
     /// This accounts for all bytes `force_acquire`'d from the buffer manager
     /// before `maybe_apply_backpressure` could block:
     /// - `SEQ_TRACKER_OVERHEAD`: fixed allocation at KVTable creation
-    /// - `BATCH_ENTRY_OVERHEAD`: minimum per-entry cost from `WriteBatch::estimated_size()` for a write
-    ///   (excludes key/value bytes, so real writes will consume more)
-    /// - `SKIPMAP_ENTRY_OVERHEAD`: per-entry SkipMap node cost for a new entry
-    /// - `SEQUENCED_KEY_SIZE`: the SequencedKey struct stored as the map key
+    /// - `BATCH_ENTRY_OVERHEAD + SKIPMAP_ENTRY_OVERHEAD + SEQUENCED_KEY_SIZE`:
+    ///   per-entry cost from `WriteBatch::estimated_size()` (excludes
+    ///   key/value bytes, so real writes will consume more)
+    /// - `KVTABLE_SIZE`: base struct cost
     pub(crate) const MIN_WRITE_BUFFER_SIZE: usize = Self::SEQ_TRACKER_OVERHEAD
         + Self::BATCH_ENTRY_OVERHEAD
         + Self::SKIPMAP_ENTRY_OVERHEAD
@@ -582,7 +592,21 @@ impl KVTable {
         iterator
     }
 
-    pub(crate) fn put(&self, row: RowEntry) {
+    /// Inserts a row entry into the table.
+    ///
+    /// The caller is responsible for ensuring that this table's
+    /// `write_buffer_permit` already covers the entry's data bytes plus
+    /// per-entry structural overhead (`SKIPMAP_ENTRY_OVERHEAD +
+    /// SEQUENCED_KEY_SIZE`). This is typically done by including the
+    /// overhead in the batch permit and merging it before calling `put`.
+    ///
+    /// For the rare overwrite case (same SequencedKey already exists),
+    /// excess pre-allocated overhead is released back to the semaphore.
+    pub(crate) fn put(&self, mut row: RowEntry) {
+        // Merge the entry's permit into the table's permit (if present).
+        if let Some(permit) = row.permit.take() {
+            self.write_buffer_permit.merge(&permit);
+        }
         let internal_key = SequencedKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
@@ -608,19 +632,26 @@ impl KVTable {
             true
         });
         if let Some(size) = previous_size.take() {
-            self.entries_size_in_bytes
-                .fetch_sub(size, Ordering::Relaxed);
-            self.entries_size_in_bytes
-                .fetch_add(row_size, Ordering::Relaxed);
+            // Overwrite (same SequencedKey): no new SkipMap node was created.
+            // Release the pre-allocated structural overhead that wasn't needed,
+            // plus the old entry's data budget (now replaced by the new entry).
+            let excess = Self::SKIPMAP_ENTRY_OVERHEAD + Self::SEQUENCED_KEY_SIZE + size;
+            let _ = self.write_buffer_permit.take(excess);
+            match size.cmp(&row_size) {
+                std::cmp::Ordering::Less => {
+                    self.entries_size_in_bytes
+                        .fetch_add(row_size - size, Ordering::Relaxed);
+                }
+                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Greater => {
+                    self.entries_size_in_bytes
+                        .fetch_sub(size - row_size, Ordering::Relaxed);
+                }
+            }
         } else {
+            // New entry: budget was pre-allocated by the caller.
             self.entries_size_in_bytes
                 .fetch_add(row_size, Ordering::Relaxed);
-            // Track SkipMap node overhead plus the SequencedKey struct stored
-            // as the map key (Bytes handle + u64 seq) for genuinely new entries.
-            let permit = self
-                .buffer_manager
-                .force_acquire(Self::SKIPMAP_ENTRY_OVERHEAD + Self::SEQUENCED_KEY_SIZE);
-            self.write_buffer_permit.merge(&permit);
         }
     }
 

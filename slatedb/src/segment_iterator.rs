@@ -469,6 +469,7 @@ mod tests {
             seq,
             create_ts: None,
             expire_ts: None,
+            permit: None,
         }
     }
 
@@ -479,6 +480,7 @@ mod tests {
             seq,
             create_ts: None,
             expire_ts: None,
+            permit: None,
         }
     }
 

@@ -9,6 +9,7 @@ use log::{error, trace};
 use tokio::{runtime::Handle, sync::oneshot};
 use tracing::instrument;
 
+use crate::byte_buffer_manager::{ByteBufferManager, ByteBufferPermit};
 use crate::clock::MonotonicClock;
 use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
@@ -54,6 +55,7 @@ pub(crate) struct WalBufferManager {
     db_stats: DbStats,
     mono_clock: Arc<MonotonicClock>,
     table_store: Arc<TableStore>,
+    write_buffer_manager: ByteBufferManager,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
     /// The largest flush_epoch for which a size-triggered flush request has been
@@ -82,6 +84,9 @@ struct WalBufferManagerInner {
     recent_flushed_wal_id: u64,
     /// The oracle to track the last flushed sequence number.
     oracle: Arc<DbOracle>,
+    /// Permit tracking bytes allocated by the WAL buffer against the write buffer budget.
+    /// Bytes are added on append and released when immutable WALs are drained.
+    wal_permit: Arc<ByteBufferPermit>,
 }
 
 /// Stores entries to the write-ahead log (WAL) in memory.
@@ -123,7 +128,9 @@ impl WalBufferManager {
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
+        write_buffer_manager: ByteBufferManager,
     ) -> Self {
+        let wal_permit = Arc::new(write_buffer_manager.force_acquire(0));
         let current_wal = WalBuffer::new();
         let immutable_wals = VecDeque::new();
         let inner = WalBufferManagerInner {
@@ -135,6 +142,7 @@ impl WalBufferManager {
             flush_tx: None,
             task_executor: None,
             oracle,
+            wal_permit,
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
@@ -143,6 +151,7 @@ impl WalBufferManager {
             db_stats,
             table_store,
             mono_clock,
+            write_buffer_manager,
             max_wal_bytes_size,
             max_flush_interval,
             last_flush_requested_epoch: AtomicU64::new(0),
@@ -233,6 +242,17 @@ impl WalBufferManager {
         entries: &[RowEntry],
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
+
+        // Track the WAL's structural overhead against the write buffer budget.
+        // The key/value data bytes are already accounted for by the write batch
+        // permit (which is transferred to the memtable). The WAL only adds
+        // per-entry struct overhead (Bytes handles, seq, timestamps, VecDeque slot).
+        let overhead = entries.len() * std::mem::size_of::<RowEntry>();
+        if overhead > 0 {
+            let permit = self.write_buffer_manager.force_acquire(overhead);
+            let inner = self.inner.read();
+            inner.wal_permit.merge(&permit);
+        }
 
         let mut inner = self.inner.write();
         for entry in entries {
@@ -435,6 +455,7 @@ impl WalBufferManager {
         let last_flushed_seq = inner.oracle.last_remote_persisted_seq();
 
         let mut releaseable_count = 0;
+        let mut released_entries = 0usize;
         for (_, wal) in inner.immutable_wals.iter() {
             if wal
                 .last_seq()
@@ -442,6 +463,7 @@ impl WalBufferManager {
                 .unwrap_or(false)
             {
                 releaseable_count += 1;
+                released_entries += wal.len();
             } else {
                 break;
             }
@@ -453,6 +475,14 @@ impl WalBufferManager {
                 releaseable_count
             );
             inner.immutable_wals.drain(..releaseable_count);
+
+            // Release the structural overhead for the drained entries from the
+            // WAL permit. `take` splits the released bytes into a temporary permit
+            // which is immediately dropped, returning them to the budget.
+            if released_entries > 0 {
+                let released_overhead = released_entries * std::mem::size_of::<RowEntry>();
+                drop(inner.wal_permit.take(released_overhead));
+            }
         }
     }
 
@@ -870,6 +900,7 @@ mod tests {
             mono_clock,
             1000,                 // max_wal_bytes_size
             Some(flush_interval), // max_flush_interval
+            ByteBufferManager::new(usize::MAX, usize::MAX),
         ));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             Arc::new(status_manager),

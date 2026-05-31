@@ -60,6 +60,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::{Manifest, VersionedManifest};
+use crate::mem_table::KVTable;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
@@ -186,6 +187,7 @@ impl DbInner {
             mono_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
+            write_buffer_manager.clone(),
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
@@ -639,9 +641,10 @@ impl DbInner {
 
             assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
             self.oracle.advance_durable_seq(replayed_table.last_seq);
-            let permit = self
-                .write_buffer_manager
-                .force_acquire(metadata.entries_size_in_bytes);
+            let permit_size = metadata.entries_size_in_bytes
+                + metadata.entry_num
+                    * (KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE);
+            let permit = self.write_buffer_manager.force_acquire(permit_size);
             replayed_table.table.add_write_permit(&permit);
             self.replay_memtable(replayed_table)?;
             self.maybe_apply_backpressure().await?;
