@@ -2129,6 +2129,7 @@ mod tests {
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{ManifestCore, VersionedManifest};
+    use crate::mem_table::KVTable;
     use crate::merge_operator::{
         MERGE_OPERATOR_COMPACT_PATH, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
@@ -8203,8 +8204,7 @@ mod tests {
         // or the first put deadlocks on backpressure. We keep max_unflushed_bytes
         // small so the *unflushed-data* backpressure path still triggers when
         // the 16KB frozen memtable exceeds it.
-        use crate::mem_table::KVTable;
-        let min_buffer_capacity = KVTable::MIN_WRITE_BUFFER_SIZE + LARGE_VALUE_BYTES * 2; // headroom for data
+        let min_buffer_capacity = KVTable::MIN_WRITE_BUFFER_SIZE; // headroom for data
         let db = Db::builder(
             "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
             object_store,

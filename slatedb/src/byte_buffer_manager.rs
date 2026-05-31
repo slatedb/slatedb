@@ -304,11 +304,12 @@ impl ByteBudgetSemaphore {
     /// Blocks until allocated bytes drop below `num_bytes`. Does not reserve
     /// any capacity — callers must handle TOCTOU races.
     async fn wait_for_allocated_below(&self, num_bytes: usize) {
-        let _ = self.waiter_cnt.fetch_add(1, Ordering::Release);
         let mut current = self.allocated_bytes.load(Ordering::Acquire);
         if current < num_bytes {
             return;
         }
+
+        let _ = self.waiter_cnt.fetch_add(1, Ordering::Release);
 
         let notify_fut = self.notify.notified();
         tokio::pin!(notify_fut);
