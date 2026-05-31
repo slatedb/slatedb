@@ -233,8 +233,21 @@ impl ObjectStore for RetryingObjectStore {
             }
             let meta = result.meta.clone();
             let range = result.range.clone();
+            let range_len = (range.end - range.start) as usize;
             let attributes = result.attributes.clone();
             let bytes = result.bytes().await?;
+            let bytes_len = bytes.len();
+
+            if bytes_len != range_len {
+                return Err(object_store::Error::Generic {
+                    store: "cached_object_store",
+                    source: format!(
+                        "Size check failed: {bytes_len} bytes read, but range is {range_len} bytes"
+                    )
+                    .into(),
+                });
+            }
+
             Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed()),
                 meta,
