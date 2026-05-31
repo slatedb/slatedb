@@ -121,6 +121,9 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
+use crate::compaction_worker::{
+    build_handler as build_worker_handler, WorkerMessage, COMPACTION_WORKER_TASK_NAME,
+};
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
@@ -128,7 +131,6 @@ use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
-use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
@@ -644,7 +646,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 builder = builder.with_merge_operator(operator);
             }
 
-            let (handler, rx) = builder
+            let (handler, rx, worker_handler, worker_rx) = builder
                 .build_handler(
                     uncached_table_store.clone(),
                     manifest_store.clone(),
@@ -655,6 +657,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 COMPACTOR_TASK_NAME.to_string(),
                 Box::new(handler),
                 rx,
+                &tokio_handle,
+            )?;
+            task_executor.add_handler(
+                COMPACTION_WORKER_TASK_NAME.to_string(),
+                Box::new(worker_handler),
+                worker_rx,
                 &tokio_handle,
             )?;
         }
@@ -1160,11 +1168,10 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         )
     }
 
-    /// Build a CompactorEventHandler from this builder's configuration.
+    /// Build a CompactorEventHandler and embedded worker from this builder's configuration.
     ///
-    /// Constructs the compaction scheduler, executor, and stats, then
-    /// returns the handler and its message receiver, which are needed
-    /// to register the compactor with the task executor in DbBuilder::build
+    /// Returns the coordinator handler + receiver and the embedded worker handler + receiver,
+    /// both of which must be registered with the task executor in DbBuilder::build.
     pub(crate) async fn build_handler(
         self,
         table_store: Arc<TableStore>,
@@ -1174,44 +1181,49 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         (
             CompactorEventHandler,
             async_channel::Receiver<CompactorMessage>,
+            crate::compaction_worker::CompactionWorkerHandler,
+            async_channel::Receiver<WorkerMessage>,
         ),
         SlateDBError,
     > {
         let options = Arc::new(self.options);
-        let handle = self.compaction_runtime;
+        // For the embedded worker: use a fixed fast poll interval and inherit the
+        // coordinator's max_sst_size so output SSTs match the configured split threshold.
+        let worker_options = Arc::new(crate::config::CompactionWorkerOptions {
+            compactions_poll_interval: std::time::Duration::from_millis(100),
+            max_sst_size: options.max_sst_size,
+            ..self.worker_options
+        });
         let scheduler_supplier = self
             .scheduler_supplier
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
-        let (tx, rx) = async_channel::unbounded();
+        let (_tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
         let stats = Arc::new(CompactionStats::new(&self.recorder));
-        let executor = Arc::new(TokioCompactionExecutor::new(
-            TokioCompactionExecutorOptions {
-                handle,
-                options: options.clone(),
-                worker_tx: tx,
-                table_store,
-                rand: self.rand.clone(),
-                stats: stats.clone(),
-                clock: self.system_clock.clone(),
-                manifest_store: manifest_store.clone(),
-                merge_operator: self.merge_operator,
-                #[cfg(feature = "compaction_filters")]
-                compaction_filter_supplier: self.compaction_filter_supplier,
-            },
-        ));
         let handler = CompactorEventHandler::new(
-            manifest_store,
-            compactions_store,
+            manifest_store.clone(),
+            compactions_store.clone(),
             options,
             scheduler,
-            executor,
+            self.rand.clone(),
+            stats.clone(),
+            self.system_clock.clone(),
+        )
+        .await?;
+        let (worker_handler, worker_rx) = build_worker_handler(
+            manifest_store,
+            compactions_store,
+            table_store,
+            worker_options,
+            self.compaction_runtime,
             self.rand,
             stats,
             self.system_clock,
-        )
-        .await?;
-        Ok((handler, rx))
+            self.merge_operator,
+            #[cfg(feature = "compaction_filters")]
+            self.compaction_filter_supplier,
+        );
+        Ok((handler, rx, worker_handler, worker_rx))
     }
 }
 

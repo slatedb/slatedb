@@ -174,37 +174,6 @@ pub(crate) trait CompactionExecutor {
 
     /// Stops the executor and cancels any in-flight tasks, waiting for them to finish.
     fn stop(&self);
-
-    /// Returns true if the executor has been stopped (but not necessarily finished).
-    fn is_stopped(&self) -> bool;
-
-    /// Returns true if execution is delegated to out-of-process workers via the
-    /// claim protocol on `.compactions`. The coordinator skips starting tiered
-    /// compactions locally and lets workers transition `Submitted → Running`.
-    fn is_remote(&self) -> bool {
-        false
-    }
-}
-
-/// No-op executor used by the coordinator when compaction execution is delegated
-/// to [`crate::compaction_worker::CompactionWorker`] processes (or an embedded
-/// worker in the same process). The coordinator writes `Submitted` entries to
-/// `.compactions`; workers claim them via the optimistic CAS protocol described
-/// in RFC-0025.
-pub(crate) struct RemoteCompactionExecutor;
-
-impl CompactionExecutor for RemoteCompactionExecutor {
-    fn start_compaction_job(&self, _compaction: StartCompactionJobArgs) {}
-
-    fn stop(&self) {}
-
-    fn is_stopped(&self) -> bool {
-        false
-    }
-
-    fn is_remote(&self) -> bool {
-        true
-    }
 }
 
 /// Implemented by message types that the executor sends on job completion and progress.
@@ -283,10 +252,6 @@ impl<M: ExecutorMessage> CompactionExecutor for TokioCompactionExecutor<M> {
 
     fn stop(&self) {
         self.inner.stop()
-    }
-
-    fn is_stopped(&self) -> bool {
-        self.inner.is_stopped()
     }
 }
 
@@ -579,10 +544,6 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
     }
 
-    /// Returns true if the executor has been stopped (but not necessarily finished).
-    fn is_stopped(&self) -> bool {
-        self.is_stopped.load(atomic::Ordering::SeqCst)
-    }
 }
 
 #[cfg(test)]

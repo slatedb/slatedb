@@ -1,6 +1,6 @@
 //! Distributed-compaction worker (RFC-0025).
 //!
-//! A [`CompactionWorker`] polls `.compactions` for `Submitted` entries, claims
+//! A [`CompactionWorker`] polls `.compactions` for `Scheduled` entries, claims
 //! them via the optimistic CAS protocol described in RFC-0025, executes the
 //! compaction with the same code path the in-process executor uses, and writes
 //! `Compacted` (with the produced `output_ssts`) back to `.compactions`. The
@@ -115,7 +115,7 @@ impl CompactionWorker {
     }
 
     /// Gracefully stops the worker, resetting any compactions it claimed back
-    /// to `Submitted` so other workers can pick them up immediately.
+    /// to `Scheduled` so other workers can pick them up immediately.
     pub async fn stop(&self) -> Result<(), crate::Error> {
         self.task_executor
             .shutdown_task(COMPACTION_WORKER_TASK_NAME)
@@ -310,7 +310,7 @@ impl CompactionWorkerHandler {
             .saturating_sub(self.active_jobs.len())
     }
 
-    /// Scans `.compactions` for `Submitted` entries without a worker, claims up
+    /// Scans `.compactions` for `Scheduled` entries without a worker, claims up
     /// to remaining capacity via CAS, and dispatches each to the executor.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
         let capacity = self.capacity();
@@ -334,7 +334,7 @@ impl CompactionWorkerHandler {
             let mut to_claim: Vec<(Compaction, StartCompactionJobArgs)> = Vec::new();
             for c in dirty_compactions
                 .value
-                .iter_with_status(CompactionStatus::Submitted)
+                .iter_with_status(CompactionStatus::Scheduled)
                 .filter(|c| c.worker().is_none())
             {
                 if to_claim.len() >= capacity {
@@ -507,7 +507,7 @@ impl CompactionWorkerHandler {
         }
     }
 
-    /// Returns a claim to `Submitted` so it can be re-attempted by any worker
+    /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
         let worker_id = self.worker_id.as_str();
@@ -534,7 +534,7 @@ impl CompactionWorkerHandler {
                 return Ok(());
             }
             let updated = existing
-                .with_status(CompactionStatus::Submitted)
+                .with_status(CompactionStatus::Scheduled)
                 .with_worker(None);
             dirty.value.insert(updated);
             match stored.update(dirty).await {
@@ -734,9 +734,6 @@ mod tests {
             self.jobs.lock().push(args);
         }
         fn stop(&self) {}
-        fn is_stopped(&self) -> bool {
-            false
-        }
     }
 
     struct WorkerFixture {
@@ -810,11 +807,11 @@ mod tests {
             }
         }
 
-        /// Writes a single Submitted compaction directly to `.compactions`,
+        /// Writes a single Scheduled compaction directly to `.compactions`,
         /// simulating one a coordinator would emit.
-        async fn seed_submitted_compaction(&self, id: Ulid, sources: Vec<SourceId>) {
+        async fn seed_scheduled_compaction(&self, id: Ulid, sources: Vec<SourceId>) {
             let spec = CompactionSpec::new(sources, 0);
-            let compaction = Compaction::new(id, spec); // defaults to Submitted, no worker
+            let compaction = Compaction::new(id, spec).with_status(CompactionStatus::Scheduled);
             let mut stored = StoredCompactions::try_load(self.compactions_store.clone())
                 .await
                 .unwrap()
@@ -835,10 +832,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_worker_claims_submitted_compaction() {
+    async fn test_worker_claims_scheduled_compaction() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
 
         fx.handler.poll_and_claim().await.unwrap();
@@ -890,7 +887,7 @@ mod tests {
     async fn test_worker_writes_compacted_on_finish() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
 
@@ -927,7 +924,7 @@ mod tests {
     async fn test_worker_releases_claim_on_execution_failure() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
 
@@ -938,7 +935,7 @@ mod tests {
 
         // On error the worker releases the claim so another worker can retry.
         let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Submitted);
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         assert!(!fx.handler.active_jobs.contains(&id));
     }
@@ -947,7 +944,7 @@ mod tests {
     async fn test_worker_cleanup_releases_active_claims() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
         assert_eq!(fx.handler.active_jobs.len(), 1);
@@ -957,7 +954,7 @@ mod tests {
         fx.handler.cleanup(empty, Ok(())).await.unwrap();
 
         let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Submitted);
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         assert!(fx.handler.active_jobs.is_empty());
     }
@@ -968,15 +965,15 @@ mod tests {
         let id = Ulid::from_parts(1, 0);
         // Source view ID that does not exist in the manifest — build_job_args
         // should reject this so the worker never claims it, leaving it
-        // Submitted for the coordinator to reschedule.
+        // Scheduled for another worker to retry.
         let ghost = Ulid::from_parts(u64::MAX, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(ghost)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(ghost)])
             .await;
 
         fx.handler.poll_and_claim().await.unwrap();
 
         let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Submitted);
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         // No active job retained.
         assert!(fx.handler.active_jobs.is_empty());

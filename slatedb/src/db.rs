@@ -767,6 +767,14 @@ impl Db {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
 
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
+            .await
+        {
+            warn!("failed to shutdown compaction worker task [error={:?}]", e);
+        }
+
         if let Err(e) = self.task_executor.shutdown_task(GC_TASK_NAME).await {
             warn!("failed to shutdown garbage collector task [error={:?}]", e);
         }
