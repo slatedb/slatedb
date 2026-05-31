@@ -957,4 +957,67 @@ mod tests {
             .get(&Attribute::Metadata(Cow::Borrowed(super::PUT_ID_ATTRIBUTE)))
             .is_some());
     }
+
+    #[tokio::test]
+    async fn test_get_opts_range_read_size_check_passes() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let path = Path::from("/data/obj");
+
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let result = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    range: Some((0..5).into()),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect("range read should pass size check");
+
+        let bytes = result.bytes().await.unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn test_get_opts_range_read_size_mismatch_returns_error() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/data/obj");
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_truncate_get_range_bytes(1, 1));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+
+        // First attempt returns truncated body (1 byte vs 5 expected),
+        // triggering the size check error. The retry succeeds normally.
+        let result = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    range: Some((0..5).into()),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect("should succeed after retrying past truncated response");
+
+        let bytes = result.bytes().await.unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"hello"));
+        // 1 truncated attempt + 1 successful retry
+        assert_eq!(flaky.get_range_attempts(), 2);
+    }
 }
