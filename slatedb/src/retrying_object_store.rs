@@ -233,7 +233,7 @@ impl ObjectStore for RetryingObjectStore {
             }
             let meta = result.meta.clone();
             let range = result.range.clone();
-            let range_len = (range.end - range.start) as usize;
+            let range_len = range.end.saturating_sub(range.start) as usize;
             let attributes = result.attributes.clone();
             let bytes = result.bytes().await?;
             let bytes_len = bytes.len();
