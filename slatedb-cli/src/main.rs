@@ -5,6 +5,7 @@ use slatedb::admin::{self, Admin, AdminBuilder};
 use slatedb::compactor::{
     CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
 };
+use slatedb::compaction_worker::CompactionWorkerBuilder;
 use slatedb::config::{
     CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
@@ -33,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let path = Path::from(args.path.as_str());
     let object_store = admin::load_object_store_from_env(args.env_file)?;
     let cancellation_token = CancellationToken::new();
-    let admin = AdminBuilder::new(path, object_store).build();
+    let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
 
     let ct = cancellation_token.clone();
     tokio::spawn(async move {
@@ -68,7 +69,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::RunGarbageCollection { resource, min_age } => {
             exec_gc_once(&admin, resource, min_age).await?
         }
-        CliCommands::RunCompactor => admin.run_compactor(cancellation_token.clone()).await?,
+        CliCommands::RunCompactor { no_embedded_worker } => {
+            admin
+                .run_compactor_with_options(
+                    cancellation_token.clone(),
+                    CompactorOptions {
+                        embedded_worker: !no_embedded_worker,
+                        ..CompactorOptions::default()
+                    },
+                )
+                .await?
+        }
+        CliCommands::RunWorker => exec_run_worker(path, object_store, cancellation_token).await?,
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,
@@ -341,5 +353,32 @@ async fn exec_ts_to_seq(admin: &Admin, ts_secs: i64, round_up: bool) -> Result<(
         Some(seq) => println!("{}", seq),
         None => println!("not found"),
     }
+    Ok(())
+}
+
+async fn exec_run_worker(
+    path: Path,
+    object_store: std::sync::Arc<dyn object_store::ObjectStore>,
+    cancellation_token: CancellationToken,
+) -> Result<(), Box<dyn Error>> {
+    let worker = CompactionWorkerBuilder::new(path, object_store)
+        .build()
+        .await?;
+
+    let mut run_task = tokio::spawn({
+        let worker = worker.clone();
+        async move { worker.run().await }
+    });
+
+    tokio::select! {
+        result = &mut run_task => {
+            return Ok(result??);
+        }
+        _ = cancellation_token.cancelled() => {
+            // fall through to graceful shutdown
+        }
+    }
+
+    worker.stop().await?;
     Ok(())
 }
