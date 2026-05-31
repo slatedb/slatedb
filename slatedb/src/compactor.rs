@@ -386,7 +386,7 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
-        // The coordinator uses a delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
+        // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (`embedded_worker = true`) or running standalone.
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
@@ -443,9 +443,7 @@ impl Compactor {
             .map_err(|e| e.into())
     }
 
-    /// Derives the embedded worker's options from the coordinator's options.
-    /// Phase 2 keeps this implicit — full `CompactionWorkerOptions` on the
-    /// coordinator builder is left for a follow-up.
+    /// Returns the options to pass to the embedded compaction worker.
     fn worker_options(&self) -> crate::config::CompactionWorkerOptions {
         self.worker_options.clone()
     }
@@ -4823,6 +4821,19 @@ mod tests {
             compactions
                 .get(&compaction_id)
                 .expect("missing compaction")
+                .status(),
+            CompactionStatus::Failed
+        );
+        let stored_compactions = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored_compactions
+                .get(&compaction_id)
+                .expect("missing stored compaction")
                 .status(),
             CompactionStatus::Failed
         );

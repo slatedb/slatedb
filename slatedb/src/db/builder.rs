@@ -646,7 +646,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 builder = builder.with_merge_operator(operator);
             }
 
-            let (handler, rx, worker_handler, worker_rx) = builder
+            let (handler, rx, worker) = builder
                 .build_handler(
                     uncached_table_store.clone(),
                     manifest_store.clone(),
@@ -659,12 +659,14 @@ impl<P: Into<Path>> DbBuilder<P> {
                 rx,
                 &tokio_handle,
             )?;
-            task_executor.add_handler(
-                COMPACTION_WORKER_TASK_NAME.to_string(),
-                Box::new(worker_handler),
-                worker_rx,
-                &tokio_handle,
-            )?;
+            if let Some((worker_handler, worker_rx)) = worker {
+                task_executor.add_handler(
+                    COMPACTION_WORKER_TASK_NAME.to_string(),
+                    Box::new(worker_handler),
+                    worker_rx,
+                    &tokio_handle,
+                )?;
+            }
         }
 
         let gc_builder = self.gc_builder.or_else(|| {
@@ -1168,10 +1170,12 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         )
     }
 
-    /// Build a CompactorEventHandler and embedded worker from this builder's configuration.
+    /// Build a CompactorEventHandler and optionally an embedded worker from this builder's
+    /// configuration.
     ///
-    /// Returns the coordinator handler + receiver and the embedded worker handler + receiver,
-    /// both of which must be registered with the task executor in DbBuilder::build.
+    /// Returns the coordinator handler + receiver, and `Some((worker_handler, worker_rx))` when
+    /// [`CompactorOptions::embedded_worker`] is `true`. Both, when present, must be registered
+    /// with the task executor in DbBuilder::build.
     pub(crate) async fn build_handler(
         self,
         table_store: Arc<TableStore>,
@@ -1181,19 +1185,14 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         (
             CompactorEventHandler,
             async_channel::Receiver<CompactorMessage>,
-            crate::compaction_worker::CompactionWorkerHandler,
-            async_channel::Receiver<WorkerMessage>,
+            Option<(
+                crate::compaction_worker::CompactionWorkerHandler,
+                async_channel::Receiver<WorkerMessage>,
+            )>,
         ),
         SlateDBError,
     > {
         let options = Arc::new(self.options);
-        // For the embedded worker: use a fixed fast poll interval and inherit the
-        // coordinator's max_sst_size so output SSTs match the configured split threshold.
-        let worker_options = Arc::new(crate::config::CompactionWorkerOptions {
-            compactions_poll_interval: std::time::Duration::from_millis(100),
-            max_sst_size: options.max_sst_size,
-            ..self.worker_options
-        });
         let scheduler_supplier = self
             .scheduler_supplier
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
@@ -1203,27 +1202,38 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let handler = CompactorEventHandler::new(
             manifest_store.clone(),
             compactions_store.clone(),
-            options,
+            options.clone(),
             scheduler,
             self.rand.clone(),
             stats.clone(),
             self.system_clock.clone(),
         )
         .await?;
-        let (worker_handler, worker_rx) = build_worker_handler(
-            manifest_store,
-            compactions_store,
-            table_store,
-            worker_options,
-            self.compaction_runtime,
-            self.rand,
-            stats,
-            self.system_clock,
-            self.merge_operator,
-            #[cfg(feature = "compaction_filters")]
-            self.compaction_filter_supplier,
-        );
-        Ok((handler, rx, worker_handler, worker_rx))
+        let worker = if options.embedded_worker {
+            // For the embedded worker: use a fixed fast poll interval and inherit the
+            // coordinator's max_sst_size so output SSTs match the configured split threshold.
+            let worker_options = Arc::new(crate::config::CompactionWorkerOptions {
+                compactions_poll_interval: std::time::Duration::from_millis(100),
+                max_sst_size: options.max_sst_size,
+                ..self.worker_options
+            });
+            Some(build_worker_handler(
+                manifest_store,
+                compactions_store,
+                table_store,
+                worker_options,
+                self.compaction_runtime,
+                self.rand,
+                stats,
+                self.system_clock,
+                self.merge_operator,
+                #[cfg(feature = "compaction_filters")]
+                self.compaction_filter_supplier,
+            ))
+        } else {
+            None
+        };
+        Ok((handler, rx, worker))
     }
 }
 
