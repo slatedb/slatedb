@@ -543,7 +543,6 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         self.handle.block_on(wait_for_task_termination);
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
     }
-
 }
 
 #[cfg(test)]
