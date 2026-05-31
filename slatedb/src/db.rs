@@ -403,6 +403,17 @@ impl DbInner {
                 let watcher_for_oldest_unflushed_wal =
                     self.wal_buffer.watcher_for_oldest_unflushed_wal();
 
+                // There is a window of time after total_mem_size_bytes exceeds
+                // max_unflushed_bytes but before we retrieve the watchers. If
+                // both the memtable and WAL were flushed in that window, there
+                // is nothing to wait on and the select! would block for the full
+                // 30s timeout. Short-circuit back to re-evaluate the condition.
+                if maybe_oldest_unflushed_memtable.is_none()
+                    && watcher_for_oldest_unflushed_wal.is_none()
+                {
+                    continue;
+                }
+
                 let await_memtable_uploaded = async {
                     if let Some(oldest_unflushed_memtable) = maybe_oldest_unflushed_memtable {
                         oldest_unflushed_memtable.await_uploaded().await
