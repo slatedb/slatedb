@@ -43,6 +43,10 @@ TTL is stored as an absolute expiration timestamp, not a relative duration. On c
 
 Deletes write tombstones and do not carry TTL.
 
+:::caution
+Batch-local merges requires one effective `expire_ts` per key. `Db::write(...)` and transaction commit return `ErrorKind::Invalid` if a single batch tries to merge the same key across different expiration timestamps. Effective timestamps are computed after applying `Settings::default_ttl`, so `Ttl::Default` can still differ from `Ttl::NoExpiry` or from another explicit TTL.
+:::
+
 :::note
 When SlateDB materializes a value from merge operands, the resulting row reports the earliest `expire_ts` across the merged operands and any base value. A later merge with a longer TTL does not extend the lifetime of older merged data.
 :::

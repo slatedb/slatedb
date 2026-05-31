@@ -80,7 +80,11 @@ If no merge operator is configured and a read encounters a `Merge` row, SlateDB 
 
 ### Rewrites
 
-Inside a committed [`WriteBatch`](https://docs.rs/slatedb/latest/slatedb/struct.WriteBatch.html), SlateDB reduces consecutive merge operations for the same key when the writer has a merge operator configured. If the batch also contains a value or tombstone base for that key, the reduced row becomes a plain value. If it has only operands, the reduced row stays a `Merge`.
+Before a [`WriteBatch`](https://docs.rs/slatedb/latest/slatedb/struct.WriteBatch.html) is committed, SlateDB reduces consecutive merge operations for the same key when the writer has a merge operator configured. If the batch also contains a value or tombstone base for that key, the reduced row becomes a plain value. If it has only operands, the reduced row stays a `Merge`.
+
+:::caution
+`Db::write(...)` and transaction commits reject batch-local merges for the same key when the rows being reduced have different effective `expire_ts` values. This includes multiple `merge_with_options(...)` calls with different TTLs, a `put_with_options(...)` followed by a merge with a different TTL, or a `delete(...)` followed by a merge that expires. Use one effective TTL for each key in a batch, or split the operations across separate batchces or commits.
+:::
 
 Memtable flush and compaction use the same merge logic before they write new SSTs. Those rewrite paths are stricter than reads. They keep rows with different `expire_ts` values in separate groups so they can expire independently, and they stop at snapshot and durability retention boundaries so active snapshots or remote readers can still see the version chain they need.
 
