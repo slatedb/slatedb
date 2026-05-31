@@ -187,6 +187,24 @@ impl Drop for ByteBufferPermit {
     }
 }
 
+/// Decrements `waiter_cnt` when dropped, ensuring cancellation safety.
+struct WaiterGuard<'a> {
+    semaphore: &'a ByteBudgetSemaphore,
+}
+
+impl<'a> WaiterGuard<'a> {
+    fn new(semaphore: &'a ByteBudgetSemaphore) -> Self {
+        semaphore.waiter_cnt.fetch_add(1, Ordering::Release);
+        Self { semaphore }
+    }
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.semaphore.waiter_cnt.fetch_sub(1, Ordering::Release);
+    }
+}
+
 #[derive(Debug)]
 struct ByteBudgetSemaphore {
     notify: Notify,
@@ -209,7 +227,7 @@ impl ByteBudgetSemaphore {
     /// Reserves `num_bytes`, blocking until allocated bytes drop below
     /// capacity. Uses a CAS loop with a `Notify` to avoid spinning.
     async fn acquire(&self, num_bytes: usize) {
-        let _ = self.waiter_cnt.fetch_add(1, Ordering::Release);
+        let _guard = WaiterGuard::new(self);
         let mut current = self.allocated_bytes.load(Ordering::Relaxed);
         let notify_fut = self.notify.notified();
         tokio::pin!(notify_fut);
@@ -236,7 +254,6 @@ impl ByteBudgetSemaphore {
                 current = self.allocated_bytes.load(Ordering::Acquire);
             }
         }
-        let _ = self.waiter_cnt.fetch_sub(1, Ordering::Release);
     }
 
     /// Unconditionally adds `num_bytes` to the allocated count without
@@ -309,7 +326,7 @@ impl ByteBudgetSemaphore {
             return;
         }
 
-        let _ = self.waiter_cnt.fetch_add(1, Ordering::Release);
+        let _guard = WaiterGuard::new(self);
 
         let notify_fut = self.notify.notified();
         tokio::pin!(notify_fut);
@@ -323,8 +340,6 @@ impl ByteBudgetSemaphore {
                 current = self.allocated_bytes.load(Ordering::Acquire);
             }
         }
-
-        let _ = self.waiter_cnt.fetch_sub(1, Ordering::Release);
     }
 }
 
