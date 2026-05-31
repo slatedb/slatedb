@@ -238,14 +238,26 @@ impl WriteOp {
         }
     }
 
-    /// Returns the byte length of this operation's value payload,
-    /// or zero for deletes.
-    pub(crate) fn value_size(&self) -> usize {
+    /// Returns the estimated write-buffer budget this entry will occupy
+    /// in the memtable. Includes key bytes, value bytes (with `Bytes`
+    /// handle overhead), and the per-entry SkipMap structural overhead
+    /// (`SKIPMAP_ENTRY_OVERHEAD + SEQUENCED_KEY_SIZE`).
+    pub(crate) fn estimated_memtable_size(&self) -> usize {
+        let mut size = KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE;
         match self {
-            WriteOp::Put { value, .. } => value.len(),
-            WriteOp::Delete { .. } => 0,
-            WriteOp::Merge { value, .. } => value.len(),
+            WriteOp::Put { key, value, .. } | WriteOp::Merge { key, value, .. } => {
+                size += key.len();
+                if !value.is_empty() {
+                    size += value.len() + std::mem::size_of::<Bytes>() * 2;
+                } else {
+                    size += std::mem::size_of::<Bytes>();
+                }
+            }
+            WriteOp::Delete { key, .. } => {
+                size += key.len() + std::mem::size_of::<Bytes>();
+            }
         }
+        size
     }
 }
 
@@ -511,20 +523,11 @@ impl WriteBatch {
 
     pub(crate) fn set_write_buffer(&mut self, permit: Arc<ByteBufferPermit>) {
         for op in self.ops.values_mut() {
-            let value_size = op.value_size();
-            let mut entry_budget = KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE;
+            let entry_budget = op.estimated_memtable_size();
             match op {
-                WriteOp::Put { key, permit: p, .. } | WriteOp::Merge { key, permit: p, .. } => {
-                    entry_budget += key.len();
-                    if value_size > 0 {
-                        entry_budget += value_size + std::mem::size_of::<Bytes>() * 2;
-                    } else {
-                        entry_budget += std::mem::size_of::<Bytes>();
-                    }
-                    *p = Some(permit.take(entry_budget));
-                }
-                WriteOp::Delete { key, permit: p } => {
-                    entry_budget += key.len() + std::mem::size_of::<Bytes>();
+                WriteOp::Put { permit: p, .. }
+                | WriteOp::Merge { permit: p, .. }
+                | WriteOp::Delete { permit: p, .. } => {
                     *p = Some(permit.take(entry_budget));
                 }
             }
@@ -539,19 +542,10 @@ impl WriteBatch {
     /// so that `put_prebudgeted` can insert entries without additional
     /// semaphore operations.
     pub(crate) fn estimated_size(&self) -> usize {
-        let mut size = 0;
-        for (seq_key, op) in self.ops.iter() {
-            size += seq_key.user_key.len();
-            let value_size = op.value_size();
-            if value_size > 0 {
-                size += value_size;
-                size += std::mem::size_of::<Bytes>() * 2;
-            } else {
-                size += std::mem::size_of::<Bytes>();
-            }
-            size += KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE;
-        }
-        size
+        self.ops
+            .values()
+            .map(|op| op.estimated_memtable_size())
+            .sum()
     }
 }
 

@@ -60,7 +60,6 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::{Manifest, VersionedManifest};
-use crate::mem_table::KVTable;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
@@ -641,9 +640,7 @@ impl DbInner {
 
             assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
             self.oracle.advance_durable_seq(replayed_table.last_seq);
-            let permit_size = metadata.entries_size_in_bytes
-                + metadata.entry_num
-                    * (KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE);
+            let permit_size = metadata.write_buffer_size();
             let permit = self.write_buffer_manager.force_acquire(permit_size);
             replayed_table.table.add_write_permit(&permit);
             self.replay_memtable(replayed_table)?;

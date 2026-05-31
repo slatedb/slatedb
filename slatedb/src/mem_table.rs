@@ -126,6 +126,16 @@ pub(crate) struct KVTableMetadata {
     pub(crate) first_seq: u64,
 }
 
+impl KVTableMetadata {
+    /// Returns the total write-buffer budget for all entries: data bytes
+    /// (tracked by `entries_size_in_bytes`) plus per-entry structural
+    /// overhead (`SKIPMAP_ENTRY_OVERHEAD + SEQUENCED_KEY_SIZE`).
+    pub(crate) fn write_buffer_size(&self) -> usize {
+        self.entries_size_in_bytes
+            + self.entry_num * (KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE)
+    }
+}
+
 pub(crate) struct WritableKVTable {
     table: Arc<KVTable>,
 }
@@ -357,9 +367,7 @@ impl ImmutableMemtable {
         // (tracked by entries_size_in_bytes) plus structural overhead.
         let metadata = new_table.metadata();
         if metadata.entry_num > 0 {
-            let budget = metadata.entries_size_in_bytes
-                + metadata.entry_num
-                    * (KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE);
+            let budget = metadata.write_buffer_size();
             let permit = self.table.buffer_manager().force_acquire(budget);
             new_table.add_write_permit(&permit);
         }
@@ -403,10 +411,10 @@ impl KVTable {
     /// (one for u64 sequence numbers, one for i64 timestamps).
     pub(crate) const SEQ_TRACKER_OVERHEAD: usize = 8192 * std::mem::size_of::<u64>() * 2;
 
-    /// Per-entry overhead from `WriteBatch::estimated_size()`: the two `Bytes`
-    /// structs (key + value) stored in the RowEntry. This is the fixed per-entry
-    /// cost charged by the write path before the batch reaches the memtable,
-    /// excluding the variable-length key and value byte data.
+    /// Per-entry overhead from `WriteOp::estimated_memtable_size()`: the two
+    /// `Bytes` structs (key + value) stored in the RowEntry. This is the fixed
+    /// per-entry cost charged by the write path before the batch reaches the
+    /// memtable, excluding the variable-length key and value byte data.
     pub(crate) const BATCH_ENTRY_OVERHEAD: usize = std::mem::size_of::<Bytes>() * 2;
 
     /// The minimum write-buffer capacity required to create a KVTable and
@@ -416,7 +424,7 @@ impl KVTable {
     /// before `maybe_apply_backpressure` could block:
     /// - `SEQ_TRACKER_OVERHEAD`: fixed allocation at KVTable creation
     /// - `BATCH_ENTRY_OVERHEAD + SKIPMAP_ENTRY_OVERHEAD + SEQUENCED_KEY_SIZE`:
-    ///   per-entry cost from `WriteBatch::estimated_size()` (excludes
+    ///   per-entry cost from `WriteOp::estimated_memtable_size()` (excludes
     ///   key/value bytes, so real writes will consume more)
     /// - `KVTABLE_SIZE`: base struct cost
     pub(crate) const MIN_WRITE_BUFFER_SIZE: usize = Self::SEQ_TRACKER_OVERHEAD
