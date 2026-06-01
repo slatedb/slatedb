@@ -474,7 +474,8 @@ impl CompactionWorkerHandler {
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
-            let Some(existing) = stored.compactions().get(&compaction_id).cloned() else {
+            let mut dirty = stored.prepare_dirty()?;
+            let Some(existing) = dirty.value.get(&compaction_id).cloned() else {
                 info!(
                     "compaction entry missing on completion; dropping [id={}]",
                     compaction_id
@@ -493,7 +494,6 @@ impl CompactionWorkerHandler {
                 .with_status(CompactionStatus::Compacted)
                 .with_output_ssts(output_ssts.clone())
                 .with_worker(Some(WorkerSpec::new(self.worker_id.clone(), heartbeat_ms)));
-            let mut dirty = stored.prepare_dirty()?;
             dirty.value.insert(updated);
             match stored.update(dirty).await {
                 Ok(()) => return Ok(()),
@@ -510,7 +510,8 @@ impl CompactionWorkerHandler {
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
-            let Some(existing) = stored.compactions().get(&compaction_id).cloned() else {
+            let mut dirty = stored.prepare_dirty()?;
+            let Some(existing) = dirty.value.get(&compaction_id).cloned() else {
                 info!(
                     "compaction no longer exists, no claim to release [worker_id]={} [compaction_id]={}",
                     worker_id,
@@ -531,7 +532,6 @@ impl CompactionWorkerHandler {
             let updated = existing
                 .with_status(CompactionStatus::Submitted)
                 .with_worker(None);
-            let mut dirty = stored.prepare_dirty()?;
             dirty.value.insert(updated);
             match stored.update(dirty).await {
                 Ok(()) => return Ok(()),
