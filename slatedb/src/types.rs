@@ -1,7 +1,5 @@
 use bytes::Bytes;
 
-use crate::byte_buffer_manager::ByteBufferPermit;
-
 /// Represents a key-value pair known not to be a tombstone.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -28,9 +26,6 @@ pub struct RowEntry {
     pub create_ts: Option<i64>,
     /// The expiration timestamp (if set).
     pub expire_ts: Option<i64>,
-    /// An optional write-buffer budget permit for this entry.
-    /// When present, `put` will merge this into the table's permit.
-    pub(crate) permit: Option<ByteBufferPermit>,
 }
 
 impl Clone for RowEntry {
@@ -41,7 +36,6 @@ impl Clone for RowEntry {
             seq: self.seq,
             create_ts: self.create_ts,
             expire_ts: self.expire_ts,
-            permit: None,
         }
     }
 }
@@ -70,7 +64,6 @@ impl RowEntry {
             seq,
             create_ts,
             expire_ts,
-            permit: None,
         }
     }
 
@@ -119,7 +112,6 @@ impl RowEntry {
             seq,
             create_ts: None,
             expire_ts: None,
-            permit: None,
         }
     }
 
@@ -131,7 +123,6 @@ impl RowEntry {
             seq,
             create_ts: None,
             expire_ts: None,
-            permit: None,
         }
     }
 
@@ -143,7 +134,6 @@ impl RowEntry {
             seq,
             create_ts: None,
             expire_ts: None,
-            permit: None,
         }
     }
 
@@ -155,7 +145,6 @@ impl RowEntry {
             seq: self.seq,
             create_ts: Some(create_ts),
             expire_ts: self.expire_ts,
-            permit: None,
         }
     }
 
@@ -167,7 +156,6 @@ impl RowEntry {
             seq: self.seq,
             create_ts: self.create_ts,
             expire_ts: Some(expire_ts),
-            permit: None,
         }
     }
 }

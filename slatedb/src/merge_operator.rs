@@ -6,7 +6,6 @@ use slatedb_common::metrics::CounterFn;
 use thiserror::Error;
 
 use crate::{
-    byte_buffer_manager::ByteBufferPermit,
     error::SlateDBError,
     iter::{RowEntryIterator, TrackedRowEntryIterator},
     types::{RowEntry, ValueDeletable},
@@ -344,7 +343,6 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         key: &Bytes,
         batch: &mut Vec<RowEntry>,
         merge_tracker: &mut MergeTracker,
-        accumulated_permit: &mut Option<ByteBufferPermit>,
     ) -> Result<Bytes, SlateDBError> {
         batch.reverse();
         let mut operands: Vec<Bytes> = Vec::with_capacity(batch.len());
@@ -352,13 +350,6 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
             merge_tracker.update(entry)?;
             if let Some(v) = entry.value.as_bytes() {
                 operands.push(v);
-            }
-            // Accumulate the entry's permit into the combined permit.
-            if let Some(entry_permit) = entry.permit.take() {
-                match accumulated_permit {
-                    Some(existing) => existing.merge(&entry_permit),
-                    None => *accumulated_permit = Some(entry_permit),
-                }
             }
         }
 
@@ -388,9 +379,6 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
             seq: first_entry.seq,
         };
 
-        // Accumulate permits from all entries consumed during merging.
-        let mut accumulated_permit: Option<ByteBufferPermit> = None;
-
         let mut results = Vec::new();
         let mut batch = Vec::with_capacity(MERGE_BATCH_SIZE);
 
@@ -411,12 +399,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
 
                 // if the batch is full, merge it and add the result to the results vector
                 if batch.len() >= MERGE_BATCH_SIZE {
-                    results.push(self.process_batch(
-                        &key,
-                        &mut batch,
-                        &mut merge_tracker,
-                        &mut accumulated_permit,
-                    )?);
+                    results.push(self.process_batch(&key, &mut batch, &mut merge_tracker)?);
                 }
 
                 next = self.delegate.next().await?;
@@ -427,26 +410,15 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
 
         // handle leftovers from the last batch
         if !batch.is_empty() {
-            results.push(self.process_batch(
-                &key,
-                &mut batch,
-                &mut merge_tracker,
-                &mut accumulated_permit,
-            )?);
+            results.push(self.process_batch(&key, &mut batch, &mut merge_tracker)?);
         }
 
         let base_value = base.as_ref().and_then(|b| b.value.as_bytes());
         let found_base = base.is_some();
 
-        // Fold the base entry's metadata and permit into the tracker.
-        if let Some(mut base_entry) = base {
+        // Fold the base entry's metadata into the tracker.
+        if let Some(base_entry) = base {
             merge_tracker.update(&base_entry)?;
-            if let Some(base_permit) = base_entry.permit.take() {
-                match &accumulated_permit {
-                    Some(existing) => existing.merge(&base_permit),
-                    None => accumulated_permit = Some(base_permit),
-                }
-            }
         }
 
         // If we have no results and either no base or a tombstone base, return None
@@ -469,7 +441,6 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
             seq: merge_tracker.seq,
             create_ts: merge_tracker.max_create_ts,
             expire_ts: merge_tracker.min_expire_ts,
-            permit: accumulated_permit,
         }))
     }
 }
@@ -1214,192 +1185,5 @@ mod tests {
             vec![RowEntry::new_value(b"key1", b"BASE12", 2).with_expire_ts(50)],
         )
         .await;
-    }
-
-    // ---------------------------------------------------------------
-    // Permit tracking tests
-    // ---------------------------------------------------------------
-
-    use crate::byte_buffer_manager::ByteBufferManager;
-
-    /// Helper: create a shared ByteBufferManager for permit tests.
-    fn test_buffer_manager() -> ByteBufferManager {
-        ByteBufferManager::new(usize::MAX, usize::MAX)
-    }
-
-    /// Helper: attach a permit (from the given manager) to a RowEntry.
-    fn with_permit(mut entry: RowEntry, mgr: &ByteBufferManager, bytes: usize) -> RowEntry {
-        entry.permit = Some(mgr.force_acquire(bytes));
-        entry
-    }
-
-    #[tokio::test]
-    async fn merge_accumulates_permits_from_all_merge_entries() {
-        let merge_operator = Arc::new(MockMergeOperator {});
-        let mgr = test_buffer_manager();
-        // 3 merge entries for the same key, each with a 100-byte permit.
-        let data = vec![
-            with_permit(RowEntry::new_merge(b"key1", b"a", 3), &mgr, 100),
-            with_permit(RowEntry::new_merge(b"key1", b"b", 2), &mgr, 100),
-            with_permit(RowEntry::new_merge(b"key1", b"c", 1), &mgr, 100),
-        ];
-
-        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
-            merge_operator,
-            data.into(),
-            true,
-            None,
-        );
-        iterator.init().await.unwrap();
-
-        let result = iterator.next().await.unwrap().unwrap();
-        assert_eq!(result.key.as_ref(), b"key1");
-        assert_eq!(result.value.as_bytes().unwrap().as_ref(), b"cba");
-        // The merged entry's permit should hold the combined budget (300).
-        let permit = result
-            .permit
-            .expect("merged entry should carry accumulated permit");
-        assert_eq!(permit.size(), 300);
-    }
-
-    #[tokio::test]
-    async fn merge_accumulates_permit_from_base_value() {
-        let merge_operator = Arc::new(MockMergeOperator {});
-        let mgr = test_buffer_manager();
-        // 2 merge entries + 1 base value, each with a permit.
-        let data = vec![
-            with_permit(RowEntry::new_merge(b"key1", b"a", 3), &mgr, 50),
-            with_permit(RowEntry::new_merge(b"key1", b"b", 2), &mgr, 50),
-            with_permit(RowEntry::new_value(b"key1", b"BASE", 1), &mgr, 200),
-        ];
-
-        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
-            merge_operator,
-            data.into(),
-            true,
-            None,
-        );
-        iterator.init().await.unwrap();
-
-        let result = iterator.next().await.unwrap().unwrap();
-        assert_eq!(result.key.as_ref(), b"key1");
-        assert_eq!(result.value.as_bytes().unwrap().as_ref(), b"BASEba");
-        // Combined permit: 50 + 50 + 200 = 300.
-        let permit = result
-            .permit
-            .expect("merged entry should carry accumulated permit");
-        assert_eq!(permit.size(), 300);
-    }
-
-    #[tokio::test]
-    async fn non_merge_entry_preserves_its_permit() {
-        let merge_operator = Arc::new(MockMergeOperator {});
-        let mgr = test_buffer_manager();
-        // A plain value entry (not a merge) should pass through with its permit intact.
-        let data = vec![with_permit(
-            RowEntry::new_value(b"key1", b"val", 1),
-            &mgr,
-            42,
-        )];
-
-        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
-            merge_operator,
-            data.into(),
-            true,
-            None,
-        );
-        iterator.init().await.unwrap();
-
-        let result = iterator.next().await.unwrap().unwrap();
-        assert_eq!(result.key.as_ref(), b"key1");
-        let permit = result
-            .permit
-            .expect("non-merge entry should keep its permit");
-        assert_eq!(permit.size(), 42);
-    }
-
-    #[tokio::test]
-    async fn merge_with_no_permits_produces_no_permit() {
-        let merge_operator = Arc::new(MockMergeOperator {});
-        // Merge entries without permits (e.g. from compaction path).
-        let data = vec![
-            RowEntry::new_merge(b"key1", b"a", 2),
-            RowEntry::new_merge(b"key1", b"b", 1),
-        ];
-
-        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
-            merge_operator,
-            data.into(),
-            true,
-            None,
-        );
-        iterator.init().await.unwrap();
-
-        let result = iterator.next().await.unwrap().unwrap();
-        assert_eq!(result.key.as_ref(), b"key1");
-        assert!(
-            result.permit.is_none(),
-            "merged entry without source permits should have no permit"
-        );
-    }
-
-    #[tokio::test]
-    async fn non_matching_entry_retains_permit_in_buffer() {
-        let merge_operator = Arc::new(MockMergeOperator {});
-        let mgr = test_buffer_manager();
-        // key1 merge entries followed by a key2 entry with its own permit.
-        let data = vec![
-            with_permit(RowEntry::new_merge(b"key1", b"a", 2), &mgr, 80),
-            with_permit(RowEntry::new_merge(b"key1", b"b", 1), &mgr, 80),
-            with_permit(RowEntry::new_value(b"key2", b"val", 3), &mgr, 55),
-        ];
-
-        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
-            merge_operator,
-            data.into(),
-            true,
-            None,
-        );
-        iterator.init().await.unwrap();
-
-        // First result: merged key1, should have 80+80=160.
-        let result1 = iterator.next().await.unwrap().unwrap();
-        assert_eq!(result1.key.as_ref(), b"key1");
-        let permit1 = result1
-            .permit
-            .expect("key1 merged entry should have permit");
-        assert_eq!(permit1.size(), 160);
-
-        // Second result: key2, should retain its own 55-byte permit.
-        let result2 = iterator.next().await.unwrap().unwrap();
-        assert_eq!(result2.key.as_ref(), b"key2");
-        let permit2 = result2.permit.expect("key2 entry should keep its permit");
-        assert_eq!(permit2.size(), 55);
-    }
-
-    #[tokio::test]
-    async fn merge_with_mixed_permits_accumulates_only_present_ones() {
-        let merge_operator = Arc::new(MockMergeOperator {});
-        let mgr = test_buffer_manager();
-        // Mix of entries with and without permits.
-        let data = vec![
-            with_permit(RowEntry::new_merge(b"key1", b"a", 3), &mgr, 75),
-            RowEntry::new_merge(b"key1", b"b", 2), // no permit
-            with_permit(RowEntry::new_merge(b"key1", b"c", 1), &mgr, 25),
-        ];
-
-        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
-            merge_operator,
-            data.into(),
-            true,
-            None,
-        );
-        iterator.init().await.unwrap();
-
-        let result = iterator.next().await.unwrap().unwrap();
-        assert_eq!(result.key.as_ref(), b"key1");
-        // Only the two entries with permits contribute: 75 + 25 = 100.
-        let permit = result.permit.expect("should accumulate present permits");
-        assert_eq!(permit.size(), 100);
     }
 }

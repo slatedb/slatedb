@@ -8,7 +8,7 @@ use crate::byte_buffer_manager::ByteBufferPermit;
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::mem_table::{KVTable, KVTableInternalKeyRange, SequencedKey};
+use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::{RowEntry, ValueDeletable};
@@ -75,17 +75,14 @@ pub(crate) enum WriteOp {
         key: Bytes,
         value: Bytes,
         options: PutOptions,
-        permit: Option<ByteBufferPermit>,
     },
     Delete {
         key: Bytes,
-        permit: Option<ByteBufferPermit>,
     },
     Merge {
         key: Bytes,
         value: Bytes,
         options: MergeOptions,
-        permit: Option<ByteBufferPermit>,
     },
 }
 
@@ -96,27 +93,20 @@ impl Clone for WriteOp {
                 key,
                 value,
                 options,
-                ..
             } => WriteOp::Put {
                 key: key.clone(),
                 value: value.clone(),
                 options: options.clone(),
-                permit: None,
             },
-            WriteOp::Delete { key, .. } => WriteOp::Delete {
-                key: key.clone(),
-                permit: None,
-            },
+            WriteOp::Delete { key } => WriteOp::Delete { key: key.clone() },
             WriteOp::Merge {
                 key,
                 value,
                 options,
-                ..
             } => WriteOp::Merge {
                 key: key.clone(),
                 value: value.clone(),
                 options: options.clone(),
-                permit: None,
             },
         }
     }
@@ -130,28 +120,24 @@ impl PartialEq for WriteOp {
                     key: k1,
                     value: v1,
                     options: o1,
-                    ..
                 },
                 WriteOp::Put {
                     key: k2,
                     value: v2,
                     options: o2,
-                    ..
                 },
             ) => k1 == k2 && v1 == v2 && o1 == o2,
-            (WriteOp::Delete { key: k1, .. }, WriteOp::Delete { key: k2, .. }) => k1 == k2,
+            (WriteOp::Delete { key: k1 }, WriteOp::Delete { key: k2 }) => k1 == k2,
             (
                 WriteOp::Merge {
                     key: k1,
                     value: v1,
                     options: o1,
-                    ..
                 },
                 WriteOp::Merge {
                     key: k2,
                     value: v2,
                     options: o2,
-                    ..
                 },
             ) => k1 == k2 && v1 == v2 && o1 == o2,
             _ => false,
@@ -174,13 +160,12 @@ impl std::fmt::Debug for WriteOp {
                 key,
                 value,
                 options,
-                ..
             } => {
                 let key = trunc(key);
                 let value = trunc(value);
                 write!(f, "Put({key}, {value}, {:?})", options)
             }
-            WriteOp::Delete { key, .. } => {
+            WriteOp::Delete { key } => {
                 let key = trunc(key);
                 write!(f, "Delete({key})")
             }
@@ -188,7 +173,6 @@ impl std::fmt::Debug for WriteOp {
                 key,
                 value,
                 options,
-                ..
             } => {
                 let key = trunc(key);
                 let value = trunc(value);
@@ -199,65 +183,51 @@ impl std::fmt::Debug for WriteOp {
 }
 
 impl WriteOp {
-    /// Convert WriteOp to RowEntry, transferring the permit.
+    /// Convert WriteOp to RowEntry.
     pub(crate) fn to_row_entry(
-        &mut self,
+        &self,
         seq: u64,
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> RowEntry {
         match self {
-            WriteOp::Put {
-                key, value, permit, ..
-            } => RowEntry {
+            WriteOp::Put { key, value, .. } => RowEntry {
                 key: key.clone(),
                 value: ValueDeletable::Value(value.clone()),
                 seq,
                 create_ts,
                 expire_ts,
-                permit: permit.take(),
             },
-            WriteOp::Delete { key, permit, .. } => RowEntry {
+            WriteOp::Delete { key } => RowEntry {
                 key: key.clone(),
                 value: ValueDeletable::Tombstone,
                 seq,
                 create_ts,
                 expire_ts,
-                permit: permit.take(),
             },
-            WriteOp::Merge {
-                key, value, permit, ..
-            } => RowEntry {
+            WriteOp::Merge { key, value, .. } => RowEntry {
                 key: key.clone(),
                 value: ValueDeletable::Merge(value.clone()),
                 seq,
                 create_ts,
                 expire_ts,
-                permit: permit.take(),
             },
         }
     }
 
-    /// Returns the estimated write-buffer budget this entry will occupy
-    /// in the memtable. Includes key bytes, value bytes (with `Bytes`
-    /// handle overhead), and the per-entry SkipMap structural overhead
-    /// (`SKIPMAP_ENTRY_OVERHEAD + SEQUENCED_KEY_SIZE`).
-    pub(crate) fn estimated_memtable_size(&self) -> usize {
-        let mut size = KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE;
+    /// Returns the estimated key/value byte size of this write operation,
+    /// including the overhead of `Bytes` handles stored in memory.
+    pub(crate) fn estimated_kv_size(&self) -> usize {
         match self {
             WriteOp::Put { key, value, .. } | WriteOp::Merge { key, value, .. } => {
-                size += key.len();
+                let mut size = key.len() + std::mem::size_of::<Bytes>();
                 if !value.is_empty() {
-                    size += value.len() + std::mem::size_of::<Bytes>() * 2;
-                } else {
-                    size += std::mem::size_of::<Bytes>();
+                    size += value.len() + std::mem::size_of::<Bytes>();
                 }
+                size
             }
-            WriteOp::Delete { key, .. } => {
-                size += key.len() + std::mem::size_of::<Bytes>();
-            }
+            WriteOp::Delete { key } => key.len() + std::mem::size_of::<Bytes>(),
         }
-        size
     }
 }
 
@@ -388,7 +358,6 @@ impl WriteBatch {
                 key,
                 value,
                 options: options.clone(),
-                permit: None,
             },
         );
 
@@ -419,7 +388,6 @@ impl WriteBatch {
                 key,
                 value: Bytes::copy_from_slice(value.as_ref()),
                 options: options.clone(),
-                permit: None,
             },
         );
 
@@ -438,7 +406,7 @@ impl WriteBatch {
         self.remove_ops_by_key(&key);
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Delete { key, permit: None },
+            WriteOp::Delete { key },
         );
 
         self.write_idx += 1;
@@ -538,30 +506,12 @@ impl WriteBatch {
     }
 
     pub(crate) fn set_write_buffer(&mut self, permit: Arc<ByteBufferPermit>) {
-        for op in self.ops.values_mut() {
-            let entry_budget = op.estimated_memtable_size();
-            match op {
-                WriteOp::Put { permit: p, .. }
-                | WriteOp::Merge { permit: p, .. }
-                | WriteOp::Delete { permit: p, .. } => {
-                    *p = Some(permit.take(entry_budget));
-                }
-            }
-        }
         self.write_buffer_permit = Some(permit);
     }
 
-    /// Returns a conservative estimate of the in-memory byte footprint
-    /// this batch will occupy once written to the memtable. Includes
-    /// key bytes, value bytes, and the per-entry structural overhead
-    /// (SkipMap node + SequencedKey). This budget is allocated upfront
-    /// so that `put_prebudgeted` can insert entries without additional
-    /// semaphore operations.
+    /// Returns the total estimated key/value byte footprint of this batch.
     pub(crate) fn estimated_size(&self) -> usize {
-        self.ops
-            .values()
-            .map(|op| op.estimated_memtable_size())
-            .sum()
+        self.ops.values().map(|op| op.estimated_kv_size()).sum()
     }
 }
 
@@ -726,7 +676,6 @@ mod tests {
                         key: Bytes::from(test_case.key),
                         value: Bytes::from(value),
                         options: test_case.options,
-                        permit: None,
                     },
                 );
             } else {
@@ -735,7 +684,6 @@ mod tests {
                     SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
                     WriteOp::Delete {
                         key: Bytes::from(test_case.key),
-                        permit: None,
                     },
                 );
             }

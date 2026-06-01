@@ -128,7 +128,6 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
                         seq: entry.seq,
                         expire_ts: None,
                         create_ts: entry.create_ts,
-                        permit: None,
                     }
                 }
                 _ => entry,

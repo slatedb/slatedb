@@ -79,6 +79,13 @@ impl ByteBufferManager {
         }
     }
 
+    pub fn force_expand(&self, permit: &ByteBufferPermit, num_bytes: usize) {
+        self.inner.force_acquire(num_bytes);
+        permit
+            .reserved_bytes
+            .fetch_add(num_bytes, Ordering::Relaxed);
+    }
+
     /// Returns the number of unreserved bytes remaining in the budget.
     pub fn available(&self) -> usize {
         self.inner.available()
@@ -172,10 +179,10 @@ impl ByteBufferPermit {
         }
     }
 
-    pub fn force_acquire(&self, num_bytes: usize) {
-        self.reserved_bytes.fetch_add(num_bytes, Ordering::Relaxed);
-        self.semaphore.force_acquire(num_bytes);
-    }
+    // pub fn force_acquire(&self, num_bytes: usize) {
+    //     self.reserved_bytes.fetch_add(num_bytes, Ordering::Relaxed);
+    //     self.semaphore.force_acquire(num_bytes);
+    // }
 }
 
 impl Drop for ByteBufferPermit {
@@ -295,10 +302,9 @@ impl ByteBudgetSemaphore {
             "cannot release more bytes than were reserved"
         );
 
-        if self.waiter_cnt.load(Ordering::Acquire) > 0
-            && (prev - num_bytes) < self.capacity {
-                self.notify.notify_waiters();
-            }
+        if self.waiter_cnt.load(Ordering::Acquire) > 0 && (prev - num_bytes) < self.capacity {
+            self.notify.notify_waiters();
+        }
     }
 
     /// Returns the number of unreserved bytes (capacity minus allocated),

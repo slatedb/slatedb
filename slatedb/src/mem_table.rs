@@ -109,7 +109,7 @@ pub(crate) struct KVTable {
     /// paths after the antichain check. Empty when no extractor is
     /// configured.
     touched_segments: Mutex<std::collections::BTreeSet<Bytes>>,
-    buffer_manager: ByteBufferManager,
+    write_buffer_manager: ByteBufferManager,
     write_buffer_permit: Arc<ByteBufferPermit>,
 }
 
@@ -356,20 +356,13 @@ impl ImmutableMemtable {
     /// number greater than the given `seq`. [`ImmutableMemtable::recent_flushed_wal_id`]
     /// remains the same.
     pub(crate) fn filter_after_seq(&self, seq: u64) -> Self {
-        let new_table = WritableKVTable::with_buffer_manager(self.table.buffer_manager().clone());
+        let new_table =
+            WritableKVTable::with_buffer_manager(self.table.write_buffer_manager.clone());
         let mut table_iter = self.table.iter();
         while let Some(entry) = table_iter.next_sync() {
             if entry.seq > seq {
                 new_table.put(entry);
             }
-        }
-        // Allocate budget for all entries that were inserted: data bytes
-        // (tracked by entries_size_in_bytes) plus structural overhead.
-        let metadata = new_table.metadata();
-        if metadata.entry_num > 0 {
-            let budget = metadata.write_buffer_size();
-            let permit = self.table.buffer_manager().force_acquire(budget);
-            new_table.add_write_permit(&permit);
         }
         // Preserve the touched-segment set on the filtered table:
         // filtering by seq can remove rows but never changes which
@@ -417,9 +410,10 @@ impl KVTable {
     // In practice we use a round 1MB minimum to provide comfortable headroom
     // for real-world key/value sizes and multiple concurrent writes.
 
-    pub(crate) fn new(buffer_manager: ByteBufferManager) -> Self {
-        let write_buffer_permit =
-            Arc::new(buffer_manager.force_acquire(Self::SEQ_TRACKER_OVERHEAD + Self::KVTABLE_SIZE));
+    pub(crate) fn new(write_buffer_manager: ByteBufferManager) -> Self {
+        let write_buffer_permit = Arc::new(
+            write_buffer_manager.force_acquire(Self::SEQ_TRACKER_OVERHEAD + Self::KVTABLE_SIZE),
+        );
         Self {
             map: Arc::new(SkipMap::new()),
             entries_size_in_bytes: AtomicUsize::new(0),
@@ -429,13 +423,9 @@ impl KVTable {
             first_seq: AtomicU64::new(u64::MAX),
             sequence_tracker: Mutex::new(SequenceTracker::new()),
             touched_segments: Mutex::new(std::collections::BTreeSet::new()),
-            buffer_manager,
+            write_buffer_manager,
             write_buffer_permit,
         }
-    }
-
-    pub(crate) fn buffer_manager(&self) -> &ByteBufferManager {
-        &self.buffer_manager
     }
 
     /// Merge a batch's touched-segment prefixes into this table's
@@ -586,19 +576,21 @@ impl KVTable {
 
     /// Inserts a row entry into the table.
     ///
-    /// The caller is responsible for ensuring that this table's
-    /// `write_buffer_permit` already covers the entry's data bytes plus
-    /// per-entry structural overhead (`SKIPMAP_ENTRY_OVERHEAD +
-    /// SEQUENCED_KEY_SIZE`). This is typically done by including the
-    /// overhead in the batch permit and merging it before calling `put`.
+    /// Acquires the per-entry structural overhead (`SKIPMAP_ENTRY_OVERHEAD +
+    /// SEQUENCED_KEY_SIZE`) from the buffer manager. The caller is responsible
+    /// for ensuring the key/value data bytes are already covered by the
+    /// table's `write_buffer_permit` (via `add_write_permit`).
     ///
     /// For the rare overwrite case (same SequencedKey already exists),
     /// excess pre-allocated overhead is released back to the semaphore.
-    pub(crate) fn put(&self, mut row: RowEntry) {
-        // Merge the entry's permit into the table's permit (if present).
-        if let Some(permit) = row.permit.take() {
-            self.write_buffer_permit.merge(&permit);
-        }
+    pub(crate) fn put(&self, row: RowEntry) {
+        // Acquire per-entry skiplist overhead from the buffer manager.
+        let entry_overhead = Self::SKIPMAP_ENTRY_OVERHEAD
+            + std::mem::size_of::<SequencedKey>()
+            + std::mem::size_of::<RowEntry>();
+        self.write_buffer_manager
+            .force_expand(&self.write_buffer_permit, entry_overhead);
+
         let internal_key = SequencedKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 

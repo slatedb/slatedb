@@ -106,7 +106,7 @@ struct WalBuffer {
     last_seq: u64,
     /// size of the entries that has been added to the WAL buffer in bytes
     entries_size: usize,
-    buffer_manager: ByteBufferManager,
+    write_buffer_manager: ByteBufferManager,
     /// Permit tracking bytes allocated by this WAL buffer against the write buffer budget.
     /// Bytes are released back to the budget when this WalBuffer is dropped.
     write_buffer_permit: ByteBufferPermit,
@@ -498,7 +498,7 @@ impl WalBuffer {
             last_tick: i64::MIN,
             last_seq: 0,
             entries_size: 0,
-            buffer_manager: write_buffer_manager.clone(),
+            write_buffer_manager: write_buffer_manager.clone(),
             write_buffer_permit: write_buffer_manager.force_acquire(std::mem::size_of::<Self>()),
         }
     }
@@ -518,8 +518,8 @@ impl WalBuffer {
 
         let growth_bytes = (cap_after - cap_before) * std::mem::size_of::<RowEntry>();
         if growth_bytes > 0 {
-            self.write_buffer_permit
-                .merge(&self.buffer_manager.force_acquire(growth_bytes));
+            self.write_buffer_manager
+                .force_expand(&self.write_buffer_permit, growth_bytes);
         }
     }
 

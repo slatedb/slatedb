@@ -38,6 +38,7 @@ use std::collections::BTreeSet;
 
 use bytes::Bytes;
 
+use crate::byte_buffer_manager::ByteBufferPermit;
 use crate::config::WriteOptions;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
@@ -188,11 +189,19 @@ impl DbInner {
             self.wal_buffer.maybe_trigger_flush()?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
-            self.write_entries_to_memtable(entries, touched_segments);
+            self.write_entries_to_memtable(
+                entries,
+                touched_segments,
+                batch.write_buffer_permit.take(),
+            );
             wal_watcher
         } else {
             // if WAL is disabled, we just write the entries to memtable.
-            self.write_entries_to_memtable(entries, touched_segments)
+            self.write_entries_to_memtable(
+                entries,
+                touched_segments,
+                batch.write_buffer_permit.take(),
+            )
         };
         // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
         // after merge operators and overwrites are collapsed
@@ -287,19 +296,23 @@ impl DbInner {
     }
 
     /// Write entries to the currently active memtable and record
-    /// the batch's touched-segment prefixes on it. Each entry carries
-    /// its own write-buffer permit which is merged into the table
-    /// during `put`. Returns a durable watcher for the memtable.
-    /// When no extractor is configured, `touched_segments` is empty
-    /// and recording is a no-op.
+    /// the batch's touched-segment prefixes on it. The batch's
+    /// write-buffer permit (covering key/value data bytes) is merged
+    /// into the table's permit. Returns a durable watcher for the
+    /// memtable. When no extractor is configured, `touched_segments`
+    /// is empty and recording is a no-op.
     fn write_entries_to_memtable(
         &self,
         entries: Vec<RowEntry>,
         touched_segments: BTreeSet<Bytes>,
+        permit: Option<Arc<ByteBufferPermit>>,
     ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         let guard = self.state.read();
         let memtable = guard.memtable();
         memtable.record_touched_segments(touched_segments);
+        if let Some(permit) = permit.as_ref() {
+            memtable.add_write_permit(permit);
+        }
         entries.into_iter().for_each(|entry| memtable.put(entry));
         memtable.table().durable_watcher()
     }
