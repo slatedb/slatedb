@@ -352,8 +352,11 @@ impl Admin {
         &self,
         cancellation_token: CancellationToken,
     ) -> Result<(), crate::Error> {
-        self.run_compactor_with_options(cancellation_token, crate::config::CompactorOptions::default())
-            .await
+        self.run_compactor_with_options(
+            cancellation_token,
+            crate::config::CompactorOptions::default(),
+        )
+        .await
     }
 
     /// Like [`Admin::run_compactor`] but accepts explicit [`crate::config::CompactorOptions`].

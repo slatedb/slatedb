@@ -2,10 +2,10 @@ use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
+use slatedb::compaction_worker::CompactionWorkerBuilder;
 use slatedb::compactor::{
     CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
 };
-use slatedb::compaction_worker::CompactionWorkerBuilder;
 use slatedb::config::{
     CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };

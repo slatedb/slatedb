@@ -406,6 +406,9 @@ impl Compaction {
     }
 
     /// Sets bytes processed so far for this compaction.
+    // Consumed once the worker wires up progress/heartbeat emission in the
+    // failure-detection follow-up.
+    #[allow(dead_code)]
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
     }
@@ -421,6 +424,9 @@ impl Compaction {
     }
 
     /// Sets the output SSTs produced by this compaction.
+    // Consumed once the worker wires up progress/heartbeat emission in the
+    // failure-detection follow-up.
+    #[allow(dead_code)]
     pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
         assert!(
             output_ssts.starts_with(self.output_ssts.as_slice()),

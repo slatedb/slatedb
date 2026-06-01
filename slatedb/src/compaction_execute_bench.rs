@@ -15,8 +15,8 @@ use tokio::task::JoinHandle;
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
+use crate::compaction_worker::WorkerMessage;
 use crate::compactor::stats::CompactionStats;
-use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
@@ -390,7 +390,7 @@ impl CompactionExecuteBench {
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction_job(job));
         while let Ok(msg) = rx.recv().await {
-            if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
+            if let WorkerMessage::CompactionJobFinished { id: _, result } = msg {
                 match result {
                     Ok(_) => {
                         let elapsed_ms = self

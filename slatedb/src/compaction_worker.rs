@@ -29,7 +29,7 @@ use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
-    CompactionExecutor, ExecutorMessage, StartCompactionJobArgs, TokioCompactionExecutor,
+    CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
 };
 use crate::compactor_state::{Compaction, CompactionStatus, SourceId, WorkerSpec};
@@ -49,48 +49,6 @@ use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use slatedb_common::metrics::{MetricLevel, MetricsRecorder, MetricsRecorderHelper};
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
-
-#[derive(Debug)]
-pub(crate) enum WorkerMessage {
-    /// Signals that a compaction job has finished execution.
-    CompactionJobFinished {
-        /// Job id (distinct from the canonical compaction id).
-        id: Ulid,
-        /// Output SR on success, or the compaction error.
-        result: Result<crate::db_state::SortedRun, SlateDBError>,
-    },
-    /// Periodic progress update from the [`CompactionExecutor`].
-    // Fields are unused until heartbeat emission is wired in the failure-detection follow-up.
-    #[allow(dead_code)]
-    CompactionJobProgress {
-        /// The job id associated with this progress report.
-        id: Ulid,
-        /// The total number of bytes processed so far (estimate).
-        bytes_processed: u64,
-        /// The output SSTs produced so far (including previous runs).
-        output_ssts: Vec<crate::db_state::SsTableHandle>,
-    },
-    /// Ticker-triggered message to poll `.compactions` for claimable jobs.
-    PollCompactions,
-}
-
-impl ExecutorMessage for WorkerMessage {
-    fn job_finished(id: Ulid, result: Result<crate::db_state::SortedRun, SlateDBError>) -> Self {
-        WorkerMessage::CompactionJobFinished { id, result }
-    }
-
-    fn job_progress(
-        id: Ulid,
-        bytes_processed: u64,
-        output_ssts: Vec<crate::db_state::SsTableHandle>,
-    ) -> Self {
-        WorkerMessage::CompactionJobProgress {
-            id,
-            bytes_processed,
-            output_ssts,
-        }
-    }
-}
 
 /// Stateless executor of compaction jobs claimed from `.compactions`.
 ///
@@ -123,6 +81,30 @@ impl CompactionWorker {
             .await
             .map_err(|e| e.into())
     }
+}
+
+#[derive(Debug)]
+pub(crate) enum WorkerMessage {
+    /// Signals that a compaction job has finished execution.
+    CompactionJobFinished {
+        /// Job id (distinct from the canonical compaction id).
+        id: Ulid,
+        /// Output SR on success, or the compaction error.
+        result: Result<crate::db_state::SortedRun, SlateDBError>,
+    },
+    /// Periodic progress update from the [`CompactionExecutor`].
+    // Fields are unused until heartbeat emission is wired in the failure-detection follow-up.
+    #[allow(dead_code)]
+    CompactionJobProgress {
+        /// The job id associated with this progress report.
+        id: Ulid,
+        /// The total number of bytes processed so far (estimate).
+        bytes_processed: u64,
+        /// The output SSTs produced so far (including previous runs).
+        output_ssts: Vec<crate::db_state::SsTableHandle>,
+    },
+    /// Ticker-triggered message to poll `.compactions` for claimable jobs.
+    PollCompactions,
 }
 
 /// Builder for [`CompactionWorker`].
@@ -678,7 +660,7 @@ pub(crate) fn build_handler(
         max_fetch_tasks: options.max_fetch_tasks,
         ..CompactorOptions::default()
     });
-    let executor = Arc::new(TokioCompactionExecutor::<WorkerMessage>::new(
+    let executor = Arc::new(TokioCompactionExecutor::new(
         TokioCompactionExecutorOptions {
             handle: worker_runtime.clone(),
             options: executor_compactor_options,
