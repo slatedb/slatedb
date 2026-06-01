@@ -323,10 +323,7 @@ impl DbInner {
             options: options.clone(),
             done: tx,
         };
-        let write_buffer_size = batch_msg.batch.estimated_size();
-
-        let write_buffer = self.write_buffer_manager.force_acquire(write_buffer_size);
-        batch_msg.batch.set_write_buffer(Arc::new(write_buffer));
+        batch_msg.batch.set_write_buffer(&self.write_buffer_manager);
         self.write_notifier.send(batch_msg)?;
 
         self.maybe_apply_backpressure().await?;

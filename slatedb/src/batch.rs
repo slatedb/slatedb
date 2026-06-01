@@ -4,7 +4,7 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-use crate::byte_buffer_manager::ByteBufferPermit;
+use crate::byte_buffer_manager::{ByteBufferManager, ByteBufferPermit};
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
@@ -500,8 +500,9 @@ impl WriteBatch {
         Ok((entries, touched_segments, entries_bytes))
     }
 
-    pub(crate) fn set_write_buffer(&mut self, permit: Arc<ByteBufferPermit>) {
-        self.write_buffer_permit = Some(permit);
+    pub(crate) fn set_write_buffer(&mut self, write_buffer_manager: &ByteBufferManager) {
+        let permit = write_buffer_manager.force_acquire(self.estimated_size());
+        self.write_buffer_permit = Some(Arc::new(permit));
     }
 
     /// Returns the total estimated key/value byte footprint of this batch.
