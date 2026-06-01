@@ -93,7 +93,7 @@ The `ByteBufferManager` addresses these opportunities by:
   memtable flush).
   - The memory usage of the allocated write buffers (both current and immutable) should count towards the limit. This should not be double counted if it is one allocation.
   - This will not track buffers used for compaction.
-  - DbReader instances should be able to use the memory budget in future interations. 
+  - DbReader instances should be able to use the memory budget in future interactions. 
 - The buffer memory limits should be observed as strictly as possible. Erroring towards over counting if needed. KVTable and other container struct allocation size do not count towards this.
 - Provide an RAII permit lifecycle: acquire before write, release on memtable
   drop.
