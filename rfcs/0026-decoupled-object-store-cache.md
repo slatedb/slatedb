@@ -22,14 +22,12 @@ Table of Contents:
    - [A worked example](#a-worked-example)
    - [Allocation overhead](#allocation-overhead)
 - [Implementation plan](#implementation-plan)
-   - [Modules to touch](#modules-to-touch)
    - [Caveats](#caveats)
 - [Impact Analysis](#impact-analysis)
 - [Operations](#operations)
    - [Performance and Cost](#performance-and-cost)
    - [Observability](#observability)
    - [Compatibility](#compatibility)
-- [Testing plan](#testing-plan)
 - [Rollout](#rollout)
 - [Alternatives](#alternatives)
 - [Open Questions](#open-questions)
@@ -628,6 +626,13 @@ follow-ups in that section land:
 - Evicting on retry-tagged reads lets the fsync workaround go away,
   removing one local disk sync per admitted write at the cost of one
   extra upstream GET on the rare CRC-mismatch path.
+
+### Performance and Cost
+
+As a start performance is unchanged except for the per-call allocation overhead
+described in [Allocation overhead](#allocation-overhead). Further changes
+and improvements can be picked up incrementally from the follow-ups listed
+in [Cache wrapper behavior](#cache-wrapper-behavior).
 
 ### Observability
 
