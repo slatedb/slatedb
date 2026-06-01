@@ -172,10 +172,10 @@ impl ByteBufferPermit {
         }
     }
 
-    // pub fn force_acquire(&self, num_bytes: usize) {
-    //     self.reserved_bytes.fetch_add(num_bytes, Ordering::Relaxed);
-    //     self.semaphore.force_acquire(num_bytes);
-    // }
+    pub fn force_acquire(&self, num_bytes: usize) {
+        self.reserved_bytes.fetch_add(num_bytes, Ordering::Relaxed);
+        self.semaphore.force_acquire(num_bytes);
+    }
 }
 
 impl Drop for ByteBufferPermit {

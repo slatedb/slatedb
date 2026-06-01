@@ -84,9 +84,6 @@ struct WalBufferManagerInner {
     recent_flushed_wal_id: u64,
     /// The oracle to track the last flushed sequence number.
     oracle: Arc<DbOracle>,
-    /// Permit tracking bytes allocated by the WAL buffer against the write buffer budget.
-    /// Bytes are added on append and released when immutable WALs are drained.
-    wal_permit: Arc<ByteBufferPermit>,
 }
 
 /// Stores entries to the write-ahead log (WAL) in memory.
@@ -109,9 +106,9 @@ struct WalBuffer {
     last_seq: u64,
     /// size of the entries that has been added to the WAL buffer in bytes
     entries_size: usize,
-    /// Tracked capacity of the VecDeque backing buffer in bytes.
-    /// This reflects the actual heap allocation (`capacity * size_of::<RowEntry>()`).
-    tracked_capacity_bytes: usize,
+    /// Permit tracking bytes allocated by this WAL buffer against the write buffer budget.
+    /// Bytes are released back to the budget when this WalBuffer is dropped.
+    permit: ByteBufferPermit,
 }
 
 /// An iterator over entries in a WalBuffer.
@@ -133,8 +130,7 @@ impl WalBufferManager {
         max_flush_interval: Option<Duration>,
         write_buffer_manager: ByteBufferManager,
     ) -> Self {
-        let wal_permit = Arc::new(write_buffer_manager.force_acquire(0));
-        let current_wal = WalBuffer::new();
+        let current_wal = WalBuffer::new(&write_buffer_manager);
         let immutable_wals = VecDeque::new();
         let inner = WalBufferManagerInner {
             current_wal,
@@ -145,7 +141,6 @@ impl WalBufferManager {
             flush_tx: None,
             task_executor: None,
             oracle,
-            wal_permit,
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
@@ -252,16 +247,10 @@ impl WalBufferManager {
         // VecDeque's backing buffer growth — when the VecDeque reallocates to
         // fit new entries, we charge the additional capacity to the budget.
         let mut inner = self.inner.write();
-        let mut total_growth = 0usize;
         for entry in entries {
-            total_growth += inner.current_wal.append(entry.clone());
+            inner.current_wal.append(entry.clone());
         }
         let durable_watcher = inner.current_wal.durable_watcher();
-
-        if total_growth > 0 {
-            let permit = self.write_buffer_manager.force_acquire(total_growth);
-            inner.wal_permit.merge(&permit);
-        }
 
         Ok(durable_watcher)
     }
@@ -427,8 +416,9 @@ impl WalBufferManager {
         }
 
         let next_wal_id = self.wal_id_incrementor.next_wal_id();
+        let new_wal = WalBuffer::new(&self.write_buffer_manager);
         let mut inner = self.inner.write();
-        let current_wal = std::mem::replace(&mut inner.current_wal, WalBuffer::new());
+        let current_wal = std::mem::replace(&mut inner.current_wal, new_wal);
         inner.flush_epoch += 1;
         inner
             .immutable_wals
@@ -449,6 +439,8 @@ impl WalBufferManager {
     }
 
     /// Recycle the immutable WALs that are flushed to the remote storage.
+    /// Each WalBuffer owns its own permit, so dropping them automatically
+    /// releases the tracked bytes back to the write buffer budget.
     fn maybe_release_immutable_wals(&self) {
         let mut inner = self.inner.write();
 
@@ -460,7 +452,6 @@ impl WalBufferManager {
         let last_flushed_seq = inner.oracle.last_remote_persisted_seq();
 
         let mut releaseable_count = 0;
-        let mut released_capacity_bytes = 0usize;
         for (_, wal) in inner.immutable_wals.iter() {
             if wal
                 .last_seq()
@@ -468,7 +459,6 @@ impl WalBufferManager {
                 .unwrap_or(false)
             {
                 releaseable_count += 1;
-                released_capacity_bytes += wal.tracked_capacity_bytes();
             } else {
                 break;
             }
@@ -480,13 +470,6 @@ impl WalBufferManager {
                 releaseable_count
             );
             inner.immutable_wals.drain(..releaseable_count);
-
-            // Release the tracked VecDeque capacity for the drained WALs from
-            // the WAL permit. `take` splits the released bytes into a temporary
-            // permit which is immediately dropped, returning them to the budget.
-            if released_capacity_bytes > 0 {
-                drop(inner.wal_permit.take(released_capacity_bytes));
-            }
         }
     }
 
@@ -504,21 +487,23 @@ impl WalBufferManager {
 }
 
 impl WalBuffer {
-    /// Creates a new empty `WalBuffer`.
-    fn new() -> Self {
+    /// Creates a new empty `WalBuffer`, acquiring a zero-byte permit from the
+    /// given write buffer manager. The permit grows as entries are appended and
+    /// is released back to the budget when this buffer is dropped.
+    fn new(write_buffer_manager: &ByteBufferManager) -> Self {
         Self {
             entries: VecDeque::new(),
             durable: WatchableOnceCell::new(),
             last_tick: i64::MIN,
             last_seq: 0,
             entries_size: 0,
-            tracked_capacity_bytes: 0,
+            permit: write_buffer_manager.force_acquire(std::mem::size_of::<Self>()),
         }
     }
 
     /// Appends an entry and returns the additional bytes the VecDeque
     /// allocated (capacity growth) that need to be tracked.
-    fn append(&mut self, entry: RowEntry) -> usize {
+    fn append(&mut self, entry: RowEntry) {
         if let Some(ts) = entry.create_ts {
             self.last_tick = ts;
         }
@@ -530,14 +515,9 @@ impl WalBuffer {
         let cap_after = self.entries.capacity();
 
         let growth_bytes = (cap_after - cap_before) * std::mem::size_of::<RowEntry>();
-        self.tracked_capacity_bytes += growth_bytes;
-        growth_bytes
-    }
-
-    /// Returns the total tracked capacity bytes for this buffer.
-    /// This is the actual heap allocation for the VecDeque backing array.
-    fn tracked_capacity_bytes(&self) -> usize {
-        self.tracked_capacity_bytes
+        if growth_bytes > 0 {
+            self.permit.force_acquire(growth_bytes);
+        }
     }
 
     /// Returns an iterator to iterate over the entries.
@@ -699,9 +679,15 @@ mod tests {
         )
     }
 
+    /// Creates a WalBuffer with a dummy permit for unit testing.
+    fn make_wal_buffer() -> WalBuffer {
+        let mgr = ByteBufferManager::new(usize::MAX, usize::MAX);
+        WalBuffer::new(&mgr)
+    }
+
     #[test]
     fn test_new_buffer_initial_state() {
-        let buffer = WalBuffer::new();
+        let buffer = make_wal_buffer();
 
         assert!(buffer.is_empty());
         assert_eq!(buffer.len(), 0);
@@ -712,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_append_single_entry() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
         let entry = make_entry("key1", "value1", 42, Some(1000));
         let expected_size = entry.estimated_size();
 
@@ -727,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_append_multiple_entries() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
 
         let entry1 = make_entry("key1", "value1", 10, Some(100));
         let entry2 = make_entry("key2", "value2", 20, Some(200));
@@ -752,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_notify_durable_success() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
         buffer.append(make_entry("key", "value", 1, None));
 
         buffer.notify_durable(Ok(()));
@@ -763,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_notify_durable_error() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
         buffer.append(make_entry("key", "value", 1, None));
 
         buffer.notify_durable(Err(SlateDBError::Closed));
@@ -774,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_durable_watcher_returns_reader() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
         buffer.append(make_entry("key", "value", 1, None));
 
         let mut reader = buffer.durable_watcher();
@@ -786,7 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_notify_durable_only_sets_once() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
         buffer.append(make_entry("key", "value", 1, None));
 
         buffer.notify_durable(Ok(()));
@@ -798,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_iter() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
         let mut iter = buffer.iter();
         assert!(iter.next().is_none());
 
@@ -844,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_large_entry_size() {
-        let mut buffer = WalBuffer::new();
+        let mut buffer = make_wal_buffer();
 
         let large_key = "k".repeat(10_000);
         let large_value = "v".repeat(100_000);
