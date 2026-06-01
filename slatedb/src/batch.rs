@@ -8,7 +8,7 @@ use crate::byte_buffer_manager::ByteBufferPermit;
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::mem_table::{KVTable, SequencedKey};
+use crate::mem_table::{KVTable, KVTableInternalKeyRange, SequencedKey};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::{RowEntry, ValueDeletable};
@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
+use std::ops::RangeBounds;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -199,18 +200,15 @@ impl std::fmt::Debug for WriteOp {
 
 impl WriteOp {
     /// Convert WriteOp to RowEntry, transferring the permit.
-    pub(crate) fn into_row_entry(
-        self,
+    pub(crate) fn to_row_entry(
+        &mut self,
         seq: u64,
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> RowEntry {
         match self {
             WriteOp::Put {
-                key,
-                value,
-                mut permit,
-                ..
+                key, value, permit, ..
             } => RowEntry {
                 key: key.clone(),
                 value: ValueDeletable::Value(value.clone()),
@@ -219,9 +217,7 @@ impl WriteOp {
                 expire_ts,
                 permit: permit.take(),
             },
-            WriteOp::Delete {
-                key, mut permit, ..
-            } => RowEntry {
+            WriteOp::Delete { key, permit, .. } => RowEntry {
                 key: key.clone(),
                 value: ValueDeletable::Tombstone,
                 seq,
@@ -230,10 +226,7 @@ impl WriteOp {
                 permit: permit.take(),
             },
             WriteOp::Merge {
-                key,
-                value,
-                mut permit,
-                ..
+                key, value, permit, ..
             } => RowEntry {
                 key: key.clone(),
                 value: ValueDeletable::Merge(value.clone()),
@@ -479,7 +472,7 @@ impl WriteBatch {
     /// When `extractor` is `None`, the returned prefix set is empty.
     #[allow(clippy::panic)]
     pub(crate) async fn extract_entries(
-        self,
+        &mut self,
         seq: u64,
         now: i64,
         default_ttl: Option<u64>,
@@ -492,7 +485,8 @@ impl WriteBatch {
         }
 
         let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new_with_seq_and_ttl(
-            self,
+            &mut *self,
+            ..,
             IterationOrder::Ascending,
             seq,
             now,
@@ -578,11 +572,16 @@ pub(crate) struct WriteBatchIterator {
 }
 
 impl WriteBatchIterator {
-    pub(crate) fn new(batch: WriteBatch, ordering: IterationOrder) -> Self {
+    pub(crate) fn new(
+        batch: &WriteBatch,
+        range: impl RangeBounds<Bytes>,
+        ordering: IterationOrder,
+    ) -> Self {
+        let range = KVTableInternalKeyRange::from(range);
         let mut entries: Vec<(SequencedKey, RowEntry)> = batch
             .ops
-            .into_iter()
-            .map(|(k, v)| (k, v.into_row_entry(u64::MAX, None, None)))
+            .range(range)
+            .map(|(k, v)| (k.clone(), v.clone().to_row_entry(u64::MAX, None, None)))
             .collect();
 
         if matches!(ordering, IterationOrder::Descending) {
@@ -599,22 +598,24 @@ impl WriteBatchIterator {
     }
 
     pub(crate) fn new_with_seq_and_ttl(
-        batch: WriteBatch,
+        batch: &mut WriteBatch,
+        range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
         seq: u64,
         now: i64,
         default_ttl: Option<u64>,
     ) -> Self {
+        let range = KVTableInternalKeyRange::from(range);
         let mut entries: Vec<(SequencedKey, RowEntry)> = batch
             .ops
-            .into_iter()
+            .range_mut(range)
             .map(|(k, v)| {
-                let expire_ts = match &v {
+                let expire_ts = match v {
                     WriteOp::Put { options, .. } => options.expire_ts_from(default_ttl, now),
                     WriteOp::Merge { options, .. } => options.expire_ts_from(default_ttl, now),
                     WriteOp::Delete { .. } => None,
                 };
-                (k, v.into_row_entry(seq, Some(now), expire_ts))
+                (k.clone(), v.to_row_entry(seq, Some(now), expire_ts))
             })
             .collect();
 
@@ -662,6 +663,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::bytes_range::BytesRange;
     use crate::config::Ttl;
     use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
@@ -766,7 +768,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -785,13 +787,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_writebatch_iterator_range() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key3", b"value3");
+        batch.put(b"key5", b"value5");
+
+        // Test range [key2, key4)
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
+
+        let expected = vec![RowEntry::new_value(b"key3", b"value3", u64::MAX)];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
     async fn test_writebatch_iterator_descending() {
         let mut batch = WriteBatch::new();
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
         batch.put(b"key2", b"value2");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         let expected = vec![
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
@@ -809,7 +830,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek to key3
         iter.seek(b"key3").await.unwrap();
@@ -830,7 +851,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         // Seek to key3 (in descending, we want keys <= key3)
         iter.seek(b"key3").await.unwrap();
@@ -847,7 +868,7 @@ mod tests {
     #[tokio::test]
     async fn test_writebatch_iterator_empty_batch() {
         let batch = WriteBatch::new();
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let result = iter.next().await.unwrap();
         assert!(result.is_none());
@@ -859,7 +880,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek to key2 (doesn't exist)
         iter.seek(b"key2").await.unwrap();
@@ -881,7 +902,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek beyond maximum key
         iter.seek(b"key9").await.unwrap();
@@ -899,7 +920,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -929,7 +950,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek before first key
         iter.seek(b"key1").await.unwrap();
@@ -939,6 +960,36 @@ mod tests {
         assert!(result.is_some());
         let entry = result.unwrap();
         assert_eq!(entry.key, Bytes::from_static(b"key2"));
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_range_with_tombstones() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.delete(b"key2");
+        batch.put(b"key3", b"value3");
+        batch.delete(b"key4");
+        batch.put(b"key5", b"value5");
+
+        // Range [key2, key4) should include tombstones
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
+
+        let expected = vec![
+            RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Tombstone,
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new_value(b"key3", b"value3", u64::MAX),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
     }
 
     #[test]
@@ -1242,7 +1293,7 @@ mod tests {
         batch.delete(b"key3");
 
         // When: creating an iterator
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Then: the iterator should return all operations in order
         let expected = vec![
@@ -1282,7 +1333,7 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating an iterator
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Then: the iterator should return all merge operations
         let expected = vec![
@@ -1321,7 +1372,7 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating a descending iterator
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         // Then: the iterator should return operations in descending order
         let expected = vec![
@@ -1352,6 +1403,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_iterate_over_merges_in_range() {
+        // Given: a WriteBatch with merges for different keys
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key3", b"merge3");
+        batch.merge(b"key5", b"merge5");
+
+        // When: creating an iterator with a range filter
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
+
+        // Then: the iterator should only return merges within the range
+        let expected = vec![RowEntry::new(
+            Bytes::from_static(b"key3"),
+            ValueDeletable::Merge(Bytes::from_static(b"merge3")),
+            u64::MAX,
+            None,
+            None,
+        )];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
     async fn should_seek_to_merge_operations() {
         // Given: a WriteBatch with merges for different keys
         let mut batch = WriteBatch::new();
@@ -1360,7 +1438,7 @@ mod tests {
         batch.merge(b"key5", b"merge5");
 
         // When: creating an iterator and seeking to key3
-        let mut iter = WriteBatchIterator::new(batch.clone(), IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
         iter.seek(b"key3").await.unwrap();
 
         // Then: the iterator should return key3 and key5

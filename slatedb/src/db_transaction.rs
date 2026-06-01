@@ -152,10 +152,17 @@ impl DbTransaction {
 
         let db_state = self.db_inner.state.read().view();
 
+        // Build the write batch iterator synchronously while holding the read
+        // guard, avoiding a clone of the full batch. The iterator materializes
+        // only the entries overlapping the read range (a single key for a
+        // point get), so this is O(log N) instead of O(N).
+        let key_slice = key.as_ref();
+        let range = BytesRange::from_slice(key_slice..=key_slice);
         let write_batch_iter = {
             let guard = self.write_batch.read();
             Some(WriteBatchIterator::new(
-                (*guard).clone(),
+                &guard,
+                range,
                 IterationOrder::Ascending,
             ))
         };
@@ -284,7 +291,11 @@ impl DbTransaction {
         // only the entries in the scan range.
         let write_batch_iter = {
             let guard = self.write_batch.read();
-            Some(WriteBatchIterator::new((*guard).clone(), options.order))
+            Some(WriteBatchIterator::new(
+                &guard,
+                range.clone(),
+                options.order,
+            ))
         };
 
         self.db_inner

@@ -150,6 +150,7 @@ use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
+use crate::mem_table::KVTable;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::object_stores::ObjectStoreType;
@@ -168,15 +169,6 @@ use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
 use uuid::Uuid;
-
-/// The minimum write-buffer capacity enforced at build time (1 MB).
-///
-/// This must be large enough to cover the fixed overhead from:
-/// - `KVTable` (see `slatedb/src/mem_table.rs`): struct size, SequenceTracker
-///   pre-allocation, SkipMap node overhead, and per-entry key/value handles.
-/// - `WalBuffer` (see `slatedb/src/wal_buffer.rs`): struct size and the
-///   initial VecDeque allocation on first append.
-pub(crate) const MIN_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// A builder for creating a new Db instance.
 ///
@@ -244,8 +236,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// budget of in-flight writes. If not set, a default manager is
     /// created with a budget equal to `max_unflushed_bytes`.
     ///
-    /// The capacity must be at least [`MIN_WRITE_BUFFER_SIZE`](Self::MIN_WRITE_BUFFER_SIZE)
-    /// (1 MB). Otherwise [`build`](Self::build) will return an error.
+    /// The capacity must be at least [`KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL`](crate::mem_table::KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL)
+    /// when the WAL is enabled, or [`KVTable::MIN_WRITE_BUFFER_SIZE`](crate::mem_table::KVTable::MIN_WRITE_BUFFER_SIZE)
+    /// when the WAL is disabled. Otherwise [`build`](Self::build) will return an error.
     pub fn with_write_buffer_manager(mut self, write_buffer_manager: ByteBufferManager) -> Self {
         self.write_buffer_manager = Some(write_buffer_manager);
         self
@@ -610,12 +603,19 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.settings.max_unflushed_bytes,
             )
         });
-        if write_buffer_manager.capacity() < MIN_WRITE_BUFFER_SIZE {
+        let wal_enabled = DbInner::wal_enabled_in_options(&self.settings);
+        let min_write_buffer_size = if wal_enabled {
+            KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL
+        } else {
+            KVTable::MIN_WRITE_BUFFER_SIZE
+        };
+        if write_buffer_manager.capacity() < min_write_buffer_size {
             return Err(crate::Error::invalid(
                 format!(
-                    "invalid configuration: write_buffer_manager capacity ({}) must be at least MIN_WRITE_BUFFER_SIZE ({})",
+                    "invalid configuration: write_buffer_manager capacity ({}) must be at least {} ({})",
                     write_buffer_manager.capacity(),
-                    MIN_WRITE_BUFFER_SIZE,
+                    if wal_enabled { "KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL" } else { "KVTable::MIN_WRITE_BUFFER_SIZE" },
+                    min_write_buffer_size,
                 )
             ));
         }
@@ -1765,7 +1765,6 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 mod tests {
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::Settings;
-    use crate::db::builder::MIN_WRITE_BUFFER_SIZE;
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
@@ -1947,43 +1946,102 @@ mod tests {
         db.close().await.expect("failed to close db");
     }
 
-    /// Validates that `MIN_WRITE_BUFFER_SIZE` is sufficient for a single write.
+    /// Validates that `MIN_WRITE_BUFFER_SIZE` and `MIN_WRITE_BUFFER_SIZE_WITH_WAL`
+    /// accurately reflect the bytes `force_acquire`'d during a single write.
+    ///
+    /// This test creates a DB with exactly the minimum capacity and performs
+    /// a single write. If the constants undercount the actual allocations,
+    /// the write will either be rejected at build time or deadlock (caught
+    /// by the timeout).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_min_write_buffer_size_is_sufficient() {
+    async fn test_min_write_buffer_size_with_wal_is_sufficient() {
         use crate::byte_buffer_manager::ByteBufferManager;
+        use crate::mem_table::KVTable;
 
-        let capacity = MIN_WRITE_BUFFER_SIZE;
+        // Use exactly the WAL-aware minimum as the buffer capacity.
+        // Set high_watermark = capacity so at_capacity() only fires when
+        // allocated >= capacity (i.e., truly full).
+        let capacity = KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL;
         let db = crate::Db::builder(
-            "test_min_write_buffer_size_is_sufficient",
+            "test_min_write_buffer_size_with_wal_is_sufficient",
             Arc::new(InMemory::new()),
         )
         .with_settings(Settings {
             flush_interval: Some(std::time::Duration::from_millis(10)),
+            // max_unflushed_bytes must be large enough not to trip the
+            // unflushed-bytes backpressure path for a single entry.
             max_unflushed_bytes: 1024 * 1024,
             ..Settings::default()
         })
         .with_write_buffer_manager(ByteBufferManager::new(capacity, capacity))
         .build()
         .await
-        .expect("build with MIN_WRITE_BUFFER_SIZE should succeed");
+        .expect("build with MIN_WRITE_BUFFER_SIZE_WITH_WAL should succeed");
 
+        // A single minimal write should succeed without deadlocking.
+        // If the minimum is too low, this will hang.
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(5), db.put(b"k", b"")).await;
         assert!(
             result.is_ok(),
-            "put timed out — MIN_WRITE_BUFFER_SIZE may be too small"
+            "put timed out — MIN_WRITE_BUFFER_SIZE_WITH_WAL may be too small"
         );
         result.unwrap().expect("put should succeed");
 
         db.close().await.expect("close should succeed");
     }
 
-    /// Validates that capacity below `MIN_WRITE_BUFFER_SIZE` is rejected.
+    /// Same as above but for the WAL-disabled path.
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_min_write_buffer_size_without_wal_is_sufficient() {
+        use crate::byte_buffer_manager::ByteBufferManager;
+        use crate::mem_table::KVTable;
+
+        let capacity = KVTable::MIN_WRITE_BUFFER_SIZE;
+        let db = crate::Db::builder(
+            "test_min_write_buffer_size_without_wal_is_sufficient",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            wal_enabled: false,
+            flush_interval: None, // WAL-disabled needs manual flush for durability
+            max_unflushed_bytes: 1024 * 1024,
+            ..Settings::default()
+        })
+        .with_write_buffer_manager(ByteBufferManager::new(capacity, capacity))
+        .build()
+        .await
+        .expect("build with MIN_WRITE_BUFFER_SIZE should succeed when WAL disabled");
+
+        // Write without await_durable since WAL is disabled and flush_interval is None.
+        use crate::db::{PutOptions, WriteOptions};
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..WriteOptions::default()
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            db.put_with_options(b"k", b"", &PutOptions::default(), &write_opts),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "put timed out — MIN_WRITE_BUFFER_SIZE may be too small for WAL-disabled"
+        );
+        result.unwrap().expect("put should succeed");
+
+        db.close().await.expect("close should succeed");
+    }
+
+    /// Validates that the constants are NOT over-counting by checking that
+    /// capacity = min - 1 is actually rejected.
     #[tokio::test]
     async fn test_write_buffer_below_minimum_is_rejected() {
         use crate::byte_buffer_manager::ByteBufferManager;
+        use crate::mem_table::KVTable;
 
-        let capacity = MIN_WRITE_BUFFER_SIZE - 1;
+        let capacity = KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL - 1;
         let result = crate::Db::builder(
             "test_write_buffer_below_minimum_is_rejected",
             Arc::new(InMemory::new()),
@@ -1994,7 +2052,7 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "build should reject capacity below MIN_WRITE_BUFFER_SIZE"
+            "build should reject capacity below MIN_WRITE_BUFFER_SIZE_WITH_WAL"
         );
     }
 
