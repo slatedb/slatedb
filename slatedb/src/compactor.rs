@@ -689,10 +689,12 @@ impl CompactorEventHandler {
     }
 
     /// Calculates the estimated total source bytes for a compaction.
+    /// Returns 0 for any source that is no longer present in the manifest
+    /// (e.g. already committed by a worker) — this is a metrics-only path.
     fn calculate_estimated_source_bytes(compaction: &Compaction, db_state: &ManifestCore) -> u64 {
-        let tree = db_state
-            .tree_for_segment(compaction.spec().segment())
-            .expect("compaction target segment missing from manifest");
+        let Some(tree) = db_state.tree_for_segment(compaction.spec().segment()) else {
+            return 0;
+        };
 
         let views_by_id: HashMap<Ulid, &SsTableView> =
             tree.l0.iter().map(|view| (view.id, view)).collect();
@@ -706,12 +708,12 @@ impl CompactorEventHandler {
             .map(|source| match source {
                 SourceId::SstView(id) => views_by_id
                     .get(id)
-                    .expect("compaction source view not found in L0")
-                    .estimate_size(),
+                    .map(|v| v.estimate_size())
+                    .unwrap_or(0),
                 SourceId::SortedRun(id) => srs_by_id
                     .get(id)
-                    .expect("compaction source sorted run not found")
-                    .estimate_size(),
+                    .map(|sr| sr.estimate_size())
+                    .unwrap_or(0),
             })
             .sum()
     }
