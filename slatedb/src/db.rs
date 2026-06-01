@@ -343,6 +343,7 @@ impl DbInner {
     }
 
     #[inline]
+    #[allow(clippy::disallowed_macros)]
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             self.check_closed()?;
@@ -2130,7 +2131,7 @@ mod tests {
         GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, Ttl,
         WriteOptions,
     };
-    use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db::builder::{GarbageCollectorBuilder, MIN_WRITE_BUFFER_SIZE};
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
     use crate::instrumented_object_store::stats::{
@@ -2140,7 +2141,6 @@ mod tests {
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{ManifestCore, VersionedManifest};
-    use crate::mem_table::KVTable;
     use crate::merge_operator::{
         MERGE_OPERATOR_COMPACT_PATH, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
@@ -7254,10 +7254,9 @@ mod tests {
         let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
         let object_store = Arc::new(InMemory::new());
         // The ByteBufferManager capacity (max_unflushed_bytes) must exceed
-        // KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL or the first put will deadlock on
+        // DbBuilder::MIN_WRITE_BUFFER_SIZE or the first put will deadlock on
         // backpressure.
-        use crate::mem_table::KVTable;
-        let min_memtable_overhead = KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL + 64; // batch estimated size headroom
+        let min_memtable_overhead = MIN_WRITE_BUFFER_SIZE + 64; // batch estimated size headroom
         let settings = Settings {
             l0_sst_size_bytes: 4 * 1024,
             max_unflushed_bytes: min_memtable_overhead + 1,
@@ -8211,11 +8210,11 @@ mod tests {
         options.max_unflushed_bytes = MAX_UNFLUSHED_BYTES;
         options.l0_max_ssts = 16;
 
-        // The ByteBufferManager capacity must exceed KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL
+        // The ByteBufferManager capacity must exceed DbBuilder::MIN_WRITE_BUFFER_SIZE
         // or the first put deadlocks on backpressure. We keep max_unflushed_bytes
         // small so the *unflushed-data* backpressure path still triggers when
         // the 16KB frozen memtable exceeds it.
-        let min_buffer_capacity = KVTable::MIN_WRITE_BUFFER_SIZE_WITH_WAL; // headroom for data
+        let min_buffer_capacity = MIN_WRITE_BUFFER_SIZE; // headroom for data
         let db = Db::builder(
             "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
             object_store,

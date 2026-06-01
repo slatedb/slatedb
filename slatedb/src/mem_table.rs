@@ -19,7 +19,7 @@ use crate::byte_buffer_manager::{ByteBufferManager, ByteBufferPermit};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
-use crate::types::{RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
@@ -386,17 +386,6 @@ impl KVTable {
     /// plus a `u64` sequence number. This is the key type stored in the SkipMap.
     pub(crate) const SEQUENCED_KEY_SIZE: usize = std::mem::size_of::<SequencedKey>();
 
-    /// Fixed size of a `RowEntry` struct: the `key` (`Bytes`), `value`
-    /// (`ValueDeletable` enum), `seq` (`u64`), `create_ts` (`Option<i64>`),
-    /// and `expire_ts` (`Option<i64>`). This is the value type stored in the
-    /// SkipMap, excluding the variable-length key/value byte data.
-    pub(crate) const ROW_ENTRY_SIZE: usize = std::mem::size_of::<RowEntry>();
-
-    /// Fixed size of a `ValueDeletable` enum: discriminant + largest variant
-    /// (`Value(Bytes)` or `Merge(Bytes)`). This is the value field within
-    /// each `RowEntry`.
-    pub(crate) const VALUE_DELETABLE_SIZE: usize = std::mem::size_of::<ValueDeletable>();
-
     /// Fixed size of the `KVTable` struct itself (all inline fields, Arc
     /// handles, atomics, etc.). Used when accounting for the base cost of
     /// creating a new memtable.
@@ -411,42 +400,22 @@ impl KVTable {
     /// (one for u64 sequence numbers, one for i64 timestamps).
     pub(crate) const SEQ_TRACKER_OVERHEAD: usize = 8192 * std::mem::size_of::<u64>() * 2;
 
-    /// Per-entry overhead from `WriteOp::estimated_memtable_size()`: the two
-    /// `Bytes` structs (key + value) stored in the RowEntry. This is the fixed
-    /// per-entry cost charged by the write path before the batch reaches the
-    /// memtable, excluding the variable-length key and value byte data.
-    pub(crate) const BATCH_ENTRY_OVERHEAD: usize = std::mem::size_of::<Bytes>() * 2;
-
-    /// The minimum write-buffer capacity required to create a KVTable and
-    /// write at least one entry without deadlocking on backpressure.
-    ///
-    /// This accounts for all bytes `force_acquire`'d from the buffer manager
-    /// before `maybe_apply_backpressure` could block:
-    /// - `SEQ_TRACKER_OVERHEAD`: fixed allocation at KVTable creation
-    /// - `BATCH_ENTRY_OVERHEAD + SKIPMAP_ENTRY_OVERHEAD + SEQUENCED_KEY_SIZE`:
-    ///   per-entry cost from `WriteOp::estimated_memtable_size()` (excludes
-    ///   key/value bytes, so real writes will consume more)
-    /// - `KVTABLE_SIZE`: base struct cost
-    pub(crate) const MIN_WRITE_BUFFER_SIZE: usize = Self::SEQ_TRACKER_OVERHEAD
-        + Self::BATCH_ENTRY_OVERHEAD
-        + Self::SKIPMAP_ENTRY_OVERHEAD
-        + Self::SEQUENCED_KEY_SIZE
-        + Self::KVTABLE_SIZE;
-
-    /// The minimum write-buffer capacity when the WAL is enabled.
-    ///
-    /// When WAL is active, the first `push_back` into the WAL's empty
-    /// `VecDeque<RowEntry>` allocates a backing buffer with the VecDeque's
-    /// initial capacity (4 on current Rust std). That entire allocation
-    /// is `force_acquire`'d against the buffer manager.
-    pub(crate) const MIN_WRITE_BUFFER_SIZE_WITH_WAL: usize =
-        Self::MIN_WRITE_BUFFER_SIZE + Self::VECDEQUE_INITIAL_CAPACITY * Self::ROW_ENTRY_SIZE;
-
-    /// The initial capacity VecDeque allocates on the first push.
-    /// Rust's std VecDeque currently allocates 4 slots on the first insertion.
-    /// If this ever changes in a future Rust version, the build-time assertion
-    /// in `WalBufferManager::append` will catch it.
-    const VECDEQUE_INITIAL_CAPACITY: usize = 4;
+    // The theoretical minimum write-buffer capacity required to create a
+    // KVTable and write at least one entry without deadlocking on backpressure:
+    //
+    // Without WAL:
+    //   8192 * size_of::<u64>() * 2           (SequenceTracker pre-allocation)
+    //   + size_of::<Bytes>() * 2              (per-entry key/value handle overhead)
+    //   + 128                                 (SkipMap node overhead estimate)
+    //   + size_of::<SequencedKey>()           (SkipMap key struct)
+    //   + size_of::<KVTable>()                (base struct cost)
+    //   + size_of::<WalBuffer>()              (always created even if WAL disabled)
+    //
+    // With WAL (adds first VecDeque allocation on first push):
+    //   + 4 * size_of::<RowEntry>()           (VecDeque initial capacity)
+    //
+    // In practice we use a round 1MB minimum to provide comfortable headroom
+    // for real-world key/value sizes and multiple concurrent writes.
 
     pub(crate) fn new(buffer_manager: ByteBufferManager) -> Self {
         let write_buffer_permit =
