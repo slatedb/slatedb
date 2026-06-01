@@ -445,24 +445,20 @@ mod tests {
     use crate::clock::MonotonicClock;
     use crate::iter::IterationOrder;
 
-    fn wb_point_iter(write_batch: &Option<WriteBatch>, key: &[u8]) -> Option<WriteBatchIterator> {
-        write_batch.as_ref().map(|wb| {
-            WriteBatchIterator::new(
-                wb,
-                BytesRange::from_slice(key..=key),
-                IterationOrder::Ascending,
-            )
-        })
+    fn wb_point_iter(write_batch: &Option<WriteBatch>, _key: &[u8]) -> Option<WriteBatchIterator> {
+        write_batch
+            .as_ref()
+            .map(|wb| WriteBatchIterator::new(wb.clone(), IterationOrder::Ascending))
     }
 
     fn wb_range_iter(
         write_batch: &Option<WriteBatch>,
-        range: &BytesRange,
+        _range: &BytesRange,
         order: IterationOrder,
     ) -> Option<WriteBatchIterator> {
         write_batch
             .as_ref()
-            .map(|wb| WriteBatchIterator::new(wb, range.clone(), order))
+            .map(|wb| WriteBatchIterator::new(wb.clone(), order))
     }
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::db_status::DbStatusManager;

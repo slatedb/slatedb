@@ -295,22 +295,17 @@ impl ByteBudgetSemaphore {
             "cannot release more bytes than were reserved"
         );
 
-        if self.waiter_cnt.load(Ordering::Acquire) > 0 {
-            if (prev - num_bytes) < self.capacity {
+        if self.waiter_cnt.load(Ordering::Acquire) > 0
+            && (prev - num_bytes) < self.capacity {
                 self.notify.notify_waiters();
             }
-        }
     }
 
     /// Returns the number of unreserved bytes (capacity minus allocated),
     /// clamped to zero when over-allocated via `force_acquire`.
     fn available(&self) -> usize {
         let current = self.allocated_bytes.load(Ordering::Acquire);
-        if current < self.capacity {
-            self.capacity - current
-        } else {
-            0
-        }
+        self.capacity.saturating_sub(current)
     }
 
     /// Returns the total number of bytes currently allocated.

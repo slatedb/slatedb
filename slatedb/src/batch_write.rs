@@ -127,7 +127,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
 impl DbInner {
     #[allow(clippy::panic)]
     #[instrument(level = "trace", skip_all, fields(batch_size = batch.ops.len()))]
-    async fn write_batch(&self, mut batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
+    async fn write_batch(&self, batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
         let _options = options;
         #[cfg(not(dst))]
         let now = self.mono_clock.now().await?;
@@ -158,6 +158,14 @@ impl DbInner {
                 return Err(SlateDBError::TransactionConflict);
             }
         }
+
+        // Save txn_id and (if needed) keys before `batch` is consumed by `extract_entries`.
+        let txn_id = batch.txn_id;
+        let write_keys = if txn_id.is_none() {
+            Some(batch.keys())
+        } else {
+            None
+        };
 
         // Count batch-local merge folding on the flush path so DB-side merge
         // resolution uses one metric for both write batches and memtable flushes.
@@ -212,11 +220,11 @@ impl DbInner {
 
         // track the recent committed txn for conflict check. if txn_id is not supplied,
         // we still consider this as an transaction commit.
-        if let Some(txn_id) = &batch.txn_id {
+        if let Some(txn_id) = &txn_id {
             self.txn_manager
                 .track_recent_committed_txn(txn_id, commit_seq);
         } else {
-            let write_keys = batch.keys();
+            let write_keys = write_keys.expect("write_keys must be set when txn_id is None");
             self.txn_manager
                 .track_recent_committed_write_batch(&write_keys, commit_seq);
         }
