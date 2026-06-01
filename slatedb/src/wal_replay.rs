@@ -234,6 +234,7 @@ impl WalReplayIterator {
 
         while !self.current_iter.is_finished() {
             if let Some(wal_id_and_iter) = &mut self.current_iter.current_iter {
+                let mut total_entry_size = 0;
                 while let Some(row_entry) = wal_id_and_iter.iter.next().await? {
                     // skip the entries that are already in the L0 SST.
                     if row_entry.seq <= self.min_seq {
@@ -244,8 +245,11 @@ impl WalReplayIterator {
                         self.last_tick = self.last_tick.max(ts);
                     }
                     self.last_seq = self.last_seq.max(row_entry.seq);
+                    total_entry_size += row_entry.estimated_size();
                     table.put(row_entry);
                 }
+
+                table.add_write_permit(&self.buffer_manager.force_acquire(total_entry_size));
 
                 last_wal_id = wal_id_and_iter.wal_id;
 

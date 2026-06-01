@@ -647,14 +647,8 @@ impl DbInner {
             // would cause the flusher's assertion that the remote persisted seq is always >= the
             // last seq in the memtable to fail. By updating `last_remote_persisted_seq` here, we
             // ensure the assertion holds true.
-
-            let metadata = replayed_table.table.metadata();
-
             assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
             self.oracle.advance_durable_seq(replayed_table.last_seq);
-            let permit_size = metadata.write_buffer_size();
-            let permit = self.write_buffer_manager.force_acquire(permit_size);
-            replayed_table.table.add_write_permit(&permit);
             self.replay_memtable(replayed_table)?;
             self.maybe_apply_backpressure().await?;
         }

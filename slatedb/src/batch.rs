@@ -215,18 +215,13 @@ impl WriteOp {
         }
     }
 
-    /// Returns the estimated key/value byte size of this write operation,
-    /// including the overhead of `Bytes` handles stored in memory.
+    /// Returns the estimated key/value byte size of this write operation
     pub(crate) fn estimated_kv_size(&self) -> usize {
         match self {
             WriteOp::Put { key, value, .. } | WriteOp::Merge { key, value, .. } => {
-                let mut size = key.len() + std::mem::size_of::<Bytes>();
-                if !value.is_empty() {
-                    size += value.len() + std::mem::size_of::<Bytes>();
-                }
-                size
+                key.len() + value.len()
             }
-            WriteOp::Delete { key } => key.len() + std::mem::size_of::<Bytes>(),
+            WriteOp::Delete { key } => key.len(),
         }
     }
 }
@@ -510,6 +505,8 @@ impl WriteBatch {
     }
 
     /// Returns the total estimated key/value byte footprint of this batch.
+    /// Currently we don't track the size of the channel that the WriteBatch is
+    /// sent to so we only account for the key/value size here.
     pub(crate) fn estimated_size(&self) -> usize {
         self.ops.values().map(|op| op.estimated_kv_size()).sum()
     }

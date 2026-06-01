@@ -126,16 +126,6 @@ pub(crate) struct KVTableMetadata {
     pub(crate) first_seq: u64,
 }
 
-impl KVTableMetadata {
-    /// Returns the total write-buffer budget for all entries: data bytes
-    /// (tracked by `entries_size_in_bytes`) plus per-entry structural
-    /// overhead (`SKIPMAP_ENTRY_OVERHEAD + SEQUENCED_KEY_SIZE`).
-    pub(crate) fn write_buffer_size(&self) -> usize {
-        self.entries_size_in_bytes
-            + self.entry_num * (KVTable::SKIPMAP_ENTRY_OVERHEAD + KVTable::SEQUENCED_KEY_SIZE)
-    }
-}
-
 pub(crate) struct WritableKVTable {
     table: Arc<KVTable>,
 }
