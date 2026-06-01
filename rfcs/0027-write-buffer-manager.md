@@ -91,6 +91,10 @@ The `ByteBufferManager` addresses these opportunities by:
 
 - Enforce a global memory budget on in-flight write data (write batches through
   memtable flush).
+  - The memory usage of the allocated write buffers (both current and immutable) should count towards the limit. This should not be double counted if it is one allocation.
+  - This will not track buffers used for compaction.
+  - DbReader instances should be able to use the memory budget in future interations. 
+- The buffer memory limits should be observed as strictly as possible. Erroring towards over counting if needed. KVTable and other container struct allocation size do not count towards this.
 - Provide an RAII permit lifecycle: acquire before write, release on memtable
   drop.
 - Complement (not replace) the existing `max_unflushed_bytes` backpressure.
@@ -98,16 +102,20 @@ The `ByteBufferManager` addresses these opportunities by:
 - (Phase 2) Allow callers to share a budget across multiple DB instances via
   `DbBuilder::with_write_buffer_manager()` and establish a registry pattern
   for intelligent backpressure.
+- The configuration of the memory manager should be as simple as possible -- ideally just one size. Additional configs can be added in future and then only if they are really needed.
+
 
 ## Non-Goals
 
 - Replacing the existing `max_unflushed_bytes` backpressure mechanism entirely.
 - Tracking block cache or read-path memory.
-- Providing per-writer or per-key granularity on budget allocation.
+- Track struct byte allocations that will never be released like `DbInner::write_notifier`.
+- Enforce a hard limit on memory. 
 - Guaranteeing exact byte-level accounting (estimates are conservative
   approximations).
 - (Phase 2) Per-instance tracking and intelligent backpressure policies — this
   RFC only outlines the direction.
+
 
 ## Design
 
@@ -121,29 +129,27 @@ path.
 The core primitive is an async semaphore built on `AtomicUsize` + `tokio::Notify`
 that tracks allocations in bytes rather than discrete permits.
 
-```slatedb/slatedb/src/byte_buffer_manager.rs#L174-L178
+```slatedb/slatedb/src/byte_buffer_manager.rs#L216-L221
 struct ByteBudgetSemaphore {
     notify: Notify,
     allocated_bytes: AtomicUsize,
+    waiter_cnt: AtomicUsize,
     capacity: usize,
 }
 ```
 
 **Why not `tokio::sync::Semaphore`?** Tokio's semaphore enforces a hard capacity
 limit — once all permits are issued, acquisitions block until permits are
-returned. The `ByteBufferManager` intentionally uses soft capacity tracking:
-normal `acquire` calls allow a single writer to overshoot capacity rather than
-requiring the reservation to fit within remaining headroom. A custom
-`ByteBudgetSemaphore` gives us full control over this soft-cap behavior, which
-`tokio::sync::Semaphore` does not support.
+returned, and there is no way to over-allocate. The `ByteBufferManager` relies
+on soft capacity tracking: `force_acquire` lets writers overshoot capacity
+rather than blocking. A custom `ByteBudgetSemaphore` gives us full control over
+this soft-cap behavior, which `tokio::sync::Semaphore` does not support.
 
-The semaphore exposes the following operations:
+The semaphore operations used in production:
 
-```slatedb/slatedb/src/byte_buffer_manager.rs#L180-L190
+```slatedb/slatedb/src/byte_buffer_manager.rs#L223-L345
 impl ByteBudgetSemaphore {
     fn new(capacity: usize) -> Self;
-    async fn acquire(&self, num_bytes: usize);
-    fn try_acquire(&self, num_bytes: usize) -> bool;
     fn force_acquire(&self, num_bytes: usize);
     fn release(&self, num_bytes: usize);
     fn available(&self) -> usize;
@@ -152,17 +158,15 @@ impl ByteBudgetSemaphore {
 }
 ```
 
-- **`acquire`** — spins on a CAS loop. When `allocated_bytes >= capacity`, the
-  caller awaits a `Notify` signal that fires when any permit is released. On
-  success, `allocated_bytes` is incremented by `num_bytes`.
-- **`try_acquire`** — non-blocking CAS. Returns `true` if capacity was
-  available and the reservation succeeded, `false` otherwise.
 - **`force_acquire`** — non-blocking `fetch_add`. Can push `allocated_bytes`
-  above `capacity`. Used for WAL replay and the normal write dispatch path.
-- **`release`** — subtracts `num_bytes` from `allocated_bytes` via CAS and
-  notifies waiters if the budget drops below capacity.
-- **`wait_for_allocated_below`** — blocks until allocated bytes drop below the
-  given threshold (used by `await_capacity`).
+  above `capacity`. Used by the write path and WAL replay.
+- **`release`** — subtracts `num_bytes` from `allocated_bytes` via `fetch_sub`
+  and notifies waiters if the budget drops below capacity.
+- **`available`** — returns `capacity - allocated_bytes` (saturating to zero
+  when over-allocated).
+- **`allocated`** — returns the current `allocated_bytes` count.
+- **`wait_for_allocated_below`** — blocks until `allocated_bytes` drops below
+  the given threshold (used by `await_capacity`).
 
 #### ByteBufferManager
 
@@ -186,12 +190,11 @@ time to drain.
 
 Methods:
 
-```slatedb/slatedb/src/byte_buffer_manager.rs#L20-L108
+```slatedb/slatedb/src/byte_buffer_manager.rs#L20-L118
 impl ByteBufferManager {
     pub fn new(capacity: usize, high_watermark: usize) -> Self;
-    pub async fn acquire(&self, num_bytes: usize) -> ByteBufferPermit;
-    pub fn try_acquire(&self, num_bytes: usize) -> Option<ByteBufferPermit>;
     pub fn force_acquire(&self, num_bytes: usize) -> ByteBufferPermit;
+    pub fn force_expand(&self, permit: &ByteBufferPermit, num_bytes: usize);
     pub fn available(&self) -> usize;
     pub fn capacity(&self) -> usize;
     pub fn at_capacity(&self) -> bool;
@@ -199,12 +202,12 @@ impl ByteBufferManager {
 }
 ```
 
-- **`acquire`** — blocks (async) until `allocated_bytes < capacity`, then
-  atomically increments `allocated_bytes` by `num_bytes` and returns a permit.
-- **`try_acquire`** — attempts to reserve without blocking; returns
-  `Some(permit)` if capacity was available, or `None` if exhausted.
-- **`force_acquire`** — unconditionally reserves bytes (for dispatch and
-  replay). Can push `allocated_bytes` above `capacity`.
+- **`force_acquire`** — unconditionally reserves bytes (for the write path,
+  table creation, WAL buffer creation, and WAL replay). Can push
+  `allocated_bytes` above `capacity`. Never blocks.
+- **`force_expand`** — unconditionally adds `num_bytes` to an existing permit's
+  reservation. Used by `KVTable::put` (per-entry structural overhead) and
+  `WalBuffer::append` (VecDeque capacity growth).
 - **`available`** — returns `capacity - allocated_bytes` (saturating).
 - **`capacity`** — returns the total byte budget capacity.
 - **`at_capacity`** — returns `true` if `allocated_bytes >= high_watermark`.
@@ -216,7 +219,7 @@ impl ByteBufferManager {
 An RAII guard that releases its byte reservation on drop. Multiple permits can
 be consolidated via `merge()` to combine reservations into a single guard.
 
-```slatedb/slatedb/src/byte_buffer_manager.rs#L117-L171
+```slatedb/slatedb/src/byte_buffer_manager.rs#L128-L195
 pub struct ByteBufferPermit {
     semaphore: Arc<ByteBudgetSemaphore>,
     reserved_bytes: AtomicUsize,
@@ -224,7 +227,7 @@ pub struct ByteBufferPermit {
 
 impl ByteBufferPermit {
     pub fn merge(&self, other: &ByteBufferPermit);
-    pub fn size(&self) -> usize;
+    pub fn take(&self, num_bytes: usize) -> Self;
 }
 
 impl Drop for ByteBufferPermit {
@@ -232,67 +235,217 @@ impl Drop for ByteBufferPermit {
 }
 ```
 
-The `merge()` operation atomically zeroes the source permit's `reserved_bytes`
-and adds that value to the target. This means the source permit's `Drop` is a
-no-op, avoiding double-release. This is critical because multiple write batches
-can land in the same active memtable, and their permits need to be consolidated
-into a single permit that releases when the memtable is dropped.
+- **`merge`** — atomically zeroes the source permit's `reserved_bytes` and adds
+  that value to the target. The source permit's `Drop` becomes a no-op,
+  avoiding double-release. Used by `KVTable::add_write_permit` to consolidate
+  multiple write batch permits into the table's single permit.
+- **`take`** — subtracts `num_bytes` from this permit and returns a new permit
+  owning those bytes. Used by `KVTable::put` in the overwrite case to release
+  excess pre-allocated structural overhead back to the budget.
 
 #### Integration into the Write Path
 
 The permit lifecycle flows through the write path as follows:
 
-```/dev/null/diagram.txt#L1-L14
-Writer                  DbInner                      Memtable
-  │                       │                            │
-  ├─ write_with_options ─►│                            │
-  │                       ├─ force_acquire(size)       │
-  │                       ├─ batch.set_write_buffer    │
-  │                       ├─ dispatch to writer ──────►│
-  │                       │                            ├─ add_write_permit
-  │                       │                            │  (merge into table)
-  │                       ├─ maybe_apply_backpressure  │
-  │                       │  (blocks if at_capacity)   │
-  │                       │                            │
-  │                       │           flush to L0 ────►│ drop memtable
-  │                       │                            │ └─ permit.drop()
-  │                       │                            │    (releases budget)
+```/dev/null/diagram.txt#L1-L20
+Writer                  DbInner                 WalBuffer                KVTable
+  │                       │                        │                       │
+  ├─ write_with_options ─►│                        │                       │
+  │                       ├─ batch.set_write_buffer(&write_buffer_manager) │
+  │                       │  (internally calls force_acquire(estimated_size))
+  │                       ├─ dispatch to writer ──►│                       │
+  │                       │                        ├─ append(entries)      │
+  │                       │                        │  (force_expand for    │
+  │                       │                        │   VecDeque growth     │
+  │                       │                        │   only; NOT kv bytes) │
+  │                       ├────────────────────────┼──────────────────────►│
+  │                       │                        │                       ├─ add_write_permit
+  │                       │                        │                       │  (merge kv permit)
+  │                       │                        │                       ├─ put(entry)
+  │                       │                        │                       │  (force_expand for
+  │                       │                        │                       │   structural overhead)
+  │                       ├─ maybe_apply_backpressure                      │
+  │                       │  (blocks if at_capacity)                       │
+  │                       │                        │                       │
+  │                       │  flush WAL to storage ►│ drop WalBuffer        │
+  │                       │                        │ └─ permit.drop()      │
+  │                       │                        │   (releases struct    │
+  │                       │                        │    overhead only)     │
+  │                       │                        │                       │
+  │                       │           flush to L0 ─┼──────────────────────►│ drop KVTable
+  │                       │                        │                       │ └─ permit.drop()
+  │                       │                        │                       │   (releases kv bytes
+  │                       │                        │                       │    + struct overhead)
 ```
 
-1. **`WriteBatch`** gains a `write_buffer_permit: Option<Arc<ByteBufferPermit>>`
-   field. The `set_write_buffer()` method attaches a permit to the batch.
-   `force_acquire` is used because the bytes technically have already been
-   allocated. By getting the permit and dispatching to the writer without
-   blocking, we guarantee progress can be made. By applying backpressure after
-   the write dispatch, we enforce the soft buffer limit.
+The fundamental pattern is that the **user provides byte buffers** (keys and
+values), and those byte buffer metrics are tracked exclusively in relation to
+the `KVTable`. The WAL and dispatch channel do *not* account for the key/value
+data bytes themselves — only the `KVTable` does.
 
-2. **`DbInner::write_with_options`** calls `force_acquire(estimated_size)` to
-   immediately account for the write's memory footprint, attaches the permit to
-   the batch, dispatches the batch to the writer, and *then* calls
-   `maybe_apply_backpressure()`. This "acquire-then-backpressure" ordering
-   ensures the write is tracked before checking whether the system should stall.
-   Using `force_acquire` (non-blocking) avoids holding up the dispatch path;
-   backpressure is applied reactively after the write is in-flight.
+1. **`WriteBatch`** has a `write_buffer_permit: Option<Arc<ByteBufferPermit>>`
+   field. The `set_write_buffer(&ByteBufferManager)` method takes a reference
+   to the write buffer manager, calls `force_acquire(self.estimated_size())`
+   internally, and attaches the resulting permit to the batch.
+   `force_acquire` is used because the bytes have already been allocated by the
+   caller. The permit accounts **only for the key and value byte buffers** that
+   the user is storing — it does not account for the `WriteBatch` struct itself,
+   the dispatch channel, or any other transient overhead.
 
-3. **`DbInner::write_entries_to_memtable`** passes the permit to the memtable
-   via `add_write_permit`.
+2. **`DbInner::write_with_options`** calls
+   `batch.set_write_buffer(&self.write_buffer_manager)`, which acquires a permit
+   for `estimated_size` bytes (the sum of key/value sizes in the batch, see
+   `WriteBatch::estimated_size()`). It then dispatches the batch to the writer
+   and calls `maybe_apply_backpressure()`. This "acquire-then-backpressure"
+   ordering ensures the user's byte buffers are tracked before checking whether
+   the system should stall. Using `force_acquire` (non-blocking) avoids holding
+   up the dispatch path; backpressure is applied reactively after the write is
+   in-flight.
+
+3. **`DbInner::write_entries_to_memtable`** passes the permit to the `KVTable`
+   via `add_write_permit`, which merges it into the table's own permit. From
+   this point, the `KVTable` owns the byte buffer budget for those key/value
+   bytes.
+
+#### Memory Tracking Responsibilities
+
+Each component tracks a distinct slice of memory:
+
+- **`KVTable` (memtable)** — Tracks *everything* related to its state:
+  - The user-provided key/value byte buffers (via the merged write permit)
+  - Its own structural overhead: `KVTable` struct size, `SequenceTracker`
+    pre-allocation, per-entry `SkipMap` node overhead, and `SequencedKey` +
+    `RowEntry` struct sizes
+  - On creation, `force_acquire(SEQ_TRACKER_OVERHEAD + KVTABLE_SIZE)` reserves
+    the base cost; on each `put()`, `force_expand` adds per-entry structural
+    overhead
+
+- **`WalBuffer`** — Tracks only its own structural overhead (the `WalBuffer`
+  struct size and `VecDeque` capacity growth as entries are appended). It does
+  **not** track the key/value data bytes. Those bytes are shared (via `Bytes`
+  reference counting) with the `KVTable`, which is the sole owner of the
+  key/value budget.
+
+- **`DbStateView` (read-side `Arc<KVTable>`)** — The `KVTable` can be shared
+  via `Arc` for read access (e.g., in `DbStateView`). This shared reference
+  does **not** independently track byte buffers — it is a view on the original
+  table. The budget for key/value bytes remains with the original `KVTable`'s
+  permit and is released only when the last `Arc` reference is dropped (i.e.,
+  after flush completes and all readers release the table).
+
+#### Size Estimation Algorithms
+
+Each component uses a specific formula to calculate the bytes it charges
+against the write buffer budget.
+
+**Write Batch (user-provided key/value bytes)**
+
+The `WriteBatch::estimated_size()` sums only the raw key and value byte lengths
+across all operations in the batch:
+
+```
+batch_size = ∑ op.estimated_kv_size()
+
+where estimated_kv_size =
+    Put  | Merge : key.len() + value.len()
+    Delete       : key.len()
+```
+
+This is the size passed to `force_acquire` when the permit is created. It
+represents the user-provided byte buffers and nothing else.
+
+**KVTable (memtable)**
+
+The `KVTable` charges two categories of bytes against the budget:
+
+1. *Base overhead* — acquired once at table creation:
+
+   ```
+   base = SEQ_TRACKER_OVERHEAD + KVTABLE_SIZE
+
+   where
+     SEQ_TRACKER_OVERHEAD = 8192 * size_of::<u64>() * 2   (~128 KiB)
+     KVTABLE_SIZE         = size_of::<KVTable>()
+   ```
+
+2. *Per-entry structural overhead* — expanded on each `put()`:
+
+   ```
+   entry_overhead = SKIPMAP_ENTRY_OVERHEAD
+                  + size_of::<SequencedKey>()
+                  + size_of::<RowEntry>()
+
+   where
+     SKIPMAP_ENTRY_OVERHEAD = 128   (tower pointers, node header, alignment)
+     SequencedKey           = Bytes handle + u64 seq
+     RowEntry               = key + value + seq + optional timestamps
+   ```
+
+   In the overwrite case (same `SequencedKey` already exists), the excess
+   structural overhead that was pre-allocated but not needed is released back
+   via `permit.take()`:
+
+   ```
+   excess = SKIPMAP_ENTRY_OVERHEAD + size_of::<SequencedKey>() + old_entry_size
+   ```
+
+The total budget consumed by one `KVTable` is therefore:
+
+```
+total = base
+      + (num_entries * entry_overhead)
+      + user_kv_bytes          (from merged write batch permits)
+      - overwrite_corrections  (excess returned via take())
+```
+
+**WalBuffer**
+
+The `WalBuffer` charges only its own container overhead:
+
+1. *Base overhead* — acquired once at buffer creation:
+
+   ```
+   base = size_of::<WalBuffer>()
+   ```
+
+2. *VecDeque capacity growth* — expanded each time the internal `VecDeque`
+   reallocates:
+
+   ```
+   growth_bytes = (cap_after - cap_before) * size_of::<RowEntry>()
+   ```
+
+   This is only charged when the `VecDeque`'s capacity actually increases
+   (i.e., when it reallocates its backing buffer to fit more entries).
+
+The total budget consumed by one `WalBuffer` is:
+
+```
+total = base + cumulative_growth_bytes
+```
+
+Notably, the `WalBuffer` does **not** charge for the key/value data bytes of
+the entries it holds. Those bytes are shared via `Bytes` reference counting
+with the `KVTable`, which is the sole owner of that portion of the budget.
 
 #### Memtable Permit Tracking
 
-`KVTable` stores a `OnceCell<Arc<ByteBufferPermit>>`. The first permit is
-set directly. Subsequent permits (from concurrent batches landing in the same
-memtable) are merged into the existing one via `ByteBufferPermit::merge()`.
-This ensures a single release when the table is dropped after flush.
+`KVTable` stores an `Arc<ByteBufferPermit>` that is created at construction
+time (covering the base structural overhead). When write batches land in the
+table, their permits are merged into this single table permit via
+`ByteBufferPermit::merge()`. This ensures all tracked bytes — both the
+user-provided key/value buffers and the table's own structural allocations —
+are released in a single `Drop` when the table is dropped after flush.
 
-```slatedb/slatedb/src/mem_table.rs#L112-L113
-write_buffer_permit: OnceCell<Arc<ByteBufferPermit>>,
+```slatedb/slatedb/src/mem_table.rs#L113
+write_buffer_permit: Arc<ByteBufferPermit>,
 ```
 
-```slatedb/slatedb/src/mem_table.rs#L571-L576
-pub(crate) fn add_write_permit(&self, permit: Arc<ByteBufferPermit>) {
-    if let Err(permit) = self.write_buffer_permit.set(permit) {
-        self.write_buffer_permit.get().unwrap().merge(&permit);
-    }
+```slatedb/slatedb/src/mem_table.rs#L647-L653
+/// Merges an external write-buffer budget permit into this table's
+/// permit so that a single drop releases the combined reservation.
+pub(crate) fn add_write_permit(&self, permit: &ByteBufferPermit) {
+    self.write_buffer_permit.merge(permit);
 }
 ```
 
@@ -343,6 +496,18 @@ if self.write_buffer_manager.at_capacity() {
 The write-buffer remaining budget is also logged in trace and warn messages
 for observability.
 
+> **Consideration:** The `ByteBufferManager` tracks outstanding bytes more
+> accurately than the existing `max_unflushed_bytes` check, which relies on a
+> point-in-time snapshot of WAL + immutable memtable sizes under a read lock.
+> In principle, the byte buffer budget alone could replace Condition 1 entirely,
+> since it already accounts for all in-flight write data from dispatch through
+> flush. For simplicity, the current implementation retains both conditions:
+> the legacy `max_unflushed_bytes` check provides a familiar, battle-tested
+> safety net, while the byte buffer high watermark adds a more precise
+> second layer. A future iteration may simplify these into a single
+> budget-based backpressure mechanism once the byte buffer approach has
+> sufficient production mileage.
+
 #### Public API and Builder
 
 - `ByteBufferManager` is re-exported from `lib.rs` as a public type.
@@ -350,6 +515,28 @@ for observability.
   `capacity` and `high_watermark` set to `settings.max_unflushed_bytes`.
 - In Phase 2, `DbBuilder` will expose `with_write_buffer_manager()` for
   callers who want to share a budget across multiple DB instances.
+
+#### Defaults
+
+When no explicit `ByteBufferManager` is provided via
+`DbBuilder::with_write_buffer_manager()`, the database constructs one with:
+
+- **`capacity`** = `settings.max_unflushed_bytes` (default: 1 GB)
+- **`high_watermark`** = `capacity` (i.e., backpressure triggers only when the
+  full budget is consumed)
+
+Setting `high_watermark == capacity` means `at_capacity()` returns `true` only
+when allocated bytes reach the entire budget. This is the simplest default: the
+system allows writes to fill the budget completely before applying
+backpressure, relying on the flush pipeline to drain immutable memtables in the
+background.
+
+The minimum acceptable capacity is 1 MB (`MIN_WRITE_BUFFER_SIZE`). The builder
+rejects any `ByteBufferManager` whose capacity falls below this threshold.
+This floor ensures there is always enough headroom to cover the fixed
+overhead of a single `KVTable` (primarily the `SequenceTracker`
+pre-allocation at ~128 KiB) plus at least one entry, preventing deadlock
+where the budget is exhausted before any write can land.
 
 ### Phase 2: Instance Registry for Intelligent Backpressure (WIP)
 
@@ -558,10 +745,9 @@ Tokio's semaphore is well-tested and supports async acquisition. However, it
 enforces a hard capacity limit: once all permits are issued, further
 acquisitions block until permits are returned, and there is no way to
 over-allocate. The `ByteBufferManager` relies on soft capacity tracking —
-normal `acquire` lets a single writer's reservation overshoot rather than
-requiring it to fit within remaining headroom. A custom
-`ByteBudgetSemaphore` gives us full control over this soft-cap behavior, which
-`tokio::sync::Semaphore` does not support.
+`force_acquire` lets a writer's reservation overshoot capacity rather than
+blocking. A custom `ByteBudgetSemaphore` gives us full control over this
+soft-cap behavior, which `tokio::sync::Semaphore` does not support.
 
 **Integrate budget tracking into the database state lock**
 
