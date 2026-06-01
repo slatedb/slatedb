@@ -1,24 +1,40 @@
-use crate::batch::WriteBatchIterator;
+use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
-use crate::db_iter::{apply_filters, DbRecencyIterator};
+use crate::db_iter::{apply_filters, DbRecencyIterator, GetIterator};
+use crate::db_state::SsTableView;
 use crate::db_stats::DbStats;
-use crate::iter::RowEntryIterator;
-use crate::manifest::{ManifestCore, Segment};
+use crate::filter_iterator::FilterIterator;
+use crate::iter::{IterationOrder, RowEntryIterator, VecRowIterator};
+use crate::manifest::{LsmTreeState, ManifestCore, Segment};
 use crate::mem_table::{ImmutableMemtable, KVTable};
-use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
+use crate::merge_operator::{
+    instrument_merge_operator, MergeOperatorIterator, MergeOperatorRequiredIterator,
+    MergeOperatorType,
+};
+use crate::multi_sst::{read_sst_for_keys, PendingKey};
 use crate::oracle::Oracle;
 use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::KeyValue;
+use crate::types::{KeyValue, RowEntry, ValueDeletable};
+use crate::utils::build_concurrent;
 use crate::{error::SlateDBError, DbIterator};
 
 use bytes::Bytes;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
+use ulid::Ulid;
+
+/// Per-SST batched read result for `multi_get`: `(newest-first rank, [(unique
+/// key index, that SST's versions of the key, newest-first)])`.
+type SstBatchResult = (usize, Vec<(usize, Vec<RowEntry>)>);
+
+/// One unit of concurrent SST work for `multi_get`:
+/// `(rank, view, keys to look up in that view)`.
+type SstReadWork = (usize, SsTableView, Arc<Vec<PendingKey>>);
 
 pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
@@ -259,6 +275,300 @@ impl Reader {
             .transpose()
     }
 
+    /// Resolve a batch of point keys against a single snapshot ("group by SST"
+    /// strategy). Returns one `Option<RowEntry>` per input key, in input order;
+    /// duplicate keys yield duplicate results.
+    ///
+    /// Setup (snapshot, max-seq) happens once for the whole batch. The layers
+    /// are then walked newest-first — write batch, memtables, then each
+    /// segment's L0 SSTs and sorted runs — shrinking the pending set as keys
+    /// resolve, so a key found in a newer layer is never read from an older
+    /// one. Each on-disk SST is visited once for all of its pending keys (see
+    /// [`crate::multi_sst::read_sst_for_keys`]).
+    ///
+    /// A key is "resolved" only when a `Value` or `Tombstone` is found; `Merge`
+    /// operands keep it descending to older layers (merge operands legitimately
+    /// span layers). The final value per key is produced by feeding the
+    /// accumulated entries through the same [`GetIterator`] +
+    /// [`MergeOperatorIterator`] resolution the single-key `get` path uses, so
+    /// the result is identical to calling `get` for each key.
+    ///
+    /// Mirrors the arguments of [`Self::get_key_value_with_options`]: a shared
+    /// `db_state` view, an optional per-transaction `write_batch` (consulted
+    /// first), and an optional `max_seq` bound (folded with durability/dirty via
+    /// `prepare_max_seq`).
+    pub(crate) async fn multi_get_with_options(
+        &self,
+        keys: &[Bytes],
+        options: &ReadOptions,
+        db_state: &(dyn DbStateReader + Sync + Send),
+        write_batch: Option<&WriteBatch>,
+        max_seq: Option<u64>,
+    ) -> Result<Vec<Option<RowEntry>>, SlateDBError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db_stats.get_requests.increment(keys.len() as u64);
+        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
+
+        // Deduplicate keys for I/O; results are scattered back to every input
+        // position so duplicates resolve once but appear in each slot.
+        let mut unique_keys: Vec<Bytes> = Vec::new();
+        let mut index_of: HashMap<Bytes, usize> = HashMap::new();
+        let mut orig_to_unique: Vec<usize> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let u = *index_of.entry(key.clone()).or_insert_with(|| {
+                unique_keys.push(key.clone());
+                unique_keys.len() - 1
+            });
+            orig_to_unique.push(u);
+        }
+        let n = unique_keys.len();
+
+        // Per unique key: write-batch entries (unfiltered, highest precedence),
+        // everything-else entries (memtable + on-disk), and whether a base
+        // (Value/Tombstone) has been found yet.
+        let mut wb_acc: Vec<Vec<RowEntry>> = vec![Vec::new(); n];
+        let mut acc: Vec<Vec<RowEntry>> = vec![Vec::new(); n];
+        let mut resolved: Vec<bool> = vec![false; n];
+
+        let sst_options = SstIteratorOptions {
+            cache_blocks: options.cache_blocks,
+            eager_spawn: true,
+            filter_context: options.filter_context.clone(),
+            ..SstIteratorOptions::default()
+        };
+
+        // 1. Write batch (transaction only). Entries carry seq u64::MAX and are
+        //    not max_seq filtered, matching the single-key get path.
+        if let Some(wb) = write_batch {
+            for (u, key) in unique_keys.iter().enumerate() {
+                let mut iter = WriteBatchIterator::new(
+                    wb,
+                    BytesRange::from_slice(key.as_ref()..=key.as_ref()),
+                    IterationOrder::Ascending,
+                );
+                iter.init().await?;
+                let mut entries = Vec::new();
+                while let Some(entry) = iter.next().await? {
+                    if entry.key.as_ref() == key.as_ref() {
+                        entries.push(entry);
+                    }
+                }
+                append_wb_versions(entries, &mut wb_acc[u], &mut resolved[u]);
+            }
+        }
+
+        // 2. Active memtable, then immutable memtables (newest-first).
+        let memtable = db_state.memtable();
+        read_memtable_layer(&memtable, &unique_keys, max_seq, &mut acc, &mut resolved).await?;
+        for imm in db_state.imm_memtable() {
+            let table = imm.table();
+            read_memtable_layer(&table, &unique_keys, max_seq, &mut acc, &mut resolved).await?;
+        }
+
+        // 3. On-disk: group still-pending keys by their LSM tree (segment), then
+        //    walk each tree's L0 + sorted runs. Unsegmented DBs yield one group.
+        let core = db_state.core();
+        let default_tree = core.default_segment().tree;
+        // Group keys by their LSM tree's identity. The key is the tree's Arc
+        // pointer cast to `usize` (a raw pointer would make the future `!Send`).
+        let mut groups: HashMap<usize, (Arc<LsmTreeState>, Vec<PendingKey>)> = HashMap::new();
+        for (u, key) in unique_keys.iter().enumerate() {
+            if resolved[u] {
+                continue;
+            }
+            let tree = match core
+                .select_segments(&BytesRange::from_slice(key.as_ref()..=key.as_ref()))
+            {
+                None => default_tree.clone(),
+                Some(segments) => match segments.last() {
+                    Some(segment) => segment.tree.clone(),
+                    // Configured but no segment covers this key: no on-disk data.
+                    None => continue,
+                },
+            };
+            groups
+                .entry(Arc::as_ptr(&tree) as usize)
+                .or_insert_with(|| (tree.clone(), Vec::new()))
+                .1
+                .push(PendingKey {
+                    idx: u,
+                    key: key.clone(),
+                });
+        }
+        for (_, (tree, group_keys)) in groups {
+            self.read_tree_layer(
+                &tree,
+                &group_keys,
+                &sst_options,
+                max_seq,
+                &mut acc,
+                &mut resolved,
+            )
+            .await?;
+        }
+
+        // 4. Resolve each unique key, then scatter to input positions.
+        let mut resolved_values: Vec<Option<RowEntry>> = Vec::with_capacity(n);
+        for u in 0..n {
+            let wb_entries = std::mem::take(&mut wb_acc[u]);
+            let rest_entries = std::mem::take(&mut acc[u]);
+            resolved_values.push(
+                self.resolve_entry(&unique_keys[u], wb_entries, rest_entries, max_seq)
+                    .await?,
+            );
+        }
+        Ok(orig_to_unique
+            .iter()
+            .map(|&u| resolved_values[u].clone())
+            .collect())
+    }
+
+    /// Walk one LSM tree (segment) for its group of pending keys: all L0 SSTs in
+    /// parallel (newest-first), then each sorted run newest-first with a shrink
+    /// between runs to preserve early-exit.
+    async fn read_tree_layer(
+        &self,
+        tree: &LsmTreeState,
+        group_keys: &[PendingKey],
+        sst_options: &SstIteratorOptions,
+        max_seq: Option<u64>,
+        acc: &mut [Vec<RowEntry>],
+        resolved: &mut [bool],
+    ) -> Result<(), SlateDBError> {
+        // L0: any L0 SST may hold any key, so all of them are read for every
+        // still-pending key. Rank by position (front = newest) and apply
+        // newest-first so the newest SST wins.
+        let l0_pending: Vec<PendingKey> = group_keys
+            .iter()
+            .filter(|pk| !resolved[pk.idx])
+            .cloned()
+            .collect();
+        if !l0_pending.is_empty() && !tree.l0.is_empty() {
+            let shared = Arc::new(l0_pending);
+            let work: Vec<SstReadWork> =tree
+                .l0
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(rank, view)| (rank, view, shared.clone()))
+                .collect();
+            let results = self.read_ssts_concurrent(work, sst_options).await?;
+            apply_layer_results(results, max_seq, acc, resolved);
+        }
+
+        // Sorted runs, newest run first. Within a run each key maps (via binary
+        // search) to one SST view, so group keys by covering view and read each
+        // view once. Shrink between runs.
+        for sr in tree.compacted.iter() {
+            let sr_pending: Vec<&PendingKey> =
+                group_keys.iter().filter(|pk| !resolved[pk.idx]).collect();
+            if sr_pending.is_empty() {
+                break;
+            }
+            let view_pos: HashMap<Ulid, usize> = sr
+                .sst_views
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (v.id, i))
+                .collect();
+            // Keyed by view index so iteration is ascending key-range order,
+            // matching the single-key sorted-run point iterators.
+            let mut view_keys: BTreeMap<usize, Vec<PendingKey>> = BTreeMap::new();
+            for pk in sr_pending {
+                for view in sr.tables_covering_point_key(pk.key.as_ref()) {
+                    view_keys
+                        .entry(view_pos[&view.id])
+                        .or_default()
+                        .push(pk.clone());
+                }
+            }
+            if view_keys.is_empty() {
+                continue;
+            }
+            let work: Vec<SstReadWork> =view_keys
+                .into_iter()
+                .map(|(rank, keys)| (rank, sr.sst_views[rank].clone(), Arc::new(keys)))
+                .collect();
+            let results = self.read_ssts_concurrent(work, sst_options).await?;
+            apply_layer_results(results, max_seq, acc, resolved);
+        }
+        Ok(())
+    }
+
+    /// Read a set of `(rank, view, keys)` work items concurrently (bounded), one
+    /// [`read_sst_for_keys`] call per view, and return the per-view results
+    /// sorted by `rank` so the caller can apply them in precedence order.
+    async fn read_ssts_concurrent(
+        &self,
+        work: Vec<SstReadWork>,
+        sst_options: &SstIteratorOptions,
+    ) -> Result<Vec<SstBatchResult>, SlateDBError> {
+        if work.is_empty() {
+            return Ok(Vec::new());
+        }
+        let max_parallel = work.len().clamp(1, 4);
+        let table_store = self.table_store.clone();
+        let opts = sst_options.clone();
+        let stats = self.db_stats.clone();
+        let results = build_concurrent(work, max_parallel, move |(rank, view, keys)| {
+            let table_store = table_store.clone();
+            let opts = opts.clone();
+            let stats = stats.clone();
+            async move {
+                let per_key =
+                    read_sst_for_keys(&view, &keys[..], &table_store, &opts, Some(&stats)).await?;
+                Ok(Some((rank, per_key)))
+            }
+        })
+        .await?;
+        let mut results: Vec<SstBatchResult> = results.into();
+        results.sort_by_key(|(rank, _)| *rank);
+        Ok(results)
+    }
+
+    /// Produce the final entry for one key by replaying its accumulated versions
+    /// through the same components the single-key `get` path uses: a
+    /// [`GetIterator`] (write-batch arm unfiltered, the rest seq-filtered) wrapped
+    /// in the merge operator. Returns `None` for a missing or deleted key.
+    async fn resolve_entry(
+        &self,
+        key: &Bytes,
+        wb_entries: Vec<RowEntry>,
+        rest_entries: Vec<RowEntry>,
+        max_seq: Option<u64>,
+    ) -> Result<Option<RowEntry>, SlateDBError> {
+        if wb_entries.is_empty() && rest_entries.is_empty() {
+            return Ok(None);
+        }
+        let wb_iter: Box<dyn RowEntryIterator + 'static> =
+            Box::new(VecRowIterator::new(wb_entries));
+        let rest_iter: Box<dyn RowEntryIterator + 'static> = Box::new(
+            FilterIterator::new_with_max_seq(VecRowIterator::new(rest_entries), max_seq),
+        );
+        let get_iter = GetIterator::new(
+            key.clone(),
+            wb_iter,
+            std::iter::empty::<Box<dyn RowEntryIterator + 'static>>(),
+            rest_iter,
+        );
+        let mut top: Box<dyn RowEntryIterator + 'static> = match self.read_merge_operator.clone() {
+            Some(merge_operator) => Box::new(MergeOperatorIterator::new(
+                merge_operator,
+                get_iter,
+                true,
+                None,
+            )),
+            None => Box::new(MergeOperatorRequiredIterator::new(get_iter)),
+        };
+        top.init().await?;
+        Ok(match top.next().await? {
+            Some(entry) if entry.value.is_tombstone() => None,
+            other => other,
+        })
+    }
+
     /// Create an iterator over a key range.
     ///
     /// Produces a merged iterator over the provided `write_batch` (if any),
@@ -428,6 +738,93 @@ impl Reader {
         let filtered = apply_filters(all_iters, max_seq);
         Ok(DbRecencyIterator::new(VecDeque::from(filtered)))
     }
+}
+
+/// Append on-disk/memtable versions of one key to its accumulator. Entries with
+/// `seq > max_seq` are dropped (not visible at this snapshot). A `Value` or
+/// `Tombstone` marks the key resolved, so older layers are skipped for it.
+fn append_versions(
+    entries: Vec<RowEntry>,
+    max_seq: Option<u64>,
+    acc: &mut Vec<RowEntry>,
+    resolved: &mut bool,
+) {
+    for entry in entries {
+        if max_seq.is_some_and(|ms| entry.seq > ms) {
+            continue;
+        }
+        if !matches!(entry.value, ValueDeletable::Merge(_)) {
+            *resolved = true;
+        }
+        acc.push(entry);
+    }
+}
+
+/// Append write-batch versions of one key. Write-batch entries are always
+/// visible (seq `u64::MAX`) and are never max_seq filtered, matching the
+/// single-key `get` path.
+fn append_wb_versions(entries: Vec<RowEntry>, acc: &mut Vec<RowEntry>, resolved: &mut bool) {
+    for entry in entries {
+        if !matches!(entry.value, ValueDeletable::Merge(_)) {
+            *resolved = true;
+        }
+        acc.push(entry);
+    }
+}
+
+/// Apply per-view results (already sorted newest-first by rank) to the per-key
+/// accumulators, skipping keys already resolved by a newer view in this layer.
+fn apply_layer_results(
+    results: Vec<SstBatchResult>,
+    max_seq: Option<u64>,
+    acc: &mut [Vec<RowEntry>],
+    resolved: &mut [bool],
+) {
+    for (_rank, per_key) in results {
+        for (u, entries) in per_key {
+            if resolved[u] {
+                continue;
+            }
+            append_versions(entries, max_seq, &mut acc[u], &mut resolved[u]);
+        }
+    }
+}
+
+/// Probe an in-memory table for every still-pending key, appending its versions.
+async fn read_memtable_layer(
+    table: &KVTable,
+    unique_keys: &[Bytes],
+    max_seq: Option<u64>,
+    acc: &mut [Vec<RowEntry>],
+    resolved: &mut [bool],
+) -> Result<(), SlateDBError> {
+    for (u, key) in unique_keys.iter().enumerate() {
+        if resolved[u] {
+            continue;
+        }
+        let entries = kv_table_get_versions(table, key).await?;
+        append_versions(entries, max_seq, &mut acc[u], &mut resolved[u]);
+    }
+    Ok(())
+}
+
+/// Collect all versions of `key` from a `KVTable`, newest-first. The table has
+/// no direct point-get, so this uses a `key..=key` range iterator (in-memory,
+/// O(log n)).
+async fn kv_table_get_versions(
+    table: &KVTable,
+    key: &Bytes,
+) -> Result<Vec<RowEntry>, SlateDBError> {
+    let mut iter = table.range(key.clone()..=key.clone(), IterationOrder::Ascending);
+    iter.init().await?;
+    let mut out = Vec::new();
+    while let Some(entry) = iter.next().await? {
+        if entry.key.as_ref() != key.as_ref() {
+            break;
+        }
+        out.push(entry);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1315,6 +1712,175 @@ mod tests {
             expected.map(|b| String::from_utf8_lossy(b))
         );
 
+        Ok(())
+    }
+
+    /// Build a reader over a populated `TestDbState`, run `multi_get` for
+    /// `query_keys`, assert it agrees key-by-key with single `get` against the
+    /// same snapshot (the differential invariant), and return the batch values.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_multi_get(
+        entries: Vec<TestEntry>,
+        query_keys: &[&'static [u8]],
+        dirty: bool,
+        last_committed_seq: Option<u64>,
+        max_seq: Option<u64>,
+        merge: bool,
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
+        let test_clock = Arc::new(MockSystemClock::new());
+        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
+        let oracle = Arc::new(DbReaderOracle::new(
+            last_committed_seq.unwrap_or(u64::MAX),
+            DbStatusManager::new(0),
+        ));
+        let merge_operator = if merge {
+            Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
+        } else {
+            None
+        };
+        let reader = Reader::new(
+            test_db_state.table_store.clone(),
+            db_stats,
+            mono_clock,
+            oracle,
+            merge_operator,
+        );
+        let read_options = ReadOptions::default().with_dirty(dirty);
+
+        let batch: Vec<Bytes> = query_keys.iter().map(|k| Bytes::copy_from_slice(k)).collect();
+        let multi = reader
+            .multi_get_with_options(
+                &batch,
+                &read_options,
+                &test_db_state,
+                write_batch.as_ref(),
+                max_seq,
+            )
+            .await?;
+        assert_eq!(multi.len(), query_keys.len());
+        let multi_vals: Vec<Option<Bytes>> = multi
+            .into_iter()
+            .map(|entry| entry.and_then(|entry| entry.value.as_bytes()))
+            .collect();
+
+        // Differential: each key resolved individually via get must match.
+        for (i, key) in query_keys.iter().enumerate() {
+            let single = reader
+                .get_key_value_with_options(
+                    *key,
+                    &read_options,
+                    &test_db_state,
+                    wb_point_iter(&write_batch, key),
+                    max_seq,
+                )
+                .await?
+                .map(|kv| kv.value);
+            assert_eq!(
+                multi_vals[i], single,
+                "multi_get disagreed with get for key {:?}",
+                String::from_utf8_lossy(key)
+            );
+        }
+        Ok(multi_vals)
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_distinct_keys_across_layers() -> Result<(), SlateDBError> {
+        let entries = vec![
+            TestEntry::value(b"mem_key", b"mem_val", 90),
+            TestEntry::value(b"l0_key", b"l0_val", 70).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"sr_key", b"sr_val", 50).with_location(LayerLocation::SortedRun(0)),
+            TestEntry::tombstone(b"del_key", 80).with_location(LayerLocation::L0Sst(0)),
+        ];
+        let vals = run_multi_get(
+            entries,
+            &[b"mem_key", b"l0_key", b"sr_key", b"del_key", b"absent"],
+            true,
+            None,
+            None,
+            false,
+        )
+        .await?;
+        assert_eq!(vals[0].as_deref(), Some(b"mem_val".as_ref()));
+        assert_eq!(vals[1].as_deref(), Some(b"l0_val".as_ref()));
+        assert_eq!(vals[2].as_deref(), Some(b"sr_val".as_ref()));
+        assert_eq!(vals[3], None); // tombstone
+        assert_eq!(vals[4], None); // absent
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_same_l0_sst_and_duplicates() -> Result<(), SlateDBError> {
+        // Two keys live in the same L0 SST; one key is queried twice.
+        let entries = vec![
+            TestEntry::value(b"key1", b"v1", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"v2", 51).with_location(LayerLocation::L0Sst(0)),
+        ];
+        let vals = run_multi_get(
+            entries,
+            &[b"key1", b"key2", b"key1", b"absent"],
+            true,
+            None,
+            None,
+            false,
+        )
+        .await?;
+        assert_eq!(vals[0].as_deref(), Some(b"v1".as_ref()));
+        assert_eq!(vals[1].as_deref(), Some(b"v2".as_ref()));
+        assert_eq!(vals[2].as_deref(), Some(b"v1".as_ref())); // duplicate slot
+        assert_eq!(vals[3], None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_empty_batch() -> Result<(), SlateDBError> {
+        let vals = run_multi_get(
+            vec![TestEntry::value(b"key1", b"v1", 50)],
+            &[],
+            true,
+            None,
+            None,
+            false,
+        )
+        .await?;
+        assert!(vals.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_merge_across_layers() -> Result<(), SlateDBError> {
+        // A key whose value is built from merge operands spanning layers, plus a
+        // plain key and an absent key, resolved in one batch with a merge
+        // operator configured.
+        let entries = vec![
+            TestEntry::merge(b"acc", b"c", 90),
+            TestEntry::merge(b"acc", b"b", 80).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"acc", b"a", 70).with_location(LayerLocation::SortedRun(0)),
+            TestEntry::value(b"plain", b"p", 60),
+        ];
+        let vals = run_multi_get(entries, &[b"acc", b"plain", b"gone"], true, None, None, true).await?;
+        assert_eq!(vals[0].as_deref(), Some(b"abc".as_ref())); // merge("a","b","c")
+        assert_eq!(vals[1].as_deref(), Some(b"p".as_ref()));
+        assert_eq!(vals[2], None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_seq_filtering() -> Result<(), SlateDBError> {
+        // Committed-read + snapshot max_seq filtering applies across the batch:
+        // the newer (uncommitted/over-bound) version is hidden, exposing the
+        // older committed value.
+        let entries = vec![
+            TestEntry::value(b"k", b"newer", 100),
+            TestEntry::value(b"k", b"older", 40).with_location(LayerLocation::L0Sst(0)),
+        ];
+        let vals = run_multi_get(entries, &[b"k"], false, Some(50), Some(60), false).await?;
+        assert_eq!(vals[0].as_deref(), Some(b"older".as_ref()));
         Ok(())
     }
 

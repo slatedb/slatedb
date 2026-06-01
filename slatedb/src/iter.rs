@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::collections::VecDeque;
 
 use crate::error::SlateDBError;
 use crate::types::RowEntry;
@@ -112,6 +113,50 @@ impl RowEntryIterator for EmptyIterator {
     }
 
     async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+}
+
+/// A [`RowEntryIterator`] backed by an in-memory list of pre-collected entries.
+///
+/// Used by the batched `multi_get` path: a single key's accumulated versions
+/// (in newest-first / sequence-descending order) are replayed through the same
+/// [`crate::db_iter::GetIterator`] + merge-operator resolution the single-key
+/// `get` path uses, so tombstone / merge / sequence semantics are inherited
+/// rather than reimplemented.
+pub(crate) struct VecRowIterator {
+    entries: VecDeque<RowEntry>,
+}
+
+impl VecRowIterator {
+    pub(crate) fn new(entries: impl Into<VecDeque<RowEntry>>) -> Self {
+        Self {
+            entries: entries.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl RowEntryIterator for VecRowIterator {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        Ok(self.entries.pop_front())
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        // The multi_get resolution path only calls `next`, but `seek` is
+        // implemented for trait completeness. Entries are stored in iteration
+        // order, so drop any leading entries that sort before `next_key`.
+        while let Some(front) = self.entries.front() {
+            if front.key.as_ref() < next_key {
+                self.entries.pop_front();
+            } else {
+                break;
+            }
+        }
         Ok(())
     }
 }
