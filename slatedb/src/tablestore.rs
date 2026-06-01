@@ -2307,7 +2307,10 @@ mod tests {
             .map(|_| SsTableId::Compacted(ulid::Ulid::new()))
             .collect();
         for id in &ids {
-            main_store.put(&ts.path(id), Bytes::new().into()).await.unwrap();
+            main_store
+                .put(&ts.path(id), Bytes::new().into())
+                .await
+                .unwrap();
         }
 
         // All three exist -> all counted as deleted, none failed.

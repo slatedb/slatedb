@@ -6453,9 +6453,7 @@ mod tests {
             2
         );
 
-        probe_table_store
-            .delete_ssts(&[SsTableId::Wal(1)])
-            .await;
+        probe_table_store.delete_ssts(&[SsTableId::Wal(1)]).await;
         gated_store.head_gate.release();
 
         let err = match w1_handle.await.unwrap() {
@@ -6518,9 +6516,7 @@ mod tests {
             .wait_for_arrivals(head_arrivals_before + 1)
             .await;
 
-        probe_table_store
-            .delete_ssts(&[SsTableId::Wal(1)])
-            .await;
+        probe_table_store.delete_ssts(&[SsTableId::Wal(1)]).await;
         gated_store.head_gate.release();
 
         let err = match w1_handle.await.unwrap() {

@@ -1,9 +1,7 @@
-use crate::manifest::Manifest;
-use crate::tablestore::SstFileMetadata;
-use crate::{
-    config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
-    tablestore::{DeleteResult, TableStore},
-};
+use crate::config::GarbageCollectorDirectoryOptions;
+use crate::error::SlateDBError;
+use crate::manifest::{store::ManifestStore, Manifest};
+use crate::tablestore::{DeleteResult, SstFileMetadata, TableStore};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use std::sync::Arc;
