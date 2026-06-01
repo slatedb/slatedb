@@ -6455,8 +6455,7 @@ mod tests {
 
         probe_table_store
             .delete_ssts(&[SsTableId::Wal(1)])
-            .await
-            .unwrap();
+            .await;
         gated_store.head_gate.release();
 
         let err = match w1_handle.await.unwrap() {
@@ -6521,8 +6520,7 @@ mod tests {
 
         probe_table_store
             .delete_ssts(&[SsTableId::Wal(1)])
-            .await
-            .unwrap();
+            .await;
         gated_store.head_gate.release();
 
         let err = match w1_handle.await.unwrap() {

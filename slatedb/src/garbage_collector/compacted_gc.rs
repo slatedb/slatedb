@@ -6,10 +6,9 @@ use crate::{
     db_state::SsTableId,
     error::SlateDBError,
     manifest::{store::ManifestStore, Manifest, VersionedManifest},
-    tablestore::TableStore,
+    tablestore::{DeleteResult, TableStore},
 };
 use chrono::{DateTime, Utc};
-use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -233,16 +232,17 @@ impl GcTask for CompactedGcTask {
                 "deleting compacted SSTs [count={}]",
                 sst_ids_to_delete.len()
             );
-            match self.table_store.delete_ssts(&sst_ids_to_delete).await {
-                Ok(()) => self
-                    .stats
-                    .gc_compacted_count
-                    .increment(sst_ids_to_delete.len() as u64),
-                Err(e) => error!(
-                    "error deleting compacted SSTs [count={}, error={}]",
-                    sst_ids_to_delete.len(),
-                    e
-                ),
+            let DeleteResult { deleted, failed } =
+                self.table_store.delete_ssts(&sst_ids_to_delete).await;
+            self.stats.gc_compacted_count.increment(deleted as u64);
+            if failed > 0 {
+                log::warn!(
+                    "deleted compacted SSTs with failures [deleted={}, failed={}]",
+                    deleted,
+                    failed
+                );
+            } else {
+                log::info!("deleted compacted SSTs [count={}]", deleted);
             }
         }
 

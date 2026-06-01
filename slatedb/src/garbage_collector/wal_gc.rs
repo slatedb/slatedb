@@ -2,10 +2,9 @@ use crate::manifest::Manifest;
 use crate::tablestore::SstFileMetadata;
 use crate::{
     config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
-    tablestore::TableStore,
+    tablestore::{DeleteResult, TableStore},
 };
 use chrono::{DateTime, Utc};
-use log::error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -144,20 +143,19 @@ impl GcTask for WalGcTask {
                 );
             }
         } else {
-            match self.table_store.delete_ssts(&sst_ids_to_delete).await {
-                Ok(()) => {
-                    let n = sst_ids_to_delete.len() as u64;
-                    match self.mode {
-                        WalGcMode::Regular => self.stats.gc_wal_count.increment(n),
-                        WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(n),
-                    }
-                }
-                Err(e) => error!(
-                    "error deleting {} [count={}, error={}]",
+            let DeleteResult { deleted, failed } =
+                self.table_store.delete_ssts(&sst_ids_to_delete).await;
+            match self.mode {
+                WalGcMode::Regular => self.stats.gc_wal_count.increment(deleted as u64),
+                WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(deleted as u64),
+            }
+            if failed > 0 {
+                log::warn!(
+                    "deleted {} with failures [deleted={}, failed={}]",
                     self.resource(),
-                    sst_ids_to_delete.len(),
-                    e
-                ),
+                    deleted,
+                    failed
+                );
             }
         }
 

@@ -655,11 +655,7 @@ mod tests {
         flush_to_l0(&db).await;
         let sst_id = first_l0_sst_id(&db);
         db.evict_cached_sst(sst_id).await.expect("evict");
-        db.inner
-            .table_store
-            .delete_ssts(&[sst_id])
-            .await
-            .expect("delete_ssts");
+        db.inner.table_store.delete_ssts(&[sst_id]).await;
 
         // when: we warm a target whose underlying IO will fail
         let result = db
