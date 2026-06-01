@@ -4262,7 +4262,7 @@ mod tests {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(MockSystemClock::new());
-        let mut options = test_db_options(0, 300, None);
+        let mut options = test_db_options(0, 350, None);
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -4353,7 +4353,7 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 320, None))
             .with_metrics_recorder(metrics_recorder.clone())
             .build()
             .await
@@ -5562,7 +5562,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 512, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .with_fp_registry(fp_registry.clone())
             .build()
@@ -5610,7 +5610,7 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
         let db_restored = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 512, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .with_fp_registry(fp_registry.clone())
             .build()
@@ -6204,7 +6204,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        let mut settings = test_db_options(0, 128, None);
+        let mut settings = test_db_options(0, 256, None);
         // Disable automatic flush
         settings.flush_interval = None;
 

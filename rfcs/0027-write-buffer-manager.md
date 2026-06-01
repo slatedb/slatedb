@@ -18,8 +18,8 @@ Table of Contents:
     - [WAL Replay](#wal-replay)
     - [Backpressure Enhancement](#backpressure-enhancement)
     - [Public API and Builder](#public-api-and-builder)
-  - [Phase 2: Lock-Free SST and WAL Capacity Tracking](#phase-2-lock-free-sst-and-wal-capacity-tracking)
-  - [Phase 3: Instance Registry for Intelligent Backpressure (WIP)](#phase-3-instance-registry-for-intelligent-backpressure-wip)
+  - [Phase 2: Instance Registry for Intelligent Backpressure (WIP)](#phase-2-instance-registry-for-intelligent-backpressure-wip)
+- [Pathological Cases](#pathological-cases)
 - [Impact Analysis](#impact-analysis)
   - [Core API & Query Semantics](#core-api--query-semantics)
   - [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -49,19 +49,16 @@ Authors:
 
 ## Summary
 
-This RFC introduces a `ByteBufferManager` — a generic byte-budget primitive —
-used here to enforce a global memory budget on in-flight write data. The struct
-is purposefully named generically because it can be reused for other capacity
-tracking (see Phase 2), but in this context it is stored as the
-`write_buffer_manager` field and exposed via
-`DbBuilder::with_write_buffer_manager()` because Phase 1 specifically tracks
-write buffer memory (write batches through memtable flush).
+This RFC introduces a `ByteBufferManager` — a byte-budget primitive — used to
+enforce a per-instance memory budget on in-flight write data. Each SlateDB
+instance creates its own `ByteBufferManager` internally; callers do not need to
+provide or configure one in Phase 1.
 
 Phase 1 tracks and bounds the memory consumed by write batches and memtables,
 complementing the existing `max_unflushed_bytes` backpressure with an explicit
-acquire/release mechanism tied to memtable flushes. Phase 2 outlines how the
-same primitive can be extended to SST table and WAL capacity tracking without
-requiring locks on the database state.
+acquire/release mechanism tied to memtable flushes. Phase 2 introduces
+`DbBuilder::with_write_buffer_manager()` so that multiple instances can share a
+budget, along with an instance registry for intelligent backpressure.
 
 ## Motivation
 
@@ -98,10 +95,9 @@ The `ByteBufferManager` addresses these opportunities by:
   drop.
 - Complement (not replace) the existing `max_unflushed_bytes` backpressure.
 - Avoid locking the database state for budget tracking.
-- Allow callers to share a budget across multiple DB instances or inject a
-  custom size via the builder API.
-- (Phase 2) Establish a pattern that can be reused for SST and WAL capacity
-  tracking.
+- (Phase 2) Allow callers to share a budget across multiple DB instances via
+  `DbBuilder::with_write_buffer_manager()` and establish a registry pattern
+  for intelligent backpressure.
 
 ## Non-Goals
 
@@ -110,8 +106,8 @@ The `ByteBufferManager` addresses these opportunities by:
 - Providing per-writer or per-key granularity on budget allocation.
 - Guaranteeing exact byte-level accounting (estimates are conservative
   approximations).
-- (Phase 2) Per instance tracking — this RFC only outlines
-  the direction.
+- (Phase 2) Per-instance tracking and intelligent backpressure policies — this
+  RFC only outlines the direction.
 
 ## Design
 
@@ -264,10 +260,11 @@ Writer                  DbInner                      Memtable
 ```
 
 1. **`WriteBatch`** gains a `write_buffer_permit: Option<Arc<ByteBufferPermit>>`
-   field. The `set_write_buffer()` method attaches a permit to the batch. `force_acquire` is used 
-   because they bytes technically have already been allocated. By getting the permit and dispatching to the writer
-   without blocking, we guarantee progress can be made. By applying backpressure after the write dispatch,
-   we enforce the soft buffer limit.
+   field. The `set_write_buffer()` method attaches a permit to the batch.
+   `force_acquire` is used because the bytes technically have already been
+   allocated. By getting the permit and dispatching to the writer without
+   blocking, we guarantee progress can be made. By applying backpressure after
+   the write dispatch, we enforce the soft buffer limit.
 
 2. **`DbInner::write_with_options`** calls `force_acquire(estimated_size)` to
    immediately account for the write's memory footprint, attaches the permit to
@@ -349,56 +346,27 @@ for observability.
 #### Public API and Builder
 
 - `ByteBufferManager` is re-exported from `lib.rs` as a public type.
-- `DbBuilder` exposes `with_write_buffer_manager()` for callers who want to
-  share a budget across multiple DB instances or inject a custom size.
-- If not provided, the builder creates a default manager with both `capacity`
-  and `high_watermark` set to `settings.max_unflushed_bytes`.
+- Each instance creates its own `ByteBufferManager` internally with both
+  `capacity` and `high_watermark` set to `settings.max_unflushed_bytes`.
+- In Phase 2, `DbBuilder` will expose `with_write_buffer_manager()` for
+  callers who want to share a budget across multiple DB instances.
 
-### Phase 2: Lock-Free SST and WAL Capacity Tracking
+### Phase 2: Instance Registry for Intelligent Backpressure (WIP)
 
-Phase 1 establishes the `ByteBudgetSemaphore` pattern: a lock-free, atomic
-byte-budget with async acquisition and RAII release. Phase 2 proposes reusing
-this pattern to track additional memory pools without locking the database state.
-
-**Opportunity:** The existing backpressure in `maybe_apply_backpressure` reads
-the database state under a `RwLock` to aggregate WAL buffer size and immutable
-memtable sizes. This works reliably, but the same lock is also held during
-memtable rotation and other state mutations. As we add more tracked resource
-pools, moving size accounting out of the lock would reduce contention on the
-write path.
-
-**Proposed direction:** Introduce additional `ByteBudgetSemaphore`-backed
-managers for:
-
-- **WAL buffer memory** — permits acquired when WAL entries are buffered,
-  released when the WAL segment is flushed to object storage.
-- **Immutable memtable memory** — permits acquired when a memtable is frozen
-  (rotated from mutable to immutable), released when the SST flush to L0
-  completes.
-
-This would allow `maybe_apply_backpressure` to check budget availability via
-atomic reads (`available()`) instead of locking the database state to sum sizes.
-The existing `max_unflushed_bytes` check could be replaced entirely by the
-combined budget of these managers, or retained as a secondary safety net.
-
-Detailed design of Phase 2 is deferred to a future RFC or an addendum to this
-one, once Phase 1 is validated in production.
-
-### Phase 3: Instance Registry for Intelligent Backpressure (WIP)
-
-Phase 1 and 2 enforce budget limits but apply backpressure blindly — when the
+Phase 1 enforces budget limits but applies backpressure blindly — when the
 budget is exhausted, all writers block regardless of which DB instance holds the
-majority of the allocation. Phase 3 proposes a registry pattern that enables
+majority of the allocation. Phase 2 proposes a registry pattern that enables
 smarter backpressure strategies by tracking which instances share the budget.
 
 **Problem:** When a single `ByteBufferManager` is shared across multiple DB
-instances (e.g. via `DbBuilder::with_write_buffer_manager()`), an instance
-that has consumed a disproportionate share of the budget causes all other
-instances to stall. There is no mechanism today to identify the heavy consumer
-or to direct backpressure at it specifically.
+instances via `DbBuilder::with_write_buffer_manager()`, an instance that has
+consumed a disproportionate share of the budget causes all other instances to
+stall. Without per-instance tracking there is no mechanism to identify the
+heavy consumer or to direct backpressure at it specifically.
 
-**Proposed direction:** Introduce an instance registry within the
-`ByteBufferManager`:
+**Proposed direction:** Introduce `DbBuilder::with_write_buffer_manager()` to
+allow sharing a `ByteBufferManager` across instances, and add an instance
+registry within the manager:
 
 - **Registration** — Each DB instance registers itself with the shared
   `ByteBufferManager` on startup and deregisters on shutdown. The registry
@@ -418,18 +386,22 @@ or to direct backpressure at it specifically.
   permits outstanding, time spent blocked) for debugging shared-budget
   contention.
 
-Detailed design of Phase 3 is deferred to a future RFC, once Phase 2's
-per-pool tracking is in place and multi-instance sharing patterns are better
+Detailed design of Phase 2 is deferred to a future RFC, once Phase 1 is
+validated in production and multi-instance sharing patterns are better
 understood from production usage.
 
 ## Pathological Cases
-Until a version of Phase 3 is in place, there will exist some form of the following pathological case: 
-1 to N instances obtain buffer permits so that the total allocated buffer is slightly under or equal to the high watermark.
-This will cause any write by any other instance to always trigger a small memtable to be flushed. Essentially making each instance 
-write to any of the instances that don't own a significant portion of the buffer permits a new memtable. In order to properly handle
-this kind of issue, the `ByteBufferManager` needs a way to know what allocations are being held and a mechanism to trigger their release.
-This is a task for Phase 3.
 
+When Phase 2 introduces shared budgets across instances, the following
+pathological case can arise: 1 to N instances obtain buffer permits so that the
+total allocated buffer is slightly under or equal to the high watermark. This
+will cause any write by any other instance to always trigger a small memtable to
+be flushed. Essentially making each instance write to any of the instances that
+don't own a significant portion of the buffer permits a new memtable. In order
+to properly handle this kind of issue, the `ByteBufferManager` needs a way to
+know what allocations are being held and a mechanism to trigger their release.
+Phase 2's instance registry and intelligent backpressure policies are designed
+to address this.
 
 ## Impact Analysis
 
@@ -505,8 +477,9 @@ apply.
 
 ### Observability
 
-- **Configuration changes:** New optional `with_write_buffer_manager()` on
-  `DbBuilder`. Default behavior is unchanged.
+- **Configuration changes:** Phase 1 has no new configuration — the budget is
+  derived from `max_unflushed_bytes`. Phase 2 adds optional
+  `with_write_buffer_manager()` on `DbBuilder`.
 - **New components:** `ByteBufferManager` (public), `ByteBufferPermit`
   (public), `ByteBudgetSemaphore` (internal).
 - **Metrics:** The existing `backpressure_count` metric now also fires when
@@ -519,8 +492,8 @@ apply.
 - **Existing data on object storage / on-disk formats:** No change. This is
   purely an in-memory tracking mechanism.
 - **Existing public APIs:** The `ByteBufferManager` is a new public type.
-  `DbBuilder` gains a new optional method. No existing APIs are changed or
-  removed.
+  No existing APIs are changed or removed. `DbBuilder` gains a new optional
+  method in Phase 2.
 - **Rolling upgrades:** Not applicable — this is a client-side, in-memory
   mechanism with no wire protocol or storage format changes.
 
@@ -554,18 +527,19 @@ apply.
 
 - Milestones / phases:
   - **Phase 1:** Land `ByteBufferManager`, `ByteBufferPermit`,
-    `ByteBudgetSemaphore`, and write-path integration. Default budget equals
-    `max_unflushed_bytes`.
-  - **Phase 2:** Extend the pattern to WAL buffer and immutable memtable
-    capacity tracking, potentially replacing the lock-based size aggregation
-    in `maybe_apply_backpressure`.
+    `ByteBudgetSemaphore`, and write-path integration. Each instance creates
+    its own manager with budget equal to `max_unflushed_bytes`.
+  - **Phase 2:** Add `DbBuilder::with_write_buffer_manager()` for shared
+    budgets, instance registry, per-instance accounting, and intelligent
+    backpressure policies.
 - Feature flags / opt-in:
-  - Phase 1 is always active with a default budget. Callers can customize via
-    `DbBuilder::with_write_buffer_manager()`.
+  - Phase 1 is always active with a per-instance default budget.
+  - Phase 2 is opt-in via `DbBuilder::with_write_buffer_manager()`.
 - Docs updates:
-  - `DbBuilder` API docs for `with_write_buffer_manager()`.
   - `ByteBufferManager` and `ByteBufferPermit` type-level documentation.
-  - Operational guidance on tuning the budget for multi-instance deployments.
+  - (Phase 2) `DbBuilder` API docs for `with_write_buffer_manager()`.
+  - (Phase 2) Operational guidance on tuning the budget for multi-instance
+    deployments.
 
 ## Alternatives
 
@@ -623,15 +597,15 @@ handles skewed workloads naturally.
   restrictive depending on the workload. Should the budget be a separate
   setting or a fraction of `max_unflushed_bytes`? Should the high watermark
   default to something less than capacity (e.g. 80%)?
-- For Phase 2, should the WAL and immutable memtable pools share a single
-  budget with the write buffer, or should they be independent budgets with
-  separate capacities?
+- For Phase 2, what backpressure policy should be the default when multiple
+  instances share a budget? Proportional fairness, priority-based, or
+  something simpler?
 
 ## References
 
-- [Issue #1669: Better Memory Management With A WriteBufferManager](https://github.com/slatedb/slatedb/issues/1669)
+- [Issue #1669: Better Memory Management With A ByteBufferManager](https://github.com/slatedb/slatedb/issues/1669)
 - [PR #1 (prototype): adding the primitive](https://github.com/zach-schoenberger/slatedb/pull/1)
-- RocksDB [`WriteBufferManager`](https://github.com/facebook/rocksdb/wiki/Write-Buffer-Manager)
+- RocksDB [`ByteBufferManager`](https://github.com/facebook/rocksdb/wiki/Write-Buffer-Manager)
   — prior art for global memtable memory budgeting in an LSM engine.
 
 ## Updates
