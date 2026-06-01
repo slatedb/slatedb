@@ -757,4 +757,4 @@ becomes the cleanest allocation-free path that keeps the Extensions protocol.
 - Upstream `BufWriter` extensions bug: [apache/arrow-rs-object-store#735](https://github.com/apache/arrow-rs-object-store/issues/735)
 - OpenDAL cache layer: [apache/opendal#6297](https://github.com/apache/opendal/pull/6297)
 - OpenDAL `FoyerService`: [apache/opendal#7160](https://github.com/apache/opendal/pull/7160)
-- [Draft PR for a prototype for the implemention](https://github.com/nomiero/slatedb/pull/4)
+- [Draft PR for a prototype for the implementation](https://github.com/nomiero/slatedb/pull/4)
