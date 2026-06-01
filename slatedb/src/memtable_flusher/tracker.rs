@@ -16,6 +16,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::debug;
+use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
@@ -29,6 +30,42 @@ use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+
+macro_rules! memtable_flush_stat_name {
+    ($suffix:expr) => {
+        concat!("slatedb.memtable_flush.", $suffix)
+    };
+}
+
+pub(crate) const MEMTABLE_FREEZE_COUNT: &str = memtable_flush_stat_name!("memtable_freeze_count");
+pub(crate) const CHECKPOINT_REQUEST_COUNT: &str =
+    memtable_flush_stat_name!("checkpoint_request_count");
+pub(crate) const FLUSH_REQUEST_COUNT: &str = memtable_flush_stat_name!("flush_request_count");
+pub(crate) const L0_UPLOAD_COUNT: &str = memtable_flush_stat_name!("l0_upload_count");
+pub(crate) const L0_FLUSH_COUNT: &str = memtable_flush_stat_name!("l0_flush_count");
+pub(crate) const MANIFEST_REFRESH_COUNT: &str = memtable_flush_stat_name!("manifest_refresh_count");
+
+pub(crate) struct FlushTrackerStats {
+    pub(crate) memtable_freeze_count: Arc<dyn CounterFn>,
+    pub(crate) checkpoint_request_count: Arc<dyn CounterFn>,
+    pub(crate) flush_request_count: Arc<dyn CounterFn>,
+    pub(crate) l0_upload_count: Arc<dyn CounterFn>,
+    pub(crate) l0_flush_count: Arc<dyn CounterFn>,
+    pub(crate) manifest_refresh_count: Arc<dyn CounterFn>,
+}
+
+impl FlushTrackerStats {
+    pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
+        Self {
+            memtable_freeze_count: recorder.counter(MEMTABLE_FREEZE_COUNT).register(),
+            checkpoint_request_count: recorder.counter(CHECKPOINT_REQUEST_COUNT).register(),
+            flush_request_count: recorder.counter(FLUSH_REQUEST_COUNT).register(),
+            l0_upload_count: recorder.counter(L0_UPLOAD_COUNT).register(),
+            l0_flush_count: recorder.counter(L0_FLUSH_COUNT).register(),
+            manifest_refresh_count: recorder.counter(MANIFEST_REFRESH_COUNT).register(),
+        }
+    }
+}
 
 /// Unified message type for the flush tracker's event loop.
 pub(crate) enum TrackerMessage {
@@ -84,6 +121,7 @@ pub(super) struct FlushTracker {
     uploader: Uploader,
     manifest_writer: ManifestWriter,
     frontier: TrackedImmFrontier,
+    stats: FlushTrackerStats,
 }
 
 impl FlushTracker {
@@ -92,11 +130,13 @@ impl FlushTracker {
         uploader: Uploader,
         manifest_writer: ManifestWriter,
     ) -> Self {
+        let stats = FlushTrackerStats::new(&inner.recorder);
         Self {
             inner,
             uploader,
             manifest_writer,
             frontier: TrackedImmFrontier::new(),
+            stats,
         }
     }
 }
@@ -105,8 +145,12 @@ impl FlushTracker {
 impl MessageHandler<TrackerMessage> for FlushTracker {
     async fn handle(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
         match message {
-            TrackerMessage::MemtableFrozen => self.reconcile_and_dispatch().await,
+            TrackerMessage::MemtableFrozen => {
+                self.stats.memtable_freeze_count.increment(1);
+                self.reconcile_and_dispatch().await
+            }
             TrackerMessage::FlushRequest { target, sender } => {
+                self.stats.flush_request_count.increment(1);
                 self.handle_flush_request(target, sender).await
             }
             TrackerMessage::CheckpointRequest {
@@ -114,15 +158,23 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 options,
                 sender,
             } => {
+                self.stats.checkpoint_request_count.increment(1);
                 self.handle_checkpoint_request(target, options, sender)
                     .await
             }
-            TrackerMessage::UploadComplete(uploaded) => self.handle_uploaded(uploaded).await,
+            TrackerMessage::UploadComplete(uploaded) => {
+                self.stats.l0_upload_count.increment(1);
+                self.handle_uploaded(uploaded).await
+            }
             TrackerMessage::FlushComplete { through_seq } => {
+                self.stats.l0_flush_count.increment(1);
                 self.frontier.retire_through(through_seq);
                 self.reconcile_and_dispatch().await
             }
-            TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
+            TrackerMessage::ManifestRefreshed => {
+                self.stats.manifest_refresh_count.increment(1);
+                self.reconcile_and_dispatch().await
+            }
             TrackerMessage::PollManifest { sender } => self.manifest_writer.send_poll(sender),
         }
     }
@@ -151,7 +203,10 @@ impl FlushTracker {
             "flush-memtable-to-l0",
             |_| { Ok(()) }
         );
-        self.reconcile_and_dispatch().await?;
+        if let Err(err) = self.reconcile_and_dispatch().await {
+            let _ = sender.send(Err(err.clone()));
+            return Err(err);
+        }
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer.send_flush(through_seq, sender)?;
         Ok(())
@@ -163,7 +218,10 @@ impl FlushTracker {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.reconcile_and_dispatch().await?;
+        if let Err(err) = self.reconcile_and_dispatch().await {
+            let _ = sender.send(Err(err.clone()));
+            return Err(err);
+        }
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer
             .send_checkpoint(through_seq, options, sender)?;
@@ -256,25 +314,20 @@ impl FlushTracker {
 
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         loop {
-            // Find the next pending imm whose touched segments all
-            // have room. Skip blocked imms rather than stalling — the
-            // manifest writer commits in seqno order regardless of
-            // upload dispatch order, so an unrelated later imm can
-            // make progress while an older one waits on its
-            // saturated segment.
+            // Strict seq order: skipping a blocked older imm
+            // deadlocks against the manifest writer's FIFO commit
+            // (#1687).
             let next_idx = self
                 .frontier
                 .tracked
                 .iter()
-                .enumerate()
-                .find(|(_, t)| {
-                    matches!(t.state, TrackedImmState::PendingDispatch)
-                        && self.can_dispatch(&t.imm_memtable)
-                })
-                .map(|(idx, _)| idx);
+                .position(|t| matches!(t.state, TrackedImmState::PendingDispatch));
             let Some(idx) = next_idx else {
                 return Ok(());
             };
+            if !self.can_dispatch(&self.frontier.tracked[idx].imm_memtable) {
+                return Ok(());
+            }
             self.frontier.tracked[idx].state = TrackedImmState::Uploading;
             let tracked = &self.frontier.tracked[idx];
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
@@ -461,6 +514,7 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
+    use crate::memtable_flusher::uploader::Uploader;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -622,12 +676,14 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.tree.l0.clear();
+        Arc::make_mut(&mut dirty.value.core.tree).l0.clear();
         for (first, last) in ranges {
-            dirty.value.core.tree.l0.push_back(SsTableView::new(
-                ulid::Ulid::new(),
-                seeded_l0_handle_with_bounds(first, Some(last)),
-            ));
+            Arc::make_mut(&mut dirty.value.core.tree)
+                .l0
+                .push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle_with_bounds(first, Some(last)),
+                ));
         }
         stored_manifest.update(dirty).await.unwrap();
     }
@@ -635,14 +691,11 @@ mod tests {
     fn set_local_l0_disjoint(harness: &TestHarness, ranges: &[(&[u8], &[u8])]) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.tree.l0.clear();
+            Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                .l0
+                .clear();
             for (first, last) in ranges {
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -659,12 +712,14 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.tree.l0.clear();
+        Arc::make_mut(&mut dirty.value.core.tree).l0.clear();
         for idx in 0..l0_len {
-            dirty.value.core.tree.l0.push_back(SsTableView::new(
-                ulid::Ulid::new(),
-                seeded_l0_handle(format!("seed-{idx}").as_bytes()),
-            ));
+            Arc::make_mut(&mut dirty.value.core.tree)
+                .l0
+                .push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle(format!("seed-{idx}").as_bytes()),
+                ));
         }
         stored_manifest.update(dirty).await.unwrap();
     }
@@ -682,12 +737,12 @@ mod tests {
             }
             modifier.state.manifest.value.core.segments = vec![Segment {
                 prefix: Bytes::copy_from_slice(prefix),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0,
                     compacted: vec![],
-                },
+                }),
             }];
         });
     }
@@ -695,14 +750,11 @@ mod tests {
     fn set_local_l0_len(harness: &TestHarness, l0_len: usize) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.tree.l0.clear();
+            Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                .l0
+                .clear();
             for idx in 0..l0_len {
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -716,11 +768,17 @@ mod tests {
         inner: Arc<DbInner>,
         flusher: MemtableFlusher,
         executor: crate::dispatcher::MessageHandlerExecutor,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     }
 
     impl StartedFlusher {
         async fn shutdown(&self) {
             MemtableFlusher::shutdown(&self.executor).await;
+        }
+
+        async fn shutdown_uploader_with_error(&self, err: SlateDBError) {
+            self.closed_result.write_result(Err(err));
+            Uploader::shutdown(&self.executor).await;
         }
     }
 
@@ -754,6 +812,7 @@ mod tests {
             inner,
             flusher,
             executor,
+            closed_result,
         }
     }
 
@@ -968,6 +1027,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flush_waiter_receives_error_when_reconcile_fails_before_manifest_writer() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_reconcile_flush_error",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
+        flusher
+            .shutdown_uploader_with_error(SlateDBError::Fenced)
+            .await;
+
+        let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap();
+        assert!(
+            matches!(flush_result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            flush_result
+        );
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_waiter_receives_error_when_reconcile_fails_before_manifest_writer() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_reconcile_checkpoint_error",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
+        flusher
+            .shutdown_uploader_with_error(SlateDBError::Fenced)
+            .await;
+
+        let checkpoint_result = timeout(
+            Duration::from_secs(5),
+            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(checkpoint_result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            checkpoint_result
+        );
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn should_wait_for_manifest_refresh_before_dispatching_when_l0_is_full() {
         let settings = Settings {
             l0_max_ssts: 1,
@@ -997,7 +1111,11 @@ mod tests {
             // Clear both local and remote L0 so the flusher can make progress.
             {
                 let mut guard = flusher.inner.state.write();
-                guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+                guard.modify(|modifier| {
+                    Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                        .l0
+                        .clear()
+                });
             }
             set_remote_l0_len(&path, object_store, 0).await;
 
@@ -1163,15 +1281,15 @@ mod tests {
                 modifier.state.manifest.value.core.segments = vec![
                     Segment {
                         prefix: Bytes::from_static(b"aaa"),
-                        tree: LsmTreeState::default(),
+                        tree: Arc::new(LsmTreeState::default()),
                     },
                     Segment {
                         prefix: Bytes::from_static(b"bbb"),
-                        tree: LsmTreeState::default(),
+                        tree: Arc::new(LsmTreeState::default()),
                     },
                     Segment {
                         prefix: Bytes::from_static(b"ccc"),
-                        tree: LsmTreeState::default(),
+                        tree: Arc::new(LsmTreeState::default()),
                     },
                 ];
             });
@@ -1223,7 +1341,11 @@ mod tests {
         // Drain L0 locally and remotely; flush should now progress.
         {
             let mut guard = flusher.inner.state.write();
-            guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+            guard.modify(|modifier| {
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .clear()
+            });
         }
         set_remote_l0_disjoint(&path, object_store, &[]).await;
 

@@ -166,6 +166,15 @@ pub(crate) enum SlateDBError {
     #[error("merge operator missing. A merge operator is required to read merge operands")]
     MergeOperatorMissing,
 
+    #[error(
+        "only one merge TTL per-key allowed in a batch. key={key:?}, previous=`{previous_expire_ts:?}`, current=`{current_expire_ts:?}`"
+    )]
+    IncompatibleMergeTtls {
+        key: Bytes,
+        previous_expire_ts: Option<i64>,
+        current_expire_ts: Option<i64>,
+    },
+
     #[error("checkpoint missing. checkpoint_id=`{0}`")]
     CheckpointMissing(Uuid),
 
@@ -204,6 +213,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid union: {0}")]
     InvalidUnion(String),
+
+    #[error("invalid clone projection for segment prefix {prefix:?}: {reason}")]
+    InvalidProjection { prefix: Bytes, reason: String },
 
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
@@ -287,6 +299,26 @@ impl SlateDBError {
             },
             other => other,
         }
+    }
+
+    /// Returns true if this error or any of its sources is an object-store NotFound.
+    pub(crate) fn has_object_store_not_found(&self) -> bool {
+        fn is_object_store_not_found(err: &(dyn std::error::Error + 'static)) -> bool {
+            err.downcast_ref::<object_store::Error>()
+                .is_some_and(|err| matches!(err, object_store::Error::NotFound { .. }))
+                || err
+                    .downcast_ref::<Arc<object_store::Error>>()
+                    .is_some_and(|err| matches!(err.as_ref(), object_store::Error::NotFound { .. }))
+        }
+
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(err) = current {
+            if is_object_store_not_found(err) {
+                return true;
+            }
+            current = err.source();
+        }
+        false
     }
 
     /// Returns true if this error means a sequenced write should refresh and retry.
@@ -571,6 +603,11 @@ impl From<SlateDBError> for Error {
             SlateDBError::SeekKeyOutOfRange { .. } => Error::invalid(msg),
             SlateDBError::SeekKeyLessThanLastReturnedKey => Error::invalid(msg),
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
+            SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
+            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
+            SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
+            SlateDBError::InvalidUnion(_) => Error::invalid(msg),
+            SlateDBError::InvalidProjection { .. } => Error::invalid(msg),
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
             SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
@@ -582,8 +619,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
+            SlateDBError::IncompatibleMergeTtls { .. } => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
-            SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
+            SlateDBError::InvalidSequenceOrder { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidSequenceNumber { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
@@ -632,10 +670,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
-            SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
-            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
-            SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
-            SlateDBError::InvalidUnion(_) => Error::invalid(msg),
         }
     }
 }
@@ -653,6 +687,16 @@ mod tests {
         let public_err = Error::from(err);
 
         assert_eq!(public_err.kind(), ErrorKind::Data);
+    }
+
+    #[test]
+    fn has_object_store_not_found_detects_wrapped_source() {
+        let err = SlateDBError::from(object_store::Error::NotFound {
+            path: "test/path".to_string(),
+            source: Box::new(std::io::Error::other("not found")),
+        });
+
+        assert!(err.has_object_store_not_found());
     }
 
     #[test]

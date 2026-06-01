@@ -5,7 +5,7 @@ use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_iter::{apply_filters, DbRecencyIterator};
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
-use crate::manifest::ManifestCore;
+use crate::manifest::{ManifestCore, Segment};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
@@ -14,7 +14,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
-use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
+use crate::{error::SlateDBError, DbIterator};
 
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -51,10 +51,6 @@ pub(crate) struct ScanContext<'a> {
     /// with a greater sequence number are filtered out by the iterator
     /// construction. Used by snapshots and transactions.
     pub(crate) max_seq: Option<u64>,
-    /// Optional tracker that records the scanned range for SSI conflict
-    /// detection. Populated only for transactions running at the
-    /// serializable-snapshot isolation level.
-    pub(crate) range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     /// Optional scan prefix forwarded to per-SST filter evaluation. When set,
     /// filters are probed with a prefix query so SSTs that do not contain the
     /// prefix can be skipped.
@@ -156,7 +152,14 @@ impl Reader {
             })
             .collect::<Vec<_>>();
 
-        let segments = db_state.core().select_segments(range);
+        let default_seg;
+        let segments: &[Segment] = match db_state.core().select_segments(range) {
+            Some(segments) => segments,
+            None => {
+                default_seg = db_state.core().default_segment();
+                std::slice::from_ref(&default_seg)
+            }
+        };
         let total_ssts: usize = segments.iter().map(|s| s.tree.total_ssts()).sum();
         let max_parallel = total_ssts.clamp(1, 4);
 
@@ -238,7 +241,6 @@ impl Reader {
             mem_iters,
             segment_iter,
             max_seq,
-            None,
             self.read_merge_operator.clone(),
             sst_iter_options.order,
         )
@@ -311,7 +313,6 @@ impl Reader {
             mem_iters,
             segment_iter,
             max_seq,
-            ctx.range_tracker,
             self.read_merge_operator.clone(),
             options.order,
         )
@@ -359,13 +360,16 @@ impl Reader {
         // Cross-segment recency is not well-defined: walking segment A's
         // oldest sorted run before touching segment B's freshest data
         // breaks the freshest-first contract callers expect.
-        // `select_segments` always returns at least one entry (the default
-        // unsegmented tree when no segments are configured).
-        let mut segments = db_state.core().select_segments(&range);
-        if segments.len() > 1 {
+        // `select_segments` returns `None` when unconfigured; `default_segment`
+        // provides the fallback unsegmented tree.
+        let segments = db_state.core().select_segments(&range);
+        if segments.is_some_and(|s| s.len() > 1) {
             return Err(SlateDBError::RecencyScanPrefixSpansMultipleSegments);
         }
-        let segment = segments.pop();
+        let segment = match segments {
+            Some(segments) => segments.first().cloned(),
+            None => Some(db_state.core().default_segment()),
+        };
 
         let mut all_iters: Vec<Box<dyn RowEntryIterator + 'static>> = Vec::new();
 
@@ -545,8 +549,7 @@ mod tests {
                 return Ok(());
             }
             let sst_handle = self.build_sst(entries).await?;
-            self.core
-                .tree
+            Arc::make_mut(&mut self.core.tree)
                 .l0
                 .push_front(SsTableView::identity(sst_handle));
             Ok(())
@@ -564,20 +567,15 @@ mod tests {
             let sst_handle = self.build_sst(entries).await?;
 
             // Find or create the sorted run
-            if let Some(sr) = self
-                .core
-                .tree
-                .compacted
-                .iter_mut()
-                .find(|sr| sr.id == sr_id)
-            {
+            let tree = Arc::make_mut(&mut self.core.tree);
+            if let Some(sr) = tree.compacted.iter_mut().find(|sr| sr.id == sr_id) {
                 sr.sst_views.push(SsTableView::identity(sst_handle));
             } else {
                 let new_sr = SortedRun {
                     id: sr_id,
                     sst_views: vec![SsTableView::identity(sst_handle)],
                 };
-                self.core.tree.compacted.push(new_sr);
+                tree.compacted.push(new_sr);
             }
             Ok(())
         }
@@ -1733,7 +1731,6 @@ mod tests {
                     db_state: &test_db_state,
                     write_batch_iter: wb_iter,
                     max_seq: test_case.max_seq,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
@@ -1863,7 +1860,6 @@ mod tests {
                     db_state: &test_db_state,
                     write_batch_iter: wb_iter,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
@@ -2036,7 +2032,6 @@ mod tests {
                     db_state: &test_db_state,
                     write_batch_iter: wb_iter,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: None,
                 },
             )

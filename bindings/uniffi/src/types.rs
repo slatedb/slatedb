@@ -362,6 +362,7 @@ pub enum CompactionStatus {
     Running,
     Completed,
     Failed,
+    Compacted,
 }
 
 impl From<CoreCompactionStatus> for CompactionStatus {
@@ -371,6 +372,7 @@ impl From<CoreCompactionStatus> for CompactionStatus {
             CoreCompactionStatus::Running => Self::Running,
             CoreCompactionStatus::Completed => Self::Completed,
             CoreCompactionStatus::Failed => Self::Failed,
+            CoreCompactionStatus::Compacted => Self::Compacted,
         }
     }
 }

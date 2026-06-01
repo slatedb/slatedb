@@ -25,6 +25,15 @@ use log::warn;
 use crate::utils::build_concurrent;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
+/// Specifies how `verify_size` should compare actual vs expected bytes.
+#[derive(Debug, Clone, Copy)]
+enum SizeCheck {
+    /// Actual must be ≤ expected (used while a stream is still producing chunks).
+    AtMost,
+    /// Actual must be exactly equal to expected (used after a stream is fully consumed).
+    Exact,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
@@ -178,12 +187,7 @@ impl CachedObjectStore {
     /// lazily from observed metadata locations, so this method may return `None`
     /// for early requests until successful GET/HEAD responses are observed.
     fn cache_location_for(&self, location: &Path) -> Option<Path> {
-        self.resolved_root.get().map(|root| {
-            if root.as_ref().is_empty() {
-                return location.clone();
-            }
-            root.parts().chain(location.parts()).collect()
-        })
+        cache_location_for(&self.resolved_root, location)
     }
 
     /// Lazily resolves the root prefix and validates the derived cache key.
@@ -358,10 +362,13 @@ impl CachedObjectStore {
         if self.admission_picker.pick(entry.as_ref()).admitted() {
             // Convert PutPayload to stream and save parts to cache.
             // Note: cached_head() already saved the head, so we only need to save parts
+            let payload_len = payload.content_length() as u64;
             let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
 
-            // Save parts only, ignoring errors (cache failures shouldn't fail the PUT operation)
-            self.save_parts_stream(entry, stream, 0).await.ok();
+            // Save parts only; on error, clean up any partially-written parts.
+            self.save_parts_stream_with_cleanup(entry.as_ref(), stream, 0, 0..payload_len)
+                .await
+                .ok();
         }
 
         Ok(result)
@@ -426,11 +433,9 @@ impl CachedObjectStore {
     /// aligned with the part size.
     async fn save_get_result(&self, result: GetResult) -> object_store::Result<u64> {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
-        assert!(result.range.start.is_multiple_of(part_size_bytes_u64));
-        assert!(
-            result.range.end.is_multiple_of(part_size_bytes_u64)
-                || result.range.end == result.meta.size
-        );
+        let range = result.range.clone();
+        assert!(range.start.is_multiple_of(part_size_bytes_u64));
+        assert!(range.end.is_multiple_of(part_size_bytes_u64) || range.end == result.meta.size);
 
         let entry = self
             .cache_storage
@@ -440,16 +445,49 @@ impl CachedObjectStore {
         if self.admission_picker.pick(entry.as_ref()).admitted() {
             entry.save_head((&result.meta, &result.attributes)).await?;
 
-            let start_part_number = usize::try_from(result.range.start / part_size_bytes_u64)
-                .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
+            let start_part_number = usize::try_from(range.start / part_size_bytes_u64)
+                .expect("Part number exceeds usize on this system. Try increasing part size.");
 
             let stream = result.into_stream();
 
-            self.save_parts_stream(entry, stream, start_part_number)
-                .await?;
+            self.save_parts_stream_with_cleanup(
+                entry.as_ref(),
+                stream,
+                start_part_number,
+                range.clone(),
+            )
+            .await?;
         }
 
         Ok(object_size)
+    }
+
+    /// Calls `save_parts_stream` and, on error, deletes any partially-written parts
+    /// before returning the error.
+    async fn save_parts_stream_with_cleanup<S>(
+        &self,
+        entry: &dyn LocalCacheEntry,
+        stream: S,
+        start_part_number: usize,
+        range: Range<u64>,
+    ) -> object_store::Result<usize>
+    where
+        S: stream::Stream<Item = Result<Bytes, object_store::Error>> + Unpin,
+    {
+        let result = self
+            .save_parts_stream(entry, stream, start_part_number, range.clone())
+            .await;
+
+        if result.is_err() {
+            let part_size_bytes_u64 = self.part_size_bytes as u64;
+            let end_part_number = usize::try_from(range.end.div_ceil(part_size_bytes_u64))
+                .unwrap_or(start_part_number);
+            for part_number in start_part_number..end_part_number {
+                let _ = entry.delete_part(part_number).await;
+            }
+        }
+
+        result
     }
 
     /// Save a stream of bytes to cache as parts, starting from the specified part number.
@@ -457,9 +495,10 @@ impl CachedObjectStore {
     /// This method only saves the data parts - the head should be saved separately.
     async fn save_parts_stream<S>(
         &self,
-        entry: Box<dyn LocalCacheEntry>,
+        entry: &dyn LocalCacheEntry,
         mut stream: S,
         start_part_number: usize,
+        range: Range<u64>,
     ) -> object_store::Result<usize>
     where
         S: stream::Stream<Item = Result<Bytes, object_store::Error>> + Unpin,
@@ -468,9 +507,14 @@ impl CachedObjectStore {
         let mut part_number = start_part_number;
         let mut total_bytes: usize = 0;
 
+        let range_len = (range.end - range.start) as usize;
+
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             total_bytes += chunk.len();
+
+            Self::verify_size(total_bytes, range_len, SizeCheck::AtMost)?;
+
             buffer.extend_from_slice(&chunk);
 
             while buffer.len() >= self.part_size_bytes {
@@ -479,6 +523,9 @@ impl CachedObjectStore {
                 part_number += 1;
             }
         }
+
+        // No point in saving an invalid file so return early.
+        Self::verify_size(total_bytes, range_len, SizeCheck::Exact)?;
 
         // Save any remaining bytes as the last part
         if !buffer.is_empty() {
@@ -581,19 +628,18 @@ impl CachedObjectStore {
                         None
                     };
 
-                    // Save the head and the part to cache for future accesses. Just read the bytes
-                    // if we still can't derive a canonical cache key.
-                    let bytes = if let Some(entry) = cache_entry {
-                        // Save the head and the part to cache for future accesses.
-                        let meta = get_result.meta.clone();
-                        let attrs = get_result.attributes.clone();
-                        let bytes = get_result.bytes().await?;
+                    // Read bytes and validate the range before caching.
+                    let meta = get_result.meta.clone();
+                    let attrs = get_result.attributes.clone();
+                    let bytes = get_result.bytes().await?;
+                    Self::verify_size(bytes.len(), range_in_part.len(), SizeCheck::Exact)?;
+
+                    // Save the head and the part to cache for future accesses.
+                    // Skip if we can't derive a canonical cache key.
+                    if let Some(entry) = cache_entry {
                         entry.save_head((&meta, &attrs)).await.ok();
                         entry.save_part(part_id, bytes.clone()).await.ok();
-                        bytes
-                    } else {
-                        get_result.bytes().await?
-                    };
+                    }
 
                     Ok::<_, object_store::Error>(bytes)
                 })
@@ -672,6 +718,29 @@ impl CachedObjectStore {
         }
     }
 
+    fn verify_size(
+        total_bytes: usize,
+        range_len: usize,
+        check: SizeCheck,
+    ) -> object_store::Result<()> {
+        let failed = match check {
+            SizeCheck::AtMost => total_bytes > range_len,
+            SizeCheck::Exact => total_bytes != range_len,
+        };
+        if failed {
+            let msg = format!(
+                "Size check ({:?}) failed: {} bytes read, but range is {} bytes",
+                check, total_bytes, range_len
+            );
+            warn!("{}", msg);
+            return Err(object_store::Error::Generic {
+                store: "cached_object_store",
+                source: msg.into(),
+            });
+        }
+        Ok(())
+    }
+
     fn align_range(&self, range: &Range<u64>, alignment: usize) -> Range<u64> {
         let alignment = alignment as u64;
         let start_aligned = range.start - range.start % alignment;
@@ -690,6 +759,15 @@ fn head_only_get_result(meta: ObjectMeta, attributes: Attributes) -> GetResult {
         meta,
         attributes,
     }
+}
+
+fn cache_location_for(resolved_root: &Arc<OnceCell<Path>>, location: &Path) -> Option<Path> {
+    resolved_root.get().map(|root| {
+        if root.as_ref().is_empty() {
+            return location.clone();
+        }
+        root.parts().chain(location.parts()).collect()
+    })
 }
 
 impl std::fmt::Display for CachedObjectStore {
@@ -732,12 +810,43 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.put_multipart_opts(location, opts).await
     }
 
+    /// Deletion of the cache entries associated with the object being
+    /// deleted is not atomic with respect to the object deletion from
+    /// the underlying object store. So for some period of time after
+    /// the deletion, cached object parts are still visible in the cache.
+    /// But assuming each object ever created by SlateDB is immutable and
+    /// has a unique name, this is not a problem.
+    ///
+    /// If eviction is enabled, deletion of the associated cache entries
+    /// happens asynchronously; when the control returns to the caller,
+    /// the entries still might be present in the cache. If eviction is
+    /// off, the deletion happens synchronously; when the control returns
+    /// to the caller, it is guaranteed no entries present in the cache
+    /// (assuming no errors happened during the deletion).
     fn delete_stream(
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        // TODO: handle cache eviction
-        self.object_store.delete_stream(locations)
+        let resolved_root = self.resolved_root.clone();
+        let cache_storage = self.cache_storage.clone();
+        let part_size_bytes = self.part_size_bytes;
+
+        self.object_store
+            .delete_stream(locations)
+            .then(move |result| {
+                let resolved_root = resolved_root.clone();
+                let cache_storage = cache_storage.clone();
+                async move {
+                    if let Ok(ref location) = result {
+                        if let Some(cache_location) = cache_location_for(&resolved_root, location) {
+                            let entry = cache_storage.entry(&cache_location, part_size_bytes);
+                            entry.delete().await;
+                        }
+                    }
+                    result
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -806,9 +915,14 @@ impl From<GetRange> for GetRangeKey {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::Bytes;
-    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
+    use futures::StreamExt;
+    use object_store::{
+        path::Path, GetOptions, GetRange, GetResult, GetResultPayload, ObjectStore, ObjectStoreExt,
+        PutPayload,
+    };
     use rand::Rng;
 
     use super::CachedObjectStore;
@@ -1981,5 +2095,436 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap().bytes().await.unwrap();
         assert_eq!(&bytes[..], &payload[..512]);
+    }
+
+    #[rstest::rstest]
+    #[case::no_evictor_cached(false, true)]
+    #[case::with_evictor_cached(true, true)]
+    #[case::no_evictor_uncached(false, false)]
+    #[case::with_evictor_uncached(true, false)]
+    #[tokio::test]
+    async fn test_delete(#[case] evictor: bool, #[case] cached: bool) {
+        const PART_SIZE: usize = 1024;
+
+        let location1 = Path::from("/data/testfile1");
+        let location2 = Path::from("/data/testfile2");
+
+        let test_cache_folder = new_test_cache_folder();
+        let payload = gen_rand_bytes(PART_SIZE * 3);
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+
+        object_store
+            .put(&location1, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+        object_store
+            .put(&location2, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder.clone(),
+            evictor.then_some(1024 * 1024),
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+
+        let cached_store = CachedObjectStore::new(
+            object_store,
+            Arc::clone(&cache_storage) as Arc<dyn LocalCacheStorage>,
+            PART_SIZE,
+            false,
+            stats,
+        )
+        .unwrap();
+        cached_store.start_evictor().await;
+
+        if cached {
+            cached_store
+                .get(&location1)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+        }
+        cached_store
+            .get(&location2)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        let cache_location1 = cached_store.cache_location_for(&location1).unwrap();
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        if cached {
+            assert_eq!(parts1.len(), 3, "{parts1:?}");
+            assert_eq!(cache_storage.file_handle_cache_population(), 6);
+        } else {
+            assert_eq!(parts1.len(), 0, "{parts1:?}");
+            assert_eq!(cache_storage.file_handle_cache_population(), 3);
+        }
+
+        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
+        let entry2 = cached_store
+            .cache_storage
+            .entry(&cache_location2, PART_SIZE);
+        let parts2 = entry2.cached_parts().await.unwrap();
+        assert_eq!(parts2.len(), 3, "{parts2:?}");
+
+        cached_store.delete(&location1).await.unwrap();
+        if evictor {
+            // XXX: If evictor is running, deletion is performed asynchronously
+            //      from the evictor "thread".
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
+
+        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
+        let entry2 = cached_store
+            .cache_storage
+            .entry(&cache_location2, PART_SIZE);
+        let parts2 = entry2.cached_parts().await.unwrap();
+        assert_eq!(parts2.len(), 3, "{parts2:?}");
+
+        // verify repeated delete is idempotent
+        cached_store.delete(&location1).await.unwrap();
+        let entry1 = cached_store
+            .cache_storage
+            .entry(&cache_location1, PART_SIZE);
+        let parts1 = entry1.cached_parts().await.unwrap();
+        assert_eq!(parts1.len(), 0, "{parts1:?}");
+        assert_eq!(cache_storage.file_handle_cache_population(), 3);
+    }
+
+    // --- Range bounds validation tests ---
+
+    #[tokio::test]
+    async fn test_save_parts_stream_exceeds_range() {
+        // Create a stream that produces more bytes than the range allows.
+        let part_size = 1024;
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        let location = Path::from("/data/range_exceed_test");
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+
+        // Range says 100 bytes, but stream produces 200 bytes.
+        let range = 0u64..100u64;
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from(vec![0u8; 80])),
+            Ok(Bytes::from(vec![0u8; 120])), // total 200 > 100
+        ]);
+
+        let result = cached_store
+            .save_parts_stream(entry.as_ref(), stream, 0, range)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Size check (AtMost) failed"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Verify nothing was persisted to cache (no bad file written).
+        let cached_parts = entry.cached_parts().await.unwrap();
+        assert_eq!(cached_parts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_save_parts_stream_under_range() {
+        // Create a stream that produces fewer bytes than the range requires.
+        let part_size = 1024;
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        let location = Path::from("/data/range_under_test");
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+
+        // Range says 200 bytes, but stream produces only 100 bytes.
+        let range = 0u64..200u64;
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from(vec![0u8; 50])),
+            Ok(Bytes::from(vec![0u8; 50])), // total 100 < 200
+        ]);
+
+        let result = cached_store
+            .save_parts_stream(entry.as_ref(), stream, 0, range)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Size check (Exact) failed"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Verify nothing was persisted to cache (no bad file written).
+        let cached_parts = entry.cached_parts().await.unwrap();
+        assert_eq!(cached_parts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_save_parts_stream_exact_range() {
+        // Stream produces exactly the right number of bytes - should succeed.
+        let part_size = 1024;
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        let location = Path::from("/data/range_exact_test");
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+
+        // Range says 150 bytes, stream produces exactly 150 bytes.
+        let range = 10u64..160u64;
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from(vec![1u8; 75])),
+            Ok(Bytes::from(vec![2u8; 75])), // total 150 == 150
+        ]);
+
+        let result = cached_store
+            .save_parts_stream(entry.as_ref(), stream, 0, range)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 150);
+    }
+
+    /// An ObjectStore wrapper that truncates the bytes returned by `get_opts`
+    /// to simulate a corrupted or short response.
+    #[derive(Debug)]
+    struct TruncatingObjectStore {
+        inner: Arc<dyn ObjectStore>,
+        /// Maximum number of bytes to return from get_opts, regardless of the
+        /// requested range.
+        max_bytes: usize,
+    }
+
+    impl TruncatingObjectStore {
+        fn new(inner: Arc<dyn ObjectStore>, max_bytes: usize) -> Self {
+            Self { inner, max_bytes }
+        }
+    }
+
+    impl std::fmt::Display for TruncatingObjectStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TruncatingObjectStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for TruncatingObjectStore {
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let result = self.inner.get_opts(location, options).await?;
+            let meta = result.meta.clone();
+            let attrs = result.attributes.clone();
+            let range = result.range.clone();
+            let bytes = result.bytes().await?;
+
+            // Truncate the bytes.
+            let truncated = bytes.slice(..self.max_bytes.min(bytes.len()));
+
+            Ok(GetResult {
+                payload: GetResultPayload::Stream(
+                    futures::stream::once(async move { Ok(truncated) }).boxed(),
+                ),
+                meta,
+                attributes: attrs,
+                range,
+            })
+        }
+
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_offset(
+            &self,
+            prefix: Option<&Path>,
+            offset: &Path,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list_with_offset(prefix, offset)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_part_bytes_too_short_for_range() {
+        // Simulate an object store returning fewer bytes than requested,
+        // which should trigger the range validation error in read_part.
+        let part_size = 1024;
+        let inner_store = Arc::new(object_store::memory::InMemory::new());
+
+        // Write a file large enough for at least one full part.
+        let location = Path::from("data/truncated_test");
+        let payload = gen_rand_bytes(part_size * 2);
+        inner_store
+            .put(&location, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+
+        // Wrap with a truncating store that only returns 500 bytes max.
+        let truncating_store: Arc<dyn ObjectStore> =
+            Arc::new(TruncatingObjectStore::new(inner_store, 500));
+
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let cached_store = CachedObjectStore::new(
+            truncating_store,
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        // Request a full part (range 0..1024) but the store only returns 500 bytes.
+        // read_part requests range_in_part = 0..1024, so bytes.len() (500) < range_in_part.len() (1024).
+        let result = cached_store.read_part(&location, 0, 0..part_size).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Size check (Exact) failed"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Verify that the truncated data was NOT written to cache.
+        let entry = cached_store.cache_storage.entry(&location, part_size);
+        let cached_parts = entry.cached_parts().await.unwrap();
+        assert_eq!(cached_parts.len(), 0);
     }
 }

@@ -1,9 +1,10 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use bytes::Bytes;
-use log::{error, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -224,20 +225,26 @@ impl Display for CompactionSpec {
 ///
 /// State transitions:
 /// ```text
-/// Submitted <-> Running --> Completed
-///     |             |
-///     |             v
-///     +----------> Failed
+/// Submitted <-> Running --> Compacted --> Completed
+///     |             |           |
+///     |             v           |
+///     +----------> Failed <-----+
 /// ```
 ///
-/// `Completed` and `Failed` are terminal states.
+/// `Completed` and `Failed` are terminal states. `Compacted` is the
+/// distributed-compaction intermediate state where the worker has written its
+/// final output SSTs but the coordinator has not yet committed the result to
+/// the manifest. See RFC-0025.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CompactionStatus {
     /// The compaction has been submitted but not yet started.
     Submitted,
     /// The compaction is currently running.
     Running,
-    /// The compaction finished successfully.
+    /// The worker finished execution and wrote its output SSTs; the
+    /// coordinator has not yet committed the result to the manifest.
+    Compacted,
+    /// The compaction finished successfully and was committed to the manifest.
     Completed,
     /// The compaction failed. It might or might not have started before failure.
     Failed,
@@ -247,12 +254,37 @@ impl CompactionStatus {
     fn active(self) -> bool {
         matches!(
             self,
-            CompactionStatus::Submitted | CompactionStatus::Running
+            CompactionStatus::Submitted | CompactionStatus::Running | CompactionStatus::Compacted
         )
     }
 
     fn finished(self) -> bool {
         matches!(self, CompactionStatus::Completed | CompactionStatus::Failed)
+    }
+}
+
+/// Identity and liveness for the worker currently executing a compaction.
+///
+/// Persisted in `.compactions` alongside the `Compaction` once a worker claims
+/// it. A null `WorkerSpec` on a `Submitted` compaction means the job is
+/// unclaimed and available to be picked up by the next polling worker.
+///
+/// See RFC-0025 for the claim and heartbeat protocols.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkerSpec {
+    /// The id of the worker that owns this compaction.
+    pub worker_id: String,
+    /// Wall-clock ms of the last progress write performed by the owning worker.
+    /// Used by the coordinator to reclaim jobs whose owners have gone silent.
+    pub last_heartbeat_ms: u64,
+}
+
+impl WorkerSpec {
+    pub fn new(worker_id: String, last_heartbeat_ms: u64) -> Self {
+        Self {
+            worker_id,
+            last_heartbeat_ms,
+        }
     }
 }
 
@@ -274,6 +306,9 @@ pub struct Compaction {
     status: CompactionStatus,
     /// Output SSTs produced by this compaction, if any.
     output_ssts: Vec<SsTableHandle>,
+    /// The worker that has claimed this compaction. `None` means the
+    /// compaction is unclaimed (only valid when `status == Submitted`).
+    worker: Option<WorkerSpec>,
 }
 
 impl Compaction {
@@ -284,6 +319,7 @@ impl Compaction {
             bytes_processed: 0,
             status: CompactionStatus::Submitted,
             output_ssts: Vec::new(),
+            worker: None,
         }
     }
 
@@ -294,6 +330,11 @@ impl Compaction {
 
     pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
         self.output_ssts = output_ssts;
+        self
+    }
+
+    pub(crate) fn with_worker(mut self, worker: Option<WorkerSpec>) -> Self {
+        self.worker = worker;
         self
     }
 
@@ -381,6 +422,11 @@ impl Compaction {
     /// Sets the current status of this compaction.
     pub(crate) fn set_status(&mut self, status: CompactionStatus) {
         self.status = status;
+    }
+
+    /// Returns the worker that has claimed this compaction, if any.
+    pub fn worker(&self) -> Option<&WorkerSpec> {
+        self.worker.as_ref()
     }
 
     /// Returns true if the compaction is active (submitted or running).
@@ -657,19 +703,32 @@ impl CompactorState {
             merged.insert(compaction.id(), compaction.clone());
         }
 
+        // For compactions not in local state (Vacant), only accept `Submitted` since
+        // execution hasn't started so it's safe to adopt. For known compactions (Occupied),
+        // only accept `Compacted`, the worker's signal that execution finished and the
+        // coordinator should commit the manifest.
         for compaction in remote_compactions.value.iter() {
-            if let Entry::Vacant(v) = merged.entry(compaction.id()) {
-                // The compactor should control all compaction state transitions. If the
-                // compactor finds a new remote compaction (a compaction that the compactor
-                // didn't create), it must be in `Submitted` status (the beginning status).
-                if !matches!(compaction.status(), CompactionStatus::Submitted) {
-                    error!(
-                        "skipping remote commpaction with unexpected (non-Submitted) status [compaction={:?}]",
-                        compaction,
-                    );
-                    continue;
+            match merged.entry(compaction.id()) {
+                Entry::Vacant(v) => {
+                    if !matches!(compaction.status(), CompactionStatus::Submitted) {
+                        error!(
+                            "skipping remote compaction with unexpected (non-Submitted) status [compaction={:?}]",
+                            compaction,
+                        );
+                        continue;
+                    }
+                    v.insert(compaction.clone());
                 }
-                v.insert(compaction.clone());
+                Entry::Occupied(mut o) => {
+                    if matches!(compaction.status(), CompactionStatus::Compacted) {
+                        o.insert(compaction.clone());
+                    } else {
+                        debug!(
+                            "ignoring remote compaction update with non-Compacted status [compaction={:?}]",
+                            compaction,
+                        );
+                    }
+                }
             }
         }
 
@@ -696,7 +755,7 @@ impl CompactorState {
         // Segment configuration is stable; the writer is the source of truth.
         let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
-            tree,
+            tree: Arc::new(tree),
             segments,
             segment_extractor_name: remote_manifest.value.core.segment_extractor_name.clone(),
             next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
@@ -1111,6 +1170,32 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_remote_compactions_accepts_compacted_from_worker() {
+        let manifest = new_dirty_manifest();
+        let compactor_epoch = manifest.value.compactor_epoch;
+        let id = Ulid::from_parts(1, 0);
+
+        let mut local_compactions = new_dirty_compactions(compactor_epoch);
+        local_compactions
+            .value
+            .insert(compaction_with_status(id, CompactionStatus::Running));
+        let mut state = CompactorState::new(manifest, local_compactions);
+
+        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
+        remote_compactions
+            .value
+            .insert(compaction_with_status(id, CompactionStatus::Compacted));
+
+        state.merge_remote_compactions(remote_compactions);
+
+        let merged = &state.compactions.value;
+        assert_eq!(
+            merged.get(&id).expect("not found").status(),
+            CompactionStatus::Compacted
+        );
+    }
+
+    #[test]
     fn test_merge_remote_compactions_drops_non_submitted_remote() {
         let manifest = new_dirty_manifest();
         let compactor_epoch = manifest.value.compactor_epoch;
@@ -1495,21 +1580,21 @@ mod tests {
         dirty.value.core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v_b.clone()]),
                     compacted: vec![],
-                },
+                }),
             },
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v_a.clone()]),
                     compacted: vec![],
-                },
+                }),
             },
         ];
 
@@ -1552,12 +1637,12 @@ mod tests {
         // V0: writer has X with l0=[v1]. Compactor matches.
         let writer_v0 = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![v1.clone()]),
                 compacted: vec![],
-            },
+            }),
         }];
 
         // V1: compactor's drain post-spec state. Watermark advanced to v1,
@@ -1565,12 +1650,12 @@ mod tests {
         // side merge with writer.V0 keeps the marker.
         let compactor_post_drain = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: Some(v1.id),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: vec![],
-            },
+            }),
         }];
         let v1_segments =
             crate::manifest::merge_segments_from_writer(&compactor_post_drain, &writer_v0);
@@ -1747,12 +1832,12 @@ mod tests {
         };
         let segment = Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: vec![sr5.clone(), sr3.clone()],
-            },
+            }),
         };
         state.manifest.value.core.segments = vec![segment];
         let root_compacted_before = state.db_state().tree.compacted.clone();
@@ -1800,7 +1885,7 @@ mod tests {
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -1808,7 +1893,7 @@ mod tests {
                     id: 7,
                     sst_views: Vec::new(),
                 }],
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -1845,14 +1930,14 @@ mod tests {
 
         // Seed real sources so the source-isolation check passes for both
         // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
-        state.manifest.value.core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
             id: 99,
             sst_views: Vec::new(),
         }];
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -1860,7 +1945,7 @@ mod tests {
                     id: 100,
                     sst_views: Vec::new(),
                 }],
-            },
+            }),
         }];
 
         let root_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -1888,7 +1973,7 @@ mod tests {
 
         // Seed SR(7) in the root tree so the source-isolation check passes
         // for the first submission; the spec rewrites that SR (destination=7).
-        state.manifest.value.core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
             id: 7,
             sst_views: Vec::new(),
         }];
@@ -1920,12 +2005,12 @@ mod tests {
         let l0_b = drain_test_view(2);
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_b.clone(), l0_a.clone()]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let first_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -1956,21 +2041,21 @@ mod tests {
         state.manifest.value.core.segments = vec![
             Segment {
                 prefix: prefix_a.clone(),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![l0_a.clone()]),
                     compacted: Vec::new(),
-                },
+                }),
             },
             Segment {
                 prefix: prefix_b.clone(),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![l0_b.clone()]),
                     compacted: Vec::new(),
-                },
+                }),
             },
         ];
 
@@ -1998,12 +2083,12 @@ mod tests {
         let l0 = drain_test_view(1);
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0.clone()]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -2053,12 +2138,12 @@ mod tests {
         let prefix = Bytes::from_static(b"hour=10/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_newer.clone(), l0_older.clone()]),
                 compacted: vec![sr.clone()],
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -2104,12 +2189,12 @@ mod tests {
         let prefix = Bytes::from_static(b"hour=10/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_late.clone(), l0_observed.clone()]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());

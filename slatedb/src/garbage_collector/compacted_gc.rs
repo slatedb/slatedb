@@ -218,7 +218,17 @@ impl GcTask for CompactedGcTask {
             .filter(|id| !active_ssts.contains(id))
             .collect::<Vec<_>>();
 
+        if self.compacted_options.dry_run && !sst_ids_to_delete.is_empty() {
+            log::info!(
+                "dry run: skipping SST deletion [count={}]",
+                sst_ids_to_delete.len()
+            );
+        }
         for id in sst_ids_to_delete {
+            if self.compacted_options.dry_run {
+                log::debug!("dry run: would delete SST but skipped [id={:?}]", id);
+                continue;
+            }
             log::info!("deleting SST [id={:?}]", id);
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting SST [id={:?}, error={}]", id, e);
@@ -318,10 +328,7 @@ mod tests {
         // Mark one SST as active in the manifest so that most_recent_sst_dt
         // is newer than the configured minimum-age cutoff.
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty
-            .value
-            .core
-            .tree
+        Arc::make_mut(&mut dirty.value.core.tree)
             .l0
             .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
@@ -333,6 +340,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(5),
+            dry_run: false,
         };
         let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
@@ -424,10 +432,7 @@ mod tests {
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty
-            .value
-            .core
-            .tree
+        Arc::make_mut(&mut dirty.value.core.tree)
             .l0
             .push_back(SsTableView::identity(manifest_handle));
         stored_manifest.update(dirty).await.unwrap();
@@ -440,6 +445,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(0),
+            dry_run: false,
         };
         let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
@@ -518,10 +524,7 @@ mod tests {
         // most_recent_sst_dt boundary is 3_000ms and the compaction
         // low watermark (2_000ms) becomes the effective cutoff (see below).
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty
-            .value
-            .core
-            .tree
+        Arc::make_mut(&mut dirty.value.core.tree)
             .l0
             .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
@@ -542,6 +545,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(0),
+            dry_run: false,
         };
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let stats = Arc::new(GcStats::new(&recorder));
@@ -612,10 +616,7 @@ mod tests {
             .await
             .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
-        dirty_manifest
-            .value
-            .core
-            .tree
+        Arc::make_mut(&mut dirty_manifest.value.core.tree)
             .l0
             .push_back(SsTableView::identity(l0_handle));
         stored_manifest.update(dirty_manifest).await.unwrap();
@@ -637,6 +638,7 @@ mod tests {
         let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(2),
+            dry_run: false,
         };
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let stats = Arc::new(GcStats::new(&recorder));
@@ -680,7 +682,7 @@ mod tests {
 
     fn manifest_with(unsegmented: LsmTreeState, segments: Vec<Segment>) -> Manifest {
         let mut core = ManifestCore::new();
-        core.tree = unsegmented;
+        core.tree = Arc::new(unsegmented);
         core.segments = segments;
         if !core.segments.is_empty() {
             core.segment_extractor_name = Some("test".into());
@@ -703,7 +705,7 @@ mod tests {
             },
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![segment_l0.clone()]),
@@ -711,7 +713,7 @@ mod tests {
                         id: 0,
                         sst_views: vec![segment_sr.clone()],
                     }],
-                },
+                }),
             }],
         );
 
@@ -736,12 +738,12 @@ mod tests {
             },
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![view_at(5_000)]),
                     compacted: vec![],
-                },
+                }),
             }],
         );
 
@@ -758,12 +760,12 @@ mod tests {
             LsmTreeState::default(),
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: Some(ulid_at(7_000)),
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
                     compacted: vec![],
-                },
+                }),
             }],
         );
 
@@ -785,12 +787,12 @@ mod tests {
             },
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![view_at(9_000)]),
                     compacted: vec![],
-                },
+                }),
             }],
         );
 

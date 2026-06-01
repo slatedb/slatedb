@@ -29,6 +29,13 @@ pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
 pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_false_positive_count");
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
 pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_count");
+/// Size of key value pairs inserted into the memtable after batch merge operators and overwrites
+/// are collapsed.
+/// Use as denominator to calculate write amplification:
+///   write_amp = (`WAL_FLUSH_BYTES` + `L0_FLUSH_BYTES` + `compactor::stats::BYTES_COMPACTED`)
+///               / `MEMTABLE_WRITE_BYTES`
+pub const MEMTABLE_WRITE_BYTES: &str = db_stat_name!("memtable_write_bytes");
+pub const WAL_FLUSH_BYTES: &str = db_stat_name!("wal_flush_bytes");
 
 /// Label key distinguishing filter metrics for point lookups from those for
 /// prefix scans. Value is one of [`FILTER_KIND_POINT`] or
@@ -60,6 +67,8 @@ pub(crate) struct DbStatsInner {
     pub(crate) l0_flush_bytes: Arc<dyn CounterFn>,
     pub(crate) merge_operator_read_operands: Arc<dyn CounterFn>,
     pub(crate) merge_operator_flush_operands: Arc<dyn CounterFn>,
+    pub(crate) memtable_write_bytes: Arc<dyn CounterFn>,
+    pub(crate) wal_flush_bytes: Arc<dyn CounterFn>,
 }
 
 #[derive(Clone)]
@@ -136,6 +145,8 @@ impl DbStats {
                 .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_FLUSH_PATH)])
                 .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
                 .register(),
+            memtable_write_bytes: recorder.counter(MEMTABLE_WRITE_BYTES).register(),
+            wal_flush_bytes: recorder.counter(WAL_FLUSH_BYTES).register(),
         };
         DbStats {
             inner: Arc::new(inner),

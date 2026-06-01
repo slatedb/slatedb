@@ -77,23 +77,39 @@ impl GcTask for ManifestGcTask {
         }
 
         // Delete manifests older than min_age
-        for manifest_metadata in manifest_metadata_list {
-            let is_active = active_manifest_ids.contains(&manifest_metadata.id);
-            if !is_active
-                && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+        let manifests_to_delete = manifest_metadata_list
+            .into_iter()
+            .filter(|manifest_metadata| {
+                let is_active = active_manifest_ids.contains(&manifest_metadata.id);
+                !is_active
+                    && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+            })
+            .collect::<Vec<_>>();
+        if self.manifest_options.dry_run && !manifests_to_delete.is_empty() {
+            log::info!(
+                "dry run: skipping manifest deletion [count={}]",
+                manifests_to_delete.len()
+            );
+        }
+        for manifest_metadata in manifests_to_delete {
+            if self.manifest_options.dry_run {
+                log::debug!(
+                    "dry run: would delete manifest but skipped [id={:?}]",
+                    manifest_metadata.id
+                );
+                continue;
+            }
+            if let Err(e) = self
+                .manifest_store
+                .delete_manifest(manifest_metadata.id)
+                .await
             {
-                if let Err(e) = self
-                    .manifest_store
-                    .delete_manifest(manifest_metadata.id)
-                    .await
-                {
-                    error!(
-                        "error deleting manifest [id={:?}, error={}]",
-                        manifest_metadata.id, e
-                    );
-                } else {
-                    self.stats.gc_manifest_count.increment(1);
-                }
+                error!(
+                    "error deleting manifest [id={:?}, error={}]",
+                    manifest_metadata.id, e
+                );
+            } else {
+                self.stats.gc_manifest_count.increment(1);
             }
         }
 
@@ -148,6 +164,7 @@ mod tests {
             GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(1),
                 interval: None,
+                dry_run: false,
             },
         );
         task.collect(Utc::now() + TimeDelta::hours(1))

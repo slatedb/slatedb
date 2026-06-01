@@ -118,6 +118,7 @@ use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::CachedObjectStore;
+use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
@@ -140,12 +141,13 @@ use crate::db_reader::DbReader;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::fence::{WriterFenceResult, WriterFencer};
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
-use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
@@ -541,13 +543,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             }),
         ));
 
-        // Get next WAL ID before writing manifest
-        let replay_after_wal_id = match &latest_manifest {
-            Some(latest_stored_manifest) => latest_stored_manifest.db_state().replay_after_wal_id,
-            None => 0,
-        };
-        let next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
-
         // Initialize the database
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
@@ -566,16 +561,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         };
 
-        let mut manifest = FenceableManifest::init_writer(
-            stored_manifest,
-            self.settings.manifest_update_timeout,
-            system_clock.clone(),
-        )
-        .await?;
+        let fencer = WriterFencer::new(table_store.clone(), &self.settings, system_clock.clone());
+        let WriterFenceResult {
+            manifest,
+            replay_range,
+        } = fencer.fence(stored_manifest).await?;
+
+        let manifest_dirty = manifest.prepare_dirty()?;
 
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
-        let manifest_dirty = manifest.prepare_dirty()?;
         let status_manager = DbStatusManager::new_with_manifest(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),
@@ -604,11 +599,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
             .await?,
         );
-
-        // Fence writers if WAL is enabled
-        if inner.wal_enabled {
-            inner.fence_writers(&mut manifest, next_wal_id).await?;
-        }
 
         // Setup background tasks
         let tokio_handle = Handle::current();
@@ -710,7 +700,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
-        inner.replay_wal().await?;
+        inner.replay_wal(replay_range).await?;
 
         // Preload cache if enabled
         if let Some(cached_obj_store) = cached_object_store {
@@ -1553,6 +1543,8 @@ pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Byt
     system_clock: Option<Arc<dyn SystemClock>>,
     rand: Option<Arc<DbRand>>,
     projection_range: Option<R>,
+    segment_filter: Option<SegmentFilterFn>,
+    segment_projection: Option<SegmentProjectionFn>,
 }
 
 impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
@@ -1569,6 +1561,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
             system_clock: None,
             rand: None,
             projection_range: None,
+            segment_filter: None,
+            segment_projection: None,
         }
     }
 
@@ -1597,6 +1591,43 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
         self
     }
 
+    /// Restrict the clone to segments for which `f` returns `true`. The
+    /// unsegmented LSM tree participates as a logical segment with the empty
+    /// prefix `b""`, so e.g. `|p| !p.is_empty()` keeps only named segments
+    /// and `|p| p.is_empty()` keeps only the unsegmented tree.
+    pub fn with_segment_filter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&[u8]) -> bool + Send + Sync + 'static,
+    {
+        self.segment_filter = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a per-segment projection range. `f` receives each segment's prefix
+    /// and returns the range to retain. The returned range's bounded ends must
+    /// fall within `[prefix, prefix++)`; `Unbounded` ends resolve to the
+    /// segment edges. The result is intersected with any global
+    /// `projection_range`. Empty returned ranges surface as
+    /// `SlateDBError::InvalidProjection`.
+    pub fn with_segment_projection<F, Range>(mut self, f: F) -> Self
+    where
+        F: Fn(&[u8]) -> Range + Send + Sync + 'static,
+        Range: RangeBounds<Bytes>,
+    {
+        self.segment_projection = Some(Arc::new(move |prefix| {
+            let r = f(prefix);
+            crate::bytes_range::BytesRange::try_new(
+                r.start_bound().cloned(),
+                r.end_bound().cloned(),
+            )
+            .ok_or_else(|| crate::error::SlateDBError::InvalidProjection {
+                prefix: Bytes::copy_from_slice(prefix),
+                reason: "empty range".into(),
+            })
+        }));
+        self
+    }
+
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = Some(system_clock);
         self
@@ -1618,6 +1649,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
                 .unwrap_or_else(|| Arc::new(DefaultSystemClock::new())),
             self.rand.unwrap_or_else(|| Arc::new(Default::default())),
             self.projection_range,
+            self.segment_filter,
+            self.segment_projection,
         )
         .await?;
         Ok(())

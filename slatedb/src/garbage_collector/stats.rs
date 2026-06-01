@@ -14,6 +14,7 @@ pub const GC_COUNT: &str = gc_stat_name!("count");
 pub struct GcStats {
     pub gc_manifest_count: Arc<dyn CounterFn>,
     pub gc_wal_count: Arc<dyn CounterFn>,
+    pub gc_wal_fence_count: Arc<dyn CounterFn>,
     pub gc_compacted_count: Arc<dyn CounterFn>,
     pub gc_compactions_count: Arc<dyn CounterFn>,
     pub gc_detach_count: Arc<dyn CounterFn>,
@@ -30,6 +31,10 @@ impl GcStats {
             gc_wal_count: recorder
                 .counter(DELETED_COUNT)
                 .labels(&[("resource", "wal")])
+                .register(),
+            gc_wal_fence_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "wal_fence")])
                 .register(),
             gc_compacted_count: recorder
                 .counter(DELETED_COUNT)

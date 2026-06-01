@@ -429,6 +429,8 @@ pub(crate) struct FlakyObjectStore {
     fail_first_put_opts: AtomicUsize,
     put_opts_attempts: AtomicUsize,
     put_opts_attempt_notify: Notify,
+    max_single_put_bytes: AtomicUsize,
+    put_multipart_attempts: AtomicUsize,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
     // Put options: if set, write succeeds but returns AlreadyExists error
@@ -461,6 +463,8 @@ impl FlakyObjectStore {
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
             put_opts_attempt_notify: Notify::new(),
+            max_single_put_bytes: AtomicUsize::new(0),
+            put_multipart_attempts: AtomicUsize::new(0),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
             put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
@@ -478,6 +482,12 @@ impl FlakyObjectStore {
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
         self.put_precondition_always.store(true, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn with_single_put_size_limit(self, max_single_put_bytes: usize) -> Self {
+        self.max_single_put_bytes
+            .store(max_single_put_bytes, Ordering::SeqCst);
         self
     }
 
@@ -514,6 +524,10 @@ impl FlakyObjectStore {
 
     pub(crate) fn put_attempts(&self) -> usize {
         self.put_opts_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn multipart_attempts(&self) -> usize {
+        self.put_multipart_attempts.load(Ordering::SeqCst)
     }
 
     pub(crate) async fn wait_for_put_attempts(&self, expected: usize) {
@@ -639,6 +653,17 @@ impl ObjectStore for FlakyObjectStore {
     ) -> object_store::Result<PutResult> {
         self.put_opts_attempts.fetch_add(1, Ordering::SeqCst);
         self.put_opts_attempt_notify.notify_waiters();
+        let max_single_put_bytes = self.max_single_put_bytes.load(Ordering::SeqCst);
+        if max_single_put_bytes > 0 && payload.content_length() > max_single_put_bytes {
+            return Err(object_store::Error::Generic {
+                store: "flaky_single_put_limit",
+                source: Box::new(std::io::Error::other(format!(
+                    "single PUT payload of {} bytes exceeds limit of {} bytes",
+                    payload.content_length(),
+                    max_single_put_bytes
+                ))),
+            });
+        }
         if self.put_precondition_always.load(Ordering::SeqCst) {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),
@@ -688,6 +713,7 @@ impl ObjectStore for FlakyObjectStore {
         location: &Path,
         opts: object_store::PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.put_multipart_attempts.fetch_add(1, Ordering::SeqCst);
         self.inner.put_multipart_opts(location, opts).await
     }
 

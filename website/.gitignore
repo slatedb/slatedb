@@ -23,3 +23,7 @@ pnpm-debug.log*
 # Generated RFC wrappers
 src/content/docs/rfcs/*.mdx
 src/content/docs/rfcs-pages/*.mdx
+
+# Generated markdown mirrors (emitted by scripts/generate-md-mirrors.js at build time)
+public/docs/
+public/rfcs/

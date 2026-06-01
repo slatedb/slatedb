@@ -3,21 +3,247 @@ title: Quick Start
 description: Get started with SlateDB in minutes
 ---
 
-SlateDB is implemented in Rust. The repository also ships official Go, Java, Node.js, and Python bindings, but this quick start covers the Rust API directly.
+import { Code, Tabs, TabItem } from '@astrojs/starlight/components';
+import fullExample from '/../examples/src/full_example.rs?raw'
+
+SlateDB is implemented in Rust and ships official bindings for Go, Java, Node.js, and Python. Pick your language below to install the library and run a minimal example backed by an in-memory object store.
 
 ## Installation
 
-Add the following dependencies to your project:
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```bash
+    cargo add slatedb tokio --features tokio/macros,tokio/rt-multi-thread
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```bash
+    go get slatedb.io/slatedb-go
+    ```
 
-```bash
-cargo add slatedb tokio --features tokio/macros,tokio/rt-multi-thread
-```
+    The Go binding uses cgo and links against the `slatedb_uniffi` shared library. You need Go 1.25+, `CGO_ENABLED=1`, a C toolchain, and the `slatedb_uniffi` library on your loader path.
+  </TabItem>
+  <TabItem label="Java">
+    Gradle:
+
+    ```gradle
+    dependencies {
+        implementation("io.slatedb:slatedb-uniffi:<version>")
+    }
+    ```
+
+    Maven:
+
+    ```xml
+    <dependency>
+      <groupId>io.slatedb</groupId>
+      <artifactId>slatedb-uniffi</artifactId>
+      <version>&lt;version&gt;</version>
+    </dependency>
+    ```
+
+    Requires Java 22 or newer.
+  </TabItem>
+  <TabItem label="Node.js">
+    ```bash
+    npm install @slatedb/uniffi
+    ```
+
+    Requires Node.js 20 or newer.
+  </TabItem>
+  <TabItem label="Python">
+    ```bash
+    pip install slatedb
+    ```
+
+    Requires Python 3.10 or newer.
+  </TabItem>
+</Tabs>
 
 ## Usage
 
-SlateDB uses [`tokio`](https://crates.io/crates/tokio) as its async runtime and [`object_store`](https://docs.rs/object_store/latest/object_store/) to interact with object storage. The code below shows a simple in-memory example.
+SlateDB reads and writes through an object store. Every binding exposes `ObjectStore.resolve(...)` (or `InMemory::new()` in Rust) which accepts any URL supported by Rust's [`object_store`](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) crate, including `memory:///`, `file:///...`, `s3://`, `gs://`, and `az://`. The examples below use `memory:///` so they run without any external setup.
 
-import { Code } from '@astrojs/starlight/components';
-import fullExample from '/../examples/src/full_example.rs?raw'
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    SlateDB uses [`tokio`](https://crates.io/crates/tokio) as its async runtime and [`object_store`](https://docs.rs/object_store/latest/object_store/) to interact with object storage.
 
-<Code code={fullExample} lang="rust" title="main.rs" />
+    <Code code={fullExample} lang="rust" title="main.rs" />
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    package main
+
+    import (
+        "bytes"
+        "fmt"
+
+        slatedb "slatedb.io/slatedb-go/uniffi"
+    )
+
+    func main() {
+        store, err := slatedb.ObjectStoreResolve("memory:///")
+        if err != nil {
+            panic(err)
+        }
+        defer store.Destroy()
+
+        builder := slatedb.NewDbBuilder("example-db", store)
+        defer builder.Destroy()
+
+        db, err := builder.Build()
+        if err != nil {
+            panic(err)
+        }
+        defer db.Destroy()
+
+        if _, err := db.Put([]byte("hello"), []byte("world")); err != nil {
+            panic(err)
+        }
+
+        value, err := db.Get([]byte("hello"))
+        if err != nil {
+            panic(err)
+        }
+        if value == nil || !bytes.Equal(*value, []byte("world")) {
+            panic("unexpected value")
+        }
+
+        fmt.Println(string(*value))
+
+        if err := db.Shutdown(); err != nil {
+            panic(err)
+        }
+    }
+    ```
+
+    Handle types own Rust-side resources: call `Shutdown()` on databases and readers, and `Destroy()` on handles when you are done with them.
+  </TabItem>
+  <TabItem label="Java">
+    Most database operations return `CompletableFuture`. Native-backed handles implement `AutoCloseable` and should be closed.
+
+    ```java
+    import io.slatedb.uniffi.Db;
+    import io.slatedb.uniffi.DbBuilder;
+    import io.slatedb.uniffi.ObjectStore;
+
+    import java.nio.charset.StandardCharsets;
+    import java.util.Arrays;
+    import java.util.concurrent.CompletableFuture;
+    import java.util.concurrent.TimeUnit;
+
+    public final class Main {
+        private static <T> T await(CompletableFuture<T> future) throws Exception {
+            return future.get(30, TimeUnit.SECONDS);
+        }
+
+        public static void main(String[] args) throws Exception {
+            byte[] key = "hello".getBytes(StandardCharsets.UTF_8);
+            byte[] value = "world".getBytes(StandardCharsets.UTF_8);
+
+            try (ObjectStore store = ObjectStore.resolve("memory:///");
+                    DbBuilder builder = new DbBuilder("demo-db", store)) {
+                Db db = await(builder.build());
+                try (db) {
+                    await(db.put(key, value));
+
+                    byte[] read = await(db.get(key));
+                    if (read == null || !Arrays.equals(read, value)) {
+                        throw new IllegalStateException("unexpected value");
+                    }
+
+                    System.out.println(new String(read, StandardCharsets.UTF_8));
+                    await(db.shutdown());
+                }
+            }
+        }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    Keys and values are binary; pass `Buffer` or `Uint8Array`. Most operations are async and should be awaited. Native-backed handles also expose `dispose()` for deterministic cleanup after `shutdown()` or when abandoning a builder.
+
+    ```js
+    import assert from "node:assert/strict";
+    import { DbBuilder, ObjectStore } from "@slatedb/uniffi";
+
+    async function main() {
+      const store = ObjectStore.resolve("memory:///");
+      let db;
+
+      try {
+        const builder = new DbBuilder("demo-db", store);
+        try {
+          db = await builder.build();
+        } finally {
+          builder.dispose();
+        }
+
+        const key = Buffer.from("hello");
+        const value = Buffer.from("world");
+
+        await db.put(key, value);
+
+        const read = await db.get(key);
+        assert.deepEqual(read, value);
+
+        console.log(Buffer.from(read).toString("utf8"));
+      } finally {
+        if (db != null) {
+          await db.shutdown();
+          db.dispose();
+        }
+        store.dispose();
+      }
+    }
+
+    main().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    Most database operations are `async` and should be used with `asyncio`. `WriteBatch` is mutated synchronously and then consumed by `db.write(...)`. Call `db.shutdown()` to close native resources.
+
+    ```python
+    import asyncio
+
+    from slatedb.uniffi import (
+        DbBuilder,
+        IsolationLevel,
+        ObjectStore,
+        WriteBatch,
+    )
+
+
+    async def main() -> None:
+        store = ObjectStore.resolve("memory:///")
+        builder = DbBuilder("demo-db", store)
+        db = await builder.build()
+
+        try:
+            await db.put(b"user:1", b"Alice")
+            value = await db.get(b"user:1")
+            assert value == b"Alice"
+
+            batch = WriteBatch()
+            batch.put(b"user:2", b"Bob")
+            batch.put(b"user:3", b"Carol")
+            await db.write(batch)
+
+            scan = await db.scan_prefix(b"user:")
+            while (row := await scan.next()) is not None:
+                print(row.key, row.value)
+
+            tx = await db.begin(IsolationLevel.SERIALIZABLE_SNAPSHOT)
+            await tx.put(b"user:4", b"Dora")
+            await tx.commit()
+        finally:
+            await db.shutdown()
+
+
+    asyncio.run(main())
+    ```
+  </TabItem>
+</Tabs>

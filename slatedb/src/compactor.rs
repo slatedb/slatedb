@@ -694,9 +694,84 @@ impl CompactorEventHandler {
     async fn handle_ticker(&mut self) -> Result<(), SlateDBError> {
         if !self.is_executor_stopped() {
             self.state_writer.refresh().await?;
+            self.commit_compacted_entries().await?;
             self.maybe_schedule_compactions().await?;
             self.maybe_start_compactions().await?;
         }
+        Ok(())
+    }
+
+    /// Commits any compactions in the `Compacted` state to the manifest.
+    ///
+    /// `Compacted` is the distributed intermediate state written by a worker after it
+    /// finishes execution. The coordinator is solely responsible for transitioning
+    /// `Compacted → Completed` (or `Compacted → Failed`) by writing the manifest first
+    /// and then updating `.compactions`. See RFC-0025 §Manifest Commit Protocol.
+    ///
+    /// Recovery: on coordinator restart, `Compacted` entries are left intact in
+    /// `.compactions`. The first call to this method after startup retries the manifest
+    /// write. `validate_compaction` will fail if the sources are already absent (meaning
+    /// the manifest was written before the crash), in which case the entry is marked
+    /// `Failed` even though the compaction may have actually succeeded. This is preferred
+    /// over trying to detect success after the fact because any heuristic (e.g. checking
+    /// whether the destination SR is present in the manifest) is fragile: the destination
+    /// SR id may coincide with a source SR id (e.g. `[L0:1, SR:1] -> SR:1`), so the
+    /// destination SR can exist both before and after the compaction runs and its presence
+    /// alone does not confirm the compaction's output was committed. Marking `Failed` is
+    /// safe in both crash scenarios:
+    /// - Crash before manifest write: sources are still present, so the scheduler
+    ///   re-compacts them on the next tick.
+    /// - Crash after manifest write: sources are already absent and the manifest is
+    ///   already in the correct post-compaction state, so marking `Failed` has no
+    ///   effect on correctness.
+    async fn commit_compacted_entries(&mut self) -> Result<(), SlateDBError> {
+        let compacted = self
+            .state()
+            .compactions_with_status(CompactionStatus::Compacted)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if compacted.is_empty() {
+            return Ok(());
+        }
+
+        for compaction in compacted {
+            let id = compaction.id();
+            match self.validate_compaction(compaction.spec()) {
+                Ok(()) => {
+                    let destination = compaction
+                        .spec()
+                        .destination()
+                        .expect("Compacted tiered compaction must have a destination SR id");
+                    let output_sr = SortedRun {
+                        id: destination,
+                        sst_views: compaction
+                            .output_ssts()
+                            .iter()
+                            .map(|sst| SsTableView::identity(sst.clone()))
+                            .collect(),
+                    };
+                    self.state_mut().finish_compaction(id, output_sr);
+                    self.stats
+                        .last_compaction_ts
+                        .set(self.system_clock.now().timestamp());
+                }
+                Err(_) => {
+                    // Validation failed against the current manifest. Mark Failed so the
+                    // entry isn't retried on the next tick.
+                    info!(
+                        "compacted entry failed validation, marking Failed [id={}]",
+                        id
+                    );
+                    self.state_mut()
+                        .update_compaction(&id, |c| c.set_status(CompactionStatus::Failed));
+                }
+            }
+        }
+
+        self.log_compaction_state();
+        self.state_writer.write_state_safely().await?;
+
         Ok(())
     }
 
@@ -1015,7 +1090,7 @@ impl CompactorEventHandler {
             if !compaction.spec().is_drain() {
                 let running_compaction_count = self.running_compaction_count();
                 if running_compaction_count >= self.options.max_concurrent_compactions {
-                    info!(
+                    debug!(
                         "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
                         running_compaction_count,
                         self.options.max_concurrent_compactions,
@@ -1521,11 +1596,11 @@ mod tests {
 
         // then:
         let db_state = db_state.expect("db was not compacted");
-        for run in db_state.tree.compacted {
-            for sst in run.sst_views {
+        for run in db_state.tree.compacted.iter() {
+            for sst in run.sst_views.iter() {
                 let mut iter = SstIterator::new_borrowed_initialized(
                     ..,
-                    &sst,
+                    sst,
                     table_store.clone(),
                     SstIteratorOptions::default(),
                 )
@@ -2020,7 +2095,7 @@ mod tests {
 
         let db_state = await_compacted_compaction(
             manifest_store.clone(),
-            db_state.tree.compacted,
+            db_state.tree.compacted.clone(),
             Some(system_clock.clone()),
         )
         .await
@@ -2120,7 +2195,7 @@ mod tests {
         // Trigger compaction of L0 (tombstone) + L1 (values)
         let db_state = await_compacted_compaction(
             manifest_store.clone(),
-            db_state.tree.compacted,
+            db_state.tree.compacted.clone(),
             Some(system_clock.clone()),
         )
         .await
@@ -3255,7 +3330,7 @@ mod tests {
 
         let (_, _, table_store) = build_test_stores(os.clone());
 
-        let value = &[b'a'; 64];
+        let value = &[b'a'; 32];
         let flush_opts = FlushOptions {
             flush_type: FlushType::MemTable,
         };
@@ -3563,11 +3638,11 @@ mod tests {
         let mut core = ManifestCore::new();
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"seg"),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 l0: VecDeque::from(vec![segment_l0.clone()]),
                 compacted: vec![segment_sr.clone()],
                 ..LsmTreeState::default()
-            },
+            }),
         }];
 
         let compaction = Compaction::new(
@@ -3836,8 +3911,9 @@ mod tests {
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
         ));
-        dirty.value.core.tree.l0 = VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
-        dirty.value.core.tree.compacted = vec![
+        Arc::make_mut(&mut dirty.value.core.tree).l0 =
+            VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
+        Arc::make_mut(&mut dirty.value.core.tree).compacted = vec![
             SortedRun {
                 id: 2,
                 sst_views: vec![SsTableView::identity(SsTableHandle::new(
@@ -3939,8 +4015,8 @@ mod tests {
             SST_FORMAT_VERSION_LATEST,
             l0_info,
         ));
-        core.tree.l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
-        core.tree.compacted = vec![
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
+        Arc::make_mut(&mut core.tree).compacted = vec![
             SortedRun {
                 id: 5,
                 sst_views: vec![SsTableView::identity(SsTableHandle::new(
@@ -3986,7 +4062,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
-        core.tree.l0 = VecDeque::from(vec![
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from(vec![
             SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(1, 0)),
                 SST_FORMAT_VERSION_LATEST,
@@ -4033,7 +4109,7 @@ mod tests {
         };
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"key"),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -4055,7 +4131,7 @@ mod tests {
                         ))],
                     },
                 ],
-            },
+            }),
         }];
         let state = CompactorStateView {
             compactions: None,
@@ -4093,7 +4169,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"r")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 9,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(90, 0)),
@@ -4129,7 +4205,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 4,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(40, 0)),
@@ -4167,7 +4243,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"x")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![
+        Arc::make_mut(&mut core.tree).compacted = vec![
             SortedRun {
                 id: 8,
                 sst_views: vec![SsTableView::identity(SsTableHandle::new(
@@ -4189,7 +4265,7 @@ mod tests {
         core.segments = vec![
             Segment {
                 prefix: Bytes::from_static(b"a/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4201,11 +4277,11 @@ mod tests {
                             info.clone(),
                         ))],
                     }],
-                },
+                }),
             },
             Segment {
                 prefix: Bytes::from_static(b"b/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4227,7 +4303,7 @@ mod tests {
                             ))],
                         },
                     ],
-                },
+                }),
             },
         ];
         let state = CompactorStateView {
@@ -4269,7 +4345,7 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"x")),
             ..SsTableInfo::default()
         };
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 5,
             sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(50, 0)),
@@ -4282,7 +4358,7 @@ mod tests {
             // L0-only: still skipped because L0 SSTs are ineligible inputs.
             Segment {
                 prefix: Bytes::from_static(b"l0only/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
@@ -4291,17 +4367,17 @@ mod tests {
                         info,
                     ))]),
                     compacted: vec![],
-                },
+                }),
             },
             // Fully empty tree: also skipped.
             Segment {
                 prefix: Bytes::from_static(b"none/"),
-                tree: LsmTreeState {
+                tree: Arc::new(LsmTreeState {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
                     compacted: vec![],
-                },
+                }),
             },
         ];
         let state = CompactorStateView {
@@ -5318,18 +5394,18 @@ mod tests {
         // Root tree holds SR(7) — the global max. The segment-targeted spec
         // below proposes dst=3, which is above the segment's local max (0)
         // but below the global max.
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 7,
             sst_views: Vec::new(),
         }];
         core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_view)]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
@@ -5424,7 +5500,7 @@ mod tests {
         let l0_b = Ulid::from_parts(2, 0);
         let make_segment = |prefix: Bytes, l0_view_id: Ulid| Segment {
             prefix,
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
@@ -5433,7 +5509,7 @@ mod tests {
                     SsTableInfo::default(),
                 ))]),
                 compacted: Vec::new(),
-            },
+            }),
         };
 
         // Seed the compactor's local state with the two segments. We never
@@ -5514,19 +5590,19 @@ mod tests {
             .manifest_mut_for_test()
             .value
             .core;
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 99,
             sst_views: Vec::new(),
         }];
         let prefix = Bytes::from_static(b"seg/");
         core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         // Segment-targeted spec lists SR(99) as a source — but SR(99) lives in
@@ -5554,7 +5630,7 @@ mod tests {
             .core;
         // Place SR(7) in the root tree. The segment-targeted spec below uses 7 as
         // its destination but does not list it among its sources.
-        core.tree.compacted = vec![SortedRun {
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
             id: 7,
             sst_views: Vec::new(),
         }];
@@ -5563,7 +5639,7 @@ mod tests {
         let prefix = Bytes::from_static(b"seg/");
         core.segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -5571,7 +5647,7 @@ mod tests {
                     id: 99,
                     sst_views: Vec::new(),
                 }],
-            },
+            }),
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
@@ -5620,12 +5696,12 @@ mod tests {
             .core
             .segments = vec![Segment {
             prefix: prefix.clone(),
-            tree: LsmTreeState {
+            tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_3), make_view(l0_2), make_view(l0_1)]),
                 compacted: Vec::new(),
-            },
+            }),
         }];
 
         let spec = CompactionSpec::drain_segment(
@@ -5853,5 +5929,172 @@ mod tests {
         fn is_stopped(&self) -> bool {
             false
         }
+    }
+
+    // Builds a fake output SsTableHandle with first_entry set so that
+    // SsTableView::identity can derive a non-empty effective range.
+    fn fake_output_sst() -> SsTableHandle {
+        SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"a")),
+                ..SsTableInfo::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn test_commit_compacted_entries_writes_manifest() {
+        // given: a handler with one L0 in the manifest
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        let db_state = fixture.handler.state().db_state().clone();
+        let sources: Vec<SourceId> = db_state
+            .tree
+            .l0
+            .iter()
+            .map(|view| SourceId::SstView(view.id))
+            .collect();
+        let destination = 0u32;
+        let spec = CompactionSpec::new(sources, destination);
+        let compaction_id = Ulid::from_parts(1, 0);
+        let output_sst = fake_output_sst();
+        let compaction = Compaction::new(compaction_id, spec)
+            .with_status(CompactionStatus::Compacted)
+            .with_output_ssts(vec![output_sst.clone()]);
+
+        // inject the Compacted compaction into state (bypassing the executor)
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(compaction);
+
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        // when: the coordinator observes and commits the Compacted entry
+        fixture
+            .handler
+            .commit_compacted_entries()
+            .await
+            .expect("commit_compacted_entries failed");
+
+        // then: compaction is Completed, L0 sources removed, output SR added
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Completed,
+        );
+        let manifest = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        let core = manifest.core();
+        assert!(core.tree.l0.is_empty(), "L0 sources should be removed");
+        let sr = core.tree.compacted.iter().find(|sr| sr.id == destination);
+        assert!(
+            sr.is_some(),
+            "output SR {destination} not found in manifest"
+        );
+        assert_eq!(sr.unwrap().sst_views.first().unwrap().sst.id, output_sst.id);
+
+        // given: a Compacted SR0→SR1 compaction to validate the SR source path removed when not in L0
+        let sr1_output_sst = fake_output_sst();
+        let sr_compaction_id = Ulid::from_parts(2, 0);
+        let sr_compaction = Compaction::new(
+            sr_compaction_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 1),
+        )
+        .with_status(CompactionStatus::Compacted)
+        .with_output_ssts(vec![sr1_output_sst.clone()]);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(sr_compaction);
+
+        // when:
+        fixture
+            .handler
+            .commit_compacted_entries()
+            .await
+            .expect("SR commit failed");
+
+        // then: SR 0 removed, SR 1 added with the correct SST
+        let manifest2 = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        let core2 = manifest2.core();
+        assert!(
+            core2.tree.compacted.iter().all(|sr| sr.id != 0),
+            "SR 0 should be removed after SR compaction"
+        );
+        let sr1 = core2.tree.compacted.iter().find(|sr| sr.id == 1);
+        assert!(sr1.is_some(), "SR 1 should exist");
+        assert_eq!(
+            sr1.unwrap().sst_views.first().unwrap().sst.id,
+            sr1_output_sst.id
+        );
+        let stored2 = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored2
+                .get(&sr_compaction_id)
+                .expect("missing SR compaction")
+                .status(),
+            CompactionStatus::Completed,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_compacted_entries_marks_failed_when_sources_absent() {
+        // given: a handler where the Compacted compaction references a source
+        // that no longer exists in the manifest (simulates a post-crash recovery
+        // where the manifest was already written before the coordinator crashed)
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        // Use a fake view ID that is not present in any L0
+        let ghost_view_id = Ulid::from_parts(u64::MAX, 0);
+        let spec = CompactionSpec::new(vec![SourceId::SstView(ghost_view_id)], 0);
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(compaction_id, spec)
+            .with_status(CompactionStatus::Compacted)
+            .with_output_ssts(vec![fake_output_sst()]);
+
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(compaction);
+
+        // when:
+        fixture
+            .handler
+            .commit_compacted_entries()
+            .await
+            .expect("commit_compacted_entries failed");
+
+        // then: the compaction is marked Failed (not retried)
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Failed,
+        );
     }
 }

@@ -6,6 +6,7 @@ import starlightLlmsTxt from 'starlight-llms-txt';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateRfcWrappers } from './scripts/generate-rfcs.js';
+import { generateMdMirrors } from './scripts/generate-md-mirrors.js';
 import mermaid from 'astro-mermaid';
 
 const site = 'https://slatedb.io';
@@ -20,6 +21,10 @@ export default defineConfig({
 		starlight({
 			title: 'SlateDB',
 			description: 'An embedded database built on object storage',
+			// Use our own src/pages/404.astro (Sisyphus art) instead of
+			// Starlight's bare docs-themed 404, which otherwise wins at
+			// the literal /404 URL via injectRoute.
+			disable404Route: true,
 			logo: {
 				src: './public/img/logo-full.svg',
 				alt: 'SlateDB',
@@ -39,6 +44,29 @@ export default defineConfig({
 				// Override the default theme provider to ensure light mode is always enabled.
 				ThemeProvider: './src/components/ThemeProvider.astro',
 				Hero: './src/components/Hero.astro',
+				// Override the page title to render the frontmatter description as a lede subtitle.
+				PageTitle: './src/components/PageTitle.astro',
+				// Override the right-hand page sidebar to add a "Copy as Markdown" link below the TOC.
+				PageSidebar: './src/components/PageSidebar.astro',
+				// Override the sidebar to pin a community-stats card at the bottom.
+				Sidebar: './src/components/Sidebar.astro',
+				// Extend <Head> to advertise the per-page markdown mirror via <link rel="alternate">.
+				Head: './src/components/Head.astro',
+			},
+			expressiveCode: {
+				themes: ['github-light'],
+				styleOverrides: {
+					borderRadius: '0.75rem',
+					borderColor: 'transparent',
+					codeFontSize: '0.85rem',
+					codeLineHeight: '1.55',
+					frames: {
+						shadowColor: 'rgba(15, 23, 42, 0.04)',
+						editorActiveTabIndicatorTopColor: 'transparent',
+						editorActiveTabBorderColor: 'transparent',
+						editorTabBarBorderBottomColor: 'transparent',
+					},
+				},
 			},
 			customCss: ['./src/styles/custom.css'],
 			editLink: {
@@ -52,6 +80,21 @@ export default defineConfig({
 				{
 					tag: 'meta',
 					attrs: { property: 'og:image:alt', content: ogImageAlt },
+				},
+				{
+					tag: 'link',
+					attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+				},
+				{
+					tag: 'link',
+					attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' },
+				},
+				{
+					tag: 'link',
+					attrs: {
+						rel: 'stylesheet',
+						href: 'https://fonts.googleapis.com/css2?family=Marcellus&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap',
+					},
 				},
 			],
 			plugins: [
@@ -69,10 +112,6 @@ export default defineConfig({
 						{
 							label: 'Quick Start',
 							link: '/docs/get-started/quickstart/',
-						},
-						{
-							label: 'Node.js Quickstart',
-							link: 'https://github.com/slatedb/slatedb/blob/main/bindings/node/README.md',
 						},
 						{
 							label: 'FAQ',
@@ -262,26 +301,6 @@ export default defineConfig({
 					collapsed: true,
 					autogenerate: { directory: 'rfcs' },
 				},
-				{
-					label: 'Community',
-					items: [
-						{
-							label: 'Discord',
-							link: 'https://discord.gg/mHYmGy5MgA',
-							attrs: { target: '_blank' }
-						},
-						{
-							label: 'Dosu',
-							link: 'https://app.dosu.dev/d8f2da6d-6c4e-43a9-b5f2-b03db801b4d1/ask',
-							attrs: { target: '_blank' }
-						},
-						{
-							label: 'GitHub',
-							link: 'https://github.com/slatedb/slatedb',
-							attrs: { target: '_blank' }
-						}
-					]
-				},
 			]
 		}),
 	],
@@ -303,6 +322,29 @@ export default defineConfig({
 					const onChange = (file) => {
 						if (file.endsWith('.md') && file.includes(`${path.sep}rfcs${path.sep}`)) {
 							generateRfcWrappers();
+						}
+					};
+					server.watcher.on('add', onChange);
+					server.watcher.on('change', onChange);
+					server.watcher.on('unlink', onChange);
+				},
+			},
+			{
+				name: 'slatedb-md-mirrors',
+				// Run after the RFC wrappers exist, so we can mirror them too.
+				async buildStart() {
+					await generateRfcWrappers();
+					await generateMdMirrors();
+				},
+				configureServer(server) {
+					generateMdMirrors();
+					/** @param {string} file */
+					const onChange = (file) => {
+						const isDocSource =
+							(file.endsWith('.mdx') || file.endsWith('.md')) &&
+							(file.includes(`${path.sep}src${path.sep}content${path.sep}docs${path.sep}`));
+						if (isDocSource) {
+							generateMdMirrors();
 						}
 					};
 					server.watcher.on('add', onChange);

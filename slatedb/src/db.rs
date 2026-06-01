@@ -23,11 +23,11 @@
 pub use crate::db_status::DbStatus;
 
 use crate::db_cache_manager::{self, CacheTarget};
-use std::ops::RangeBounds;
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
+use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
 use object_store::{parse_url_opts, ObjectStore};
@@ -57,7 +57,6 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
-use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
@@ -252,7 +251,6 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
@@ -275,7 +273,6 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: Some(prefix),
                 },
             )
@@ -292,57 +289,6 @@ impl DbInner {
         self.reader
             .scan_prefix_by_recency_with_options(prefix, options, &db_state)
             .await
-    }
-
-    /// Fences all writers with an older epoch than the provided `manifest` by flushing
-    /// an empty WAL file that acts as a barrier. Any parallel old writers will fail with
-    /// `SlateDBError::Fenced` when trying to "re-write" this file.
-    async fn fence_writers(
-        &self,
-        manifest: &mut FenceableManifest,
-        next_wal_id: u64,
-    ) -> Result<(), SlateDBError> {
-        let mut empty_wal_id = next_wal_id;
-
-        loop {
-            let wrote_fence = match self.flush_empty_wal(empty_wal_id).await {
-                Ok(()) => true,
-                Err(SlateDBError::Fenced) => false,
-                Err(err) => return Err(err),
-            };
-
-            // Refresh validates that we own the latest epoch still.
-            manifest.refresh().await?;
-            let remote_dirty = manifest.prepare_dirty()?;
-            let replay_after_wal_id = remote_dirty.value.core.replay_after_wal_id;
-            let dirty_manifest = {
-                let mut state = self.state.write();
-                state.merge_remote_manifest(remote_dirty);
-                state.state().manifest.clone()
-            };
-            self.status_manager.report_manifest(dirty_manifest.into());
-
-            if wrote_fence {
-                // Our fence write might be behind replay_after_wal_id since we're racing with
-                // older writers that can advance replay_after_wal_id by flushing data to L0.
-                // We need to make sure the fence write falls above this barrier so it's visible
-                // to all other active writers.
-                if empty_wal_id > replay_after_wal_id {
-                    return Ok(());
-                } else {
-                    // If we're behind the barrier, reset to the next WAL slot.
-                    empty_wal_id = self
-                        .table_store
-                        .next_wal_sst_id(replay_after_wal_id)
-                        .await?;
-                }
-            } else {
-                // We're (probably) ahead of the barrier, but we hit a race with another writer.
-                // Instead of paying for the LIST (API cost and latency), just try the next ID.
-                // This is an optimization: we could always advance with next_wal_sst_id.
-                empty_wal_id += 1;
-            }
-        }
     }
 
     #[allow(unused_variables)]
@@ -552,7 +498,15 @@ impl DbInner {
         }
     }
 
-    async fn replay_wal(&self) -> Result<(), SlateDBError> {
+    async fn replay_wal(&self, wal_id_range: Range<u64>) -> Result<(), SlateDBError> {
+        let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "replay-wal-pause",
+            writer_epoch == 1,
+            |_| -> Result<(), SlateDBError> { Ok(()) }
+        );
+
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
@@ -571,11 +525,32 @@ impl DbInner {
         };
 
         let db_state = self.state.read().state().core().clone();
-        let mut replay_iter =
-            WalReplayIterator::new(&db_state, replay_options, Arc::clone(&self.table_store))
-                .await?;
+        let mut replay_iter = WalReplayIterator::range(
+            wal_id_range,
+            &db_state,
+            replay_options,
+            Arc::clone(&self.table_store),
+        )
+        .await?;
 
-        while let Some(replayed_table) = replay_iter.next().await? {
+        loop {
+            let replayed_table = match replay_iter.next().await {
+                Ok(Some(replayed_table)) => replayed_table,
+                Ok(None) => break,
+                // If the manifest or an SST referenced by the WAL is missing, it may
+                // indicate that a newer writer has advanced `replay_after_wal_id` and
+                // the GC has removed this WAL entry. Check the latest manifest's
+                // writer_epoch to see if this client is fenced.
+                Err(err) if err.has_object_store_not_found() => {
+                    self.memtable_flusher.refresh_manifest().await?;
+                    if self.state.read().state().manifest.value.writer_epoch > writer_epoch {
+                        return Err(SlateDBError::Fenced);
+                    }
+                    return Err(err);
+                }
+                Err(err) => return Err(err),
+            };
+
             // RFC-0024: re-extract each replayed entry's prefix to
             // populate the memtable's touched-segment set. Per the
             // validation model, durable WAL entries were validated when
@@ -2107,8 +2082,8 @@ mod tests {
     use crate::seq_tracker::FindOption;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
-        assert_iterator, lookup_merge_operator_operands, OnDemandCompactionSchedulerSupplier,
-        StringConcatMergeOperator,
+        assert_iterator, lookup_merge_operator_operands, GatedObjectStore,
+        OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
@@ -2869,6 +2844,7 @@ mod tests {
     async fn test_scan_prefix_by_recency_errors_on_multi_segment_prefix() {
         use crate::manifest::{LsmTreeState, Segment};
         use std::collections::VecDeque;
+        use std::sync::Arc;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::builder("/tmp/test_recency_multi_segment", object_store)
@@ -2887,21 +2863,21 @@ mod tests {
             core.segments = vec![
                 Segment {
                     prefix: Bytes::from_static(b"hour=12/"),
-                    tree: LsmTreeState {
+                    tree: Arc::new(LsmTreeState {
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::new(),
                         compacted: vec![],
-                    },
+                    }),
                 },
                 Segment {
                     prefix: Bytes::from_static(b"hour=13/"),
-                    tree: LsmTreeState {
+                    tree: Arc::new(LsmTreeState {
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::new(),
                         compacted: vec![],
-                    },
+                    }),
                 },
             ];
         });
@@ -3224,6 +3200,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_memtable_write_bytes_matches_batch_payload() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_write_bytes_matches_batch_payload",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024 * 1024, None))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"hello", b"world!").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len()) as i64,
+        );
+
+        db.put(b"k2", b"v2").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len()) as i64,
+        );
+
+        // Deletes count only the key length.
+        db.delete(b"k3").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len() + b"k3".len()) as i64,
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtable_write_bytes_matches_batch_payload_with_merges() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_write_bytes_matches_batch_payload_with_merges",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024 * 1024, None))
+        .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // A single merge per key is not folded by the merge iterator, so the
+        // tracked size matches key + value.
+        db.merge(b"k1", b"a").await.unwrap();
+        let mut expected = (b"k1".len() + b"a".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        // Multiple merges for the same key in a single batch are folded by the
+        // merge iterator before counting. memtable_write_bytes reflects the merged
+        // output (key + "abc"), not the sum of raw inputs (3 * key + "a" + "b" + "c").
+        let mut batch = WriteBatch::new();
+        batch.merge(b"k2", b"a");
+        batch.merge(b"k2", b"b");
+        batch.merge(b"k2", b"c");
+        db.write(batch).await.unwrap();
+        expected += (b"k2".len() + b"abc".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        // Merges to distinct keys in one batch are not folded, so each entry
+        // contributes its raw key + value.
+        let mut batch = WriteBatch::new();
+        batch.merge(b"k3", b"x");
+        batch.merge(b"k4", b"yy");
+        db.write(batch).await.unwrap();
+        expected += (b"k3".len() + b"x".len() + b"k4".len() + b"yy".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wal_flush_bytes_after_explicit_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db_options = {
+            let mut db_options = test_db_options(0, 1024 * 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder(
+            "/tmp/test_wal_flush_bytes_after_explicit_flush",
+            object_store,
+        )
+        .with_settings(db_options)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put_with_options(
+            b"hello",
+            b"world",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap_or(0),
+            0,
+        );
+
+        db.flush().await.unwrap();
+
+        let wal_bytes = lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap();
+        let memtable_bytes =
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap();
+        // WAL SST framing/footer makes the encoded payload at least as large as
+        // the memtable payload if no compression is used.
+        assert!(
+            wal_bytes >= memtable_bytes,
+            "wal_bytes={wal_bytes} memtable_bytes={memtable_bytes}",
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_get_with_durability_level_when_wal_disabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -3357,6 +3471,7 @@ mod tests {
             object_store.clone(),
         )
         .with_settings(opts)
+        .with_db_cache_disabled()
         .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
@@ -3366,7 +3481,12 @@ mod tests {
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
-        kv_store.flush().await.unwrap();
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
 
         let got = kv_store.get(key).await.unwrap();
         let access_count1 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
@@ -3573,8 +3693,8 @@ mod tests {
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
             // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 1),
-            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
-            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 1),
+            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 0),
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
         ];
 
@@ -3597,8 +3717,8 @@ mod tests {
             ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 0),
             // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
             ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 1),
-            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
-            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 1),
+            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 0),
             // 1 part is cached because the put with cache_puts enabled should cache the test_key put
             ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 1),
         ];
@@ -4079,7 +4199,7 @@ mod tests {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(MockSystemClock::new());
-        let mut options = test_db_options(0, 300, None);
+        let mut options = test_db_options(0, 350, None);
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -4170,7 +4290,7 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 320, None))
             .with_metrics_recorder(metrics_recorder.clone())
             .build()
             .await
@@ -5287,7 +5407,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 512, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .with_fp_registry(fp_registry.clone())
             .build()
@@ -5335,7 +5455,7 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
         let db_restored = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 512, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .with_fp_registry(fp_registry.clone())
             .build()
@@ -5929,7 +6049,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        let mut settings = test_db_options(0, 128, None);
+        let mut settings = test_db_options(0, 256, None);
         // Disable automatic flush
         settings.flush_interval = None;
 
@@ -6111,6 +6231,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        let wal_ssts = db.inner.table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 1);
+        assert_eq!(wal_ssts[0].size, 0);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())
@@ -6162,128 +6285,251 @@ mod tests {
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
     }
 
-    #[tokio::test]
-    async fn test_fence_writers_retries_successful_fence_behind_replay_boundary() {
-        // Race:
-        // - t0: W2 computes stale next_wal_id=2 while W1 is still active.
-        // - t1: W1 writes WAL 2 and WAL 3, flushes them to L0, and advances
-        //   the replay boundary to 3.
-        // - t2: WAL GC deletes WAL 2, so a future create at stale WAL 2 can
-        //   succeed, but it leaves WAL 3 because replay_after_wal_id is not
-        //   eligible for deletion.
-        // - t3: W2 claims the writer epoch from that manifest.
-        // - t4: W2 builds the DbInner needed to run fence_writers.
-        // - t5: W2 writes a fence at stale WAL 2; current code accepts it.
-        // - t6: W1 can still create live WAL 4 unless W2 retried the fence
-        //   above the replay boundary.
-        // - t7: ValidateFence should make t6 fail with Fenced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_writer_paused_in_replay_wal_should_be_fenced_by_concurrent_open() {
+        // Race we're trying to reproduce:
+        // - W1 starts opening: claims writer_epoch=1, writes its fence WAL, then
+        //   enters replay_wal. We pause it inside replay_wal.
+        // - W2 starts opening: claims writer_epoch=2, writes its own fence WAL
+        //   (above W1's), replays, and finishes init.
+        // - W1 unpauses, finishes replay_wal, and returns its Db handle.
+        // - W1 issues a put. This put should fail because W1's next WAL id is taken.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_fence_writers_retries_successful_fence_behind_replay_boundary";
-        let mut settings = test_db_options(0, 128, None);
-        settings.flush_interval = None;
+        let path = "/tmp/test_writer_paused_in_replay_wal_race";
+        let fp_registry = Arc::new(FailPointRegistry::new());
 
-        // - t0: W2 computes stale next_wal_id=2 while W1 is still active.
-        let stale_next_wal_id = 2;
-        let replay_after_wal_id = stale_next_wal_id + 1; // 3
-        let live_wal_id = replay_after_wal_id + 1; // 4
+        // Pause replay_wal for any writer that holds writer_epoch == 1
+        // (the condition is enforced inside the fail point body).
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
 
-        let table_store = Arc::new(TableStore::new(
+        // Kick off W1 in the background. It will park inside replay_wal.
+        // Use a long manifest poll interval on W1 so its background poller
+        // doesn't independently observe W2's epoch bump and trip the
+        // closed/fenced check while replay is paused.
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        // Wait for W1 to write its fence WAL — at that point W1 has finished
+        // fence_writers and has either entered or is about to enter the paused
+        // replay_wal call.
+        let probe_table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
             path,
             None,
         ));
-
-        // - t1: W1 writes WAL 2 and WAL 3, flushes them to L0, and advances
-        //   the replay boundary to 3.
-        for wal_id in [stale_next_wal_id, replay_after_wal_id] {
-            let mut w1_wal = table_store.table_builder();
-            w1_wal
-                .add(RowEntry::new_value(b"w1", b"write", wal_id))
-                .await
-                .unwrap();
-            let w1_wal = w1_wal.build().await.unwrap();
-            table_store
-                .write_sst(&SsTableId::Wal(wal_id), &w1_wal, false)
-                .await
-                .unwrap();
+        let mut w1_paused = false;
+        for _ in 0..600 {
+            let wals = probe_table_store.list_wal_ssts(..).await.unwrap();
+            if !wals.is_empty() {
+                w1_paused = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let mut core = ManifestCore::new();
-        core.replay_after_wal_id = replay_after_wal_id;
-        core.next_wal_sst_id = live_wal_id;
+        assert!(w1_paused, "W1 did not reach replay_wal pause in time");
+        // Small additional wait for W1 to transition from fence_writers into
+        // the paused replay_wal block.
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // - t2: WAL GC deletes WAL 2, so a future create at stale WAL 2 can
-        //   succeed, but it leaves WAL 3 because replay_after_wal_id is not
-        //   eligible for deletion.
-        table_store
-            .delete_sst(&SsTableId::Wal(stale_next_wal_id))
+        // While W1 is paused, open W2. W2's epoch is 2, so replay_wal is not
+        // paused for W2. W2 writes its own fence WAL above W1's and finishes
+        // init.
+        let db2 = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
             .await
             .unwrap();
-
-        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest =
-            StoredManifest::create_new_db(manifest_store, core, system_clock.clone())
-                .await
-                .unwrap();
-
-        // - t3: W2 claims the writer epoch from that manifest.
-        let mut manifest = FenceableManifest::init_writer(
-            stored_manifest,
-            settings.manifest_update_timeout,
-            system_clock.clone(),
-        )
-        .await
-        .unwrap();
-        let manifest_dirty = manifest.prepare_dirty().unwrap();
-
-        // - t4: Build the minimal DbInner needed to run W2's fence_writers.
-        let status_manager = DbStatusManager::new_with_manifest(
-            manifest_dirty.value.core.last_l0_seq,
-            manifest_dirty.clone().into(),
+        assert_eq!(
+            db2.inner.state.read().state().manifest.value.writer_epoch,
+            2
         );
-        let (write_tx, _write_rx) = SafeSender::unbounded_channel(status_manager.result_reader());
-        let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
-        let inner = DbInner::new(
-            settings,
-            system_clock,
-            Arc::new(DbRand::new(0)),
-            table_store.clone(),
-            manifest_dirty,
-            memtable_flusher,
-            write_tx,
-            MetricsRecorderHelper::noop(),
-            Arc::new(FailPointRegistry::new()),
+
+        // Release W1. It finishes replay_wal and returns a Db handle.
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        let db1 = w1_handle.await.unwrap().unwrap();
+        assert_eq!(
+            db1.inner.state.read().state().manifest.value.writer_epoch,
+            1
+        );
+
+        // W1's put should fail because its now fenced
+        let result = db1
+            .put_with_options(
+                b"w1",
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    async fn wait_for_wal_sst_count(table_store: &TableStore, min_count: usize, context: &str) {
+        for _ in 0..6000 {
+            let wals = table_store.list_wal_ssts(..).await.unwrap();
+            if wals.len() >= min_count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{context}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_not_found_should_be_fenced_when_writer_epoch_advanced() {
+        let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(base_store.clone()));
+        let gated_object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let path = "/tmp/wal_replay_not_found_should_be_fenced_when_writer_epoch_advanced";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = gated_object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        let probe_table_store = TableStore::new(
+            ObjectStores::new(base_store.clone(), None),
+            SsTableFormat::default(),
+            path,
             None,
-            status_manager,
-            None,
+        );
+        wait_for_wal_sst_count(
+            &probe_table_store,
+            1,
+            "W1 did not write its fence WAL in time",
         )
-        .await
-        .unwrap();
+        .await;
 
-        // - t5: W2 writes a fence at stale WAL 2; current code accepts it.
-        inner
-            .fence_writers(&mut manifest, stale_next_wal_id)
-            .await
-            .unwrap();
-
-        // - t6: W1 can still create live WAL 4 unless W2 retried the fence
-        //   above the replay boundary.
-        let mut stale_writer_wal = table_store.table_builder();
-        stale_writer_wal
-            .add(RowEntry::new_value(b"stale", b"write", 0))
-            .await
-            .unwrap();
-        let stale_writer_wal = stale_writer_wal.build().await.unwrap();
-        let stale_write_result = table_store
-            .write_sst(&SsTableId::Wal(live_wal_id), &stale_writer_wal, false)
+        let head_arrivals_before = gated_store.head_gate.arrivals();
+        gated_store.head_gate.close();
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        gated_store
+            .head_gate
+            .wait_for_arrivals(head_arrivals_before + 1)
             .await;
 
-        // - t7: ValidateFence should make t6 fail with Fenced.
-        assert!(
-            matches!(stale_write_result, Err(SlateDBError::Fenced)),
-            "expected fence_writers to retry from stale WAL {stale_next_wal_id} and fence live WAL {live_wal_id}"
+        let db2 = Db::builder(path, base_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            db2.inner.state.read().state().manifest.value.writer_epoch,
+            2
         );
+
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
+            .await
+            .unwrap();
+        gated_store.head_gate.release();
+
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced)),
+            "expected fenced error, got {err:?}"
+        );
+
+        db2.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_not_found_should_remain_not_found_when_writer_epoch_unchanged() {
+        let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(base_store.clone()));
+        let gated_object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let path = "/tmp/wal_replay_not_found_should_remain_not_found_when_writer_epoch_unchanged";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = gated_object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        let probe_table_store = TableStore::new(
+            ObjectStores::new(base_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        );
+        wait_for_wal_sst_count(
+            &probe_table_store,
+            1,
+            "W1 did not write its fence WAL in time",
+        )
+        .await;
+
+        let head_arrivals_before = gated_store.head_gate.arrivals();
+        gated_store.head_gate.close();
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        gated_store
+            .head_gate
+            .wait_for_arrivals(head_arrivals_before + 1)
+            .await;
+
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
+            .await
+            .unwrap();
+        gated_store.head_gate.release();
+
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
     }
 
     #[tokio::test]
@@ -7414,18 +7660,23 @@ mod tests {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
+            wal_fence_options: None,
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             detach_options: None,
         };
@@ -8843,6 +9094,47 @@ mod tests {
             lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_COMPACT_PATH)
                 .is_none_or(|value| value == 0)
         );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_reject_batch_local_merges_across_differing_ttls() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_reject_batch_local_merges_across_differing_ttls",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_merge_operator(Arc::new(StringConcatMergeOperator))
+        .build()
+        .await
+        .unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(3600),
+            },
+        );
+        batch.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(7200),
+            },
+        );
+
+        let err = db.write(batch).await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert!(
+            err.to_string()
+                .contains("only one merge TTL per-key allowed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(db.get(b"key1").await.unwrap(), None);
 
         db.close().await.unwrap();
     }

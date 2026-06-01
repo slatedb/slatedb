@@ -14,7 +14,8 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
-use crate::db_cache::{CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
+use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
+use crate::db_cache_manager::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter_policy::NamedFilter;
@@ -111,10 +112,117 @@ impl TableStore {
         bytes.div_ceil(self.sst_format.block_size)
     }
 
-    pub(crate) async fn last_seen_wal_id(&self) -> Result<u64, SlateDBError> {
-        let wal_ssts = self.list_wal_ssts(..).await?;
-        let last_wal_id = wal_ssts.last().map(|md| md.id.unwrap_wal_id());
-        Ok(last_wal_id.unwrap_or(0))
+    /// Find the highest WAL SST id present in the object store at or above
+    /// `start_after + 1`, returning `start_after` if none exist.
+    ///
+    /// `start_after` should be a known lower bound (e.g. `replay_after_wal_id`
+    /// from the manifest, or the highest already-replayed WAL id). Passing 0
+    /// scans the entire WAL id space.
+    ///
+    /// Two phases:
+    ///   1. Parallel exponential probe at offsets `2^0, 2^1, ..., 2^k` from
+    ///      `start_after`. One RTT per round of 8 exponents. Brackets the
+    ///      frontier between two adjacent powers of two.
+    ///   2. Sequential binary search inside the bracketed range to find the
+    ///      exact frontier.
+    ///
+    /// Relies on the fencing protocol's contiguity invariant: "id exists" is
+    /// monotone-decreasing in id, so binary search is sound. Total HEAD count
+    /// is `O(log N)` for a gap of size N, vs `O(N)` for a windowed scan.
+    pub(crate) async fn last_seen_wal_id(&self, start_after: u64) -> Result<u64, SlateDBError> {
+        fail_point!(Arc::clone(&self.fp_registry), "probe-wal-ssts", |_| {
+            Err(SlateDBError::from(std::io::Error::other("oops")))
+        });
+
+        // 8 probes per round amortizes tail latency on one RTT while keeping
+        // the concurrent HEAD fan-out bounded against the object store.
+        const ROUND_SIZE: u32 = 8;
+        // 2^48 ahead is ~280 trillion WALs; far past any plausible gap. Beyond
+        // this we give up rather than overflow / loop forever.
+        const MAX_EXP: u32 = 48;
+
+        let object_store = self.object_stores.store_of(ObjectStoreType::Wal);
+
+        // ---- Phase 1: bracket the frontier with exponential probes. ----
+        //
+        // Probe at offsets 2^0, 2^1, ..., 2^MAX_EXP above `start_after`.
+        // Contiguity (existence is monotone-decreasing in id) means the
+        // moment one probe misses, every higher offset is also guaranteed
+        // missing -- so we can stop at the first miss and treat that
+        // offset as the upper bound on the answer. The highest hit so far
+        // is the lower bound.
+        let mut lo_offset: Option<u64> = None; // highest offset known to exist
+        let mut hi_offset: Option<u64> = None; // lowest offset known to NOT exist
+        let mut next_exp: u32 = 0;
+
+        while hi_offset.is_none() {
+            if next_exp >= MAX_EXP {
+                // Object store appears to contain ids past our sanity cap;
+                // bail rather than overflow `start_after + offset`.
+                return Err(SlateDBError::InvalidDBState);
+            }
+
+            // Fire ROUND_SIZE probes in parallel at offsets 2^next_exp..2^end_exp.
+            // One round = one network RTT regardless of how many probes it contains.
+            let end_exp = (next_exp + ROUND_SIZE).min(MAX_EXP);
+            let exps: Vec<u32> = (next_exp..end_exp).collect();
+            let probes = exps.iter().map(|&e| {
+                let offset = 1u64 << e;
+                let path = self.path(&SsTableId::Wal(start_after + offset));
+                let store = object_store.clone();
+                async move { wal_object_exists(&store, &path).await }
+            });
+            let results = join_all(probes).await;
+
+            // Walk the round in offset order. Track the last hit as `lo_offset`,
+            // then stop at the first miss -- anything past that miss in the
+            // round is wasted info because we're about to switch to binary search.
+            for (e, r) in exps.iter().zip(results) {
+                let offset = 1u64 << e;
+                if r? {
+                    lo_offset = Some(offset);
+                } else {
+                    hi_offset = Some(offset);
+                    break;
+                }
+            }
+            next_exp = end_exp;
+        }
+
+        let hi = hi_offset.expect("loop only exits when hi is set");
+        let lo = match lo_offset {
+            // Round 0's smallest offset (1) didn't exist, so no WALs are
+            // visible above the hint -- the frontier IS `start_after`.
+            None => return Ok(start_after),
+            Some(o) => o,
+        };
+
+        // ---- Phase 2: binary search the open interval (lo, hi). ----
+        //
+        // Invariants entering the loop:
+        //   * offset = lo  exists       (highest from Phase 1)
+        //   * offset = hi  does not     (first miss from Phase 1)
+        // So the largest existing offset lives in [lo, hi - 1]. Search
+        // strictly above lo (left = lo + 1) so we never re-probe a slot
+        // whose state we already know.
+        let mut left = lo + 1;
+        let mut right = hi;
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let path = self.path(&SsTableId::Wal(start_after + mid));
+            if wal_object_exists(object_store, &path).await? {
+                // `mid` exists, so the answer is mid or higher; discard
+                // everything at-or-below mid.
+                left = mid + 1;
+            } else {
+                // `mid` is missing, so the answer is strictly below mid.
+                right = mid;
+            }
+        }
+
+        // Loop exits with left == right pointing at the lowest offset known
+        // to not exist; the highest existing offset is one below that.
+        Ok(start_after + left - 1)
     }
 
     /// Gracefully close the block cache, flushing in-memory entries to disk.
@@ -163,14 +271,7 @@ impl TableStore {
         &self,
         wal_id_last_compacted: u64,
     ) -> Result<u64, SlateDBError> {
-        Ok(self
-            .list_wal_ssts(wal_id_last_compacted..)
-            .await?
-            .into_iter()
-            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
-            .max()
-            .unwrap_or(wal_id_last_compacted)
-            + 1)
+        Ok(self.last_seen_wal_id(wal_id_last_compacted).await? + 1)
     }
 
     pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter<'_> {
@@ -214,9 +315,20 @@ impl TableStore {
         );
 
         let object_store = self.object_stores.store_for(id);
-        let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        write_sst_in_object_store(object_store.clone(), id, &path, &data).await?;
+        match id {
+            SsTableId::Compacted(_) => {
+                write_sst_streaming_in_object_store(object_store.clone(), &path, encoded_sst)
+                    .await?;
+            }
+            // WAL SSTs rely on PutMode::Create for fencing. The generic
+            // object_store multipart API cannot express that condition, so WALs
+            // stay on the conditional single-PUT path for now.
+            SsTableId::Wal(_) => {
+                let data = encoded_sst.remaining_as_bytes();
+                write_sst_in_object_store(object_store.clone(), id, &path, &data).await?;
+            }
+        }
 
         if let Some(ref cache) = self.cache {
             if write_cache {
@@ -247,6 +359,24 @@ impl TableStore {
             encoded_sst.format_version,
             encoded_sst.info.clone(),
         ))
+    }
+
+    /// Writes a zero-byte WAL object as a fencing marker.
+    ///
+    /// Uses create-if-absent semantics so any existing WAL object at this ID
+    /// fences the writer by returning [`SlateDBError::Fenced`].
+    pub(crate) async fn write_wal_fence(&self, wal_id: u64) -> Result<(), SlateDBError> {
+        let id = SsTableId::Wal(wal_id);
+        fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
+            Result::Err(slatedb_io_error())
+        });
+        write_sst_in_object_store(
+            self.object_stores.store_for(&id),
+            &id,
+            &self.path(&id),
+            &Bytes::new(),
+        )
+        .await
     }
 
     async fn cache_filters(&self, sst: SsTableId, id: u64, filters: Arc<[NamedFilter]>) {
@@ -413,17 +543,39 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
-        let cache_key = (handle.id, handle.info.filter_offset).into();
+        // No filter exists for this SST (either no policies configured, or the
+        // SST was built below `min_filter_keys`). Return an empty slice without
+        // touching the cache: there is nothing to load, and caching the empty
+        // answer would mask a future config change that adds filter policies.
+        if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
+            return Ok(Arc::from([]));
+        }
+        let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
         if let Some(ref cache) = self.cache {
-            let entry = cache.get_filter(&cache_key).await.unwrap_or(None);
+            // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
+            // one loader. cache_blocks=false: read-only lookup that won't pollute the
+            // cache on miss. Cache errors fall through to a best-effort direct load;
+            // we intentionally don't re-insert there — `fetch_X` errors are almost
+            // always the smuggled loader error (so the direct retry will also fail),
+            // and on the rare foyer-machinery error an insert would likely fail too.
+            let entry = if cache_blocks {
+                cache
+                    .fetch_filter(
+                        cache_key.clone(),
+                        self.read_loader(handle, CacheTarget::Filters),
+                    )
+                    .await
+                    .ok()
+            } else {
+                cache.get_filter(&cache_key).await.unwrap_or(None)
+            };
             if let Some(entry) = entry {
                 // Already decoded.
                 if let Some(filters) = entry.filters() {
                     return Ok(filters);
                 }
-
-                // Encoded form from disk-cache deserialize. Decode
-                // and overwrite the cache entry with the decoded form.
+                // Encoded form from disk-cache deserialize. Decode and overwrite
+                // the cache entry with the decoded form.
                 if let Some(encoded) = entry.encoded_filters() {
                     return Ok(self.decode_and_refresh(cache, cache_key, &encoded).await);
                 }
@@ -432,19 +584,10 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let named_filters = self
-            .sst_format
+        self.sst_format
             .read_filters(&handle.info, &obj)
             .await
-            .map_err(|e| e.with_path(&obj.path))?;
-        if cache_blocks && !named_filters.is_empty() {
-            if let Some(ref cache) = self.cache {
-                cache
-                    .insert(cache_key, CachedEntry::with_filters(named_filters.clone()))
-                    .await;
-            }
-        }
-        Ok(named_filters)
+            .map_err(|e| e.with_path(&obj.path))
     }
 
     /// Reads the stats block of an SSTable.
@@ -456,37 +599,31 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
     ) -> Result<Option<SstStats>, SlateDBError> {
+        if handle.info.stats_len == 0 {
+            return Ok(None);
+        }
+        let cache_key = (handle.id, handle.info.stats_offset).into();
         if let Some(ref cache) = self.cache {
-            if let Some(stats) = cache
-                .get_stats(&(handle.id, handle.info.stats_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.sst_stats())
-            {
+            // See `read_filters` for the rationale on the fall-through path.
+            let entry = if cache_blocks {
+                cache
+                    .fetch_stats(cache_key, self.read_loader(handle, CacheTarget::Stats))
+                    .await
+                    .ok()
+            } else {
+                cache.get_stats(&cache_key).await.unwrap_or(None)
+            };
+            if let Some(stats) = entry.and_then(|e| e.sst_stats()) {
                 return Ok(Some(stats.as_ref().clone()));
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let stats = self
-            .sst_format
+        self.sst_format
             .read_stats(&handle.info, &obj)
             .await
-            .map_err(|e| e.with_path(&obj.path))?;
-        if cache_blocks {
-            if let Some(ref cache) = self.cache {
-                if let Some(ref stats) = stats {
-                    cache
-                        .insert(
-                            (handle.id, handle.info.stats_offset).into(),
-                            CachedEntry::with_sst_stats(Arc::new(stats.clone())),
-                        )
-                        .await;
-                }
-            }
-        }
-        Ok(stats)
+            .map_err(|e| e.with_path(&obj.path))
     }
 
     /// Reads the index of an SSTable.
@@ -499,36 +636,105 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        let cache_key = (handle.id, handle.info.index_offset).into();
         if let Some(ref cache) = self.cache {
-            if let Some(index) = cache
-                .get_index(&(handle.id, handle.info.index_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.sst_index())
-            {
+            // See `read_filters` for the rationale on the fall-through path.
+            let entry = if cache_blocks {
+                cache
+                    .fetch_index(cache_key, self.read_loader(handle, CacheTarget::Index))
+                    .await
+                    .ok()
+            } else {
+                cache.get_index(&cache_key).await.unwrap_or(None)
+            };
+            if let Some(index) = entry.and_then(|e| e.sst_index()) {
                 return Ok(index);
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let index = Arc::new(
+        Ok(Arc::new(
             self.sst_format
                 .read_index(&handle.info, &obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))?,
-        );
-        if cache_blocks {
-            if let Some(ref cache) = self.cache {
-                cache
-                    .insert(
-                        (handle.id, handle.info.index_offset).into(),
-                        CachedEntry::with_sst_index(index.clone()),
-                    )
-                    .await;
-            }
-        }
-        Ok(index)
+        ))
+    }
+
+    /// Build a [`CacheLoader`] for a section-level cache entry (filter, stats,
+    /// or index). Panics on [`CacheTarget::Data`]: data blocks resolve through
+    /// [`Self::block_loader`] because they require a block index lookup.
+    ///
+    /// Builds a fresh boxed closure on every call, even when the cache hits and
+    /// the loader is never invoked; revisit if cache-hit allocations show up in
+    /// profiles.
+    fn read_loader(&self, handle: &SsTableHandle, target: CacheTarget) -> CacheLoader {
+        let info = handle.info.clone();
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let sst_format = self.sst_format.clone();
+        Box::new(move || {
+            Box::pin(async move {
+                let obj = ReadOnlyObject { object_store, path };
+                match target {
+                    CacheTarget::Filters => {
+                        let filters = sst_format
+                            .read_filters(&info, &obj)
+                            .await
+                            .map_err(|e| e.with_path(&obj.path))?;
+                        Ok(CachedEntry::with_filters(filters))
+                    }
+                    CacheTarget::Stats => {
+                        let stats = sst_format
+                            .read_stats(&info, &obj)
+                            .await
+                            .map_err(|e| e.with_path(&obj.path))?
+                            .ok_or_else(|| {
+                                crate::Error::data(
+                                    "stats_len > 0 but read_stats returned no stats".to_string(),
+                                )
+                            })?;
+                        Ok(CachedEntry::with_sst_stats(Arc::new(stats)))
+                    }
+                    CacheTarget::Index => {
+                        let index = sst_format
+                            .read_index(&info, &obj)
+                            .await
+                            .map_err(|e| e.with_path(&obj.path))?;
+                        Ok(CachedEntry::with_sst_index(Arc::new(index)))
+                    }
+                    CacheTarget::Data(_) => {
+                        unreachable!("data blocks use block_loader, not read_loader")
+                    }
+                }
+            })
+        })
+    }
+
+    /// Builds a fresh boxed closure on every call, even when the cache hits and
+    /// the loader is never invoked; revisit if cache-hit allocations show up in
+    /// profiles.
+    fn block_loader(
+        &self,
+        handle: &SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        block_num: usize,
+    ) -> CacheLoader {
+        let info = handle.info.clone();
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let sst_format = self.sst_format.clone();
+        Box::new(move || {
+            Box::pin(async move {
+                let obj = ReadOnlyObject { object_store, path };
+                let block = sst_format
+                    .read_block(&info, &index, block_num, &obj)
+                    .await
+                    .map_err(|e| e.with_path(&obj.path))?;
+                Ok(CachedEntry::with_block(Arc::new(block)))
+            })
+        })
     }
 
     #[allow(dead_code)]
@@ -564,6 +770,28 @@ impl TableStore {
         blocks: Range<usize>,
         cache_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
+        // etc.) take a dedup-aware fast-path: concurrent callers for the same block
+        // collapse onto one loader. Multi-block reads fall through to the range-
+        // coalesced path below, which issues one object-store GET per contiguous
+        // run of uncached blocks. Cache errors fall through to the direct load,
+        // which produces the authoritative error if any.
+        if cache_blocks && blocks.len() == 1 {
+            if let Some(ref cache) = self.cache {
+                let block_num = blocks.start;
+                let offset = index.borrow().block_meta().get(block_num).offset();
+                let cache_key: CachedKey = (handle.id, offset).into();
+                let loader = self.block_loader(handle, index.clone(), block_num);
+                if let Ok(entry) = cache.fetch_block(cache_key, loader).await {
+                    if let Some(block) = entry.block() {
+                        let mut result = VecDeque::with_capacity(1);
+                        result.push_back(block);
+                        return Ok(result);
+                    }
+                }
+            }
+        }
+
         // Create a ReadOnlyObject for accessing the SSTable file
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
@@ -742,6 +970,17 @@ impl TableStore {
     }
 }
 
+async fn wal_object_exists(
+    object_store: &Arc<dyn ObjectStore>,
+    path: &Path,
+) -> Result<bool, SlateDBError> {
+    match object_store.head(path).await {
+        Ok(_) => Ok(true),
+        Err(object_store::Error::NotFound { .. }) => Ok(false),
+        Err(e) => Err(SlateDBError::from(e)),
+    }
+}
+
 async fn write_sst_in_object_store(
     object_store: Arc<dyn ObjectStore>,
     id: &SsTableId,
@@ -761,6 +1000,20 @@ async fn write_sst_in_object_store(
             },
             _ => SlateDBError::from(e),
         })?;
+    Ok(())
+}
+
+async fn write_sst_streaming_in_object_store(
+    object_store: Arc<dyn ObjectStore>,
+    path: &Path,
+    encoded_sst: &EncodedSsTable,
+) -> Result<(), SlateDBError> {
+    let mut writer = BufWriter::new(object_store, path.clone());
+    for block in &encoded_sst.unconsumed_blocks {
+        writer.put(block.encoded_bytes.clone()).await?;
+    }
+    writer.put(encoded_sst.footer.clone()).await?;
+    writer.shutdown().await?;
     Ok(())
 }
 
@@ -859,6 +1112,94 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
 
     const ROOT: &str = "/root";
+
+    /// Wraps an object store: counts range-bounded `get_opts` calls and pauses the first
+    /// one until `release` is notified. Other methods just delegate. Shared by the
+    /// concurrent-read dedup tests.
+    #[cfg(feature = "foyer")]
+    #[derive(Debug)]
+    struct PauseFirstReadStore {
+        inner: Arc<dyn ObjectStore>,
+        get_range_count: std::sync::atomic::AtomicUsize,
+        paused: std::sync::atomic::AtomicBool,
+        first_read_started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[cfg(feature = "foyer")]
+    impl std::fmt::Display for PauseFirstReadStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "PauseFirstReadStore({})", self.inner)
+        }
+    }
+
+    #[cfg(feature = "foyer")]
+    #[async_trait::async_trait]
+    impl ObjectStore for PauseFirstReadStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            use std::sync::atomic::Ordering;
+            if options.range.is_some() {
+                self.get_range_count.fetch_add(1, Ordering::SeqCst);
+                if self.paused.swap(false, Ordering::SeqCst) {
+                    self.first_read_started.notify_one();
+                    self.release.notified().await;
+                }
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 
     fn make_store() -> Arc<dyn ObjectStore> {
         Arc::new(InMemory::new())
@@ -1063,6 +1404,147 @@ mod tests {
         // write another wal sst with the same id.
         let result = ts.write_sst(&wal_id, &table2, false).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_wal_fence_should_write_zero_bytes() {
+        let os = Arc::new(InMemory::new());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        ts.write_wal_fence(1).await.unwrap();
+
+        let metadata = ts.metadata(&SsTableId::Wal(1)).await.unwrap();
+        assert_eq!(metadata.size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_wal_fence_should_fail_when_fenced() {
+        let os = Arc::new(InMemory::new());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        ts.write_wal_fence(1).await.unwrap();
+        let result = ts.write_wal_fence(1).await;
+        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_wal_write_should_fail_after_zero_byte_fence() {
+        let os = Arc::new(InMemory::new());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        ts.write_wal_fence(1).await.unwrap();
+
+        let mut sst = ts.table_builder();
+        sst.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table = sst.build().await.unwrap();
+        let result = ts.write_sst(&SsTableId::Wal(1), &table, false).await;
+        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn should_use_streaming_upload_for_large_compacted_sst() {
+        // given:
+        let value_size = 11 * 1024 * 1024;
+        let os = Arc::new(
+            FlakyObjectStore::new(Arc::new(InMemory::new()), 0)
+                .with_single_put_size_limit(1024 * 1024),
+        );
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from(ROOT),
+            None,
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+
+        let mut builder = ts.table_builder();
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from(vec![b'x'; value_size])),
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let sst = builder.build().await.unwrap();
+
+        // when:
+        ts.write_sst(&id, &sst, false).await.unwrap();
+
+        // then:
+        assert_eq!(os.put_attempts(), 0);
+        assert_eq!(os.multipart_attempts(), 1);
+        ts.open_sst(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_keep_conditional_single_put_for_large_wal_sst() {
+        // given:
+        let value_size = 11 * 1024 * 1024;
+        let os = Arc::new(
+            FlakyObjectStore::new(Arc::new(InMemory::new()), 0)
+                .with_single_put_size_limit(1024 * 1024),
+        );
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from(ROOT),
+            None,
+        ));
+        let wal_id = SsTableId::Wal(1);
+
+        let mut builder = ts.table_builder();
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from(vec![b'x'; value_size])),
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let sst = builder.build().await.unwrap();
+
+        // when:
+        let result = ts.write_sst(&wal_id, &sst, false).await;
+
+        // then:
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::ObjectStoreError(_))
+        ));
+        assert_eq!(os.put_attempts(), 1);
+        assert_eq!(os.multipart_attempts(), 0);
     }
 
     #[tokio::test]
@@ -1635,6 +2117,54 @@ mod tests {
         }
     }
 
+    async fn put_wal_id(ts: &TableStore, store: &Arc<dyn ObjectStore>, id: u64) {
+        store
+            .put(&ts.path(&SsTableId::Wal(id)), Bytes::new().into())
+            .await
+            .unwrap();
+    }
+
+    fn make_ts(store: Arc<dyn ObjectStore>) -> Arc<TableStore> {
+        Arc::new(TableStore::new(
+            ObjectStores::new(store, None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ))
+    }
+
+    // Boundary values picked from the algorithm:
+    //   - ROUND_SIZE=8 -> first round probes offsets 1, 2, 4, ..., 128
+    //   - 2nd round starts at offset 256
+    // The (8, 16, 128, 256) cluster pins answers at probe offsets; the
+    // surrounding values (7/9, 127/129, 255/257) pin binary search inside
+    // each round. start_after=100 with stale ids 1..=100 also catches
+    // regressions where the start_after offset is dropped from the probe path.
+    #[rstest]
+    #[tokio::test]
+    async fn should_find_max_wal_id(
+        #[values(0, 100)] start_after: u64,
+        #[values(0, 1, 5, 7, 8, 9, 16, 127, 128, 129, 200, 255, 256, 257)] n_above: u64,
+    ) {
+        // given: stale ids at/below the hint (must be ignored) and n_above
+        // contiguous ids above the hint.
+        let store = make_store();
+        let ts = make_ts(store.clone());
+        for id in 1..=start_after {
+            put_wal_id(&ts, &store, id).await;
+        }
+        for id in (start_after + 1)..=(start_after + n_above) {
+            put_wal_id(&ts, &store, id).await;
+        }
+
+        // when: probing with start_after as the hint
+        let result = ts.last_seen_wal_id(start_after).await.unwrap();
+
+        // then: the high water mark above the hint is returned; if no ids
+        // exist above the hint, start_after itself is returned.
+        assert_eq!(result, start_after + n_above);
+    }
+
     #[tokio::test]
     async fn test_retry_write_sst_on_timeout_and_verify_bytes() {
         // Given a flaky store that times out on the first put_opts
@@ -1839,5 +2369,230 @@ mod tests {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }
         }
+    }
+
+    /// End-to-end test: concurrent index reads through `TableStore` issue a single
+    /// object-store request to load the index, even when the underlying object store
+    /// is slow.
+    ///
+    /// Determinism is anchored at two points:
+    ///
+    /// 1. The first range-bounded `get_opts` call to the wrapped object store signals
+    ///    `first_read_started` and parks on `release`. Once we see that signal we
+    ///    know task A's load is in flight inside foyer's spawned loader task.
+    /// 2. `tokio::join!(task_b, release_task)` polls members in source order. Task
+    ///    B's first poll synchronously joins foyer's in-flight fetch (no second
+    ///    object-store call); the release fires only after B has registered as a
+    ///    waiter.
+    #[cfg(feature = "foyer")]
+    #[tokio::test]
+    async fn dedups_concurrent_reads_through_object_store() {
+        use crate::db_cache::foyer::FoyerCache;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        // given: an SST written through a plain in-memory store
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+
+        let writer = TableStore::new(
+            ObjectStores::new(inner.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"k1", b"v1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"k2", b"v2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
+
+        // given: the same store wrapped so the first range read pauses, behind a
+        // real FoyerCache that supports dedup
+        let first_read_started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let counting = Arc::new(PauseFirstReadStore {
+            inner: inner.clone(),
+            get_range_count: AtomicUsize::new(0),
+            paused: AtomicBool::new(true),
+            first_read_started: first_read_started.clone(),
+            release: release.clone(),
+        });
+        let counting_store: Arc<dyn ObjectStore> = counting.clone();
+        let cache: Arc<dyn DbCache> = Arc::new(FoyerCache::new());
+        let reader = Arc::new(TableStore::new(
+            ObjectStores::new(counting_store, None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        ));
+
+        // when: task A starts reading the index; its loader will pause inside the
+        // wrapped object store
+        let handle_a = tokio::spawn({
+            let reader = reader.clone();
+            let handle = handle.clone();
+            async move { reader.read_index(&handle, true).await }
+        });
+
+        // wait until A's read has reached the object store and is paused
+        first_read_started.notified().await;
+        assert_eq!(
+            counting.get_range_count.load(Ordering::SeqCst),
+            1,
+            "exactly one read should have hit the store so far"
+        );
+
+        // when: task B races A for the same index. join! polls B first, so B's
+        // fetch_index reaches foyer's dedup map before release_task fires.
+        let task_b = {
+            let reader = reader.clone();
+            let handle = handle.clone();
+            async move { reader.read_index(&handle, true).await }
+        };
+        let release_task = {
+            let release = release.clone();
+            async move {
+                tokio::task::yield_now().await;
+                release.notify_one();
+            }
+        };
+        let (b_result, _) = tokio::join!(task_b, release_task);
+
+        // then: both callers got an index, and exactly one object-store read happened
+        let a_result = handle_a.await.expect("task A panicked");
+        assert!(a_result.is_ok(), "task A failed: {:?}", a_result.err());
+        assert!(b_result.is_ok(), "task B failed: {:?}", b_result.err());
+        assert_eq!(
+            counting.get_range_count.load(Ordering::SeqCst),
+            1,
+            "concurrent index reads must dedup into a single object-store read"
+        );
+    }
+
+    /// End-to-end test: concurrent single-block reads through `TableStore` issue a
+    /// single object-store request, even when the underlying object store is slow.
+    /// Same determinism strategy as the index test above. Exercises the fast-path
+    /// in `read_blocks_using_index` that routes 1-block reads (e.g. point-gets via
+    /// `SstIterator::for_key`) through `cache.fetch_block`.
+    #[cfg(feature = "foyer")]
+    #[tokio::test]
+    async fn dedups_concurrent_block_reads_through_object_store() {
+        use crate::db_cache::foyer::FoyerCache;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        // given: an SST written through a plain in-memory store
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+
+        let writer = TableStore::new(
+            ObjectStores::new(inner.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"k1", b"v1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"k2", b"v2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
+
+        // given: pre-load the index via the unwrapped writer so the wrapped store
+        // sees only block reads (the fast-path takes `index` as an argument, so no
+        // extra index read happens inside the race).
+        let index = writer.read_index(&handle, false).await.unwrap();
+
+        // given: the same store wrapped so the first range read pauses, behind a
+        // real FoyerCache that supports dedup
+        let first_read_started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let counting = Arc::new(PauseFirstReadStore {
+            inner: inner.clone(),
+            get_range_count: AtomicUsize::new(0),
+            paused: AtomicBool::new(true),
+            first_read_started: first_read_started.clone(),
+            release: release.clone(),
+        });
+        let counting_store: Arc<dyn ObjectStore> = counting.clone();
+        let cache: Arc<dyn DbCache> = Arc::new(FoyerCache::new());
+        let reader = Arc::new(TableStore::new(
+            ObjectStores::new(counting_store, None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        ));
+
+        // when: task A starts a single-block read; its loader will pause inside the
+        // wrapped object store
+        let handle_a = tokio::spawn({
+            let reader = reader.clone();
+            let handle = handle.clone();
+            let index = index.clone();
+            async move {
+                reader
+                    .read_blocks_using_index(&handle, index, 0..1, true)
+                    .await
+            }
+        });
+
+        // wait until A's read has reached the object store and is paused
+        first_read_started.notified().await;
+        assert_eq!(
+            counting.get_range_count.load(Ordering::SeqCst),
+            1,
+            "exactly one read should have hit the store so far"
+        );
+
+        // when: task B races A for the same block. join! polls B first, so B's
+        // fetch_block reaches foyer's dedup map before release_task fires.
+        let task_b = {
+            let reader = reader.clone();
+            let handle = handle.clone();
+            let index = index.clone();
+            async move {
+                reader
+                    .read_blocks_using_index(&handle, index, 0..1, true)
+                    .await
+            }
+        };
+        let release_task = {
+            let release = release.clone();
+            async move {
+                tokio::task::yield_now().await;
+                release.notify_one();
+            }
+        };
+        let (b_result, _) = tokio::join!(task_b, release_task);
+
+        // then: both callers got the block, and exactly one object-store read happened
+        let a_result = handle_a.await.expect("task A panicked");
+        assert!(a_result.is_ok(), "task A failed: {:?}", a_result.err());
+        assert!(b_result.is_ok(), "task B failed: {:?}", b_result.err());
+        assert_eq!(a_result.as_ref().unwrap().len(), 1);
+        assert_eq!(b_result.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            counting.get_range_count.load(Ordering::SeqCst),
+            1,
+            "concurrent single-block reads must dedup into a single object-store read"
+        );
     }
 }
