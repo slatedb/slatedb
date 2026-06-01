@@ -109,6 +109,9 @@ struct WalBuffer {
     last_seq: u64,
     /// size of the entries that has been added to the WAL buffer in bytes
     entries_size: usize,
+    /// Tracked capacity of the VecDeque backing buffer in bytes.
+    /// This reflects the actual heap allocation (`capacity * size_of::<RowEntry>()`).
+    tracked_capacity_bytes: usize,
 }
 
 /// An iterator over entries in a WalBuffer.
@@ -243,22 +246,24 @@ impl WalBufferManager {
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
-        // Track the WAL's structural overhead against the write buffer budget.
+        // Track the WAL's actual heap allocation against the write buffer budget.
         // The key/value data bytes are already accounted for by the write batch
-        // permit (which is transferred to the memtable). The WAL only adds
-        // per-entry struct overhead (Bytes handles, seq, timestamps, VecDeque slot).
-        let overhead = entries.len() * std::mem::size_of::<RowEntry>();
-        if overhead > 0 {
-            let permit = self.write_buffer_manager.force_acquire(overhead);
-            let inner = self.inner.read();
+        // permit (which is transferred to the memtable). The WAL tracks the
+        // VecDeque's backing buffer growth — when the VecDeque reallocates to
+        // fit new entries, we charge the additional capacity to the budget.
+        let mut inner = self.inner.write();
+        let mut total_growth = 0usize;
+        for entry in entries {
+            total_growth += inner.current_wal.append(entry.clone());
+        }
+        let durable_watcher = inner.current_wal.durable_watcher();
+
+        if total_growth > 0 {
+            let permit = self.write_buffer_manager.force_acquire(total_growth);
             inner.wal_permit.merge(&permit);
         }
 
-        let mut inner = self.inner.write();
-        for entry in entries {
-            inner.current_wal.append(entry.clone());
-        }
-        Ok(inner.current_wal.durable_watcher())
+        Ok(durable_watcher)
     }
 
     /// Check if we need to flush the wal with considering max_wal_size. the checking over `max_wal_size`
@@ -455,7 +460,7 @@ impl WalBufferManager {
         let last_flushed_seq = inner.oracle.last_remote_persisted_seq();
 
         let mut releaseable_count = 0;
-        let mut released_entries = 0usize;
+        let mut released_capacity_bytes = 0usize;
         for (_, wal) in inner.immutable_wals.iter() {
             if wal
                 .last_seq()
@@ -463,7 +468,7 @@ impl WalBufferManager {
                 .unwrap_or(false)
             {
                 releaseable_count += 1;
-                released_entries += wal.len();
+                released_capacity_bytes += wal.tracked_capacity_bytes();
             } else {
                 break;
             }
@@ -476,12 +481,11 @@ impl WalBufferManager {
             );
             inner.immutable_wals.drain(..releaseable_count);
 
-            // Release the structural overhead for the drained entries from the
-            // WAL permit. `take` splits the released bytes into a temporary permit
-            // which is immediately dropped, returning them to the budget.
-            if released_entries > 0 {
-                let released_overhead = released_entries * std::mem::size_of::<RowEntry>();
-                drop(inner.wal_permit.take(released_overhead));
+            // Release the tracked VecDeque capacity for the drained WALs from
+            // the WAL permit. `take` splits the released bytes into a temporary
+            // permit which is immediately dropped, returning them to the budget.
+            if released_capacity_bytes > 0 {
+                drop(inner.wal_permit.take(released_capacity_bytes));
             }
         }
     }
@@ -508,16 +512,32 @@ impl WalBuffer {
             last_tick: i64::MIN,
             last_seq: 0,
             entries_size: 0,
+            tracked_capacity_bytes: 0,
         }
     }
 
-    fn append(&mut self, entry: RowEntry) {
+    /// Appends an entry and returns the additional bytes the VecDeque
+    /// allocated (capacity growth) that need to be tracked.
+    fn append(&mut self, entry: RowEntry) -> usize {
         if let Some(ts) = entry.create_ts {
             self.last_tick = ts;
         }
         self.last_seq = entry.seq;
         self.entries_size += entry.estimated_size();
+
+        let cap_before = self.entries.capacity();
         self.entries.push_back(entry);
+        let cap_after = self.entries.capacity();
+
+        let growth_bytes = (cap_after - cap_before) * std::mem::size_of::<RowEntry>();
+        self.tracked_capacity_bytes += growth_bytes;
+        growth_bytes
+    }
+
+    /// Returns the total tracked capacity bytes for this buffer.
+    /// This is the actual heap allocation for the VecDeque backing array.
+    fn tracked_capacity_bytes(&self) -> usize {
+        self.tracked_capacity_bytes
     }
 
     /// Returns an iterator to iterate over the entries.

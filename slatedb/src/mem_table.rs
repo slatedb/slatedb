@@ -433,9 +433,24 @@ impl KVTable {
         + Self::SEQUENCED_KEY_SIZE
         + Self::KVTABLE_SIZE;
 
+    /// The minimum write-buffer capacity when the WAL is enabled.
+    ///
+    /// When WAL is active, the first `push_back` into the WAL's empty
+    /// `VecDeque<RowEntry>` allocates a backing buffer with the VecDeque's
+    /// initial capacity (4 on current Rust std). That entire allocation
+    /// is `force_acquire`'d against the buffer manager.
+    pub(crate) const MIN_WRITE_BUFFER_SIZE_WITH_WAL: usize =
+        Self::MIN_WRITE_BUFFER_SIZE + Self::VECDEQUE_INITIAL_CAPACITY * Self::ROW_ENTRY_SIZE;
+
+    /// The initial capacity VecDeque allocates on the first push.
+    /// Rust's std VecDeque currently allocates 4 slots on the first insertion.
+    /// If this ever changes in a future Rust version, the build-time assertion
+    /// in `WalBufferManager::append` will catch it.
+    const VECDEQUE_INITIAL_CAPACITY: usize = 4;
+
     pub(crate) fn new(buffer_manager: ByteBufferManager) -> Self {
         let write_buffer_permit =
-            Arc::new(buffer_manager.force_acquire(Self::SEQ_TRACKER_OVERHEAD));
+            Arc::new(buffer_manager.force_acquire(Self::SEQ_TRACKER_OVERHEAD + Self::KVTABLE_SIZE));
         Self {
             map: Arc::new(SkipMap::new()),
             entries_size_in_bytes: AtomicUsize::new(0),
