@@ -2324,6 +2324,34 @@ mod tests {
         assert_eq!(result, DeleteResult::default());
     }
 
+    #[tokio::test]
+    async fn test_delete_ssts_not_found() {
+        // Azure/GCP return NotFound (not Ok) when deleting an already-gone
+        // object. `delete_ssts` must treat those as deleted, not as 
+        // failures, and the batch must not short-circuit on them.
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(FlakyObjectStore::new(Arc::new(InMemory::new()), 0).with_delete_not_found());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(store, None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        let ids: Vec<SsTableId> = (0..3)
+            .map(|_| SsTableId::Compacted(ulid::Ulid::new()))
+            .collect();
+
+        let result = ts.delete_ssts(&ids).await;
+        assert_eq!(
+            result,
+            DeleteResult {
+                deleted: 3,
+                failed: 0
+            }
+        );
+    }
+
     #[rstest]
     #[case::main_only(make_store(), None)]
     #[case::main_and_wal(make_store(), Some(make_store()))]
