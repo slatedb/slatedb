@@ -18,6 +18,7 @@ pub const REQUEST_COUNT: &str = db_stat_name!("request_count");
 pub const WRITE_OPS: &str = db_stat_name!("write_ops");
 pub const WRITE_BATCH_COUNT: &str = db_stat_name!("write_batch_count");
 pub const BACKPRESSURE_COUNT: &str = db_stat_name!("backpressure_count");
+pub const L0_STALL_COUNT: &str = db_stat_name!("l0_stall_count");
 pub const IMMUTABLE_MEMTABLE_FLUSHES: &str = db_stat_name!("immutable_memtable_flushes");
 pub const WAL_BUFFER_FLUSHES: &str = db_stat_name!("wal_buffer_flushes");
 pub const WAL_BUFFER_FLUSH_REQUESTS: &str = db_stat_name!("wal_buffer_flush_requests");
@@ -56,6 +57,7 @@ pub(crate) struct DbStatsInner {
     pub(crate) sst_filter_prefix_positives: Arc<dyn CounterFn>,
     pub(crate) sst_filter_prefix_negatives: Arc<dyn CounterFn>,
     pub(crate) backpressure_count: Arc<dyn CounterFn>,
+    pub(crate) l0_stall_count: Arc<dyn CounterFn>,
     pub(crate) get_requests: Arc<dyn CounterFn>,
     pub(crate) scan_requests: Arc<dyn CounterFn>,
     pub(crate) flush_requests: Arc<dyn CounterFn>,
@@ -117,6 +119,7 @@ impl DbStats {
                 .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)])
                 .register(),
             backpressure_count: recorder.counter(BACKPRESSURE_COUNT).register(),
+            l0_stall_count: recorder.counter(L0_STALL_COUNT).register(),
             get_requests: recorder
                 .counter(REQUEST_COUNT)
                 .labels(&[("op", "get")])
