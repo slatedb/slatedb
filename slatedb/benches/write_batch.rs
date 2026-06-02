@@ -16,29 +16,35 @@ const EXTRACT_ENTRY_COUNT: usize = 1_024;
 const EXTRACT_MERGE_KEY_COUNT: usize = 256;
 const MERGES_PER_KEY: usize = 3;
 
-struct ConcatMergeOperator;
+struct SizeSumMergeOperator;
 
-impl MergeOperator for ConcatMergeOperator {
+impl MergeOperator for SizeSumMergeOperator {
     fn merge(
         &self,
         _key: &Bytes,
         existing_value: Option<Bytes>,
         operand: Bytes,
     ) -> Result<Bytes, MergeOperatorError> {
-        let Some(base) = existing_value else {
-            return Ok(operand);
-        };
-        let mut merged = Vec::with_capacity(base.len() + operand.len());
-        merged.extend_from_slice(&base);
-        merged.extend_from_slice(&operand);
-        Ok(Bytes::from(merged))
+        let size = existing_value.as_ref().map_or(0, Bytes::len) + operand.len();
+        Ok(Bytes::copy_from_slice(&(size as u64).to_le_bytes()))
+    }
+
+    fn merge_batch(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        let size = existing_value.as_ref().map_or(0, Bytes::len)
+            + operands.iter().map(Bytes::len).sum::<usize>();
+        Ok(Bytes::copy_from_slice(&(size as u64).to_le_bytes()))
     }
 }
 
-fn concat_merge_operator() -> Arc<dyn MergeOperator + Send + Sync> {
+fn size_sum_merge_operator() -> Arc<dyn MergeOperator + Send + Sync> {
     static MERGE_OPERATOR: OnceLock<Arc<dyn MergeOperator + Send + Sync>> = OnceLock::new();
     MERGE_OPERATOR
-        .get_or_init(|| Arc::new(ConcatMergeOperator))
+        .get_or_init(|| Arc::new(SizeSumMergeOperator))
         .clone()
 }
 
@@ -284,7 +290,7 @@ fn bench_write_batch(c: &mut Criterion) {
                         100,
                         1_000,
                         None,
-                        Some(concat_merge_operator()),
+                        Some(size_sum_merge_operator()),
                         None,
                     )
                     .await
