@@ -424,42 +424,26 @@ segments that actually exist. The query engine does not need to compute all poss
 those segments for existence. For persisted data, existing segments can be read from the manifest.
 However, for existing segments that only exist in memory, an API is required.
 
-For listing existing segments, a new method is declared on `DbMetadataOps` (in `slatedb/src/ops.rs`):
+For listing existing segments, the type `DbStatus` that is returned by `DbMetadataOps::subscribe()`
+is extended by a method `list_segments()` (in `slatedb/src/db_status.rs`):
 
 ```rust
-struct Segments {
-    segments: Vec<Bytes>,
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SegmentPrefix {
+    pub prefix: Bytes,
 }
 
-fn list_segments(
-    &self,
-    durability_filter: DurabilityLevel,
-) -> Result<Segments, crate::Error>;
-```
-
-`Db` and `DbReader` implement it. Each also exposes a matching method
-so callers who have not imported the trait can use it directly:
-
-```rust
-impl Db {
+impl DbStatus {
     pub fn list_segments(
         &self,
         durability_filter: DurabilityLevel,
-    ) -> Result<Segments, crate::Error>;
-}
-
-impl DbReader {
-    pub fn list_segments(
-        &self,
-        durability_filter: DurabilityLevel,
-    ) -> Result<Segments, crate::Error>;
+    ) -> Result<Vec<SegmentPrefix>, crate::Error>;    // new
 }
 ```
+The returned `Vec<SegmentPrefix>` is:
 
-The returned `Vec<Bytes>` in `Segments` is:
-
-- deduplicated — a prefix appearing in more than one source (e.g. both
-  the manifest and the active memtable) appears once,
+- deduplicated — a prefix appearing in more than one source
+  (manifest, current memtable, and immutable memtables) appears once,
 - sorted in ascending prefix order (`Bytes::cmp`),
 - empty when the database is unsegmented (no extractor was ever
   configured on the writer).
@@ -476,9 +460,16 @@ reused unchanged from the read path: `Remote` and `Memory`.
   storage.
 - `DurabilityLevel::Memory` — Remote, plus prefixes touched by writes
   still held in the active and immutable in-memory memtables (the
-  `touched_segments` set maintained by the write path, RFC-0024).
+  `touched_segments` set maintained by the write path).
 
 A prefix present in both sources is reported once.
+
+#### Notifying changes to segments
+
+The watch receiver returned by `subscribe()` is already notified about changes to
+persisted segments since changes to the persisted segments are changes to
+the manifest. For listing the in-memory segments as well, the watch receiver will also
+be notified about changes to the in-memory segments.
 
 #### Reader-side extractor
 
@@ -528,15 +519,7 @@ A reader that has no extractor configured cannot truthfully fulfil
 `DurabilityLevel::Memory`: its WAL-replayed memtables carry no touched
 prefixes, so the returned list would silently omit unpersisted segments.
 The implementation therefore rejects this combination with a typed
-error:
-
-```rust
-if durability_filter == DurabilityLevel::Memory
-    && self.inner.segment_extractor.is_none()
-{
-    return Err(SlateDBError::SegmentExtractorRequired.into());
-}
-```
+error.
 
 A new error variant is added:
 
@@ -548,41 +531,51 @@ SegmentExtractorRequired,
 This variant maps to `ErrorKind::Invalid` via `Error::invalid(msg)`,
 matching the other extractor-related variants.
 
-The writer (`Db`) never raises this error. The writer's open-time
-validation in `DbBuilder::build` already guarantees that a segmented
-database has its extractor configured; an unsegmented writer
+`DbStatus` received from the writer (`Db`) never raises this error.
+The writer's open-time validation in `DbBuilder::build` already guarantees
+that a segmented database has its extractor configured; an unsegmented writer
 legitimately returns an empty list at any durability level.
-`Db::list_segments` is always `Ok`.
+`DbStatus::list_segments` is always `Ok`.
 
 #### Examples
 
-A writer with the 3-byte fixed extractor, segments persisted for `aaa`,
-unpersisted writes to `bbb`:
+Assume a writer with the 3-byte fixed extractor.
+A segment `aaa` is persisted, the watch receiver returned by `subscribe()` is notified about a
+manifest change. Calls to `list_segments()` on the received `DbStatus` behave as follows:
 
 ```rust
-db.list_segments(DurabilityLevel::Remote)?; // -> [b"aaa"]
-db.list_segments(DurabilityLevel::Memory)?; // -> [b"aaa", b"bbb"]
+db_status.list_segments(DurabilityLevel::Remote)?; // -> [b"aaa"]
+db_status.list_segments(DurabilityLevel::Memory)?; // -> [b"aaa"]
 ```
 
-An unsegmented writer:
+A segment `bbb` is created in the active memtable, the watch receiver returned by
+`subscribe()` is notified about the new segment.
+Calls to `list_segments()` on the received `DbStatus` behave as follows:
 
 ```rust
-db.list_segments(DurabilityLevel::Remote)?; // -> []
-db.list_segments(DurabilityLevel::Memory)?; // -> []
+db_status.list_segments(DurabilityLevel::Remote)?; // -> [b"aaa"]
+db_status.list_segments(DurabilityLevel::Memory)?; // -> [b"aaa", b"bbb"]
 ```
 
 A reader opened with no extractor against the same segmented database:
 
 ```rust
-reader.list_segments(DurabilityLevel::Remote)?; // -> [b"aaa"]
-reader.list_segments(DurabilityLevel::Memory)
+db_status.list_segments(DurabilityLevel::Remote)?; // -> [b"aaa"]
+db_status.list_segments(DurabilityLevel::Memory)
 // -> Err(SegmentExtractorRequired) [ErrorKind::Invalid]
 ```
 
 A reader opened with the matching extractor:
 
 ```rust
-reader.list_segments(DurabilityLevel::Memory)?; // -> [b"aaa", b"bbb"]
+db_status.list_segments(DurabilityLevel::Memory)?; // -> [b"aaa", b"bbb"]
+```
+
+Writer or reader opened on an unsegmented database:
+
+```rust
+db_status.list_segments(DurabilityLevel::Remote)?; // -> []
+db_status.list_segments(DurabilityLevel::Memory)?; // -> []
 ```
 
 ### Compaction
