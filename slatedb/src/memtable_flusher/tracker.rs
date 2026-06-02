@@ -286,10 +286,17 @@ impl FlushTracker {
                 });
             let reserved = self.frontier.reserved_l0_slots();
             if max_l0_len + reserved >= settings.l0_max_ssts {
-                self.inner.db_stats.l0_stall_count.increment(1);
+                self.inner.db_stats.l0_stall_count_num_ssts.increment(1);
                 return false;
             }
-            return max_peak + reserved < settings.l0_max_ssts_per_key;
+            if max_peak + reserved >= settings.l0_max_ssts_per_key {
+                self.inner
+                    .db_stats
+                    .l0_stall_count_num_ssts_per_key
+                    .increment(1);
+                return false;
+            }
+            return true;
         }
         // Per-segment check: every touched segment must have room
         // accounting for in-flight reservations against that segment.
@@ -306,10 +313,14 @@ impl FlushTracker {
                 };
             let reserved = self.frontier.reserved_l0_slots_for(prefix);
             if tree_l0_len + reserved >= settings.l0_max_ssts {
-                self.inner.db_stats.l0_stall_count.increment(1);
+                self.inner.db_stats.l0_stall_count_num_ssts.increment(1);
                 return false;
             }
             if tree_peak + reserved >= settings.l0_max_ssts_per_key {
+                self.inner
+                    .db_stats
+                    .l0_stall_count_num_ssts_per_key
+                    .increment(1);
                 return false;
             }
         }
@@ -513,7 +524,9 @@ mod tests {
     use crate::db_state::{
         FilterFormat, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
-    use crate::db_stats::L0_STALL_COUNT;
+    use crate::db_stats::{
+        L0_STALL_COUNT, L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS, L0_STALL_TYPE_NUM_SSTS_PER_KEY,
+    };
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
@@ -534,7 +547,8 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorder, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
+        MetricsRecorderHelper,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -1176,7 +1190,23 @@ mod tests {
         assert!(timeout(Duration::from_millis(100), &mut flush)
             .await
             .is_err());
-        assert!(lookup_metric(&metrics_recorder, L0_STALL_COUNT).unwrap_or(0) > 0);
+        assert!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            )
+            .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS_PER_KEY)],
+            ),
+            Some(0)
+        );
 
         {
             let mut guard = flusher.inner.state.write();
@@ -1427,7 +1457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l0_stall_count_does_not_increment_for_per_key_cap() {
+    async fn l0_stall_count_increments_for_per_key_cap() {
         let settings = Settings {
             l0_max_ssts: 100,
             l0_max_ssts_per_key: 1,
@@ -1459,7 +1489,23 @@ mod tests {
         assert!(timeout(Duration::from_millis(100), &mut flush)
             .await
             .is_err());
-        assert_eq!(lookup_metric(&metrics_recorder, L0_STALL_COUNT), Some(0));
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            ),
+            Some(0)
+        );
+        assert!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS_PER_KEY)],
+            )
+            .unwrap_or(0)
+                > 0
+        );
 
         {
             let mut guard = flusher.inner.state.write();
