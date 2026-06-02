@@ -51,6 +51,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
     pub(crate) ops: BTreeMap<Bytes, SmallVec<[WriteOp; 1]>>,
+    pub(crate) op_count: usize,
     pub(crate) txn_id: Option<Uuid>,
     pub(crate) has_merge_ops: bool,
 }
@@ -141,6 +142,7 @@ impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {
             ops: BTreeMap::new(),
+            op_count: 0,
             txn_id: None,
             has_merge_ops: false,
         }
@@ -149,6 +151,7 @@ impl WriteBatch {
     pub(crate) fn with_txn_id(self, txn_id: Uuid) -> Self {
         Self {
             ops: self.ops,
+            op_count: self.op_count,
             txn_id: Some(txn_id),
             has_merge_ops: self.has_merge_ops,
         }
@@ -232,11 +235,14 @@ impl WriteBatch {
 
         // put will overwrite the existing key so we can safely
         // remove all previous entries.
-        self.ops.remove(&key);
-        self.ops.insert(
+        let previous = self.ops.insert(
             key.clone(),
             smallvec![WriteOp::Put(key, value, options.clone())],
         );
+        self.op_count += 1;
+        if let Some(previous) = previous {
+            self.op_count -= previous.len();
+        }
     }
 
     /// Merge a key-value pair into the batch. Keys must not be empty.
@@ -267,6 +273,7 @@ impl WriteBatch {
             ));
 
         self.has_merge_ops = true;
+        self.op_count += 1;
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
@@ -277,9 +284,13 @@ impl WriteBatch {
 
         // delete will overwrite the existing key so we can safely
         // remove all previous entries.
-        self.ops.remove(&key);
-        self.ops
+        let previous = self
+            .ops
             .insert(key.clone(), smallvec![WriteOp::Delete(key)]);
+        self.op_count += 1;
+        if let Some(previous) = previous {
+            self.op_count -= previous.len();
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -291,7 +302,7 @@ impl WriteBatch {
     }
 
     pub(crate) fn op_count(&self) -> usize {
-        self.ops.values().map(|ops| ops.len()).sum()
+        self.op_count
     }
 
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
@@ -593,6 +604,7 @@ mod tests {
         batch.put(b"key1", b"value2"); // Should overwrite previous
 
         assert_eq!(batch.ops.len(), 1); // Only one entry due to deduplication
+        assert_eq!(batch.op_count(), 1);
         let op = only_op(&batch, b"key1");
         match op {
             WriteOp::Put(_, value, _) => assert_eq!(value.as_ref(), b"value2"),
@@ -962,6 +974,14 @@ mod tests {
         batch.put(b"key1", b"final");
 
         assert!(batch.has_merge_ops());
+        assert_eq!(batch.op_count(), 1);
+        match only_op(&batch, b"key1") {
+            WriteOp::Put(key, value, _) => {
+                assert_eq!(key.as_ref(), b"key1");
+                assert_eq!(value.as_ref(), b"final");
+            }
+            _ => panic!("Expected Put operation"),
+        }
     }
 
     #[test]
@@ -1071,6 +1091,7 @@ mod tests {
 
         // Then: only the put operation should remain (merge is deduplicated by put)
         assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.op_count(), 1);
 
         let op = only_op(&batch, b"key1");
         match op {
@@ -1093,6 +1114,7 @@ mod tests {
 
         // Then: only the delete operation should remain (merge is deduplicated by delete)
         assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.op_count(), 1);
 
         let op = only_op(&batch, b"key1");
         match op {
