@@ -257,12 +257,13 @@ impl WriteBatch {
     {
         self.assert_kv(&key, &value);
 
-        let key = Bytes::copy_from_slice(key.as_ref());
-        let op = WriteOp::Merge(Bytes::copy_from_slice(value.as_ref()), options.clone());
-        if let Some(ops) = self.ops.get_mut(&key) {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        let op = WriteOp::Merge(Bytes::copy_from_slice(value), options.clone());
+        if let Some(ops) = self.ops.get_mut(key) {
             ops.push(op);
         } else {
-            self.ops.insert(key, smallvec![op]);
+            self.ops.insert(Bytes::copy_from_slice(key), smallvec![op]);
         }
 
         self.has_merge_ops = true;
