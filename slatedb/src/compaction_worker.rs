@@ -677,7 +677,12 @@ pub(crate) fn build_handler(
     ));
 
     let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
-    info!("starting compaction worker [worker_id={}]", worker_id);
+    info!(
+        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
+        worker_id,
+        options.max_concurrent_compactions,
+        options.compactions_poll_interval,
+    );
 
     let handler = CompactionWorkerHandler::new(
         worker_id,

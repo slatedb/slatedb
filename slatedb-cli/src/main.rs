@@ -8,6 +8,7 @@ use slatedb::compactor::{
 };
 use slatedb::config::{
     CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    Settings,
 };
 use slatedb::seq_tracker::FindOption;
 use std::error::Error;
@@ -361,7 +362,25 @@ async fn exec_run_worker(
     object_store: std::sync::Arc<dyn object_store::ObjectStore>,
     cancellation_token: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
+    let options = match Settings::load() {
+        Ok(s) => {
+            let opts = s.compaction_worker_options.unwrap_or_default();
+            tracing::info!(
+                "loaded worker options from SlateDb.toml [options={:?}]",
+                opts
+            );
+            opts
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to load SlateDb.toml, using defaults [error={:?}]",
+                e
+            );
+            Default::default()
+        }
+    };
     let worker = CompactionWorkerBuilder::new(path, object_store)
+        .with_options(options)
         .build()
         .await?;
 

@@ -722,6 +722,10 @@ pub struct Settings {
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
 
+    /// Configuration options for a standalone compaction worker (`run-worker`).
+    /// When `None`, worker defaults are used.
+    pub compaction_worker_options: Option<CompactionWorkerOptions>,
+
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
@@ -967,6 +971,7 @@ impl Default for Settings {
             l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
+            compaction_worker_options: Some(CompactionWorkerOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
