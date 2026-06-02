@@ -4,7 +4,7 @@
 // Run with: cargo bench -p slatedb --features bench-internal --bench write_batch
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{MergeOptions, PutOptions, Ttl};
 use slatedb::{write_batch_benches, MergeOperator, MergeOperatorError, WriteBatch};
@@ -13,8 +13,14 @@ use tokio::runtime::Runtime;
 
 const VALUE_SIZE: usize = 128;
 const EXTRACT_ENTRY_COUNT: usize = 1_024;
-const EXTRACT_MERGE_KEY_COUNT: usize = 256;
-const MERGES_PER_KEY: usize = 3;
+const MERGE_BATCH_SCENARIOS: &[(usize, usize)] = &[
+    // Each scenario is (key_count, merges_per_key).
+    (256, 3),
+    (256, 100),
+    (16, 1_000),
+    (1, 1_000),
+    (1, 10_000),
+];
 
 struct SizeSumMergeOperator;
 
@@ -84,17 +90,21 @@ fn make_batch_without_merges() -> WriteBatch {
     batch
 }
 
-fn make_batch_with_merges() -> WriteBatch {
+fn merge_batch_scenario_id(key_count: usize, merges_per_key: usize) -> String {
+    format!("{key_count}_keys/{merges_per_key}_merges_per_key")
+}
+
+fn make_batch_with_merges(key_count: usize, merges_per_key: usize) -> WriteBatch {
     let mut batch = WriteBatch::new();
     let put_options = put_options();
     let merge_options = merge_options();
-    for index in 0..EXTRACT_MERGE_KEY_COUNT {
+    for index in 0..key_count {
         let key = key(index);
         batch.put_bytes_with_options(key.clone(), value(index), &put_options);
-        for merge_index in 0..MERGES_PER_KEY {
+        for merge_index in 0..merges_per_key {
             batch.merge_with_options(
                 &key,
-                value(index * MERGES_PER_KEY + merge_index),
+                value(index * merges_per_key + merge_index),
                 &merge_options,
             );
         }
@@ -117,7 +127,17 @@ fn bench_write_batch(c: &mut Criterion) {
     let put_options = put_options();
     let merge_options = merge_options();
     let batch_without_merges = make_batch_without_merges();
-    let batch_with_merges = make_batch_with_merges();
+    let batches_with_merges: Vec<_> = MERGE_BATCH_SCENARIOS
+        .iter()
+        .copied()
+        .map(|(key_count, merges_per_key)| {
+            (
+                key_count,
+                merges_per_key,
+                make_batch_with_merges(key_count, merges_per_key),
+            )
+        })
+        .collect();
     let batch_with_repeated_overwrites = make_batch_with_repeated_overwrites();
 
     let mut group = c.benchmark_group("write_batch");
@@ -157,22 +177,35 @@ fn bench_write_batch(c: &mut Criterion) {
         );
     });
 
-    group.bench_function("put_bytes_with_options/overwrite_existing_key", |b| {
-        b.iter_batched(
-            || {
-                (
-                    batch_with_merges.clone(),
-                    key(0),
-                    value(EXTRACT_MERGE_KEY_COUNT + 1),
-                )
+    for (key_count, merges_per_key, batch_with_merges) in &batches_with_merges {
+        let key_count = *key_count;
+        let merges_per_key = *merges_per_key;
+        let scenario_id = merge_batch_scenario_id(key_count, merges_per_key);
+
+        group.bench_with_input(
+            BenchmarkId::new(
+                "put_bytes_with_options/overwrite_existing_key",
+                scenario_id.clone(),
+            ),
+            batch_with_merges,
+            |b, batch_with_merges| {
+                b.iter_batched(
+                    || {
+                        (
+                            batch_with_merges.clone(),
+                            key(0),
+                            value(key_count * merges_per_key + 1),
+                        )
+                    },
+                    |(mut batch, key, value)| {
+                        batch.put_bytes_with_options(key, value, &put_options);
+                        black_box(batch)
+                    },
+                    BatchSize::LargeInput,
+                );
             },
-            |(mut batch, key, value)| {
-                batch.put_bytes_with_options(key, value, &put_options);
-                black_box(batch)
-            },
-            BatchSize::LargeInput,
         );
-    });
+    }
 
     group.bench_function("merge_with_options/empty_batch", |b| {
         b.iter_batched(
@@ -208,22 +241,35 @@ fn bench_write_batch(c: &mut Criterion) {
         );
     });
 
-    group.bench_function("merge_with_options/existing_key_with_merges", |b| {
-        b.iter_batched(
-            || {
-                (
-                    batch_with_merges.clone(),
-                    key(0),
-                    value(EXTRACT_MERGE_KEY_COUNT + 1),
-                )
+    for (key_count, merges_per_key, batch_with_merges) in &batches_with_merges {
+        let key_count = *key_count;
+        let merges_per_key = *merges_per_key;
+        let scenario_id = merge_batch_scenario_id(key_count, merges_per_key);
+
+        group.bench_with_input(
+            BenchmarkId::new(
+                "merge_with_options/existing_key_with_merges",
+                scenario_id.clone(),
+            ),
+            batch_with_merges,
+            |b, batch_with_merges| {
+                b.iter_batched(
+                    || {
+                        (
+                            batch_with_merges.clone(),
+                            key(0),
+                            value(key_count * merges_per_key + 1),
+                        )
+                    },
+                    |(mut batch, key, value)| {
+                        batch.merge_with_options(key, value, &merge_options);
+                        black_box(batch)
+                    },
+                    BatchSize::LargeInput,
+                );
             },
-            |(mut batch, key, value)| {
-                batch.merge_with_options(key, value, &merge_options);
-                black_box(batch)
-            },
-            BatchSize::LargeInput,
         );
-    });
+    }
 
     group.bench_function("delete/empty_batch", |b| {
         b.iter_batched(
@@ -247,16 +293,26 @@ fn bench_write_batch(c: &mut Criterion) {
         );
     });
 
-    group.bench_function("delete/existing_key", |b| {
-        b.iter_batched(
-            || (batch_with_merges.clone(), key(0)),
-            |(mut batch, key)| {
-                batch.delete(key);
-                black_box(batch)
+    for (key_count, merges_per_key, batch_with_merges) in &batches_with_merges {
+        let key_count = *key_count;
+        let merges_per_key = *merges_per_key;
+        let scenario_id = merge_batch_scenario_id(key_count, merges_per_key);
+
+        group.bench_with_input(
+            BenchmarkId::new("delete/existing_key", scenario_id),
+            batch_with_merges,
+            |b, batch_with_merges| {
+                b.iter_batched(
+                    || (batch_with_merges.clone(), key(0)),
+                    |(mut batch, key)| {
+                        batch.delete(key);
+                        black_box(batch)
+                    },
+                    BatchSize::LargeInput,
+                );
             },
-            BatchSize::LargeInput,
         );
-    });
+    }
 
     group.bench_function("keys", |b| {
         b.iter_batched(
@@ -280,26 +336,36 @@ fn bench_write_batch(c: &mut Criterion) {
         );
     });
 
-    group.bench_function("extract_entries/with_merges", |b| {
-        b.to_async(&runtime).iter_batched(
-            || batch_with_merges.clone(),
-            |batch| async move {
-                black_box(
-                    write_batch_benches::extract_entries(
-                        &batch,
-                        100,
-                        1_000,
-                        None,
-                        Some(size_sum_merge_operator()),
-                        None,
-                    )
-                    .await
-                    .expect("extract_entries failed"),
-                )
+    for (key_count, merges_per_key, batch_with_merges) in &batches_with_merges {
+        let key_count = *key_count;
+        let merges_per_key = *merges_per_key;
+        let scenario_id = merge_batch_scenario_id(key_count, merges_per_key);
+
+        group.bench_with_input(
+            BenchmarkId::new("extract_entries/with_merges", scenario_id.clone()),
+            batch_with_merges,
+            |b, batch_with_merges| {
+                b.to_async(&runtime).iter_batched(
+                    || batch_with_merges.clone(),
+                    |batch| async move {
+                        black_box(
+                            write_batch_benches::extract_entries(
+                                &batch,
+                                100,
+                                1_000,
+                                None,
+                                Some(size_sum_merge_operator()),
+                                None,
+                            )
+                            .await
+                            .expect("extract_entries failed"),
+                        )
+                    },
+                    BatchSize::LargeInput,
+                );
             },
-            BatchSize::SmallInput,
         );
-    });
+    }
 
     group.bench_function("drop/no_merges", |b| {
         b.iter_batched(
@@ -309,13 +375,23 @@ fn bench_write_batch(c: &mut Criterion) {
         );
     });
 
-    group.bench_function("drop/with_merges", |b| {
-        b.iter_batched(
-            || batch_with_merges.clone(),
-            |batch| drop(black_box(batch)),
-            BatchSize::LargeInput,
+    for (key_count, merges_per_key, batch_with_merges) in &batches_with_merges {
+        let key_count = *key_count;
+        let merges_per_key = *merges_per_key;
+        let scenario_id = merge_batch_scenario_id(key_count, merges_per_key);
+
+        group.bench_with_input(
+            BenchmarkId::new("drop/with_merges", scenario_id.clone()),
+            batch_with_merges,
+            |b, batch_with_merges| {
+                b.iter_batched(
+                    || batch_with_merges.clone(),
+                    |batch| drop(black_box(batch)),
+                    BatchSize::LargeInput,
+                );
+            },
         );
-    });
+    }
 
     group.bench_function("drop/repeated_overwrites", |b| {
         b.iter_batched(
