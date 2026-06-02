@@ -7,21 +7,21 @@
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
+use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
 use uuid::Uuid;
 
-/// A batch of write operations (puts and/or deletes). All operations in the
-/// batch are applied atomically to the database. If multiple operations appear
-/// for a a single key, the last operation will be applied. The others will be
-/// dropped.
+/// A batch of write operations (puts, deletes, and merges). All operations in
+/// the batch are applied atomically to the database. Put and delete operations
+/// replace earlier operations for the same key, while merge operations are
+/// preserved until a later put or delete replaces them.
 ///
 /// # Examples
 /// ```rust
@@ -50,13 +50,8 @@ use uuid::Uuid;
 /// means that WAL SSTs could get large if there's a large batch write.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: BTreeMap<SequencedKey, WriteOp>,
+    pub(crate) ops: BTreeMap<Bytes, SmallVec<[WriteOp; 1]>>,
     pub(crate) txn_id: Option<Uuid>,
-    /// due to merges, multiple writes may happen for the same key in one batch,
-    /// this write_idx tracks the order in which writes happen within a single
-    /// batch (unrelated to the sequence number of the batch, which is assigned
-    /// atomically by the oracle when the batch is committed).
-    pub(crate) write_idx: u64,
     pub(crate) merge_op_count: usize,
 }
 
@@ -147,29 +142,17 @@ impl WriteBatch {
         WriteBatch {
             ops: BTreeMap::new(),
             txn_id: None,
-            write_idx: 0,
             merge_op_count: 0,
         }
     }
 
     /// Remove all existing ops for the given user key from the batch.
     fn remove_ops_by_key(&mut self, key: &Bytes) {
-        // Find the contiguous range of entries for this user key and delete them in place.
-        let start = SequencedKey::new(key.clone(), u64::MAX);
-        let end = SequencedKey::new(key.clone(), 0);
-
-        // Collect keys to remove
-        let keys_to_remove: Vec<SequencedKey> = self
-            .ops
-            .range(start..=end)
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        // Remove them
-        for k in keys_to_remove {
-            if let Some(WriteOp::Merge(..)) = self.ops.remove(&k) {
-                self.merge_op_count -= 1
-            }
+        if let Some(ops) = self.ops.remove(key) {
+            self.merge_op_count -= ops
+                .iter()
+                .filter(|op| matches!(op, WriteOp::Merge(..)))
+                .count();
         }
     }
 
@@ -177,7 +160,6 @@ impl WriteBatch {
         Self {
             ops: self.ops,
             txn_id: Some(txn_id),
-            write_idx: self.write_idx,
             merge_op_count: self.merge_op_count,
         }
     }
@@ -262,11 +244,9 @@ impl WriteBatch {
         // remove all previous entries.
         self.remove_ops_by_key(&key);
         self.ops.insert(
-            SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Put(key, value, options.clone()),
+            key.clone(),
+            smallvec![WriteOp::Put(key, value, options.clone())],
         );
-
-        self.write_idx += 1;
     }
 
     /// Merge a key-value pair into the batch. Keys must not be empty.
@@ -287,13 +267,16 @@ impl WriteBatch {
         self.assert_kv(&key, &value);
 
         let key = Bytes::copy_from_slice(key.as_ref());
-        self.ops.insert(
-            SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Merge(key, Bytes::copy_from_slice(value.as_ref()), options.clone()),
-        );
+        self.ops
+            .entry(key.clone())
+            .or_default()
+            .push(WriteOp::Merge(
+                key,
+                Bytes::copy_from_slice(value.as_ref()),
+                options.clone(),
+            ));
 
         self.merge_op_count += 1;
-        self.write_idx += 1;
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
@@ -305,12 +288,8 @@ impl WriteBatch {
         // delete will overwrite the existing key so we can safely
         // remove all previous entries.
         self.remove_ops_by_key(&key);
-        self.ops.insert(
-            SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Delete(key),
-        );
-
-        self.write_idx += 1;
+        self.ops
+            .insert(key.clone(), smallvec![WriteOp::Delete(key)]);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -321,8 +300,12 @@ impl WriteBatch {
         self.merge_op_count > 0
     }
 
+    pub(crate) fn op_count(&self) -> usize {
+        self.ops.values().map(|ops| ops.len()).sum()
+    }
+
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
-        self.ops.keys().map(|key| key.user_key.clone()).collect()
+        self.ops.keys().cloned().collect()
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with
@@ -441,6 +424,28 @@ pub(crate) struct WriteBatchIterator {
 }
 
 impl WriteBatchIterator {
+    /// Converts a batch write operation into a [`RowEntry`] with the supplied
+    /// sequence number and optional batch-local timestamp metadata.
+    ///
+    /// This wrapper exists because [`WriteOp::to_row_entry`] expects the caller
+    /// to provide a precomputed expiration timestamp. The iterator is where we
+    /// still have the write options, current time, and default TTL together, so
+    /// it computes the effective expiration before delegating to the lower-level
+    /// conversion.
+    fn write_op_to_row_entry(
+        op: &WriteOp,
+        seq: u64,
+        now: Option<i64>,
+        default_ttl: Option<u64>,
+    ) -> RowEntry {
+        let expire_ts = match (op, now) {
+            (WriteOp::Put(_, _, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
+            (WriteOp::Merge(_, _, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
+            _ => None,
+        };
+        op.to_row_entry(seq, now, expire_ts)
+    }
+
     pub(crate) fn new(
         batch: &WriteBatch,
         range: impl RangeBounds<Bytes>,
@@ -449,25 +454,21 @@ impl WriteBatchIterator {
         now: Option<i64>,
         default_ttl: Option<u64>,
     ) -> Self {
-        let range = KVTableInternalKeyRange::from(range);
-        let mut entries: Vec<RowEntry> = batch
-            .ops
-            .range(range)
-            .map(|(_, v)| {
-                let expire_ts = match (v, now) {
-                    (WriteOp::Put(_, _, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
-                    (WriteOp::Merge(_, _, opts), Some(now)) => {
-                        opts.expire_ts_from(default_ttl, now)
-                    }
-                    _ => None,
-                };
-                v.to_row_entry(seq, now, expire_ts)
-            })
-            .collect();
-
-        if matches!(ordering, IterationOrder::Descending) {
-            entries.reverse();
-        }
+        let entries: Vec<RowEntry> = match ordering {
+            IterationOrder::Ascending => batch
+                .ops
+                .range(range)
+                .flat_map(|(_, ops)| ops.iter().rev())
+                .map(|op| Self::write_op_to_row_entry(op, seq, now, default_ttl))
+                .collect(),
+            IterationOrder::Descending => batch
+                .ops
+                .range(range)
+                .rev()
+                .flat_map(|(_, ops)| ops.iter().rev())
+                .map(|op| Self::write_op_to_row_entry(op, seq, now, default_ttl))
+                .collect(),
+        };
 
         let iter: Box<dyn Iterator<Item = RowEntry> + Send + Sync> = Box::new(entries.into_iter());
 
@@ -520,6 +521,17 @@ mod tests {
         options: PutOptions,
     }
 
+    fn ops_for_key<'a>(batch: &'a WriteBatch, key: &[u8]) -> &'a [WriteOp] {
+        let key = Bytes::copy_from_slice(key);
+        batch.ops.get(&key).expect("missing key").as_slice()
+    }
+
+    fn only_op<'a>(batch: &'a WriteBatch, key: &[u8]) -> &'a WriteOp {
+        let ops = ops_for_key(batch, key);
+        assert_eq!(ops.len(), 1);
+        &ops[0]
+    }
+
     #[rstest]
     #[case(vec![WriteOpTestCase {
         key: b"key".to_vec(),
@@ -557,8 +569,8 @@ mod tests {
     }])]
     fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
-        let mut expected_ops: BTreeMap<SequencedKey, WriteOp> = BTreeMap::new();
-        for (seq, test_case) in test_case.into_iter().enumerate() {
+        let mut expected_ops: BTreeMap<Bytes, SmallVec<[WriteOp; 1]>> = BTreeMap::new();
+        for test_case in test_case {
             if let Some(value) = test_case.value {
                 batch.put_with_options(
                     test_case.key.as_slice(),
@@ -566,18 +578,18 @@ mod tests {
                     &test_case.options,
                 );
                 expected_ops.insert(
-                    SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
-                    WriteOp::Put(
+                    Bytes::from(test_case.key.clone()),
+                    smallvec![WriteOp::Put(
                         Bytes::from(test_case.key),
                         Bytes::from(value),
                         test_case.options,
-                    ),
+                    )],
                 );
             } else {
                 batch.delete(test_case.key.as_slice());
                 expected_ops.insert(
-                    SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
-                    WriteOp::Delete(Bytes::from(test_case.key)),
+                    Bytes::from(test_case.key.clone()),
+                    smallvec![WriteOp::Delete(Bytes::from(test_case.key))],
                 );
             }
         }
@@ -591,10 +603,7 @@ mod tests {
         batch.put(b"key1", b"value2"); // Should overwrite previous
 
         assert_eq!(batch.ops.len(), 1); // Only one entry due to deduplication
-        let op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
-            .unwrap();
+        let op = only_op(&batch, b"key1");
         match op {
             WriteOp::Put(_, value, _) => assert_eq!(value.as_ref(), b"value2"),
             _ => panic!("Expected Put operation"),
@@ -858,10 +867,7 @@ mod tests {
 
         // Then: the batch should contain one merge operation with default options
         assert_eq!(batch.ops.len(), 1);
-        let op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
-            .unwrap();
+        let op = only_op(&batch, b"key1");
         match op {
             WriteOp::Merge(key, value, options) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -885,10 +891,7 @@ mod tests {
 
         // Then: the batch should contain one merge operation with the custom options
         assert_eq!(batch.ops.len(), 1);
-        let op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
-            .unwrap();
+        let op = only_op(&batch, b"key1");
         match op {
             WriteOp::Merge(key, value, options) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -910,21 +913,14 @@ mod tests {
         batch.merge(b"key1", b"value3");
 
         // Then: all merge operations should be preserved (not deduplicated)
-        assert_eq!(batch.ops.len(), 3);
+        assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.op_count(), 3);
 
-        // And: all three operations should exist with different sequence numbers
-        let op1 = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
-            .unwrap();
-        let op2 = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
-            .unwrap();
-        let op3 = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 2))
-            .unwrap();
+        // And: all three operations should exist for the key in insertion order
+        let ops = ops_for_key(&batch, b"key1");
+        let op1 = &ops[0];
+        let op2 = &ops[1];
+        let op3 = &ops[2];
 
         match (op1, op2, op3) {
             (WriteOp::Merge(_, v1, _), WriteOp::Merge(_, v2, _), WriteOp::Merge(_, v3, _)) => {
@@ -948,17 +944,12 @@ mod tests {
 
         // Then: all merge operations should be preserved
         assert_eq!(batch.ops.len(), 3);
+        assert_eq!(batch.op_count(), 3);
 
-        // And: all keys should exist with correct sequence numbers
-        assert!(batch
-            .ops
-            .contains_key(&SequencedKey::new(Bytes::from_static(b"key1"), 0)));
-        assert!(batch
-            .ops
-            .contains_key(&SequencedKey::new(Bytes::from_static(b"key2"), 1)));
-        assert!(batch
-            .ops
-            .contains_key(&SequencedKey::new(Bytes::from_static(b"key3"), 2)));
+        // And: all keys should exist
+        assert!(batch.ops.contains_key(&Bytes::from_static(b"key1")));
+        assert!(batch.ops.contains_key(&Bytes::from_static(b"key2")));
+        assert!(batch.ops.contains_key(&Bytes::from_static(b"key3")));
     }
 
     #[test]
@@ -1009,13 +1000,12 @@ mod tests {
         batch.merge(b"key1", b"merge_value");
 
         // Then: both operations should remain (merge accumulates on top of put)
-        assert_eq!(batch.ops.len(), 2);
+        assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.op_count(), 2);
+        let ops = ops_for_key(&batch, b"key1");
 
         // Verify the put operation exists
-        let put_op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
-            .unwrap();
+        let put_op = &ops[0];
         match put_op {
             WriteOp::Put(key, value, _) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -1025,10 +1015,7 @@ mod tests {
         }
 
         // Verify the merge operation exists
-        let merge_op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
-            .unwrap();
+        let merge_op = &ops[1];
         match merge_op {
             WriteOp::Merge(key, value, _) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -1048,13 +1035,12 @@ mod tests {
         batch.merge(b"key1", b"merge_value");
 
         // Then: both operations should remain (merge accumulates on top of delete)
-        assert_eq!(batch.ops.len(), 2);
+        assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.op_count(), 2);
+        let ops = ops_for_key(&batch, b"key1");
 
         // Verify the delete operation exists
-        let delete_op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
-            .unwrap();
+        let delete_op = &ops[0];
         match delete_op {
             WriteOp::Delete(key) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -1063,10 +1049,7 @@ mod tests {
         }
 
         // Verify the merge operation exists
-        let merge_op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
-            .unwrap();
+        let merge_op = &ops[1];
         match merge_op {
             WriteOp::Merge(key, value, _) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -1088,10 +1071,7 @@ mod tests {
         // Then: only the put operation should remain (merge is deduplicated by put)
         assert_eq!(batch.ops.len(), 1);
 
-        let op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
-            .unwrap();
+        let op = only_op(&batch, b"key1");
         match op {
             WriteOp::Put(key, value, _) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -1113,10 +1093,7 @@ mod tests {
         // Then: only the delete operation should remain (merge is deduplicated by delete)
         assert_eq!(batch.ops.len(), 1);
 
-        let op = batch
-            .ops
-            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
-            .unwrap();
+        let op = only_op(&batch, b"key1");
         match op {
             WriteOp::Delete(key) => {
                 assert_eq!(key.as_ref(), b"key1");
@@ -1230,14 +1207,14 @@ mod tests {
             ),
             RowEntry::new(
                 Bytes::from_static(b"key1"),
-                ValueDeletable::Merge(Bytes::from_static(b"merge1")),
+                ValueDeletable::Merge(Bytes::from_static(b"merge3")),
                 u64::MAX,
                 None,
                 None,
             ),
             RowEntry::new(
                 Bytes::from_static(b"key1"),
-                ValueDeletable::Merge(Bytes::from_static(b"merge3")),
+                ValueDeletable::Merge(Bytes::from_static(b"merge1")),
                 u64::MAX,
                 None,
                 None,
@@ -1330,6 +1307,61 @@ mod tests {
                 None => Ok(operand),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn should_preserve_interleaved_merge_order_by_key() {
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"a");
+        batch.merge(b"key2", b"x");
+        batch.merge(b"key1", b"b");
+
+        let mut iter =
+            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+
+        let expected = vec![
+            RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Merge(Bytes::from_static(b"b")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Merge(Bytes::from_static(b"a")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Merge(Bytes::from_static(b"x")),
+                u64::MAX,
+                None,
+                None,
+            ),
+        ];
+        assert_iterator(&mut iter, expected).await;
+
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let (result, _, _) = batch
+            .extract_entries(100, 1000, None, merge_operator, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].key, Bytes::from_static(b"key1"));
+        assert_eq!(
+            result[0].value,
+            ValueDeletable::Merge(Bytes::from_static(b"ab"))
+        );
+        assert_eq!(result[1].key, Bytes::from_static(b"key2"));
+        assert_eq!(
+            result[1].value,
+            ValueDeletable::Merge(Bytes::from_static(b"x"))
+        );
     }
 
     #[tokio::test]
