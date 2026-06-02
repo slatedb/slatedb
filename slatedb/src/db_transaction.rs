@@ -164,6 +164,9 @@ impl DbTransaction {
                 &guard,
                 range,
                 IterationOrder::Ascending,
+                u64::MAX,
+                None,
+                None,
             ))
         };
 
@@ -295,6 +298,9 @@ impl DbTransaction {
                 &guard,
                 range.clone(),
                 options.order,
+                u64::MAX,
+                None,
+                None,
             ))
         };
 

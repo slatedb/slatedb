@@ -305,7 +305,7 @@ impl DbInner {
         options: &WriteOptions,
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
-        self.db_stats.write_ops.increment(batch.ops.len() as u64);
+        self.db_stats.write_ops.increment(batch.op_count() as u64);
         self.check_closed()?;
         if batch.ops.is_empty() {
             return Err(SlateDBError::EmptyBatch);
