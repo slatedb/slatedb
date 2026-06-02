@@ -30,7 +30,7 @@ use futures::{FutureExt, StreamExt};
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -204,25 +204,27 @@ impl ObjectStore for InstrumentedObjectStore {
         })
     }
 
+    // Records a single `delete` observation for the whole batch (the time to
+    // drain the entire stream), not one per object. The number of underlying
+    // HTTP requests is backend-specific — S3 bulk-deletes in chunks of up to
+    // 1,000, Azure in chunks of up to 256, while GCS deletes one object per
+    // request — so this duration is "how long the batch took", not a per-object
+    // or per-request latency. See the metrics docs for details.
     fn delete_stream(
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
         let stats = Arc::clone(&self.stats);
-        let inner = Arc::clone(&self.inner);
-        locations
-            .then(move |loc| {
-                let stats = Arc::clone(&stats);
-                let inner = Arc::clone(&inner);
-                async move {
-                    let loc = loc?;
-                    let start = Instant::now();
-                    let result = inner.delete(&loc).await;
-                    stats.delete.record(start.elapsed(), result.is_ok());
-                    result.map(|_| loc)
-                }
-            })
-            .boxed()
+        let stream = self.inner.delete_stream(locations);
+        futures::stream::once(async move {
+            let start = Instant::now();
+            let results: Vec<object_store::Result<Path>> = stream.collect().await;
+            let ok = results.iter().all(|r| r.is_ok());
+            stats.delete.record(start.elapsed(), ok);
+            futures::stream::iter(results)
+        })
+        .flatten()
+        .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -795,6 +797,41 @@ mod tests {
                 &recorder,
                 ERROR_COUNT,
                 &get_labels(ObjectStoreComponent::Gc, ObjectStoreType::Wal, "put", "put")
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_instrumented_delete_stream_records_one_per_batch() {
+        use futures::StreamExt;
+
+        // given: an instrumented store over a 100-path delete batch.
+        let (recorder, helper) = test_recorder_helper();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = InstrumentedObjectStore::new(
+            inner,
+            &helper,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
+        );
+        let paths: Vec<Path> = (0..100).map(|i| Path::from(format!("d/{i}"))).collect();
+        let input =
+            futures::stream::iter(paths.into_iter().map(Ok::<Path, object_store::Error>)).boxed();
+
+        let _: Vec<_> = store.delete_stream(input).collect().await;
+
+        // one record for the whole batch, not one per path.
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                REQUEST_COUNT,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "delete",
+                    "delete"
+                ),
             ),
             Some(1)
         );

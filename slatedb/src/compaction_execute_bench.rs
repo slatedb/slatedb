@@ -254,9 +254,15 @@ impl CompactionExecuteBench {
                 )
             })
             .collect();
+        // Bind each id to a local first: two `rand.rng()` calls in a single
+        // expression would hold the first `RefMut` guard alive while the second
+        // tries to borrow the same thread-local RNG, panicking with "RefCell
+        // already borrowed".
+        let id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         Ok(StartCompactionJobArgs {
-            id: rand.rng().gen_ulid(system_clock.as_ref()),
-            compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
+            id,
+            compaction_id,
             destination: 0,
             sst_views,
             sorted_runs: vec![],
