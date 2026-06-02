@@ -436,7 +436,7 @@ pub mod benches {
 
 /// Iterator over `WriteBatch` entries.
 pub(crate) struct WriteBatchIterator {
-    iter: Peekable<Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync>>,
+    iter: Peekable<Box<dyn Iterator<Item = RowEntry> + Send + Sync>>,
     ordering: IterationOrder,
 }
 
@@ -450,10 +450,10 @@ impl WriteBatchIterator {
         default_ttl: Option<u64>,
     ) -> Self {
         let range = KVTableInternalKeyRange::from(range);
-        let mut entries: Vec<(SequencedKey, RowEntry)> = batch
+        let mut entries: Vec<RowEntry> = batch
             .ops
             .range(range)
-            .map(|(k, v)| {
+            .map(|(_, v)| {
                 let expire_ts = match (v, now) {
                     (WriteOp::Put(_, _, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
                     (WriteOp::Merge(_, _, opts), Some(now)) => {
@@ -461,7 +461,7 @@ impl WriteBatchIterator {
                     }
                     _ => None,
                 };
-                (k.clone(), v.to_row_entry(seq, now, expire_ts))
+                v.to_row_entry(seq, now, expire_ts)
             })
             .collect();
 
@@ -469,8 +469,7 @@ impl WriteBatchIterator {
             entries.reverse();
         }
 
-        let iter: Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync> =
-            Box::new(entries.into_iter());
+        let iter: Box<dyn Iterator<Item = RowEntry> + Send + Sync> = Box::new(entries.into_iter());
 
         Self {
             iter: iter.peekable(),
@@ -486,14 +485,14 @@ impl RowEntryIterator for WriteBatchIterator {
     }
 
     async fn next(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
-        Ok(self.iter.next().map(|(_, entry)| entry))
+        Ok(self.iter.next())
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
-        while let Some((key, _)) = self.iter.peek() {
+        while let Some(entry) = self.iter.peek() {
             if match self.ordering {
-                IterationOrder::Ascending => key.user_key.as_ref() < next_key,
-                IterationOrder::Descending => key.user_key.as_ref() > next_key,
+                IterationOrder::Ascending => entry.key.as_ref() < next_key,
+                IterationOrder::Descending => entry.key.as_ref() > next_key,
             } {
                 self.iter.next();
             } else {
