@@ -456,6 +456,12 @@ impl TableStore {
             return DeleteResult::default();
         }
         // ids in a single call are all the same kind, so they route to one store.
+        debug_assert!(
+            ids.iter()
+                .all(|id| std::mem::discriminant(id) == std::mem::discriminant(&ids[0])),
+            "all SSTs in a `delete_ssts` batch must be the same kind (all Wal or all \
+             Compacted)"
+        );
         let object_store = self.object_stores.store_for(&ids[0]);
         let paths: Vec<Path> = ids.iter().map(|id| self.path(id)).collect();
         debug!("deleting {} SSTs", paths.len());
@@ -2279,7 +2285,9 @@ mod tests {
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        ts.delete_ssts(&[id1]).await;
+        let result = ts.delete_ssts(&[id1]).await;
+        assert_eq!(result.deleted, 1);
+        assert_eq!(result.failed, 0);
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
@@ -2392,7 +2400,9 @@ mod tests {
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        ts.delete_ssts(&[id1]).await;
+        let result = ts.delete_ssts(&[id1]).await;
+        assert_eq!(result.deleted, 1);
+        assert_eq!(result.failed, 0);
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);

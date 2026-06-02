@@ -217,20 +217,19 @@ impl GcTask for CompactedGcTask {
             .filter(|id| !active_ssts.contains(id))
             .collect::<Vec<_>>();
 
-        if self.compacted_options.dry_run && !sst_ids_to_delete.is_empty() {
-            log::info!(
-                "dry run: skipping SST deletion [count={}]",
-                sst_ids_to_delete.len()
-            );
-        }
         if self.compacted_options.dry_run {
-            for id in &sst_ids_to_delete {
-                log::debug!("dry run: would delete SST but skipped [id={:?}]", id);
+            if !sst_ids_to_delete.is_empty() {
+                log::info!(
+                    "dry run: skipping compacted SST deletion [count={}, ids={:?}]",
+                    sst_ids_to_delete.len(),
+                    sst_ids_to_delete,
+                );
             }
         } else {
             log::info!(
-                "deleting compacted SSTs [count={}]",
-                sst_ids_to_delete.len()
+                "deleting compacted SSTs [count={}, ids={:?}]",
+                sst_ids_to_delete.len(),
+                sst_ids_to_delete,
             );
             let DeleteResult { deleted, failed } =
                 self.table_store.delete_ssts(&sst_ids_to_delete).await;

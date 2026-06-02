@@ -204,6 +204,12 @@ impl ObjectStore for InstrumentedObjectStore {
         })
     }
 
+    // Records a single `delete` observation for the whole batch (the time to
+    // drain the entire stream), not one per object. The number of underlying
+    // HTTP requests is backend-specific — S3 bulk-deletes in chunks of up to
+    // 1,000, Azure in chunks of up to 256, while GCS deletes one object per
+    // request — so this duration is "how long the batch took", not a per-object
+    // or per-request latency. See the metrics docs for details.
     fn delete_stream(
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
