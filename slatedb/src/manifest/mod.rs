@@ -17,6 +17,7 @@ use serde::Serialize;
 use slatedb_txn_obj::DirtyObject;
 use uuid::Uuid;
 
+pub(crate) mod invariants;
 pub(crate) mod store;
 
 pub use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -510,6 +511,29 @@ impl ManifestCore {
                 .ok()?;
             Some(Arc::make_mut(&mut self.segments[idx].tree))
         }
+    }
+
+    /// The max L0 ULID watermark across all trees (the unsegmented root and
+    /// every segment), or `None` for a fresh manifest with no L0 history.
+    ///
+    /// The fold covers each tree's live L0 view IDs and its
+    /// `last_compacted_l0_sst_view_id`, the same view ULID the GC uses for its
+    /// cutoff watermark. Returned as a `Ulid` (not a raw timestamp) so the L0
+    /// cutoff invariant ([`l0_ulid_cutoff`](crate::manifest::invariants::l0_ulid_cutoff))
+    /// and the open-time skew check share one definition of the watermark.
+    // TODO: Wire this into the manifest update path in a follow-up PR for
+    // https://github.com/slatedb/slatedb/issues/1707
+    // until then unit-tested via `l0_ulid_cutoff`.
+    #[allow(dead_code)]
+    pub(crate) fn max_l0_ulid_timestamp_across_trees(&self) -> Option<ulid::Ulid> {
+        self.trees()
+            .flat_map(|tree| {
+                tree.l0
+                    .iter()
+                    .map(|view| view.id)
+                    .chain(tree.last_compacted_l0_sst_view_id)
+            })
+            .max()
     }
 
     /// Iterate every SST view referenced by this manifest — L0 views and
