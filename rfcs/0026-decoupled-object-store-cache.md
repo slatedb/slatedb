@@ -238,9 +238,7 @@ a wrapper reads it with `extensions.get::<ReadIntent>()` or
 `get::<WriteIntent>()`. No new public trait, and the protocol composes directly
 with any generic `ObjectStore` wrapper at any level of the chain.
 
-Cost: three small heap allocations per tagged call (the lazily-initialized
-`Box<HashMap>` for `Extensions`, the HashMap's bucket array on first insert,
-and the `Box<val>` for the intent itself). See
+Cost: a small per-call heap allocation overhead, described in
 [Allocation overhead](#allocation-overhead).
 
 Two alternative interfaces were considered and rejected for this RFC:
@@ -397,16 +395,15 @@ The bundled `CachedObjectStore` initially keeps its current behavior:
 Adopting the intent protocol does not change any of that on day one. What it
 does change is what the wrapper *can* do without further plumbing into
 SlateDB core. Each of these evolutions is now expressible as a small,
-isolated wrapper change, and each can land as its own follow-up with its
-own benchmarks and trade-off discussion:
+isolated wrapper change, and each can land as its own follow-up:
 
-| Signal | Wrapper change | Notes |
-|---|---|---|
-| `WriteIntent::wal()` on PUT | Skip the local write; forward to upstream only. | Only matters when `cache_puts: true`. |
-| `WriteIntent::manifest()` on PUT | Skip the local write; forward to upstream only. | Only matters when `cache_puts: true`. |
-| `WriteIntent::compaction_output()` on PUT | Skip the local write; forward to upstream only. | Only matters when `cache_puts: true`. Closes [problem 4](#the-problem-today). |
-| `ReadIntent::compaction_input()` on GET | Skip cache lookup and skip miss-admit; forward to upstream. | One-shot scans no longer enter the cache. |
-| `ReadIntent.retry = Some(_)` on GET | Delete the cache entry for `path`, then run the usual cache-aware fetch. | Closes [problem 3](#the-problem-today); lets the fsync workaround be removed. |
+| intent | Wrapper change |
+|-------------------------------------------|----------------|
+| `WriteIntent::wal()` on PUT with `cache_puts`| Skip the local write; forward to upstream only. |
+| `WriteIntent::manifest()` on PUT with `cache_puts`| Skip the local write; forward to upstream only. |
+| `WriteIntent::compaction_output()` on PUT | Add option to cache on compaction |
+| `ReadIntent::compaction_input()` on GET | Add option to skip cache lookup and skip miss-admit; forward to upstream. |
+| `ReadIntent.retry = Some(_)` on GET | Delete the cache entry for `path`, then run the usual cache-aware fetch. Closes [problem 3](#the-problem-today); lets the fsync workaround be removed. |
 
 Each future change is local to the wrapper. SlateDB core's contract
 (tag every call with intent) does not move.
@@ -416,7 +413,7 @@ on-disk layout, eviction strategy) are owned by the wrapper. Users who want
 different choices implement their own `ObjectStore` and pass it to
 `Db::builder`.
 
-### A worked example
+### Example
 
 Simplest form, using the builder:
 
@@ -468,47 +465,13 @@ local-disk round trip. On hot paths (compaction reading thousands of blocks,
 warmup loops issuing many GETs) the aggregate allocator pressure is non-zero but
 well below the cost of the I/O itself.
 
-A future micro-optimization, if allocations come to matter, is to switch to
+A future optimization, if allocations come to matter, is to switch to
 `SlateDbObjectStore` (zero allocation overhead, see
 [Alternatives](#alternatives)) or to a static-intent-per-handle arrangement if
 `object_store` ever changes `get_opts` to take `&GetOptions`.
 
-## Implementation plan
 
-The work is structured as six commits, each compiling and passing tests on its
-own. They tell the story in order: foundation, wiring, consumption, structural
-cleanup, decoupling, documentation.
-
-### Callers that need to change
-
-- **Protocol module.** A new module defines the intent types, helpers, and a
-  test recorder. No production callers yet.
-- **`TableStore` and its callers.** Every public read and write method takes
-  an `intent` argument. All producer sites (memtable flush, WAL flush,
-  compaction reads and writes, foreground reads on `Db` and `DbReader`, the
-  warmup path on `DbCacheManagerOps`) update to pass the right intent.
-- **Metadata stores.** `ManifestStore` and `CompactionsStore` construct their
-  underlying `slatedb-txn-obj` protocol with `WriteIntent::manifest()` on
-  writes and `ReadIntent::foreground()` on reads, so manifest and
-  compactions-state calls carry intents like everything else.
-- **`CachedObjectStore`.** Becomes `pub` and gains a
-  `CachedObjectStore::builder(backend)` construction path. It initially keeps
-  its current admission behavior; intent-aware policy changes such as skipping
-  `Wal`/`Manifest`/`CompactionOutput` writes, bypassing `CompactionInput` reads,
-  and evicting on retry-tagged reads can land as isolated follow-ups.
-- **Builders.** `DbBuilder`, `DbReaderBuilder`, `CompactorBuilder`, and
-  `GarbageCollectorBuilder` consolidate to a single `main_object_store`
-  handle that wraps whatever the user passed with instrumentation and retry.
-  The cache auto-construct convenience and the startup preload helpers are
-  removed; `DbCacheManagerOps::warm_sst` becomes the supported warmup path.
-- **`Settings` and `DbReaderOptions`.** `ObjectStoreCacheOptions` moves out
-  into the `cached_object_store` module; the corresponding fields are
-  removed from the public config types.
-- **`slatedb-txn-obj`.** Carries `put_extensions` / `get_extensions` fields
-  on the protocol and boundary objects, with constructors that accept
-  either a single shared payload or split read/write payloads.
-
-### Caveats
+## Caveats
 
 - **Upstream `BufWriter` extensions bug.** SST writes go through
   `object_store::buffered::BufWriter` with extensions attached via
@@ -604,16 +567,16 @@ cleanup, decoupling, documentation.
 
 ## Operations
 
-On day one the measurable runtime change is per-call tagging overhead:
+### Performance and Cost
 
-- **CPU and memory pressure.** Tagging adds three small heap allocations per
-  `ObjectStore` call (the `Box<HashMap>` for `Extensions`, the HashMap's
-  bucket array on first insert, and the `Box<val>` for the intent). Latency
-  against network or local-disk I/O is unaffected. Aggregate allocator
-  traffic on compaction or warmup is non-zero but well below the I/O cost.
-  See [Allocation overhead](#allocation-overhead).
+Initially, the measurable runtime change is per-call tagging overhead:
 
-Latency, throughput, and object-store cost do not otherwise change on day one
+- **CPU and memory pressure.** Tagging adds a small per-call heap allocation
+  overhead. Latency against network or local-disk I/O is unaffected, and
+  aggregate allocator traffic on compaction or warmup stays well below the I/O
+  cost. See [Allocation overhead](#allocation-overhead).
+
+Latency, throughput, and object-store cost do not otherwise change initially
 because the bundled wrapper keeps its current behavior (see
 [Cache wrapper behavior](#cache-wrapper-behavior)). They can evolve as the
 follow-ups in that section land:
@@ -626,13 +589,6 @@ follow-ups in that section land:
 - Evicting on retry-tagged reads lets the fsync workaround go away,
   removing one local disk sync per admitted write at the cost of one
   extra upstream GET on the rare CRC-mismatch path.
-
-### Performance and Cost
-
-As a start performance is unchanged except for the per-call allocation overhead
-described in [Allocation overhead](#allocation-overhead). Further changes
-and improvements can be picked up incrementally from the follow-ups listed
-in [Cache wrapper behavior](#cache-wrapper-behavior).
 
 ### Observability
 
@@ -739,9 +695,8 @@ becomes the cleanest allocation-free path that keeps the Extensions protocol.
 
 - **Should the object store cache live in its own crate (e.g.
   `slatedb-obj-cache`)?** Not proposed here. With the protocol in place and the
-  cache no longer required for correctness, splitting it out is mechanical.
-  Decision deferred until there is a second cache implementation or a concrete
-  consumer of the standalone crate.
+  cache no longer required for correctness, but it seems like the right step to
+  do after the RFC is executed.
 - **Allocation cost in practice.** Not measured. Worth profiling on compaction
   and warmup paths before committing to further optimization (or before
   switching to `SlateDbObjectStore`).
