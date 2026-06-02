@@ -65,9 +65,9 @@ impl Default for WriteBatch {
 /// A write operation in a batch.
 #[derive(PartialEq, Clone)]
 pub(crate) enum WriteOp {
-    Put(Bytes, Bytes, PutOptions),
-    Delete(Bytes),
-    Merge(Bytes, Bytes, MergeOptions),
+    Put(Bytes, PutOptions),
+    Delete,
+    Merge(Bytes, MergeOptions),
 }
 
 impl std::fmt::Debug for WriteOp {
@@ -81,19 +81,14 @@ impl std::fmt::Debug for WriteOp {
         }
 
         match self {
-            WriteOp::Put(key, value, options) => {
-                let key = trunc(key);
+            WriteOp::Put(value, options) => {
                 let value = trunc(value);
-                write!(f, "Put({key}, {value}, {:?})", options)
+                write!(f, "Put({value}, {:?})", options)
             }
-            WriteOp::Delete(key) => {
-                let key = trunc(key);
-                write!(f, "Delete({key})")
-            }
-            WriteOp::Merge(key, value, options) => {
-                let key = trunc(key);
+            WriteOp::Delete => write!(f, "Delete"),
+            WriteOp::Merge(value, options) => {
                 let value = trunc(value);
-                write!(f, "Merge({key}, {value}, {:?})", options)
+                write!(f, "Merge({value}, {:?})", options)
             }
         }
     }
@@ -103,12 +98,13 @@ impl WriteOp {
     /// Convert WriteOp to RowEntry for queries
     pub(crate) fn to_row_entry(
         &self,
+        key: &Bytes,
         seq: u64,
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> RowEntry {
         match self {
-            WriteOp::Put(key, value, _options) => {
+            WriteOp::Put(value, _options) => {
                 // For queries, we don't need to compute expiration time here
                 // since these are uncommitted writes. The expiration will be
                 // computed when the batch is actually written.
@@ -120,14 +116,14 @@ impl WriteOp {
                     expire_ts,
                 )
             }
-            WriteOp::Delete(key) => RowEntry::new(
+            WriteOp::Delete => RowEntry::new(
                 key.clone(),
                 ValueDeletable::Tombstone,
                 seq,
                 create_ts,
                 expire_ts,
             ),
-            WriteOp::Merge(key, value, _options) => RowEntry::new(
+            WriteOp::Merge(value, _options) => RowEntry::new(
                 key.clone(),
                 ValueDeletable::Merge(value.clone()),
                 seq,
@@ -235,10 +231,9 @@ impl WriteBatch {
 
         // put will overwrite the existing key so we can safely
         // remove all previous entries.
-        let previous = self.ops.insert(
-            key.clone(),
-            smallvec![WriteOp::Put(key, value, options.clone())],
-        );
+        let previous = self
+            .ops
+            .insert(key, smallvec![WriteOp::Put(value, options.clone())]);
         self.op_count += 1;
         if let Some(previous) = previous {
             self.op_count -= previous.len();
@@ -263,14 +258,12 @@ impl WriteBatch {
         self.assert_kv(&key, &value);
 
         let key = Bytes::copy_from_slice(key.as_ref());
-        self.ops
-            .entry(key.clone())
-            .or_default()
-            .push(WriteOp::Merge(
-                key,
-                Bytes::copy_from_slice(value.as_ref()),
-                options.clone(),
-            ));
+        let op = WriteOp::Merge(Bytes::copy_from_slice(value.as_ref()), options.clone());
+        if let Some(ops) = self.ops.get_mut(&key) {
+            ops.push(op);
+        } else {
+            self.ops.insert(key, smallvec![op]);
+        }
 
         self.has_merge_ops = true;
         self.op_count += 1;
@@ -284,9 +277,7 @@ impl WriteBatch {
 
         // delete will overwrite the existing key so we can safely
         // remove all previous entries.
-        let previous = self
-            .ops
-            .insert(key.clone(), smallvec![WriteOp::Delete(key)]);
+        let previous = self.ops.insert(key, smallvec![WriteOp::Delete]);
         self.op_count += 1;
         if let Some(previous) = previous {
             self.op_count -= previous.len();
@@ -428,23 +419,24 @@ impl WriteBatchIterator {
     /// Converts a batch write operation into a [`RowEntry`] with the supplied
     /// sequence number and optional batch-local timestamp metadata.
     ///
-    /// This wrapper exists because [`WriteOp::to_row_entry`] expects the caller
-    /// to provide a precomputed expiration timestamp. The iterator is where we
-    /// still have the write options, current time, and default TTL together, so
-    /// it computes the effective expiration before delegating to the lower-level
-    /// conversion.
+    /// This wrapper exists because a [`WriteOp`] stores only the value-level
+    /// operation payload while the key lives in the batch map. The iterator is
+    /// where that key is available alongside the write options, current time,
+    /// and default TTL, so it computes the effective expiration timestamp and
+    /// passes both the key and timestamp metadata to [`WriteOp::to_row_entry`].
     fn write_op_to_row_entry(
+        key: &Bytes,
         op: &WriteOp,
         seq: u64,
         now: Option<i64>,
         default_ttl: Option<u64>,
     ) -> RowEntry {
         let expire_ts = match (op, now) {
-            (WriteOp::Put(_, _, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
-            (WriteOp::Merge(_, _, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
+            (WriteOp::Put(_, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
+            (WriteOp::Merge(_, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
             _ => None,
         };
-        op.to_row_entry(seq, now, expire_ts)
+        op.to_row_entry(key, seq, now, expire_ts)
     }
 
     pub(crate) fn new(
@@ -459,15 +451,15 @@ impl WriteBatchIterator {
             IterationOrder::Ascending => batch
                 .ops
                 .range(range)
-                .flat_map(|(_, ops)| ops.iter().rev())
-                .map(|op| Self::write_op_to_row_entry(op, seq, now, default_ttl))
+                .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
+                .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
                 .collect(),
             IterationOrder::Descending => batch
                 .ops
                 .range(range)
                 .rev()
-                .flat_map(|(_, ops)| ops.iter().rev())
-                .map(|op| Self::write_op_to_row_entry(op, seq, now, default_ttl))
+                .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
+                .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
                 .collect(),
         };
 
@@ -580,17 +572,13 @@ mod tests {
                 );
                 expected_ops.insert(
                     Bytes::from(test_case.key.clone()),
-                    smallvec![WriteOp::Put(
-                        Bytes::from(test_case.key),
-                        Bytes::from(value),
-                        test_case.options,
-                    )],
+                    smallvec![WriteOp::Put(Bytes::from(value), test_case.options)],
                 );
             } else {
                 batch.delete(test_case.key.as_slice());
                 expected_ops.insert(
                     Bytes::from(test_case.key.clone()),
-                    smallvec![WriteOp::Delete(Bytes::from(test_case.key))],
+                    smallvec![WriteOp::Delete],
                 );
             }
         }
@@ -607,7 +595,7 @@ mod tests {
         assert_eq!(batch.op_count(), 1);
         let op = only_op(&batch, b"key1");
         match op {
-            WriteOp::Put(_, value, _) => assert_eq!(value.as_ref(), b"value2"),
+            WriteOp::Put(value, _) => assert_eq!(value.as_ref(), b"value2"),
             _ => panic!("Expected Put operation"),
         }
     }
@@ -871,8 +859,7 @@ mod tests {
         assert_eq!(batch.ops.len(), 1);
         let op = only_op(&batch, b"key1");
         match op {
-            WriteOp::Merge(key, value, options) => {
-                assert_eq!(key.as_ref(), b"key1");
+            WriteOp::Merge(value, options) => {
                 assert_eq!(value.as_ref(), b"value1");
                 assert_eq!(options, &MergeOptions::default());
             }
@@ -895,8 +882,7 @@ mod tests {
         assert_eq!(batch.ops.len(), 1);
         let op = only_op(&batch, b"key1");
         match op {
-            WriteOp::Merge(key, value, options) => {
-                assert_eq!(key.as_ref(), b"key1");
+            WriteOp::Merge(value, options) => {
                 assert_eq!(value.as_ref(), b"value1");
                 assert_eq!(options.ttl, Ttl::ExpireAfter(3600));
             }
@@ -925,7 +911,7 @@ mod tests {
         let op3 = &ops[2];
 
         match (op1, op2, op3) {
-            (WriteOp::Merge(_, v1, _), WriteOp::Merge(_, v2, _), WriteOp::Merge(_, v3, _)) => {
+            (WriteOp::Merge(v1, _), WriteOp::Merge(v2, _), WriteOp::Merge(v3, _)) => {
                 assert_eq!(v1.as_ref(), b"value1");
                 assert_eq!(v2.as_ref(), b"value2");
                 assert_eq!(v3.as_ref(), b"value3");
@@ -976,8 +962,7 @@ mod tests {
         assert!(batch.has_merge_ops());
         assert_eq!(batch.op_count(), 1);
         match only_op(&batch, b"key1") {
-            WriteOp::Put(key, value, _) => {
-                assert_eq!(key.as_ref(), b"key1");
+            WriteOp::Put(value, _) => {
                 assert_eq!(value.as_ref(), b"final");
             }
             _ => panic!("Expected Put operation"),
@@ -998,13 +983,12 @@ mod tests {
         assert_eq!(batch.op_count(), 2);
 
         match only_op(&batch, b"key1") {
-            WriteOp::Delete(key) => assert_eq!(key.as_ref(), b"key1"),
+            WriteOp::Delete => {}
             _ => panic!("Expected Delete operation"),
         }
 
         match only_op(&batch, b"key2") {
-            WriteOp::Merge(key, value, _) => {
-                assert_eq!(key.as_ref(), b"key2");
+            WriteOp::Merge(value, _) => {
                 assert_eq!(value.as_ref(), b"value2");
             }
             _ => panic!("Expected Merge operation"),
@@ -1028,8 +1012,7 @@ mod tests {
         // Verify the put operation exists
         let put_op = &ops[0];
         match put_op {
-            WriteOp::Put(key, value, _) => {
-                assert_eq!(key.as_ref(), b"key1");
+            WriteOp::Put(value, _) => {
                 assert_eq!(value.as_ref(), b"put_value");
             }
             _ => panic!("Expected Put operation"),
@@ -1038,8 +1021,7 @@ mod tests {
         // Verify the merge operation exists
         let merge_op = &ops[1];
         match merge_op {
-            WriteOp::Merge(key, value, _) => {
-                assert_eq!(key.as_ref(), b"key1");
+            WriteOp::Merge(value, _) => {
                 assert_eq!(value.as_ref(), b"merge_value");
             }
             _ => panic!("Expected Merge operation"),
@@ -1063,17 +1045,14 @@ mod tests {
         // Verify the delete operation exists
         let delete_op = &ops[0];
         match delete_op {
-            WriteOp::Delete(key) => {
-                assert_eq!(key.as_ref(), b"key1");
-            }
+            WriteOp::Delete => {}
             _ => panic!("Expected Delete operation"),
         }
 
         // Verify the merge operation exists
         let merge_op = &ops[1];
         match merge_op {
-            WriteOp::Merge(key, value, _) => {
-                assert_eq!(key.as_ref(), b"key1");
+            WriteOp::Merge(value, _) => {
                 assert_eq!(value.as_ref(), b"merge_value");
             }
             _ => panic!("Expected Merge operation"),
@@ -1095,8 +1074,7 @@ mod tests {
 
         let op = only_op(&batch, b"key1");
         match op {
-            WriteOp::Put(key, value, _) => {
-                assert_eq!(key.as_ref(), b"key1");
+            WriteOp::Put(value, _) => {
                 assert_eq!(value.as_ref(), b"put_value");
             }
             _ => panic!("Expected Put operation"),
@@ -1118,9 +1096,7 @@ mod tests {
 
         let op = only_op(&batch, b"key1");
         match op {
-            WriteOp::Delete(key) => {
-                assert_eq!(key.as_ref(), b"key1");
-            }
+            WriteOp::Delete => {}
             _ => panic!("Expected Delete operation"),
         }
     }
