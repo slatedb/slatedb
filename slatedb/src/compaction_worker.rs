@@ -20,6 +20,7 @@ use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
+use rand::Rng;
 use tokio::runtime::Handle;
 use ulid::Ulid;
 
@@ -255,6 +256,7 @@ pub(crate) struct CompactionWorkerHandler {
     /// yet `Compacted`). Used to gate capacity and to know what to reset on
     /// graceful shutdown.
     active_jobs: HashSet<Ulid>,
+    rand: Arc<DbRand>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
     /// absence on early ticks.
@@ -269,6 +271,7 @@ impl CompactionWorkerHandler {
         manifest_store: Arc<ManifestStore>,
         executor: Arc<dyn CompactionExecutor + Send + Sync>,
         clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             worker_id,
@@ -278,6 +281,7 @@ impl CompactionWorkerHandler {
             executor,
             clock,
             active_jobs: HashSet::new(),
+            rand,
             stored: None,
         }
     }
@@ -576,7 +580,19 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
             return Ok(());
         }
         match message {
-            WorkerMessage::PollCompactions => self.poll_and_claim().await?,
+            WorkerMessage::PollCompactions => {
+                // RFC-0025: sleep for random(0, interval * 0.1) before each
+                // ticker-driven poll to prevent workers from synchronizing on
+                // `.compactions` reads
+                let max_jitter = (self.options.compactions_poll_interval.as_millis() / 10) as u64;
+                let jitter_ms = if max_jitter > 0 {
+                    self.rand.rng().random_range(0..=max_jitter)
+                } else {
+                    0
+                };
+                self.clock.sleep(Duration::from_millis(jitter_ms)).await;
+                self.poll_and_claim().await?;
+            }
             WorkerMessage::CompactionJobFinished { id, result } => {
                 self.handle_finished(id, result).await?;
                 // Opportunistically claim more after freeing capacity.
@@ -674,6 +690,7 @@ pub(crate) fn build_handler(
         manifest_store.clone(),
         executor,
         system_clock.clone(),
+        rand.clone(),
     );
     (handler, rx)
 }
@@ -774,6 +791,7 @@ mod tests {
                 manifest_store.clone(),
                 executor.clone(),
                 clock,
+                Arc::new(DbRand::default()),
             );
             // `handle()` lazily loads `.compactions` on the first message; the
             // tests below drive the child fns (poll_and_claim, handle_finished,
