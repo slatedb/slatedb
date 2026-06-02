@@ -52,7 +52,7 @@ use uuid::Uuid;
 pub struct WriteBatch {
     pub(crate) ops: BTreeMap<Bytes, SmallVec<[WriteOp; 1]>>,
     pub(crate) txn_id: Option<Uuid>,
-    pub(crate) merge_op_count: usize,
+    pub(crate) has_merge_ops: bool,
 }
 
 impl Default for WriteBatch {
@@ -142,17 +142,7 @@ impl WriteBatch {
         WriteBatch {
             ops: BTreeMap::new(),
             txn_id: None,
-            merge_op_count: 0,
-        }
-    }
-
-    /// Remove all existing ops for the given user key from the batch.
-    fn remove_ops_by_key(&mut self, key: &Bytes) {
-        if let Some(ops) = self.ops.remove(key) {
-            self.merge_op_count -= ops
-                .iter()
-                .filter(|op| matches!(op, WriteOp::Merge(..)))
-                .count();
+            has_merge_ops: false,
         }
     }
 
@@ -160,7 +150,7 @@ impl WriteBatch {
         Self {
             ops: self.ops,
             txn_id: Some(txn_id),
-            merge_op_count: self.merge_op_count,
+            has_merge_ops: self.has_merge_ops,
         }
     }
 
@@ -242,7 +232,7 @@ impl WriteBatch {
 
         // put will overwrite the existing key so we can safely
         // remove all previous entries.
-        self.remove_ops_by_key(&key);
+        self.ops.remove(&key);
         self.ops.insert(
             key.clone(),
             smallvec![WriteOp::Put(key, value, options.clone())],
@@ -276,7 +266,7 @@ impl WriteBatch {
                 options.clone(),
             ));
 
-        self.merge_op_count += 1;
+        self.has_merge_ops = true;
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
@@ -287,7 +277,7 @@ impl WriteBatch {
 
         // delete will overwrite the existing key so we can safely
         // remove all previous entries.
-        self.remove_ops_by_key(&key);
+        self.ops.remove(&key);
         self.ops
             .insert(key.clone(), smallvec![WriteOp::Delete(key)]);
     }
@@ -297,7 +287,7 @@ impl WriteBatch {
     }
 
     pub(crate) fn has_merge_ops(&self) -> bool {
-        self.merge_op_count > 0
+        self.has_merge_ops
     }
 
     pub(crate) fn op_count(&self) -> usize {
@@ -960,11 +950,10 @@ mod tests {
         batch.merge(b"key1", b"value1");
 
         assert!(batch.has_merge_ops());
-        assert_eq!(batch.merge_op_count, 1);
     }
 
     #[test]
-    fn should_clear_merge_presence_when_put_overwrites_merge_ops() {
+    fn should_remember_merge_presence_when_put_overwrites_merge_ops() {
         let mut batch = WriteBatch::new();
         batch.merge(b"key1", b"value1");
         batch.merge(b"key1", b"value2");
@@ -972,22 +961,34 @@ mod tests {
 
         batch.put(b"key1", b"final");
 
-        assert!(!batch.has_merge_ops());
-        assert_eq!(batch.merge_op_count, 0);
+        assert!(batch.has_merge_ops());
     }
 
     #[test]
-    fn should_preserve_merge_presence_when_removing_only_one_keys_merges() {
+    fn should_remember_merge_presence_when_delete_overwrites_merge_ops() {
         let mut batch = WriteBatch::new();
         batch.merge(b"key1", b"value1");
         batch.merge(b"key2", b"value2");
         assert!(batch.has_merge_ops());
-        assert_eq!(batch.merge_op_count, 2);
 
         batch.delete(b"key1");
 
         assert!(batch.has_merge_ops());
-        assert_eq!(batch.merge_op_count, 1);
+        assert_eq!(batch.ops.len(), 2);
+        assert_eq!(batch.op_count(), 2);
+
+        match only_op(&batch, b"key1") {
+            WriteOp::Delete(key) => assert_eq!(key.as_ref(), b"key1"),
+            _ => panic!("Expected Delete operation"),
+        }
+
+        match only_op(&batch, b"key2") {
+            WriteOp::Merge(key, value, _) => {
+                assert_eq!(key.as_ref(), b"key2");
+                assert_eq!(value.as_ref(), b"value2");
+            }
+            _ => panic!("Expected Merge operation"),
+        }
     }
 
     #[test]
