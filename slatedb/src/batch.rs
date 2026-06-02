@@ -322,10 +322,6 @@ impl WriteBatch {
         extractor: Option<&dyn PrefixExtractor>,
     ) -> Result<(Vec<RowEntry>, BTreeSet<Bytes>, u64), SlateDBError> {
         let mut entries_bytes: u64 = 0;
-        if merger.is_none() && self.has_merge_ops() {
-            return Err(SlateDBError::MergeOperatorMissing);
-        }
-
         let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new(
             self,
             ..,
@@ -334,13 +330,17 @@ impl WriteBatch {
             Some(now),
             default_ttl,
         ));
-        if let Some(ref merge_operator) = merger {
-            it = Box::new(MergeOperatorIterator::new(
-                merge_operator.clone(),
-                it,
-                false,
-                None,
-            ));
+        if self.has_merge_ops() {
+            if let Some(ref merge_operator) = merger {
+                it = Box::new(MergeOperatorIterator::new(
+                    merge_operator.clone(),
+                    it,
+                    false,
+                    None,
+                ));
+            } else {
+                return Err(SlateDBError::MergeOperatorMissing);
+            }
         }
 
         let mut entries: Vec<RowEntry> = Vec::new();
