@@ -6,9 +6,10 @@ use crate::{
     db_state::SsTableId,
     error::SlateDBError,
     manifest::{store::ManifestStore, Manifest, VersionedManifest},
-    tablestore::{DeleteResult, TableStore},
+    tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
+use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -217,31 +218,22 @@ impl GcTask for CompactedGcTask {
             .filter(|id| !active_ssts.contains(id))
             .collect::<Vec<_>>();
 
-        if self.compacted_options.dry_run {
-            if !sst_ids_to_delete.is_empty() {
-                log::info!(
-                    "dry run: skipping compacted SST deletion [count={}, ids={:?}]",
-                    sst_ids_to_delete.len(),
-                    sst_ids_to_delete,
-                );
-            }
-        } else {
+        if self.compacted_options.dry_run && !sst_ids_to_delete.is_empty() {
             log::info!(
-                "deleting compacted SSTs [count={}, ids={:?}]",
-                sst_ids_to_delete.len(),
-                sst_ids_to_delete,
+                "dry run: skipping SST deletion [count={}]",
+                sst_ids_to_delete.len()
             );
-            let DeleteResult { deleted, failed } =
-                self.table_store.delete_ssts(&sst_ids_to_delete).await;
-            self.stats.gc_compacted_count.increment(deleted as u64);
-            if failed > 0 {
-                log::warn!(
-                    "deleted compacted SSTs with failures [deleted={}, failed={}]",
-                    deleted,
-                    failed
-                );
+        }
+        for id in sst_ids_to_delete {
+            if self.compacted_options.dry_run {
+                log::debug!("dry run: would delete SST but skipped [id={:?}]", id);
+                continue;
+            }
+            log::info!("deleting SST [id={:?}]", id);
+            if let Err(e) = self.table_store.delete_sst(&id).await {
+                error!("error deleting SST [id={:?}, error={}]", id, e);
             } else {
-                log::info!("deleted compacted SSTs [count={}]", deleted);
+                self.stats.gc_compacted_count.increment(1);
             }
         }
 

@@ -454,13 +454,6 @@ pub(crate) struct FlakyObjectStore {
     // get_range: transient failures on first N attempts
     fail_first_get_range: AtomicUsize,
     get_range_attempts: AtomicUsize,
-    // Delete: total number of `delete_stream` invocations (one per batch)
-    delete_stream_attempts: AtomicUsize,
-    // Delete: fail the first N `delete_stream` calls with a retryable batch-level error
-    fail_first_delete: AtomicUsize,
-    // Delete: if set, every input path yields a per-path NotFound. Simulates
-    // Azure/GCP, which return NotFound (not Ok) when deleting an already-gone object.
-    delete_not_found: std::sync::atomic::AtomicBool,
 }
 
 impl FlakyObjectStore {
@@ -484,9 +477,6 @@ impl FlakyObjectStore {
             list_with_offset_attempts: AtomicUsize::new(0),
             fail_first_get_range: AtomicUsize::new(0),
             get_range_attempts: AtomicUsize::new(0),
-            delete_stream_attempts: AtomicUsize::new(0),
-            fail_first_delete: AtomicUsize::new(0),
-            delete_not_found: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -569,24 +559,6 @@ impl FlakyObjectStore {
 
     pub(crate) fn get_range_attempts(&self) -> usize {
         self.get_range_attempts.load(Ordering::SeqCst)
-    }
-
-    /// Fail the first `n` `delete_stream` calls with a retryable batch-level error.
-    pub(crate) fn with_delete_failures(self, n: usize) -> Self {
-        self.fail_first_delete.store(n, Ordering::SeqCst);
-        self
-    }
-
-    /// Make every input path yield a per-path `NotFound` (Azure/GCP semantics for
-    /// deleting an already-removed object).
-    pub(crate) fn with_delete_not_found(self) -> Self {
-        self.delete_not_found.store(true, Ordering::SeqCst);
-        self
-    }
-
-    /// Number of `delete_stream` invocations so far (one per batch / retry attempt).
-    pub(crate) fn delete_stream_attempts(&self) -> usize {
-        self.delete_stream_attempts.load(Ordering::SeqCst)
     }
 
     /// Inject a failure after `fail_after` successful items in the stream.
@@ -749,46 +721,6 @@ impl ObjectStore for FlakyObjectStore {
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        self.delete_stream_attempts.fetch_add(1, Ordering::SeqCst);
-        // Fail the whole batch with a retryable (Generic) error on the first N calls.
-        if self
-            .fail_first_delete
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v > 0 {
-                    Some(v - 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok()
-        {
-            return stream::once(async move {
-                Err(object_store::Error::Generic {
-                    store: "flaky_delete",
-                    source: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "injected delete timeout",
-                    )),
-                })
-            })
-            .boxed();
-        }
-        // Simulate Azure/GCP: deleting an already-gone object yields per-path NotFound.
-        if self.delete_not_found.load(Ordering::SeqCst) {
-            return locations
-                .map(|r| {
-                    r.and_then(|path| {
-                        Err(object_store::Error::NotFound {
-                            path: path.to_string(),
-                            source: Box::new(std::io::Error::new(
-                                std::io::ErrorKind::NotFound,
-                                "injected not found",
-                            )),
-                        })
-                    })
-                })
-                .boxed();
-        }
         self.inner.delete_stream(locations)
     }
 
