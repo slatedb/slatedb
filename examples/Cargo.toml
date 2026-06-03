@@ -46,8 +46,8 @@ test = false
 bench = false
 
 [[bin]]
-name = "range-reads"
-path = "src/range_reads.rs"
+name = "range-scans"
+path = "src/range_scans.rs"
 test = false
 bench = false
 

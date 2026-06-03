@@ -256,8 +256,8 @@ export default defineConfig({
 							link: '/docs/tutorials/gcs/',
 						},
 						{
-							label: 'Range Reads',
-							link: '/docs/tutorials/range-reads/',
+							label: 'Range Scans',
+							link: '/docs/tutorials/range-scans/',
 						},
 						{
 							label: 'Checkpoint & Restore',

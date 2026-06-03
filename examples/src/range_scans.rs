@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let object_store = Arc::new(InMemory::new());
-    let db = Db::open("/tmp/slatedb_range_reads", object_store).await?;
+    let db = Db::open("/tmp/slatedb_range_scans", object_store).await?;
 
     db.put(b"test_key1", b"test_value1").await?;
     db.put(b"test_key2", b"test_value2").await?;
@@ -24,9 +24,9 @@ async fn main() -> Result<(), Error> {
         ("test_key4", "test_value4"),
     ];
     for (expected_key, expected_value) in expected {
-        let item = iter.next().await?.unwrap();
-        assert_eq!(item.key.as_ref(), expected_key.as_bytes());
-        assert_eq!(item.value.as_ref(), expected_value.as_bytes());
+        let entry = iter.next().await?.unwrap();
+        assert_eq!(entry.key.as_ref(), expected_key.as_bytes());
+        assert_eq!(entry.value.as_ref(), expected_value.as_bytes());
     }
     assert_eq!(iter.next().await?, None);
 
