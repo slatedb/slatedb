@@ -125,7 +125,7 @@ is that it builds on top of three existing primitives: (a) the existing compacti
 logic runs nearly as-is within the scope of a subcompaction, (b) it reuses the
 SST view concept with sst.overlaps() to handle shared-input SSTs to ranges and (c)
 it persists the output of subcompactions to the .compactions file that now includes
-subcompactions (see spec in the next section)
+subcompactions (see spec in the next section).
 
 ```
 // executes a full compaction with subcompactions
@@ -183,6 +183,12 @@ run_subcompaction(spec, sub):
   
   persist subcompaction completed with result_ssts
 ```
+
+It's worth noting that the main coordinator is still responsible for submitting
+the comapction, but the worker is responsible for computing the subcompaction
+plan (splits). This allows future optimizations where the subcompaction planner can pull
+information like SST indexes to improve the aplit algorithm without affecting the
+cache on the active serving node in distributed compaction.
 
 ### Persistence & Schema
 
@@ -337,48 +343,73 @@ metrics remain authoritative for overall throughput.
 
 ### Compatibility
 
-- **Wire format**: `subcompactions` is appended to the end of the `Compaction` table, so the
-  change is forward/backward compatible. Old readers skip the field; new readers see an empty
-  vector on pre-existing `.compactions` files and run the compaction without subcompactions.
-- **Rollback**: a pre-subcompaction binary ignores the `subcompactions` field, sees empty
-  `output_ssts`, and re-runs the whole compaction single-threaded. This is correct but abandons
-  any already-written subcompaction output SSTs. Those orphans are never referenced by the
-  manifest and are reclaimed by GC (see below). No manual cleanup is required; rolling back only
-  wastes in-flight work.
-- **Garbage collection**: subcompaction output SSTs are written before the manifest commit but
-  carry ULIDs newer than the parent compaction's id. The parent stays in the in-flight set until
-  every subcompaction completes, pinning the compaction low-watermark above those SSTs, so the
-  existing GC protection covers them with no version-coupled change (even when GC is running on
-  an older code version).
+- **Wire format**: `subcompactions` is appended to the end of the `Compaction`
+  table, so the change is forward/backward compatible. Old readers skip the
+  field; new readers see an empty vector on pre-existing `.compactions` files
+  and run the compaction without subcompactions.
+- **Rollback**: a pre-subcompaction binary ignores the `subcompactions` field,
+  sees empty `output_ssts`, and re-runs the whole compaction single-threaded.
+  This is correct but abandons any already-written subcompaction output SSTs.
+  Those orphans are never referenced by the manifest and are reclaimed by GC
+  (see below). No manual cleanup is required; rolling back only wastes in-flight
+  work.
+- **Garbage collection**: subcompaction output SSTs are written before the
+  manifest commit but carry ULIDs newer than the parent compaction's id. The
+  parent stays in the in-flight set until every subcompaction completes, pinning
+  the compaction low-watermark above those SSTs, so the existing GC protection
+  covers them with no version-coupled change (even when GC is running on an
+  older code version).
 
 ## Testing
 
-The testing plan beyond the usual set of work includes running `slatedb/src/compaction_execute_bench.rs`
-to ensure that subcompactions will, in practice, improve the throughput of compactions. We could consider
-modeling this with Fizzbee, but I don't think it's necessary.
+The testing plan beyond the usual set of work includes running
+`slatedb/src/compaction_execute_bench.rs` to ensure that subcompactions will, in
+practice, improve the throughput of compactions. We could consider modeling this
+with Fizzbee, but I don't think it's necessary.
 
 ## Rollout
 
-I opted to default to set `max_subcompactions = 4` by default instead of off-by-default because I
-think it's a pretty foundational feature for large compaction jobs. Note that this departs from
-prior art. RocksDB ships with it disabled (`max_subcompactions = 1`) but they also do not ship with
-a `min_subcompaction_input_bytes`. 
+I opted to default to set `max_subcompactions = 4` by default instead of
+off-by-default because I think it's a pretty foundational feature for large
+compaction jobs. Note that this departs from prior art. RocksDB ships with it
+disabled (`max_subcompactions = 1`) but they also do not ship with a
+`min_subcompaction_input_bytes`. 
 
 See the compatibility section for why this is safe to rollout in one go.
 
 ## Alternatives
 
-**L0 sublevels (Pebble's approach).** Rejected. Pebble does not split a single logical compaction
-across key ranges; it parallelizes by running multiple independent compactions at once, gated by
-`MaxConcurrentCompactions`. It makes this possible with L0 sublevels and flush splitting, which
-carve the keyspace into non-overlapping ranges so several L0->Lbase compactions can proceed without
+**L0 sublevels (Pebble's approach).** Rejected. Pebble does not split a single
+logical compaction across key ranges; it parallelizes by running multiple
+independent compactions at once, gated by `MaxConcurrentCompactions`. It makes
+this possible with L0 sublevels and flush splitting, which carve the keyspace
+into non-overlapping ranges so several L0->Lbase compactions can proceed without
 conflicting.
 
-This works for Pebble because it is a leveled engine where the parallelism opportunity lives at the
-L0->Lbase boundary. It does not help the case this RFC targets: under size-tiered compaction a
-single large sorted-run compaction is still one indivisible unit of work on one core, and no amount
-of cross-compaction concurrency speeds it up. Subcompactions parallelize *within* that unit, which
-is the only approach that addresses big SR compactions.
+This works for Pebble because it is a leveled engine where the parallelism
+opportunity lives at the L0->Lbase boundary. It does not help the case this RFC
+targets: under size-tiered compaction a single large sorted-run compaction is
+still one indivisible unit of work on one core, and no amount of
+cross-compaction concurrency speeds it up. Subcompactions parallelize *within*
+that unit, which is the only approach that addresses big SR compactions.
+
+**Index Metadata Split Algorithms.** Deferred. The idea here is to use the index
+metadata on SSTs to determine where we should be splitting instead of the rough
+heursitic that's outlined in this RFC. It's probably worth doing, but I've
+deferred details of that for a v2 implementation.
+
+**Parallelizing block construction within a single range.** Deferred/Partial
+Rejection. This is a valid alternative to the RFC in that it allows you to have
+more threads handling the compaction. To be honest, I think it's hard to tell
+whether this is a better alternative without implementing it. It is likely to be
+more complicated to implement, and also parallelize less of the overall
+compaction workload. In addition, it makes the resuming mechanism a little more
+challenging as we need to synchronize the production of sub-ranges which may
+cause lagging threads to serialize compaction. I'm inclined to reject.
+
+It is, in addition, not exclusive with the proposal in this RFC and if we wanted
+to optimize a single sub-comapction we could also apply parallelism within a
+single subcompaction (or a top level compaction, which shares the same logic).
 
 ## Open Questions
 
