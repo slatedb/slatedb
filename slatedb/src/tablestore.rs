@@ -441,8 +441,7 @@ impl TableStore {
     /// All `ids` in one call must be of the same kind (all
     /// [`SsTableId::Compacted`] or all [`SsTableId::Wal`]) so they route to the
     /// same store; the GC `collect` functions that call this always satisfy
-    /// that, and a mixed batch returns [`SlateDBError::InvalidDeletion`].
-    /// Forwarding the whole batch lets backends that support bulk delete
+    /// that. Forwarding the whole batch lets backends that support bulk delete
     /// (S3, Azure) collapse thousands of deletes into a handful of API calls.
     ///
     /// `NotFound` is treated as success — the object is already gone, so the
@@ -452,20 +451,17 @@ impl TableStore {
     /// The whole stream is drained even when some deletes fail, so a per-path
     /// failure is recorded in [`DeleteResult::failed`] rather than aborting the
     /// batch.
-    pub(crate) async fn delete_ssts(
-        &self,
-        ids: &[SsTableId],
-    ) -> Result<DeleteResult, SlateDBError> {
+    pub(crate) async fn delete_ssts(&self, ids: &[SsTableId]) -> DeleteResult {
         if ids.is_empty() {
-            return Ok(DeleteResult::default());
+            return DeleteResult::default();
         }
-        // ids in a single call must all be the same kind, so they route to one store.
-        if ids
-            .iter()
-            .any(|id| std::mem::discriminant(id) != std::mem::discriminant(&ids[0]))
-        {
-            return Err(SlateDBError::InvalidDeletion);
-        }
+        // ids in a single call are all the same kind, so they route to one store.
+        debug_assert!(
+            ids.iter()
+                .all(|id| std::mem::discriminant(id) == std::mem::discriminant(&ids[0])),
+            "all SSTs in a `delete_ssts` batch must be the same kind (all Wal or all \
+             Compacted)"
+        );
         let object_store = self.object_stores.store_for(&ids[0]);
         let paths: Vec<Path> = ids.iter().map(|id| self.path(id)).collect();
         debug!("deleting {} SSTs", paths.len());
@@ -485,7 +481,7 @@ impl TableStore {
                 }
             }
         }
-        Ok(result)
+        result
     }
 
     /// Reads metadata for a specific SST object (WAL or compacted).
@@ -2289,7 +2285,7 @@ mod tests {
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        let result = ts.delete_ssts(&[id1]).await.unwrap();
+        let result = ts.delete_ssts(&[id1]).await;
         assert_eq!(result.deleted, 1);
         assert_eq!(result.failed, 0);
 
@@ -2326,31 +2322,14 @@ mod tests {
         }
 
         // All three exist -> all counted as deleted, none failed.
-        let result = ts.delete_ssts(&ids).await.unwrap();
+        let result = ts.delete_ssts(&ids).await;
         assert_eq!(result.deleted, 3);
         assert_eq!(result.failed, 0);
         assert_eq!(count_ssts_in(&main_store).await, 0);
 
         // Empty batch is a no-op with zeroed counts.
-        let result = ts.delete_ssts(&[]).await.unwrap();
+        let result = ts.delete_ssts(&[]).await;
         assert_eq!(result, DeleteResult::default());
-    }
-
-    #[tokio::test]
-    async fn test_delete_ssts_mixed_kinds_errors() {
-        // A batch mixing Wal and Compacted ids would route to two different
-        // stores, so it must be rejected rather than partially deleted.
-        let main_store = make_store();
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), Some(make_store())),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
-
-        let ids = vec![SsTableId::Compacted(ulid::Ulid::new()), SsTableId::Wal(1)];
-        let err = ts.delete_ssts(&ids).await.unwrap_err();
-        assert!(matches!(err, error::SlateDBError::InvalidDeletion));
     }
 
     #[tokio::test]
@@ -2371,7 +2350,7 @@ mod tests {
             .map(|_| SsTableId::Compacted(ulid::Ulid::new()))
             .collect();
 
-        let result = ts.delete_ssts(&ids).await.unwrap();
+        let result = ts.delete_ssts(&ids).await;
         assert_eq!(
             result,
             DeleteResult {
@@ -2421,7 +2400,7 @@ mod tests {
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        let result = ts.delete_ssts(&[id1]).await.unwrap();
+        let result = ts.delete_ssts(&[id1]).await;
         assert_eq!(result.deleted, 1);
         assert_eq!(result.failed, 0);
 
