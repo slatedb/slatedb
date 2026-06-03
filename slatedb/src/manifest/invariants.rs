@@ -15,18 +15,26 @@ use ulid::Ulid;
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 
-/// Invariant 1 — L0 ULID cutoff. Every L0 SST view newly added by `dirty` must
-/// carry a ULID timestamp "strictly" greater than the current manifest's L0
-/// watermark (`current.core.max_l0_ulid_timestamp_across_trees()`): the maximum
-/// ULID across all trees' live L0 views and `last_compacted_l0_sst_view_id`
-/// markers.
+/// Invariant 1 — L0 ULID cutoff. Every L0 SST newly added by `dirty` must carry a
+/// physical SST ULID timestamp "strictly" greater than the current manifest's L0
+/// watermark (`current.core.max_l0_ulid_timestamp_across_trees()`).
+///
+/// The check uses the physical SST ULID — `view.sst.id.unwrap_compacted_id()` —
+/// **not** the separately-allocated `view.id`. The GC keys its cutoff and its
+/// deletion filter off the SST ULID (see `garbage_collector::compacted_gc`), and
+/// in the normal V2 path the SST ULID is minted at upload while the `view.id` is
+/// minted later when the view is added to the manifest. Validating `view.id`
+/// would miss a backwards-skewed *upload*: an SST minted below the GC cutoff could
+/// receive a fresh `view.id` above the watermark, pass this check, and still be
+/// eligible for deletion. So both the watermark and this comparison are based on
+/// the SST ULID.
 ///
 /// This guarantees a newly published L0 sorts above every L0 the GC may have
 /// already fenced, so a writer on a backwards-skewed wall clock cannot publish an
-/// SST whose ULID falls below the GC cutoff. Which could otherwise make a live
+/// SST whose ULID falls below the GC cutoff — which could otherwise make a live
 /// SST eligible for deletion and corrupt the database state.
 ///
-/// "Newly added" is the set of L0 view ULIDs present in `dirty` but absent from
+/// "Newly added" is the set of L0 SST ULIDs present in `dirty` but absent from
 /// `current`, so re-publishing existing L0s (an idempotent update) never fails
 /// the check. On violation, returns [`SlateDBError::InvalidClockTick`] with the
 /// watermark timestamp as `last_tick` and the offending ULID timestamp as
@@ -42,22 +50,23 @@ pub(crate) fn l0_ulid_cutoff(
         return Ok(());
     };
 
-    // L0 view ULIDs already committed in `current`; anything in `dirty` not
+    // Physical SST ULIDs already committed in `current`; anything in `dirty` not
     // in this set is a newly added L0 that must clear the watermark.
     let existing: HashSet<Ulid> = current
         .core
         .trees()
-        .flat_map(|tree| tree.l0.iter().map(|view| view.id))
+        .flat_map(|tree| tree.l0.iter().map(|view| view.sst.id.unwrap_compacted_id()))
         .collect();
 
     for view in dirty.core.trees().flat_map(|tree| tree.l0.iter()) {
-        if existing.contains(&view.id) {
+        let sst_id = view.sst.id.unwrap_compacted_id();
+        if existing.contains(&sst_id) {
             continue;
         }
-        if view.id.timestamp_ms() <= watermark.timestamp_ms() {
+        if sst_id.timestamp_ms() <= watermark.timestamp_ms() {
             return Err(Box::new(SlateDBError::InvalidClockTick {
                 last_tick: watermark.timestamp_ms() as i64,
-                next_tick: view.id.timestamp_ms() as i64,
+                next_tick: sst_id.timestamp_ms() as i64,
             }));
         }
     }
@@ -92,6 +101,21 @@ mod tests {
         let view_id = Ulid::from_parts(ts_ms, rand);
         let handle = SsTableHandle::new(
             SsTableId::Compacted(view_id),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        );
+        SsTableView::new(view_id, handle)
+    }
+
+    /// An L0 view whose *view* ULID carries timestamp `view_ts_ms` but whose
+    /// underlying physical *SST* ULID carries a different timestamp `sst_ts_ms`.
+    /// This is the V2 case the invariant must handle: the SST is uploaded (and its
+    /// ULID minted) separately from the later-allocated view ID, so the check must
+    /// validate the SST ULID, not the view ULID.
+    fn l0_view_split(view_ts_ms: u64, sst_ts_ms: u64) -> SsTableView {
+        let view_id = Ulid::from_parts(view_ts_ms, 0);
+        let handle = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::from_parts(sst_ts_ms, 0)),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo::default(),
         );
@@ -222,6 +246,29 @@ mod tests {
             SlateDBError::InvalidClockTick {
                 last_tick: 400,
                 next_tick: 350
+            }
+        ));
+    }
+
+    #[test]
+    fn check_uses_physical_sst_ulid_not_view_ulid() {
+        // Regression guard: the dirty L0's *SST* ULID (50) is below the watermark
+        // (100), but its *view* ULID (999) is above it. The check must key off the
+        // SST ULID — the ID the GC uses — and reject. Validating the view ULID
+        // would wrongly pass and leave a sub-cutoff SST eligible for deletion.
+        let current = manifest_with_root_l0(&[100]);
+
+        let mut dirty_core = ManifestCore::new();
+        Arc::make_mut(&mut dirty_core.tree).l0 = VecDeque::from(vec![l0_view_split(999, 50)]);
+        let dirty = Manifest::initial(dirty_core);
+
+        let err = l0_ulid_cutoff(&dirty, &current).unwrap_err();
+        let err = err.downcast::<SlateDBError>().unwrap();
+        assert!(matches!(
+            *err,
+            SlateDBError::InvalidClockTick {
+                last_tick: 100,
+                next_tick: 50
             }
         ));
     }

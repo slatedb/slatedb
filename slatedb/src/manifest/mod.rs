@@ -516,9 +516,15 @@ impl ManifestCore {
     /// The max L0 ULID watermark across all trees (the unsegmented root and
     /// every segment), or `None` for a fresh manifest with no L0 history.
     ///
-    /// The fold covers each tree's live L0 view IDs and its
-    /// `last_compacted_l0_sst_view_id`, the same view ULID the GC uses for its
-    /// cutoff watermark. Returned as a `Ulid` (not a raw timestamp) so the L0
+    /// This mirrors the GC's `newest_l0_dt` (see
+    /// `garbage_collector::compacted_gc`) exactly, so the cutoff invariant
+    /// compares against the same watermark the GC uses to delete compacted SSTs.
+    /// Per tree: if the tree has active L0s, take the max of their physical SST
+    /// ULIDs (`view.sst.id.unwrap_compacted_id()` — the ID the GC keys its cutoff
+    /// and deletion filter off, *not* the separately-allocated `view.id`);
+    /// otherwise fall back to that tree's `last_compacted_l0_sst_view_id` marker.
+    /// The result is the max of those per-tree values across the unsegmented root
+    /// and every segment. Returned as a `Ulid` (not a raw timestamp) so the L0
     /// cutoff invariant ([`l0_ulid_cutoff`](crate::manifest::invariants::l0_ulid_cutoff))
     /// and the open-time skew check share one definition of the watermark.
     // TODO: Wire this into the manifest update path in a follow-up PR for
@@ -527,11 +533,17 @@ impl ManifestCore {
     #[allow(dead_code)]
     pub(crate) fn max_l0_ulid_timestamp_across_trees(&self) -> Option<ulid::Ulid> {
         self.trees()
-            .flat_map(|tree| {
-                tree.l0
-                    .iter()
-                    .map(|view| view.id)
-                    .chain(tree.last_compacted_l0_sst_view_id)
+            .filter_map(|tree| {
+                if tree.l0.is_empty() {
+                    // No active L0s: fall back to the last-compacted marker, as
+                    // the GC does. (The GC uses the *view* id here; mirror it.)
+                    tree.last_compacted_l0_sst_view_id
+                } else {
+                    tree.l0
+                        .iter()
+                        .map(|view| view.sst.id.unwrap_compacted_id())
+                        .max()
+                }
             })
             .max()
     }
