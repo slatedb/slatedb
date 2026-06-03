@@ -631,8 +631,13 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
-                CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
-                    .with_options(opts.clone())
+                let mut builder =
+                    CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                        .with_options(opts.clone());
+                if let Some(worker_opts) = &self.settings.compaction_worker_options {
+                    builder = builder.with_worker_options(worker_opts.clone());
+                }
+                builder
             })
         });
 
