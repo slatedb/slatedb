@@ -50,6 +50,30 @@ use slatedb_common::metrics::{MetricLevel, MetricsRecorder, MetricsRecorderHelpe
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
+#[derive(Debug)]
+pub(crate) enum WorkerMessage {
+    /// Signals that a compaction job has finished execution.
+    CompactionJobFinished {
+        /// Job id (distinct from the canonical compaction id).
+        id: Ulid,
+        /// Output SR on success, or the compaction error.
+        result: Result<crate::db_state::SortedRun, SlateDBError>,
+    },
+    /// Periodic progress update from the [`CompactionExecutor`].
+    // Fields are unused until heartbeat emission is wired in the failure-detection follow-up.
+    #[allow(dead_code)]
+    CompactionJobProgress {
+        /// The job id associated with this progress report.
+        id: Ulid,
+        /// The total number of bytes processed so far (estimate).
+        bytes_processed: u64,
+        /// The output SSTs produced so far (including previous runs).
+        output_ssts: Vec<crate::db_state::SsTableHandle>,
+    },
+    /// Ticker-triggered message to poll `.compactions` for claimable jobs.
+    PollCompactions,
+}
+
 /// Stateless executor of compaction jobs claimed from `.compactions`.
 ///
 /// Build one with [`CompactionWorkerBuilder`] and drive its event loop with
@@ -81,30 +105,6 @@ impl CompactionWorker {
             .await
             .map_err(|e| e.into())
     }
-}
-
-#[derive(Debug)]
-pub(crate) enum WorkerMessage {
-    /// Signals that a compaction job has finished execution.
-    CompactionJobFinished {
-        /// Job id (distinct from the canonical compaction id).
-        id: Ulid,
-        /// Output SR on success, or the compaction error.
-        result: Result<crate::db_state::SortedRun, SlateDBError>,
-    },
-    /// Periodic progress update from the [`CompactionExecutor`].
-    // Fields are unused until heartbeat emission is wired in the failure-detection follow-up.
-    #[allow(dead_code)]
-    CompactionJobProgress {
-        /// The job id associated with this progress report.
-        id: Ulid,
-        /// The total number of bytes processed so far (estimate).
-        bytes_processed: u64,
-        /// The output SSTs produced so far (including previous runs).
-        output_ssts: Vec<crate::db_state::SsTableHandle>,
-    },
-    /// Ticker-triggered message to poll `.compactions` for claimable jobs.
-    PollCompactions,
 }
 
 /// Builder for [`CompactionWorker`].
