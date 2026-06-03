@@ -185,9 +185,9 @@ run_subcompaction(spec, sub):
 ```
 
 It's worth noting that the main coordinator is still responsible for submitting
-the comapction, but the worker is responsible for computing the subcompaction
+the compaction, but the worker is responsible for computing the subcompaction
 plan (splits). This allows future optimizations where the subcompaction planner can pull
-information like SST indexes to improve the aplit algorithm without affecting the
+information like SST indexes to improve the split algorithm without affecting the
 cache on the active serving node in distributed compaction.
 
 ### Persistence & Schema
@@ -395,7 +395,7 @@ that unit, which is the only approach that addresses big SR compactions.
 
 **Index Metadata Split Algorithms.** Deferred. The idea here is to use the index
 metadata on SSTs to determine where we should be splitting instead of the rough
-heursitic that's outlined in this RFC. It's probably worth doing, but I've
+heuristic that's outlined in this RFC. It's probably worth doing, but I've
 deferred details of that for a v2 implementation.
 
 **Parallelizing block construction within a single range.** Deferred/Partial
@@ -408,7 +408,7 @@ challenging as we need to synchronize the production of sub-ranges which may
 cause lagging threads to serialize compaction. I'm inclined to reject.
 
 It is, in addition, not exclusive with the proposal in this RFC and if we wanted
-to optimize a single sub-comapction we could also apply parallelism within a
+to optimize a single sub-compaction we could also apply parallelism within a
 single subcompaction (or a top level compaction, which shares the same logic).
 
 ## Open Questions
