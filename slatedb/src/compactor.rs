@@ -2305,8 +2305,6 @@ mod tests {
             lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_COMPACT_PATH)
                 .is_some_and(|value| value > 0)
         );
-
-        db.close().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
