@@ -16,8 +16,17 @@ use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 
 /// Invariant 1 — L0 ULID cutoff. Every L0 SST newly added by `dirty` must carry a
-/// physical SST ULID timestamp "strictly" greater than the current manifest's L0
-/// watermark (`current.core.max_l0_ulid_timestamp_across_trees()`).
+/// physical SST ULID timestamp **not below** the current manifest's L0 watermark
+/// (`current.core.max_l0_ulid_timestamp_across_trees()`) — i.e. it must be `>=`
+/// the watermark; only a strictly-below timestamp is rejected.
+///
+/// The comparison deliberately matches the GC's deletion filter, which deletes
+/// SSTs *strictly older* than the cutoff (`sst.datetime() < cutoff_dt`, at
+/// millisecond granularity) — so an SST whose timestamp equals the watermark
+/// survives the GC and is safe to publish. Allowing equality also means two L0s
+/// minted in the same millisecond both pass, which keeps the writer's retry path
+/// from spinning on same-millisecond ULID collisions; only a genuine backwards
+/// clock step (timestamp strictly below the watermark) trips the invariant.
 ///
 /// The check uses the physical SST ULID — `view.sst.id.unwrap_compacted_id()` —
 /// **not** the separately-allocated `view.id`. The GC keys its cutoff and its
@@ -29,7 +38,7 @@ use crate::manifest::Manifest;
 /// eligible for deletion. So both the watermark and this comparison are based on
 /// the SST ULID.
 ///
-/// This guarantees a newly published L0 sorts above every L0 the GC may have
+/// This guarantees a newly published L0 is not behind any L0 the GC may have
 /// already fenced, so a writer on a backwards-skewed wall clock cannot publish an
 /// SST whose ULID falls below the GC cutoff — which could otherwise make a live
 /// SST eligible for deletion and corrupt the database state.
@@ -51,7 +60,7 @@ pub(crate) fn l0_ulid_cutoff(
     };
 
     // Physical SST ULIDs already committed in `current`; anything in `dirty` not
-    // in this set is a newly added L0 that must clear the watermark.
+    // in this set is a newly added L0 that must not be behind the watermark.
     let existing: HashSet<Ulid> = current
         .core
         .trees()
@@ -63,7 +72,9 @@ pub(crate) fn l0_ulid_cutoff(
         if existing.contains(&sst_id) {
             continue;
         }
-        if sst_id.timestamp_ms() <= watermark.timestamp_ms() {
+        // Reject only a strictly-below timestamp, mirroring the GC's `<` deletion
+        // filter; an equal timestamp (e.g. a same-millisecond mint) is safe.
+        if sst_id.timestamp_ms() < watermark.timestamp_ms() {
             return Err(Box::new(SlateDBError::InvalidClockTick {
                 last_tick: watermark.timestamp_ms() as i64,
                 next_tick: sst_id.timestamp_ms() as i64,
@@ -166,20 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn dirty_adds_l0_equal_to_watermark_errors() {
-        // Strict `>`: a same-millisecond ULID is rejected (the same-ms collision
-        // the writer retry path resolves by minting past the ms boundary).
+    fn dirty_adds_l0_equal_to_watermark_ok() {
+        // Equality is allowed (`>=`), mirroring the GC's strict-`<` deletion
+        // filter: an SST minted in the same millisecond as the watermark survives
+        // the GC, so it is safe to publish and must not trip the invariant. This
+        // is what keeps same-millisecond ULID collisions off the retry path.
         let current = manifest_with_root_l0(&[100]);
         let dirty = manifest_with_root_l0(&[100, 100]);
-        let err = l0_ulid_cutoff(&dirty, &current).unwrap_err();
-        let err = err.downcast::<SlateDBError>().unwrap();
-        assert!(matches!(
-            *err,
-            SlateDBError::InvalidClockTick {
-                last_tick: 100,
-                next_tick: 100
-            }
-        ));
+        l0_ulid_cutoff(&dirty, &current).unwrap();
     }
 
     #[test]
