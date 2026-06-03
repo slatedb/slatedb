@@ -142,7 +142,7 @@ impl GcTask for WalGcTask {
                 sst_ids_to_delete,
             );
             let DeleteResult { deleted, failed } =
-                self.table_store.delete_ssts(&sst_ids_to_delete).await;
+                self.table_store.delete_ssts(&sst_ids_to_delete).await?;
             match self.mode {
                 WalGcMode::Regular => self.stats.gc_wal_count.increment(deleted as u64),
                 WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(deleted as u64),

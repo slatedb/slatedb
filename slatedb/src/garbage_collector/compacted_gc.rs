@@ -232,7 +232,7 @@ impl GcTask for CompactedGcTask {
                 sst_ids_to_delete,
             );
             let DeleteResult { deleted, failed } =
-                self.table_store.delete_ssts(&sst_ids_to_delete).await;
+                self.table_store.delete_ssts(&sst_ids_to_delete).await?;
             self.stats.gc_compacted_count.increment(deleted as u64);
             if failed > 0 {
                 log::warn!(
