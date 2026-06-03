@@ -91,6 +91,8 @@ pub mod seq_tracker;
 pub mod size_tiered_compaction;
 
 mod batch;
+#[cfg(feature = "bench-internal")]
+pub use batch::benches as write_batch_benches;
 mod batch_write;
 mod blob;
 mod block_iterator;

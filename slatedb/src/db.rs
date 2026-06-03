@@ -305,7 +305,7 @@ impl DbInner {
         options: &WriteOptions,
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
-        self.db_stats.write_ops.increment(batch.ops.len() as u64);
+        self.db_stats.write_ops.increment(batch.op_count() as u64);
         self.check_closed()?;
         if batch.ops.is_empty() {
             return Err(SlateDBError::EmptyBatch);
@@ -6461,7 +6461,10 @@ mod tests {
             2
         );
 
-        let result = probe_table_store.delete_ssts(&[SsTableId::Wal(1)]).await;
+        let result = probe_table_store
+            .delete_ssts(&[SsTableId::Wal(1)])
+            .await
+            .unwrap();
         assert_eq!(result.deleted, 1);
         assert_eq!(result.failed, 0);
         gated_store.head_gate.release();
@@ -6526,7 +6529,10 @@ mod tests {
             .wait_for_arrivals(head_arrivals_before + 1)
             .await;
 
-        let result = probe_table_store.delete_ssts(&[SsTableId::Wal(1)]).await;
+        let result = probe_table_store
+            .delete_ssts(&[SsTableId::Wal(1)])
+            .await
+            .unwrap();
         assert_eq!(result.deleted, 1);
         assert_eq!(result.failed, 0);
         gated_store.head_gate.release();
