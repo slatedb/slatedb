@@ -46,6 +46,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "range-scans"
+path = "src/range_scans.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "s3-compatible"
 path = "src/s3_compatible.rs"
 test = false
