@@ -1440,7 +1440,7 @@ mod tests {
         .unwrap();
 
         // when:
-        let db_state = await_compaction(&db, Some(system_clock.clone())).await;
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock.clone())).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1911,7 +1911,7 @@ mod tests {
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
-        let db_state = await_compaction(&db, Some(system_clock.clone()))
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock.clone()))
             .await
             .unwrap();
         assert_eq!(db_state.tree.compacted.len(), 1);
@@ -2025,7 +2025,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // Compact L0 to L1
-        let db_state = await_compaction(&db, Some(system_clock.clone()))
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock.clone()))
             .await
             .unwrap();
         assert_eq!(db_state.tree.compacted.len(), 1);
@@ -2194,7 +2194,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, Some(system_clock)).await;
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -2299,7 +2299,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db_state = await_compaction(&db, Some(system_clock)).await;
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock)).await;
         assert!(db_state.is_some(), "db was not compacted");
         assert!(
             lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_COMPACT_PATH)
@@ -2372,7 +2372,7 @@ mod tests {
         .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
-        let db_state = await_compaction(&db, Some(system_clock.clone())).await;
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock.clone())).await;
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.tree.compacted.len(), 1);
         // Save current tick since we advanced it in `await_compaction`. We'll use it
@@ -2416,7 +2416,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when: compact L0 with the existing sorted run
-        let db_state = await_compaction(&db, Some(system_clock)).await;
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -2538,7 +2538,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, Some(system_clock)).await;
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -2673,7 +2673,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, Some(system_clock)).await;
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -2771,7 +2771,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db_state = await_compaction(&db, Some(insert_clock.clone()))
+        let db_state = await_compaction(&db, os.clone(), Some(insert_clock.clone()))
             .await
             .unwrap();
         assert_eq!(db_state.tree.compacted.len(), 1);
@@ -2889,7 +2889,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let _ = await_compaction(&db, Some(system_clock)).await;
+        let _ = await_compaction(&db, os.clone(), Some(system_clock)).await;
 
         // then: verify the put value overwrote the merge
         let result = db.get(b"key1").await.unwrap();
@@ -2989,7 +2989,7 @@ mod tests {
 
         // when:
         // Wait a bit for compaction to occur
-        let _ = await_compaction(&db, Some(system_clock)).await;
+        let _ = await_compaction(&db, os.clone(), Some(system_clock)).await;
 
         // then: verify that merges with different expire times are NOT merged together
         // Reading should get only the latest merge since they weren't combined
@@ -3108,7 +3108,7 @@ mod tests {
         db.flush_with_options(flush_opts.clone()).await.unwrap();
 
         // when:
-        let _ = await_compaction(&db, Some(system_clock)).await;
+        let _ = await_compaction(&db, os.clone(), Some(system_clock)).await;
 
         // then: verify in the compacted SST that all merge operations were combined
         let stored_manifest =
@@ -3243,7 +3243,7 @@ mod tests {
 
         // when: await_compaction advances clock by 60s per iteration,
         // so compaction_start_ts will be well past expire_at=10
-        let db_state = await_compaction(&db, Some(insert_clock)).await;
+        let db_state = await_compaction(&db, os.clone(), Some(insert_clock)).await;
 
         // then: key 1 should be expired (expire_at=10 < compaction_time),
         //       key 2 should survive (expire_at=i64::MAX), key 3 has no expiry
@@ -3371,7 +3371,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, Some(insert_clock)).await;
+        let db_state = await_compaction(&db, os.clone(), Some(insert_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -4960,7 +4960,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        await_compaction(&db, Some(system_clock.clone()))
+        await_compaction(&db, os.clone(), Some(system_clock.clone()))
             .await
             .expect("db was not compacted");
 
@@ -5424,8 +5424,11 @@ mod tests {
     /// trigger time-based flushes and compactions.
     async fn await_compaction(
         db: &Db,
+        os: Arc<dyn ObjectStore>,
         clock: Option<Arc<dyn SystemClock>>,
     ) -> Option<ManifestCore> {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(&Path::from(PATH), os.clone()));
         run_for(Duration::from_secs(10), || async {
             if let Some(clock) = &clock {
                 clock.as_ref().advance(Duration::from_millis(60000)).await;
@@ -5442,8 +5445,15 @@ mod tests {
 
             let empty_l0 = core_db_state.tree.l0.is_empty();
             let compaction_ran = !core_db_state.tree.compacted.is_empty();
-            if empty_wal && empty_memtable && empty_l0 && compaction_ran {
-                return Some(core_db_state);
+
+            let no_active_compactions = compactions_store
+                .read_latest_compactions()
+                .await
+                .ok()
+                .is_some_and(|compactions| !compactions.compactions.iter().any(|c| c.active()));
+
+            if empty_wal && empty_memtable && empty_l0 && compaction_ran && no_active_compactions {
+                return Some(get_db_state(manifest_store.clone()).await);
             }
             None
         })
