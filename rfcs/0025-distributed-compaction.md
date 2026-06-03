@@ -283,19 +283,34 @@ Submitted <-> Running --> Compacted --> Completed
 
 The coordinator is solely responsible for transitions from `Compacted → Completed` (or `Compacted → Failed`), and transitions the state only after attempting the manifest write. This preserves the single-writer invariant and gives recovery a clean, unambiguous signal for `Compacted` entries: they always need a manifest write retry.
 
+**The `Scheduled` state**
+
+This RFC introduces the `Scheduled` state so that the coordinator can signal that a compaction is ready to be claimed by a worker.
+
+```text
+Submitted --> Scheduled <-> Running --> Compacted --> Completed
+    |             |             |           |
+    |             |             v           |
+    +-------------+----------> Failed <-----+
+```
+
+The coordinator is solely responsible for transitions from `Submitted → Scheduled`, and transitions the state only after validating the compaction against the current manifest and updating its local state to be aware of the newly scheduled jobs. Workers exclusively claim `Scheduled` entries. They never act on `Submitted` which keeps the coordinator the single gatekeeper for validation and ensures the coordinator has the entry in local state before any worker can transition it onward.
+
 **New Protocol (distributed compaction)**
 
-Only the coordinator commits manifest updates (preserves single-writer invariant):
+Only the coordinator validates compactions and commits manifest updates (preserves single-writer invariant):
 
-1. Observe a `Compacted` entry in `.compactions` (written by the worker on job completion).
-2. Update `.manifest` via `write_manifest_safely()`.
-3. Update `.compactions` via `write_compactions_safely()`, transitioning `Compacted` → `Completed`.
+1. Observe a `Submitted` entry in `.compactions`.
+2. Validate the compaction, if it succeeds, update local state with the new compaction and transition it to `Scheduled`. If validation fails the compaction is transitioned to `Failed`.
+3. Observe a `Compacted` entry in `.compactions` (written by the worker on job completion).
+4. Update `.manifest` via `write_manifest_safely()`.
+5. Update `.compactions` via `write_compactions_safely()`, transitioning `Compacted` → `Completed`.
 
 On coordinator restart, the recovery logic is:
 
 1. Leave `Running` jobs alone. If the owning worker survived the coordinator restart it continues executing and emitting heartbeats; if it died, the failure detection protocol reclaims it once `worker_heartbeat_timeout_ms` elapses past `coordinator_start_time_ms` (see step 2 of the failure detection protocol).
 2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the job is marked `Failed` in `.compactions`. This is safe: the manifest was already updated, the output SSTs are already referenced and protected from GC, and the scheduler has no dependency on whether the entry reads `Completed` or `Failed`.
-3. Retain active (`Submitted`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
+3. Retain active (`Submitted`, `Scheduled`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
 
 ### Deployment Shapes
 
