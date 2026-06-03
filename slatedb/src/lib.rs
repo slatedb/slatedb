@@ -80,6 +80,7 @@ pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+pub mod compaction_worker;
 pub mod compactor;
 pub mod config;
 pub mod db_cache;
@@ -90,6 +91,8 @@ pub mod seq_tracker;
 pub mod size_tiered_compaction;
 
 mod batch;
+#[cfg(feature = "bench-internal")]
+pub use batch::benches as write_batch_benches;
 mod batch_write;
 mod blob;
 mod block_iterator;

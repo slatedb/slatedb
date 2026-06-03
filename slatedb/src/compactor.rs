@@ -3330,7 +3330,7 @@ mod tests {
 
         let (_, _, table_store) = build_test_stores(os.clone());
 
-        let value = &[b'a'; 64];
+        let value = &[b'a'; 32];
         let flush_opts = FlushOptions {
             flush_type: FlushType::MemTable,
         };

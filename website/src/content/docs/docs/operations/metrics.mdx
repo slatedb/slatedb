@@ -81,6 +81,7 @@ All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
 | `slatedb.db.write_ops` | counter | | Write operations |
 | `slatedb.db.write_batch_count` | counter | | Write batches |
 | `slatedb.db.backpressure_count` | counter | | Backpressure events |
+| `slatedb.db.l0_stall_count` | counter | `type`: num_ssts, num_ssts_per_key | L0 flush dispatch stalls by cause |
 | `slatedb.db.immutable_memtable_flushes` | counter | | Immutable memtable flushes |
 | `slatedb.db.wal_buffer_flushes` | counter | | WAL buffer flushes |
 | `slatedb.db.wal_buffer_flush_requests` | counter | | WAL buffer flush requests |
@@ -148,6 +149,17 @@ All object store metrics carry four labels:
 The instrumented store sits beneath the retrying layer, so each retry attempt
 is counted separately. Cache hits that never reach the remote store are not
 counted.
+
+The `delete` API is special: SlateDB deletes SSTs in batches via the object
+store's `delete_stream`, and the instrumented store records a single
+`request_count` and `request_duration_seconds` observation for the whole batch
+(the time to drain the entire stream), not one per object. How that batch maps
+to underlying HTTP requests is backend-specific: S3 collapses deletes into bulk
+calls of up to 1,000 objects, Azure into batches of up to 256, while GCS issues
+one request per object. The number of objects per batch and the backend's
+internal concurrency therefore both move this metric. Treat the `delete`
+duration as "how long a delete batch took" rather than a per-object or
+per-request latency.
 
 ### Object store cache (`slatedb.object_store_cache.*`)
 
