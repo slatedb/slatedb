@@ -11,9 +11,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
-    Attribute, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload,
-    PutResult, RenameOptions,
+    Attribute, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
+    MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
+    PutPayload, PutResult, RenameOptions,
 };
 
 use crate::rand::DbRand;
@@ -152,6 +152,20 @@ impl RetryingObjectStore {
         );
         new_attrs
     }
+
+    /// Compute the expected byte length of a range read, truncating at the
+    /// actual file size. This handles the case where a `GetRange::Bounded`
+    /// end exceeds the file length.
+    fn expected_range_len(range: &GetRange, file_size: u64) -> u64 {
+        match range {
+            GetRange::Bounded(r) => {
+                let end = r.end.min(file_size);
+                end.saturating_sub(r.start)
+            }
+            GetRange::Offset(offset) => file_size.saturating_sub(*offset),
+            GetRange::Suffix(suffix) => (*suffix).min(file_size),
+        }
+    }
 }
 
 impl std::fmt::Display for RetryingObjectStore {
@@ -224,25 +238,35 @@ impl ObjectStore for RetryingObjectStore {
         // `get_range` lives on `ObjectStoreExt` and reads the body after
         // `get_opts` returns, so without this buffering the body bytes
         // would fall outside the retry loop.
-        let buffer_body = options.range.is_some();
         (|| async {
             // Options and location must be owned per-attempt.
-            let result = self.inner.get_opts(location, options.clone()).await?;
-            if !buffer_body {
+            let options = options.clone();
+            let options_range = options.range.clone();
+            let result = self.inner.get_opts(location, options).await?;
+            let meta = result.meta.clone();
+            let file_size = meta.size;
+
+            if options_range.is_none() {
+                // No range requested — don't buffer the body. The buffer size
+                // can't be validated wihtout buffering.
                 return Ok(result);
             }
-            let meta = result.meta.clone();
+
+            // Range read: buffer the body and validate against the expected
+            // size (requested range truncated at file size).
+            let expected_len = Self::expected_range_len(&options_range.unwrap(), file_size);
             let range = result.range.clone();
-            let range_len = range.end.saturating_sub(range.start) as usize;
             let attributes = result.attributes.clone();
             let bytes = result.bytes().await?;
-            let bytes_len = bytes.len();
+            let bytes_len = bytes.len() as u64;
 
-            if bytes_len != range_len {
+            if bytes_len != expected_len {
                 return Err(object_store::Error::Generic {
-                    store: "cached_object_store",
+                    store: "retrying_object_store",
                     source: format!(
-                        "Size check failed: {bytes_len} bytes read, but range is {range_len} bytes"
+                        "Size check failed: {bytes_len} bytes read, but expected \
+                         {expected_len} bytes (requested range truncated at file \
+                         size {file_size})"
                     )
                     .into(),
                 });
