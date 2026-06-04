@@ -31,7 +31,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use std::cmp;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -472,8 +472,11 @@ impl ManifestWriterHandler {
     /// Called before **every** CAS attempt (see [`Self::write_manifest_update_safely`]):
     /// the committed watermark is re-read each time, so a conflict-triggered
     /// reload that raised the watermark is handled on the following attempt.
-    async fn remint_l0s_below_watermark(&self) -> Result<(), SlateDBError> {
-        let Some((watermark_ts, below)) = self.l0s_below_committed_watermark() else {
+    async fn remint_l0s_below_watermark(
+        &self,
+        staged_l0_ids: &mut HashSet<ulid::Ulid>,
+    ) -> Result<(), SlateDBError> {
+        let Some((watermark_ts, below)) = self.l0s_below_committed_watermark(staged_l0_ids) else {
             return Ok(());
         };
 
@@ -483,17 +486,22 @@ impl ManifestWriterHandler {
         // by the GC (the uploader uses the same "left for the GC" handling).
         let mut remap: Vec<(ulid::Ulid, SsTableHandle)> = Vec::with_capacity(below.len());
         for l0 in below {
-            let new_id = SsTableId::Compacted(self.mint_l0_ulid_at_or_above(watermark_ts).await?);
+            let new_ulid = self.mint_l0_ulid_at_or_above(watermark_ts).await?;
+            let new_id = SsTableId::Compacted(new_ulid);
             self.db
                 .table_store
                 .copy_sst(&SsTableId::Compacted(l0.old_id), &new_id)
                 .await?;
-            // only the id changes, so the view's derived
-            // `effective_range` is unaffected.
+            // Only the id changes, so the view's derived `effective_range` is
+            // unaffected.
             remap.push((
                 l0.old_id,
                 SsTableHandle::new(new_id, l0.format_version, l0.info),
             ));
+            // Keep the staged set current so a later retry (after a reload that
+            // raised the watermark) re-mints the same logical L0 by its new id.
+            staged_l0_ids.remove(&l0.old_id);
+            staged_l0_ids.insert(new_ulid);
         }
 
         self.swap_l0_handles(&remap);
@@ -504,19 +512,21 @@ impl ManifestWriterHandler {
     /// it. Returns `None` when there is nothing to re-mint (fresh manifest, or
     /// every staged L0 already at/above the watermark).
     ///
-    /// The candidate set is exactly the invariant's "newly added" comparison: an
-    /// L0 qualifies only if it is absent from the committed manifest *and* its
-    /// SST-ULID timestamp is below the committed cross-tree watermark.
-    fn l0s_below_committed_watermark(&self) -> Option<(u64, Vec<BelowWatermarkL0>)> {
-        let committed = self.manifest.db_state();
-        let watermark_ts = committed
+    /// Only L0s in `staged_l0_ids` — the SSTs *this* flush uploaded — are
+    /// candidates. Pre-existing state L0s are never touched: they are already
+    /// committed or owned by another writer, and we hold no guarantee their
+    /// blobs are copyable. A candidate qualifies when its SST-ULID timestamp is
+    /// below the committed cross-tree watermark, mirroring the invariant's
+    /// strict `<`.
+    fn l0s_below_committed_watermark(
+        &self,
+        staged_l0_ids: &HashSet<ulid::Ulid>,
+    ) -> Option<(u64, Vec<BelowWatermarkL0>)> {
+        let watermark_ts = self
+            .manifest
+            .db_state()
             .max_l0_ulid_timestamp_across_trees()?
             .timestamp_ms();
-        let committed_ids: std::collections::HashSet<ulid::Ulid> = committed
-            .trees()
-            .flat_map(|tree| tree.l0.iter())
-            .map(|view| view.sst.id.unwrap_compacted_id())
-            .collect();
 
         let below: Vec<BelowWatermarkL0> = {
             let guard = self.db.state.read();
@@ -527,7 +537,7 @@ impl ManifestWriterHandler {
                 .flat_map(|tree| tree.l0.iter())
                 .filter_map(|view| {
                     let old_id = view.sst.id.unwrap_compacted_id();
-                    (!committed_ids.contains(&old_id) && old_id.timestamp_ms() < watermark_ts).then(
+                    (staged_l0_ids.contains(&old_id) && old_id.timestamp_ms() < watermark_ts).then(
                         || BelowWatermarkL0 {
                             old_id,
                             format_version: view.sst.format_version,
@@ -604,6 +614,14 @@ impl ManifestWriterHandler {
     ) -> Result<(), SlateDBError> {
         self.apply_uploaded_state(&staged_batch)?;
 
+        // The SST ULIDs published by this flush — the only L0s re-mint may lift
+        // below the watermark. Pre-existing state L0s are left untouched.
+        let staged_l0_ids: HashSet<ulid::Ulid> = staged_batch
+            .iter()
+            .flat_map(|uploaded| uploaded.segments.iter())
+            .map(|segment| segment.sst_handle.id.unwrap_compacted_id())
+            .collect();
+
         for uploaded in &staged_batch {
             uploaded.imm_memtable.notify_uploaded(Ok(()));
         }
@@ -618,6 +636,7 @@ impl ManifestWriterHandler {
                     .iter()
                     .map(|c| &c.options)
                     .collect::<Vec<_>>(),
+                staged_l0_ids,
             )
             .await
         {
@@ -713,11 +732,13 @@ impl ManifestWriterHandler {
     async fn write_manifest_update_safely(
         &mut self,
         checkpoint_options: &[&CheckpointOptions],
+        mut staged_l0_ids: HashSet<ulid::Ulid>,
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
         loop {
             // Lift any staged L0 below the committed L0 watermark before the CAS
-            // so the `l0_ulid_cutoff` invariant, accepts the write.
-            self.remint_l0s_below_watermark().await?;
+            // so the `l0_ulid_cutoff` invariant accepts the write. Re-read each
+            // attempt: a conflict reload below may have raised the watermark.
+            self.remint_l0s_below_watermark(&mut staged_l0_ids).await?;
             let result = self.write_manifest_update(checkpoint_options).await;
             if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
@@ -828,7 +849,10 @@ impl ManifestWriterHandler {
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         self.load_manifest().await?;
-        let mut results = self.write_manifest_update_safely(&[options]).await?;
+        // Checkpoint-only update publishes no new L0s, so nothing to re-mint.
+        let mut results = self
+            .write_manifest_update_safely(&[options], HashSet::new())
+            .await?;
         Ok(results
             .pop()
             .expect("checkpoint write should return exactly one result"))
@@ -1378,7 +1402,10 @@ mod tests {
         let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
 
         // The safe update path should reload the live newer manifest and retry safely.
-        let checkpoints = handler.write_manifest_update_safely(&[]).await.unwrap();
+        let checkpoints = handler
+            .write_manifest_update_safely(&[], std::collections::HashSet::new())
+            .await
+            .unwrap();
 
         let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
         assert!(checkpoints.is_empty());
