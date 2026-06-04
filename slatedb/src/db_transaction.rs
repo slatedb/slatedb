@@ -744,6 +744,7 @@ mod tests {
     use super::*;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_store::memory::InMemory;
+    use crate::MetricLevel;
     use rstest::rstest;
     use std::sync::Arc;
 
@@ -2030,7 +2031,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
-            metric_level: crate::MetricLevel::default(),
+            metric_level: MetricLevel::default(),
             default_ttl: None,
             block_format: None,
         }
