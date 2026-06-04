@@ -4,6 +4,7 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
+use crate::bytes_range::BytesRange;
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
@@ -13,10 +14,77 @@ use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
 use smallvec::{smallvec, SmallVec};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
 use uuid::Uuid;
+
+pub(crate) type WriteOpList = SmallVec<[WriteOp; 1]>;
+
+pub(crate) const MIN_HASHMAP_KEY_COUNT: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum WriteBatchMap {
+    Hashed(HashMap<Bytes, WriteOpList>),
+    Sorted(BTreeMap<Bytes, WriteOpList>),
+}
+
+impl Default for WriteBatchMap {
+    fn default() -> Self {
+        Self::Sorted(BTreeMap::new())
+    }
+}
+
+impl WriteBatchMap {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Hashed(map) => map.len(),
+            Self::Sorted(map) => map.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[cfg(test)]
+    fn get(&self, key: &[u8]) -> Option<&WriteOpList> {
+        match self {
+            Self::Hashed(map) => map.get(key),
+            Self::Sorted(map) => map.get(key),
+        }
+    }
+
+    fn get_mut(&mut self, key: &[u8]) -> Option<&mut WriteOpList> {
+        match self {
+            Self::Hashed(map) => map.get_mut(key),
+            Self::Sorted(map) => map.get_mut(key),
+        }
+    }
+
+    fn insert(&mut self, key: Bytes, ops: WriteOpList) -> Option<WriteOpList> {
+        match self {
+            Self::Hashed(map) => map.insert(key, ops),
+            Self::Sorted(map) => map.insert(key, ops),
+        }
+    }
+
+    fn maybe_use_hashmap(&mut self) {
+        if let Self::Sorted(map) = self {
+            if map.len() >= MIN_HASHMAP_KEY_COUNT {
+                let map = std::mem::take(map);
+                *self = Self::Hashed(map.into_iter().collect());
+            }
+        }
+    }
+
+    fn sorted(&mut self) {
+        if let Self::Hashed(map) = self {
+            let map = std::mem::take(map);
+            *self = Self::Sorted(map.into_iter().collect());
+        }
+    }
+}
 
 /// A batch of write operations (puts, deletes, and merges). All operations in
 /// the batch are applied atomically to the database. Put and delete operations
@@ -50,7 +118,7 @@ use uuid::Uuid;
 /// means that WAL SSTs could get large if there's a large batch write.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: BTreeMap<Bytes, SmallVec<[WriteOp; 1]>>,
+    pub(crate) ops: WriteBatchMap,
     pub(crate) op_count: usize,
     pub(crate) txn_id: Option<Uuid>,
     pub(crate) has_merge_ops: bool,
@@ -137,7 +205,7 @@ impl WriteOp {
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {
-            ops: BTreeMap::new(),
+            ops: WriteBatchMap::default(),
             op_count: 0,
             txn_id: None,
             has_merge_ops: false,
@@ -237,6 +305,8 @@ impl WriteBatch {
         self.op_count += 1;
         if let Some(previous) = previous {
             self.op_count -= previous.len();
+        } else {
+            self.ops.maybe_use_hashmap();
         }
     }
 
@@ -264,6 +334,7 @@ impl WriteBatch {
             ops.push(op);
         } else {
             self.ops.insert(Bytes::copy_from_slice(key), smallvec![op]);
+            self.ops.maybe_use_hashmap();
         }
 
         self.has_merge_ops = true;
@@ -282,6 +353,8 @@ impl WriteBatch {
         self.op_count += 1;
         if let Some(previous) = previous {
             self.op_count -= previous.len();
+        } else {
+            self.ops.maybe_use_hashmap();
         }
     }
 
@@ -298,7 +371,14 @@ impl WriteBatch {
     }
 
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
-        self.ops.keys().cloned().collect()
+        match &self.ops {
+            WriteBatchMap::Hashed(map) => map.keys().cloned().collect(),
+            WriteBatchMap::Sorted(map) => map.keys().cloned().collect(),
+        }
+    }
+
+    pub(crate) fn sorted(&mut self) {
+        self.ops.sorted();
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with
@@ -325,14 +405,14 @@ impl WriteBatch {
         extractor: Option<&dyn PrefixExtractor>,
     ) -> Result<(Vec<RowEntry>, BTreeSet<Bytes>, u64), SlateDBError> {
         let mut entries_bytes: u64 = 0;
-        let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new(
+        let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new_sorted(
             self,
-            ..,
+            BytesRange::from(..),
             IterationOrder::Ascending,
             seq,
             Some(now),
             default_ttl,
-        ));
+        )?);
         if self.has_merge_ops() {
             if let Some(ref merge_operator) = merger {
                 it = Box::new(MergeOperatorIterator::new(
@@ -413,7 +493,7 @@ pub mod benches {
 /// Iterator over `WriteBatch` entries.
 pub(crate) struct WriteBatchIterator {
     iter: Peekable<Box<dyn Iterator<Item = RowEntry> + Send + Sync>>,
-    ordering: IterationOrder,
+    ordering: Option<IterationOrder>,
 }
 
 impl WriteBatchIterator {
@@ -440,25 +520,55 @@ impl WriteBatchIterator {
         op.to_row_entry(key, seq, now, expire_ts)
     }
 
-    pub(crate) fn new(
+    pub(crate) fn new_sorted(
         batch: &WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
         seq: u64,
         now: Option<i64>,
         default_ttl: Option<u64>,
+    ) -> Result<Self, SlateDBError> {
+        let range = BytesRange::from(range);
+        let entries: Vec<RowEntry> = match &batch.ops {
+            WriteBatchMap::Sorted(map) => match ordering {
+                IterationOrder::Ascending => map
+                    .range(range)
+                    .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
+                    .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
+                    .collect(),
+                IterationOrder::Descending => map
+                    .range(range)
+                    .rev()
+                    .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
+                    .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
+                    .collect(),
+            },
+            WriteBatchMap::Hashed(_) => return Err(SlateDBError::UnsortedWriteBatch),
+        };
+
+        let iter: Box<dyn Iterator<Item = RowEntry> + Send + Sync> = Box::new(entries.into_iter());
+
+        Ok(Self {
+            iter: iter.peekable(),
+            ordering: Some(ordering),
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_unsorted(
+        batch: &WriteBatch,
+        seq: u64,
+        now: Option<i64>,
+        default_ttl: Option<u64>,
     ) -> Self {
-        let entries: Vec<RowEntry> = match ordering {
-            IterationOrder::Ascending => batch
-                .ops
-                .range(range)
+        let entries: Vec<RowEntry> = match &batch.ops {
+            WriteBatchMap::Hashed(map) => map
+                .iter()
                 .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
                 .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
                 .collect(),
-            IterationOrder::Descending => batch
-                .ops
-                .range(range)
-                .rev()
+            WriteBatchMap::Sorted(map) => map
+                .iter()
                 .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
                 .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
                 .collect(),
@@ -468,7 +578,7 @@ impl WriteBatchIterator {
 
         Self {
             iter: iter.peekable(),
-            ordering,
+            ordering: None,
         }
     }
 }
@@ -484,8 +594,12 @@ impl RowEntryIterator for WriteBatchIterator {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
+        let Some(ordering) = self.ordering else {
+            return Err(SlateDBError::UnsortedWriteBatch);
+        };
+
         while let Some(entry) = self.iter.peek() {
-            if match self.ordering {
+            if match ordering {
                 IterationOrder::Ascending => entry.key.as_ref() < next_key,
                 IterationOrder::Descending => entry.key.as_ref() > next_key,
             } {
@@ -524,6 +638,20 @@ mod tests {
         let ops = ops_for_key(batch, key);
         assert_eq!(ops.len(), 1);
         &ops[0]
+    }
+
+    fn numbered_key(i: usize) -> Bytes {
+        Bytes::from(format!("key-{i:04}").into_bytes())
+    }
+
+    fn numbered_value(i: usize) -> Bytes {
+        Bytes::from(format!("value-{i:04}").into_bytes())
+    }
+
+    fn put_numbered_keys(batch: &mut WriteBatch, count: usize) {
+        for i in 0..count {
+            batch.put_bytes(numbered_key(i), numbered_value(i));
+        }
     }
 
     #[rstest]
@@ -583,7 +711,17 @@ mod tests {
                 );
             }
         }
-        assert_eq!(batch.ops, expected_ops);
+        match &batch.ops {
+            WriteBatchMap::Sorted(ops) => assert_eq!(ops, &expected_ops),
+            WriteBatchMap::Hashed(_) => panic!("expected sorted map"),
+        }
+    }
+
+    #[test]
+    fn should_default_to_sorted_map() {
+        let batch = WriteBatch::new();
+
+        assert!(matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.is_empty()));
     }
 
     #[test]
@@ -601,6 +739,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn should_switch_to_hashmap_when_new_key_count_reaches_threshold() {
+        let mut batch = WriteBatch::new();
+        put_numbered_keys(&mut batch, MIN_HASHMAP_KEY_COUNT - 1);
+
+        assert!(
+            matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.len() == MIN_HASHMAP_KEY_COUNT - 1)
+        );
+
+        batch.put_bytes(
+            numbered_key(MIN_HASHMAP_KEY_COUNT - 1),
+            numbered_value(MIN_HASHMAP_KEY_COUNT - 1),
+        );
+
+        assert!(
+            matches!(&batch.ops, WriteBatchMap::Hashed(map) if map.len() == MIN_HASHMAP_KEY_COUNT)
+        );
+        assert_eq!(batch.op_count(), MIN_HASHMAP_KEY_COUNT);
+    }
+
+    #[test]
+    fn should_not_switch_to_hashmap_for_overwrites() {
+        let mut batch = WriteBatch::new();
+        for i in 0..MIN_HASHMAP_KEY_COUNT {
+            batch.put_bytes(Bytes::from_static(b"key"), numbered_value(i));
+        }
+
+        assert!(matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.len() == 1));
+        assert_eq!(batch.op_count(), 1);
+        match only_op(&batch, b"key") {
+            WriteOp::Put(value, _) => assert_eq!(value, &numbered_value(MIN_HASHMAP_KEY_COUNT - 1)),
+            _ => panic!("Expected Put operation"),
+        }
+    }
+
+    #[test]
+    fn should_force_hashed_batch_back_to_sorted() {
+        let mut batch = WriteBatch::new();
+        put_numbered_keys(&mut batch, MIN_HASHMAP_KEY_COUNT);
+        assert!(matches!(&batch.ops, WriteBatchMap::Hashed(_)));
+
+        batch.sorted();
+
+        assert!(
+            matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.len() == MIN_HASHMAP_KEY_COUNT)
+        );
+        match only_op(&batch, numbered_key(7).as_ref()) {
+            WriteOp::Put(value, _) => assert_eq!(value, &numbered_value(7)),
+            _ => panic!("Expected Put operation"),
+        }
+    }
+
     #[tokio::test]
     async fn test_writebatch_iterator_basic() {
         let mut batch = WriteBatch::new();
@@ -609,8 +799,15 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -629,6 +826,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_error_creating_sorted_iterator_over_hashed_map() {
+        let mut batch = WriteBatch::new();
+        for i in (0..MIN_HASHMAP_KEY_COUNT).rev() {
+            batch.put_bytes(numbered_key(i), numbered_value(i));
+        }
+        assert!(matches!(&batch.ops, WriteBatchMap::Hashed(_)));
+
+        let result = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(numbered_key(998)..=numbered_key(1000)),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        );
+
+        match result {
+            Err(SlateDBError::UnsortedWriteBatch) => {}
+            Err(other) => panic!("expected UnsortedWriteBatch, got {other:?}"),
+            Ok(_) => panic!("expected sorted iterator construction to fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn should_error_when_seeking_unsorted_iterator() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+
+        let mut iter = WriteBatchIterator::new_unsorted(&batch, u64::MAX, None, None);
+        let err = iter.seek(b"key1").await.unwrap_err();
+
+        assert!(matches!(err, SlateDBError::UnsortedWriteBatch));
+    }
+
+    #[tokio::test]
     async fn test_writebatch_iterator_range() {
         let mut batch = WriteBatch::new();
         batch.put(b"key1", b"value1");
@@ -636,14 +868,15 @@ mod tests {
         batch.put(b"key5", b"value5");
 
         // Test range [key2, key4)
-        let mut iter = WriteBatchIterator::new(
+        let mut iter = WriteBatchIterator::new_sorted(
             &batch,
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
             u64::MAX,
             None,
             None,
-        );
+        )
+        .unwrap();
 
         let expected = vec![RowEntry::new_value(b"key3", b"value3", u64::MAX)];
 
@@ -657,8 +890,15 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key2", b"value2");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Descending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Descending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         let expected = vec![
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
@@ -676,8 +916,15 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Seek to key3
         iter.seek(b"key3").await.unwrap();
@@ -698,8 +945,15 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Descending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Descending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Seek to key3 (in descending, we want keys <= key3)
         iter.seek(b"key3").await.unwrap();
@@ -716,8 +970,15 @@ mod tests {
     #[tokio::test]
     async fn test_writebatch_iterator_empty_batch() {
         let batch = WriteBatch::new();
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         let result = iter.next().await.unwrap();
         assert!(result.is_none());
@@ -729,8 +990,15 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Seek to key2 (doesn't exist)
         iter.seek(b"key2").await.unwrap();
@@ -752,8 +1020,15 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Seek beyond maximum key
         iter.seek(b"key9").await.unwrap();
@@ -771,8 +1046,15 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.delete(b"key4");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -802,8 +1084,15 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.put(b"key3", b"value3");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Seek before first key
         iter.seek(b"key1").await.unwrap();
@@ -825,14 +1114,15 @@ mod tests {
         batch.put(b"key5", b"value5");
 
         // Range [key2, key4) should include tombstones
-        let mut iter = WriteBatchIterator::new(
+        let mut iter = WriteBatchIterator::new_sorted(
             &batch,
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
             u64::MAX,
             None,
             None,
-        );
+        )
+        .unwrap();
 
         let expected = vec![
             RowEntry::new(
@@ -936,9 +1226,9 @@ mod tests {
         assert_eq!(batch.op_count(), 3);
 
         // And: all keys should exist
-        assert!(batch.ops.contains_key(&Bytes::from_static(b"key1")));
-        assert!(batch.ops.contains_key(&Bytes::from_static(b"key2")));
-        assert!(batch.ops.contains_key(&Bytes::from_static(b"key3")));
+        assert!(batch.ops.get(&Bytes::from_static(b"key1")).is_some());
+        assert!(batch.ops.get(&Bytes::from_static(b"key2")).is_some());
+        assert!(batch.ops.get(&Bytes::from_static(b"key3")).is_some());
     }
 
     #[test]
@@ -1112,8 +1402,15 @@ mod tests {
         batch.delete(b"key3");
 
         // When: creating an iterator
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Then: the iterator should return all operations in order
         let expected = vec![
@@ -1153,8 +1450,15 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating an iterator
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Then: the iterator should return all merge operations
         let expected = vec![
@@ -1193,8 +1497,15 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating a descending iterator
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Descending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Descending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Then: the iterator should return operations in descending order
         let expected = vec![
@@ -1233,14 +1544,15 @@ mod tests {
         batch.merge(b"key5", b"merge5");
 
         // When: creating an iterator with a range filter
-        let mut iter = WriteBatchIterator::new(
+        let mut iter = WriteBatchIterator::new_sorted(
             &batch,
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
             u64::MAX,
             None,
             None,
-        );
+        )
+        .unwrap();
 
         // Then: the iterator should only return merges within the range
         let expected = vec![RowEntry::new(
@@ -1263,8 +1575,15 @@ mod tests {
         batch.merge(b"key5", b"merge5");
 
         // When: creating an iterator and seeking to key3
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
         iter.seek(b"key3").await.unwrap();
 
         // Then: the iterator should return key3 and key5
@@ -1316,8 +1635,15 @@ mod tests {
         batch.merge(b"key2", b"x");
         batch.merge(b"key1", b"b");
 
-        let mut iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let mut iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         let expected = vec![
             RowEntry::new(

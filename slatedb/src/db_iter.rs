@@ -565,8 +565,15 @@ mod tests {
         batch.put(b"key3", b"value3");
 
         // Create WriteBatchIterator
-        let wb_iter =
-            WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
+        let wb_iter = WriteBatchIterator::new_sorted(
+            &batch,
+            BytesRange::from(..),
+            IterationOrder::Ascending,
+            u64::MAX,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Create DbIterator with WriteBatch
         let mem_iters: VecDeque<Box<dyn RowEntryIterator + 'static>> = VecDeque::new();

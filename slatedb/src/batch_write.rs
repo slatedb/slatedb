@@ -127,7 +127,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
 impl DbInner {
     #[allow(clippy::panic)]
     #[instrument(level = "trace", skip_all, fields(batch_size = batch.op_count()))]
-    async fn write_batch(&self, batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
+    async fn write_batch(&self, mut batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
         let _options = options;
         #[cfg(not(dst))]
         let now = self.mono_clock.now().await?;
@@ -161,6 +161,7 @@ impl DbInner {
 
         // Count batch-local merge folding on the flush path so DB-side merge
         // resolution uses one metric for both write batches and memtable flushes.
+        batch.sorted();
         let (entries, touched_segments, entries_size) = batch
             .extract_entries(
                 commit_seq,

@@ -152,22 +152,23 @@ impl DbTransaction {
 
         let db_state = self.db_inner.state.read().view();
 
-        // Build the write batch iterator synchronously while holding the read
-        // guard, avoiding a clone of the full batch. The iterator materializes
-        // only the entries overlapping the read range (a single key for a
-        // point get), so this is O(log N) instead of O(N).
+        // Build the write batch iterator synchronously while holding the write
+        // guard, avoiding a clone of the full batch. Force the batch back to a
+        // sorted map before range iteration so the sorted iterator contract
+        // holds even after large transactions switched to a HashMap.
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
         let write_batch_iter = {
-            let guard = self.write_batch.read();
-            Some(WriteBatchIterator::new(
+            let mut guard = self.write_batch.write();
+            guard.sorted();
+            Some(WriteBatchIterator::new_sorted(
                 &guard,
                 range,
                 IterationOrder::Ascending,
                 u64::MAX,
                 None,
                 None,
-            ))
+            )?)
         };
 
         let kv = self
@@ -289,19 +290,21 @@ impl DbTransaction {
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
 
-        // Build the write batch iterator synchronously while holding the read
-        // guard, avoiding a clone of the full batch. The iterator materializes
-        // only the entries in the scan range.
+        // Build the write batch iterator synchronously while holding the write
+        // guard, avoiding a clone of the full batch. Force the batch back to a
+        // sorted map before range iteration so scans keep ordered seek
+        // semantics even after large transactions switched to a HashMap.
         let write_batch_iter = {
-            let guard = self.write_batch.read();
-            Some(WriteBatchIterator::new(
+            let mut guard = self.write_batch.write();
+            guard.sorted();
+            Some(WriteBatchIterator::new_sorted(
                 &guard,
                 range.clone(),
                 options.order,
                 u64::MAX,
                 None,
                 None,
-            ))
+            )?)
         };
 
         self.db_inner
