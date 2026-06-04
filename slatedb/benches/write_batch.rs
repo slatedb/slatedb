@@ -6,6 +6,9 @@
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use pprof::criterion::{Output, PProfProfiler};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+use rand_xoshiro::Xoroshiro128PlusPlus;
 use slatedb::config::{MergeOptions, PutOptions, Ttl};
 use slatedb::{write_batch_benches, MergeOperator, MergeOperatorError, WriteBatch};
 use std::sync::{Arc, OnceLock};
@@ -14,6 +17,8 @@ use tokio::runtime::Runtime;
 
 const VALUE_SIZE: usize = 128;
 const EXTRACT_ENTRY_COUNT: usize = 1_024;
+const LOAD_BATCH_KEY_COUNTS: &[usize] = &[1_000, 10_000, 100_000];
+const LOAD_BATCH_SHUFFLE_SEED: u64 = 0x5EED_5EED;
 const MERGE_BATCH_SCENARIOS: &[(usize, usize)] = &[
     // Each scenario is (key_count, merges_per_key).
     (256, 3),
@@ -123,11 +128,26 @@ fn make_batch_with_repeated_overwrites() -> WriteBatch {
     batch
 }
 
+fn make_load_batch_put_entries(key_count: usize) -> Vec<(Bytes, Bytes)> {
+    let mut indices: Vec<_> = (0..key_count).collect();
+    let mut rng = Xoroshiro128PlusPlus::seed_from_u64(LOAD_BATCH_SHUFFLE_SEED ^ key_count as u64);
+    indices.shuffle(&mut rng);
+    indices
+        .into_iter()
+        .map(|index| (key(index), value(index)))
+        .collect()
+}
+
 fn bench_write_batch(c: &mut Criterion) {
     let runtime = Runtime::new().expect("failed to create runtime");
     let put_options = put_options();
     let merge_options = merge_options();
     let batch_without_merges = make_batch_without_merges();
+    let load_batch_put_entries: Vec<_> = LOAD_BATCH_KEY_COUNTS
+        .iter()
+        .copied()
+        .map(|key_count| (key_count, make_load_batch_put_entries(key_count)))
+        .collect();
     let batches_with_merges: Vec<_> = MERGE_BATCH_SCENARIOS
         .iter()
         .copied()
@@ -162,6 +182,26 @@ fn bench_write_batch(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+
+    for (key_count, put_entries) in &load_batch_put_entries {
+        let key_count = *key_count;
+        group.bench_with_input(
+            BenchmarkId::new("load_batch/puts", format!("{key_count}_keys")),
+            put_entries,
+            |b, put_entries| {
+                b.iter_batched(
+                    WriteBatch::new,
+                    |mut batch| {
+                        for (key, value) in put_entries {
+                            batch.put_bytes_with_options(key.clone(), value.clone(), &put_options);
+                        }
+                        black_box(batch)
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
 
     group.bench_function("put_bytes_with_options/new_key_populated", |b| {
         b.iter_batched(
