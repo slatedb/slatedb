@@ -18,6 +18,7 @@ Table of Contents:
    - [SlateDB core: supporting plumbing](#slatedb-core-supporting-plumbing)
    - [Where the cache will live](#where-the-cache-will-live)
    - [Builder layering](#builder-layering)
+   - [The cache as a wrapper](#the-cache-as-a-wrapper)
    - [Cache wrapper behavior](#cache-wrapper-behavior)
    - [Allocation overhead](#allocation-overhead)
 - [Caveats](#caveats)
@@ -61,11 +62,11 @@ This RFC proposes two changes:
    decompression error). A cache wrapper reads the intent and applies its own
    policy.
 2. **Pluggable cache placement.** `CachedObjectStore` will no longer be
-   explicitly created inside SlateDB. The user passes any `Arc<dyn ObjectStore>`
-   to `Db::builder`: a raw backend, the bundled `CachedObjectStore` they
-   constructed themselves, or any other intent-aware `ObjectStore`
-   implementation. The builder will wrap the passed `ObjectStore` with retry
-   and instrumentation.
+   explicitly created inside SlateDB. The user passes the innermost backend to
+   `Db::builder` and, optionally, a cache as an `ObjectStoreWrapper`: the bundled
+   `CachedObjectStore` exposed as a wrapper, or any other intent-aware
+   `ObjectStore`. The builder wraps the backend with instrumentation and retry,
+   the same order it uses today, then applies the cache wrapper on top.
 
 The protocol will be dependent on `object_store::Extensions`. An alternative is
 SlateDB-owned `SlateDbObjectStore` trait was considered and is described in
@@ -296,17 +297,28 @@ separate hook:
 ### Where the cache will live
 
 SlateDB talks to object storage through `Arc<dyn ObjectStore>`. The user passes
-one to `Db::builder(path, store)`. That store can be:
+the innermost backend to `Db::builder(path, backend)`. That backend is a raw
+store (S3, GCS, Azure, `InMemory`, `LocalFileSystem`).
 
-- A raw backend (S3, GCS, Azure, `InMemory`, `LocalFileSystem`).
-- The bundled `CachedObjectStore` wrapping a raw backend.
-- Any other intent-aware `ObjectStore` the user wrote.
+A cache (or any other wrapper) is supplied separately as an `ObjectStoreWrapper`
+through `.with_object_store_wrapper(..)`. SlateDB keeps its instrumentation and
+retry on the backend, exactly as today, and applies the wrapper on top of them.
+The wrapper can be:
 
-If the user passes a raw backend, the protocol is a no-op: SlateDB still
-attaches intents on every call, but nothing reads them.
+- The bundled `CachedObjectStore`, exposed as a wrapper.
+- Any other intent-aware wrapper the user wrote.
 
-If the user passes `CachedObjectStore` (or another intent-aware wrapper), every
-read and write flows through it with a typed intent on the extensions.
+If the user supplies no wrapper, the protocol is a no-op for caching purposes:
+SlateDB still attaches intents on every call, but nothing reads them.
+
+If the user supplies a wrapper, every read and write flows through it with a
+typed intent on the extensions.
+
+This keeps the physical layering identical to what SlateDB ships today. The
+only change is that the cache is constructed from a user-supplied wrapper rather
+than from `Settings`. See [Builder layering](#builder-layering) for the exact
+order and [The cache as a wrapper](#the-cache-as-a-wrapper) for how the bundled and
+custom caches both plug in.
 
 ### Builder layering
 
@@ -315,8 +327,8 @@ read and write flows through it with a typed intent on the extensions.
 innermost to outermost:
 
 ```
-1. The store the user passed (a raw backend, the bundled
-   CachedObjectStore, or a custom intent-aware wrapper)
+1. The backend the user passed (a raw store: S3, GCS, Azure,
+   InMemory, LocalFileSystem)
        |
        v
 2. InstrumentedObjectStore (per-operation metrics)
@@ -325,23 +337,36 @@ innermost to outermost:
 3. RetryingObjectStore (transient failure retries)
        |
        v
+4. The cache wrapper the user supplied, if any (the bundled
+   CachedObjectStore or a custom intent-aware wrapper)
+       |
+       v
    SlateDB core (TableStore, ManifestStore, CompactionsStore, GC)
 ```
 
-layers 2 and 3 are SlateDB-managed. layer 1 is whatever the user hands to the
-builder, all the way down. SlateDB core will not construct a cache on the user's
-behalf; the bundled `CachedObjectStore` is one of several things the user may
-pass in.
+Layers 2 and 3 are SlateDB-managed and sit directly on the backend, the same
+order SlateDB ships today. Layer 4 is whatever cache wrapper the user supplied,
+applied on top. SlateDB core will not construct a cache on the user's behalf;
+the bundled `CachedObjectStore` is one of several wrappers the user may supply.
 
-Users who want the bundled cache construct it themselves with
+Instrumentation and retry stay on the backend for two reasons. The metrics on
+layer 2 count only requests that reach the backend, so a cache hit served by
+layer 4 is not counted and the numbers continue to measure object store API
+traffic. Retry on layer 3 handles only backend errors with the policy designed
+for them, and the cache wrapper keeps full control of its own internal error
+handling.
+
+Users who want the bundled cache supply it as a wrapper with
 `CachedObjectStore::builder`:
 
 ```rust
-let cache = CachedObjectStore::builder(raw_backend)
+let cache = CachedObjectStore::builder()
     .root_folder(dir)
+    .build();
+let db = Db::builder(path, raw_backend)
+    .with_object_store_wrapper(cache)
     .build()
     .await?;
-let db = Db::builder(path, cache).build().await?;
 ```
 
 `root_folder` is the only required setting. Other settings
@@ -355,32 +380,100 @@ specific `Db` instance.
 `Settings`. SlateDB core will have no field that describes the cache; the
 protocol on each call is the only contract it knows.
 
-The current layering is the reverse: `CachedObjectStore` is the outermost
-layer, with retries underneath. The proposed order, with retries on the
-outside, separates the two concerns: the user provides whatever
-`dyn ObjectStore` they want at step 1, and SlateDB unconditionally adds retry
-and instrumentation on top. Custom wrappers do not need to know about retry
-behavior.
+This is the same physical order SlateDB ships today: instrumentation and retry
+wrap the backend, and the cache wraps them. What changes is only how the cache
+is constructed. Today SlateDB reads `Settings::object_store_cache_options` and
+builds `CachedObjectStore` itself. Under this proposal the user supplies the
+cache as a wrapper and SlateDB applies it at step 4.
 
-A side effect: the cache wrapper now has to handle its own internal errors
-because SlateDB cannot tell them apart from upstream errors. A transient disk
-I/O failure inside the cache, a corrupt local part, or a missing cache file
-look the same to the outer `RetryingObjectStore` as a transient backend
-failure, so SlateDB will retry them with the same policy. Wrappers that want
-different semantics (e.g. fall back to upstream on local disk failure rather
-than surface the error) implement that internally before returning to
-SlateDB.
+Because retry sits below the cache wrapper, the cache keeps full control of its
+own internal error handling. A transient disk I/O failure inside the cache, a
+corrupt local part, or a missing cache file are the cache's to resolve (fall
+back to upstream, evict and refetch, or surface the error), and SlateDB does
+not apply a backend retry policy to them. The cache's own calls to its inner
+store still get backend retries, because that inner store is the retrying
+store, so a custom wrapper never implements retry for backend calls itself.
 
 Two consequences worth calling out:
 
-- Compactor and GC builders will only add retry and instrumentation; they will
-  not auto-wrap with `CachedObjectStore`. Users who want compactor reads or GC
-  operations to go through their own cache pass it directly to those builders.
+- Compactor and GC builders will only add instrumentation and retry on the
+  backend; they will not apply a cache wrapper. Users who want compactor reads
+  or GC operations to go through their own cache supply the wrapper to those
+  builders.
 - Manifest writes and compactions metadata writes will flow through the cache
   wrapper (because there is only one main store handle). They will still skip
   the cache because they carry `WriteIntent::manifest()` and the bundled wrapper
   short-circuits that intent. See [Cache wrapper
   behavior](#cache-wrapper-behavior).
+
+### The cache as a wrapper
+
+A cache plugs in as an `ObjectStoreWrapper`. SlateDB owns the seam: it builds the
+instrumented, retrying backend first, then calls the wrapper to wrap it. This is
+what keeps instrumentation and retry on the backend while leaving the cache
+pluggable.
+
+```rust
+/// A wrapper SlateDB applies on top of the instrumented, retrying backend.
+///
+/// SlateDB instruments and wraps the user's backend with retry first, then
+/// calls `wrap`, so the returned store sits above retry and below SlateDB core.
+#[async_trait]
+pub trait ObjectStoreWrapper: Send + Sync {
+    async fn wrap(
+        &self,
+        inner: Arc<dyn ObjectStore>,
+    ) -> Result<Arc<dyn ObjectStore>, SlateDBError>;
+}
+```
+
+Each builder assembles the main store the same way. The instrument and retry
+unit is unchanged from today; the only new step is the optional wrapper on top:
+
+```rust
+// Unchanged: Instrument then Retry over the user's backend, with the
+// per-builder component and store_type labels.
+let base = instrumented_retrying_object_store(
+    backend, &recorder, component, store_type, rand.clone(), system_clock.clone(),
+);
+
+// The cache wrapper, if supplied, wraps the instrumented, retrying backend.
+let main_store = match &self.object_store_wrapper {
+    Some(wrapper) => wrapper.wrap(base).await?,
+    None => base,
+};
+```
+
+**The bundled `CachedObjectStore`.** `CachedObjectStore` is now the wrapper the
+user constructs: it holds the cache configuration and implements
+`ObjectStoreWrapper`. The live cache `ObjectStore` that does the part-file I/O
+becomes a private inner type (`CachedObjectStoreInner` below); `wrap` builds it
+from the configuration and the inner store. The async setup that
+`CachedObjectStore::from_config` does today moves onto that inner type:
+
+```rust
+impl CachedObjectStore {
+    /// Start building the bundled cache wrapper. Holds config only, no I/O yet.
+    pub fn builder() -> CachedObjectStoreBuilder { /* ... */ }
+}
+
+#[async_trait]
+impl ObjectStoreWrapper for CachedObjectStore {
+    async fn wrap(
+        &self,
+        inner: Arc<dyn ObjectStore>,
+    ) -> Result<Arc<dyn ObjectStore>, SlateDBError> {
+        // `inner` is the instrumented, retrying backend for this component.
+        // `CachedObjectStoreInner` is the private live cache store.
+        let cache = CachedObjectStoreInner::from_config(inner, &self.options, /* ... */).await?;
+        Ok(cache)
+    }
+}
+```
+
+In every case the backend, instrumentation, and retry are assembled by SlateDB
+in the same order it uses today. The cache is the one wrapper that moves out of
+SlateDB and into a user-supplied `ObjectStoreWrapper`.
 
 ### Cache wrapper behavior
 
@@ -414,40 +507,40 @@ different choices implement their own `ObjectStore` and pass it to
 
 ### Example
 
-Simplest form, using the builder:
+Simplest form with the bundled cache:
 
 ```rust
 let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-let cache = CachedObjectStore::builder(backend)
+let cache = CachedObjectStore::builder()
     .root_folder(cache_dir)
+    .build();
+let db = Db::builder("my-db", backend)
+    .with_object_store_wrapper(cache)
     .build()
     .await?;
-let db = Db::builder("my-db", cache).build().await?;
 ```
 
 With more options set:
 
 ```rust
-let cache = CachedObjectStore::builder(backend)
+let cache = CachedObjectStore::builder()
     .root_folder(cache_dir)
     .cache_puts(true)
     .part_size_bytes(8 * 1024 * 1024)
     .max_cache_size_bytes(32 * 1024 * 1024 * 1024)
-    .build()
-    .await?;
+    .build();
 ```
 
 For tests or advanced wiring (shared metrics recorder, mock clock,
 deterministic RNG):
 
 ```rust
-let cache = CachedObjectStore::builder(backend)
+let cache = CachedObjectStore::builder()
     .root_folder(cache_dir)
     .metrics_recorder(shared_recorder)
     .system_clock(mock_clock)
     .rand(seeded_rand)
-    .build()
-    .await?;
+    .build();
 ```
 
 ### Allocation overhead
@@ -600,10 +693,10 @@ follow-ups in that section land:
 
 - **API.** Users who set
   `Settings::object_store_cache_options.root_folder` to enable the bundled cache
-  will need to construct `CachedObjectStore` themselves and pass it to
-  `Db::builder` (the auto-construct convenience is removed when the field moves
-  out of `Settings`). The bundled cache's initial admission behavior, including
-  `cache_puts`, is preserved.
+  will need to construct a `CachedObjectStore::builder()` and supply it through
+  `Db::builder(..).with_object_store_wrapper(..)` (the auto-construct convenience
+  is removed when the field moves out of `Settings`). The bundled cache's
+  initial admission behavior, including `cache_puts`, is preserved.
 - **On-disk format.** Unchanged. The disk format used by `CachedObjectStore`
   stays the same, so cached files survive the migration.
 - **Wire format.** Unchanged.
