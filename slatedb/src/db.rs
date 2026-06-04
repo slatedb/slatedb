@@ -2087,7 +2087,7 @@ mod tests {
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
-    use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
+    use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue, MetricLevel};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
@@ -7046,6 +7046,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
+            metric_level: MetricLevel::default(),
             default_ttl: ttl,
             block_format: None,
         }

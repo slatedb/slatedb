@@ -2030,6 +2030,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
+            metric_level: crate::MetricLevel::default(),
             default_ttl: None,
             block_format: None,
         }

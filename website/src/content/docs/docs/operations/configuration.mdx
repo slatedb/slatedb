@@ -20,7 +20,7 @@ use slatedb::{
     config::{DbReaderOptions, ReadOptions, Settings},
     db_cache::foyer::FoyerCache,
     object_store::{memory::InMemory, ObjectStore},
-    Db, DbReader, Error,
+    Db, DbReader, Error, MetricLevel,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +32,7 @@ async fn main() -> Result<(), Error> {
     // 1. Serializable runtime settings.
     let mut settings = Settings::default();
     settings.flush_interval = Some(Duration::from_millis(250));
+    settings.metric_level = MetricLevel::Debug;
 
     // 2. Builder configuration for process-local components and wiring.
     let db = Db::builder("example", Arc::clone(&object_store))
@@ -60,6 +61,10 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 ```
+
+`Settings::metric_level` controls which registered metrics are active. The
+default is `Info`; set it to `Debug` to enable debug-level metrics when using a
+metrics recorder.
 
 ## Reconfiguring Object Stores
 

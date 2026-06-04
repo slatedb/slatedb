@@ -419,7 +419,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             .system_clock
             .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
 
-        let recorder = MetricsRecorderHelper::new(self.metrics_recorder, MetricLevel::default());
+        let recorder =
+            MetricsRecorderHelper::new(self.metrics_recorder, self.settings.metric_level);
         let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
             &recorder,
