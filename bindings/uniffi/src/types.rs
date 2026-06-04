@@ -362,6 +362,7 @@ pub enum CompactionStatus {
     Running,
     Completed,
     Failed,
+    Compacted,
 }
 
 impl From<CoreCompactionStatus> for CompactionStatus {
@@ -371,6 +372,7 @@ impl From<CoreCompactionStatus> for CompactionStatus {
             CoreCompactionStatus::Running => Self::Running,
             CoreCompactionStatus::Completed => Self::Completed,
             CoreCompactionStatus::Failed => Self::Failed,
+            CoreCompactionStatus::Compacted => Self::Compacted,
         }
     }
 }
@@ -398,8 +400,9 @@ impl From<&CoreSourceId> for SourceId {
 pub struct CompactionSpec {
     /// Ordered compaction sources.
     pub sources: Vec<SourceId>,
-    /// Destination sorted run ID.
-    pub destination: u32,
+    /// Destination sorted run ID. `None` for drain-segment specs, which
+    /// produce no new sorted run.
+    pub destination: Option<u32>,
     /// Whether any input source is an L0 SST view.
     pub has_l0_sources: bool,
     /// Whether any input source is a sorted run.

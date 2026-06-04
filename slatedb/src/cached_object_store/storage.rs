@@ -80,6 +80,8 @@ pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + Display + 'static {
 pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
     async fn save_part(&self, part_number: PartID, buf: Bytes) -> object_store::Result<()>;
 
+    async fn delete_part(&self, part_number: PartID) -> object_store::Result<()>;
+
     async fn read_part(
         &self,
         part_number: PartID,
@@ -95,6 +97,11 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
     async fn save_head(&self, meta: (&ObjectMeta, &Attributes)) -> object_store::Result<()>;
 
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>>;
+
+    /// Deletes this cache entry from the associated cache on the best effort
+    /// basis. If some error happens during the deletion, it's logged instead
+    /// of being reported to the caller.
+    async fn delete(&self);
 }
 
 pub type PartID = usize;

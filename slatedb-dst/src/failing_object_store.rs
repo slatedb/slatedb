@@ -15,8 +15,8 @@ use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use parking_lot::RwLock;
 use rand::RngCore;
@@ -373,18 +373,6 @@ impl ObjectStore for FailingObjectStore {
         self.put_like(location, payload, opts).await
     }
 
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.apply_request_faults(Operation::PutOpts, &[location.clone()], 0)
-            .await?;
-        let result = self.inner.put_multipart(location).await?;
-        self.apply_response_faults(Operation::PutOpts, &[location.clone()], 0)
-            .await?;
-        Ok(result)
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -403,21 +391,22 @@ impl ObjectStore for FailingObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        self.apply_request_faults(Operation::GetOpts, &[location.clone()], 0)
+        let op = if options.head {
+            Operation::Head
+        } else if options.range.is_some() {
+            Operation::GetRange
+        } else {
+            Operation::GetOpts
+        };
+        self.apply_request_faults(op, &[location.clone()], 0)
             .await?;
         let result = self.inner.get_opts(location, options).await?;
-        let size = result.meta.size;
-        self.apply_response_faults(Operation::GetOpts, &[location.clone()], size)
-            .await?;
-        Ok(result)
-    }
-
-    async fn get_range(&self, location: &Path, range: Range<u64>) -> object_store::Result<Bytes> {
-        self.apply_request_faults(Operation::GetRange, &[location.clone()], 0)
-            .await?;
-        let result = self.inner.get_range(location, range).await?;
-        let size = u64::try_from(result.len()).unwrap_or(u64::MAX);
-        self.apply_response_faults(Operation::GetRange, &[location.clone()], size)
+        let size = if op == Operation::GetRange {
+            result.range.end.saturating_sub(result.range.start)
+        } else {
+            result.meta.size
+        };
+        self.apply_response_faults(op, &[location.clone()], size)
             .await?;
         Ok(result)
     }
@@ -438,22 +427,37 @@ impl ObjectStore for FailingObjectStore {
         Ok(result)
     }
 
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.apply_request_faults(Operation::Head, &[location.clone()], 0)
-            .await?;
-        let result = self.inner.head(location).await?;
-        self.apply_response_faults(Operation::Head, &[location.clone()], result.size)
-            .await?;
-        Ok(result)
-    }
-
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        self.apply_request_faults(Operation::Delete, &[location.clone()], 0)
-            .await?;
-        let result = self.inner.delete(location).await;
-        self.apply_response_faults(Operation::Delete, &[location.clone()], 0)
-            .await?;
-        result
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let this = self.clone();
+        let inner = Arc::clone(&self.inner);
+        let inner_stream = inner.delete_stream(
+            locations
+                .then(move |loc| {
+                    let this = this.clone();
+                    async move {
+                        let location = loc?;
+                        this.apply_request_faults(Operation::Delete, &[location.clone()], 0)
+                            .await?;
+                        Ok(location)
+                    }
+                })
+                .boxed(),
+        );
+        let this_after = self.clone();
+        inner_stream
+            .then(move |result| {
+                let this = this_after.clone();
+                async move {
+                    let location = result?;
+                    this.apply_response_faults(Operation::Delete, &[location.clone()], 0)
+                        .await?;
+                    Ok(location)
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -540,34 +544,28 @@ impl ObjectStore for FailingObjectStore {
         Ok(result)
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
         self.apply_request_faults(Operation::Copy, &[from.clone(), to.clone()], 0)
             .await?;
-        self.inner.copy(from, to).await?;
+        self.inner.copy_opts(from, to, options).await?;
         self.apply_response_faults(Operation::Copy, &[from.clone(), to.clone()], 0)
             .await
     }
 
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
         self.apply_request_faults(Operation::Rename, &[from.clone(), to.clone()], 0)
             .await?;
-        self.inner.rename(from, to).await?;
-        self.apply_response_faults(Operation::Rename, &[from.clone(), to.clone()], 0)
-            .await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.apply_request_faults(Operation::Copy, &[from.clone(), to.clone()], 0)
-            .await?;
-        self.inner.copy_if_not_exists(from, to).await?;
-        self.apply_response_faults(Operation::Copy, &[from.clone(), to.clone()], 0)
-            .await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.apply_request_faults(Operation::Rename, &[from.clone(), to.clone()], 0)
-            .await?;
-        self.inner.rename_if_not_exists(from, to).await?;
+        self.inner.rename_opts(from, to, options).await?;
         self.apply_response_faults(Operation::Rename, &[from.clone(), to.clone()], 0)
             .await
     }

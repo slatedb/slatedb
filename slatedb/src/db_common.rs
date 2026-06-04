@@ -6,8 +6,6 @@ use crate::error::SlateDBError;
 use crate::oracle::Oracle;
 use crate::wal_replay::ReplayedMemtable;
 
-pub(crate) const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 4096;
-
 impl DbInner {
     pub(crate) fn maybe_freeze_current_memtable(&self) -> Result<(), SlateDBError> {
         let wal_id = self.wal_buffer.recent_flushed_wal_id();
@@ -29,7 +27,7 @@ impl DbInner {
             .checked_sub(last_freeze_wal_id)
             .ok_or_else(|| SlateDBError::InvalidDBState)?;
 
-        if wal_id_gap < MAX_WAL_FLUSHES_BEFORE_L0_FLUSH
+        if wal_id_gap < self.settings.max_wal_flushes_before_l0_flush
             && l0_sst_size_est < self.settings.l0_sst_size_bytes
         {
             Ok(())

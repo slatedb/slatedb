@@ -137,10 +137,17 @@ impl ManifestWriter {
         through_seq: Option<u64>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx.send(ManifestWriterCommand::AwaitFlush {
-            through_seq,
-            sender,
-        })
+        self.commands_tx.send_or_handle_closed(
+            ManifestWriterCommand::AwaitFlush {
+                through_seq,
+                sender,
+            },
+            |message, err| {
+                if let ManifestWriterCommand::AwaitFlush { sender, .. } = message {
+                    let _ = sender.send(Err(err.clone()));
+                }
+            },
+        )
     }
 
     /// Sends a checkpoint request to the manifest_writer. The manifest_writer will write
@@ -152,12 +159,18 @@ impl ManifestWriter {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx
-            .send(ManifestWriterCommand::CreateCheckpoint {
+        self.commands_tx.send_or_handle_closed(
+            ManifestWriterCommand::CreateCheckpoint {
                 through_seq,
                 options,
                 sender,
-            })
+            },
+            |message, err| {
+                if let ManifestWriterCommand::CreateCheckpoint { sender, .. } = message {
+                    let _ = sender.send(Err(err.clone()));
+                }
+            },
+        )
     }
 
     /// Enqueues a manifest poll; the result is delivered to `sender` on completion.
@@ -165,8 +178,14 @@ impl ManifestWriter {
         &self,
         sender: oneshot::Sender<Result<(), SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands_tx
-            .send(ManifestWriterCommand::PollManifest { done: Some(sender) })
+        self.commands_tx.send_or_handle_closed(
+            ManifestWriterCommand::PollManifest { done: Some(sender) },
+            |message, err| {
+                if let ManifestWriterCommand::PollManifest { done: Some(sender) } = message {
+                    let _ = sender.send(Err(err.clone()));
+                }
+            },
+        )
     }
 
     pub(crate) async fn shutdown(executor: &crate::dispatcher::MessageHandlerExecutor) {
@@ -190,6 +209,7 @@ struct ManifestWriterHandler {
     db_status_rx: watch::Receiver<crate::db_status::DbStatus>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
+    pending_manifest_refreshes: Vec<oneshot::Sender<Result<(), SlateDBError>>>,
 }
 
 #[async_trait]
@@ -247,7 +267,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
         let mut commands = commands.fuse();
         let close_result = self.try_graceful_cleanup(&mut commands, &result).await;
         // Drain any commands not consumed by graceful cleanup, collecting
-        // flush/checkpoint waiters so they receive a proper error.
+        // waiters so they receive a proper error.
         while let Some(command) = commands.next().await {
             self.collect_pending_waiter(command);
         }
@@ -258,6 +278,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
             .unwrap_or(SlateDBError::Closed);
         self.fail_pending_flushes(&error);
         self.fail_pending_checkpoints(&error);
+        self.fail_pending_manifest_refreshes(&error);
         close_result
     }
 }
@@ -281,6 +302,7 @@ impl ManifestWriterHandler {
             durable_seq,
             db_status_rx,
             pending_checkpoints: Vec::new(),
+            pending_manifest_refreshes: Vec::new(),
         }
     }
 
@@ -494,7 +516,7 @@ impl ManifestWriterHandler {
                     } else if segment.prefix.is_empty() {
                         // No extractor — singleton compatibility-encoded
                         // `prefix=""` segment lives in the top-level tree.
-                        &mut core.tree
+                        Arc::make_mut(&mut core.tree)
                     } else {
                         return Err(SlateDBError::InvalidSegmentPrefix {
                             prefix: segment.prefix.clone(),
@@ -535,7 +557,7 @@ impl ManifestWriterHandler {
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
         loop {
             let result = self.write_manifest_update(checkpoint_options).await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -563,7 +585,7 @@ impl ManifestWriterHandler {
     async fn write_current_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_current_manifest().await;
-            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+            if matches!(result.as_ref(), Err(err) if err.is_sequenced_write_conflict()) {
                 self.load_manifest().await?;
             } else {
                 return result;
@@ -599,14 +621,18 @@ impl ManifestWriterHandler {
         &mut self,
         done: Option<oneshot::Sender<Result<(), SlateDBError>>>,
     ) -> Result<(), SlateDBError> {
-        self.manifest.refresh().await?;
-        let remote_dirty = self.manifest.prepare_dirty()?;
-        self.merge_remote_manifest(remote_dirty);
-        if let Some(tx) = done {
-            let _ = tx.send(Ok(()));
+        let result = async {
+            self.manifest.refresh().await?;
+            let remote_dirty = self.manifest.prepare_dirty()?;
+            self.merge_remote_manifest(remote_dirty);
+            let _ = self.tracker_tx.send(TrackerMessage::ManifestRefreshed);
+            Ok(())
         }
-        let _ = self.tracker_tx.send(TrackerMessage::ManifestRefreshed);
-        Ok(())
+        .await;
+        if let Some(tx) = done {
+            let _ = tx.send(result.clone());
+        }
+        result
     }
 
     fn merge_remote_manifest(
@@ -617,10 +643,17 @@ impl ManifestWriterHandler {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
             let cow = wguard_state.state();
-            self.db
-                .db_stats
-                .l0_sst_count
-                .set(cow.core().tree.l0.len() as i64);
+            // L0 SST counters span every tree (root + each named segment per
+            // RFC-0024). `l0_sst_count` reports the total; `segment_max_*`
+            // reports the largest single tree, which is the right quantity
+            // for backpressure since `l0_max_ssts` is enforced per-tree.
+            let (total, max) = cow
+                .core()
+                .trees()
+                .map(|t| t.l0.len())
+                .fold((0usize, 0usize), |(sum, max), n| (sum + n, max.max(n)));
+            self.db.db_stats.l0_sst_count.set(total as i64);
+            self.db.db_stats.segment_max_l0_sst_count.set(max as i64);
             cow.manifest.clone()
         };
         self.db
@@ -719,8 +752,16 @@ impl ManifestWriterHandler {
         }
     }
 
-    /// Extract flush/checkpoint waiters from a command without processing
-    /// uploads. Used during error shutdown to ensure waiters get a proper error.
+    /// Fail remaining manifest refresh waiters on exit. If a poll request was
+    /// queued but never processed, callers still need the terminal DB error.
+    fn fail_pending_manifest_refreshes(&mut self, err: &SlateDBError) {
+        for sender in self.pending_manifest_refreshes.drain(..) {
+            let _ = sender.send(Err(err.clone()));
+        }
+    }
+
+    /// Extract waiters from a command without processing uploads. Used during
+    /// error shutdown to ensure waiters get a proper error.
     fn collect_pending_waiter(&mut self, command: ManifestWriterCommand) {
         match command {
             ManifestWriterCommand::AwaitFlush {
@@ -742,6 +783,9 @@ impl ManifestWriterHandler {
                     options,
                     sender,
                 });
+            }
+            ManifestWriterCommand::PollManifest { done: Some(sender) } => {
+                self.pending_manifest_refreshes.push(sender);
             }
             _ => {}
         }
@@ -802,7 +846,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, TrackerMessage};
+    use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -930,6 +974,18 @@ mod tests {
         setup_harness_with_extractor(path, fp_registry, None).await
     }
 
+    fn new_handler_from_harness(harness: TestHarness) -> ManifestWriterHandler {
+        let closed_result = WatchableOnceCell::new();
+        let (tracker_tx, _) =
+            crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
+        ManifestWriterHandler::new(
+            harness.inner,
+            harness.manifest,
+            Duration::from_secs(3600),
+            tracker_tx,
+        )
+    }
+
     async fn setup_harness_with_extractor(
         path: &str,
         fp_registry: Arc<FailPointRegistry>,
@@ -1034,6 +1090,42 @@ mod tests {
         manifest.manifest.core.checkpoints.len()
     }
 
+    async fn stage_manifest_boundary_conflict(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> u64 {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut external =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let start_id = external.id();
+
+        // The external writer wins the stale handler's intended id.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 1);
+
+        // A second external write leaves a live latest version above the future boundary,
+        // so the stale handler can make progress after refreshing.
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(external.id(), start_id + 2);
+
+        // GC fences and removes the stale handler's next id, but preserves the live latest
+        // version at start_id + 2.
+        manifest_store.advance_boundary(start_id + 1).await.unwrap();
+        manifest_store.delete_manifest(start_id + 1).await.unwrap();
+
+        let latest = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(latest, start_id + 2);
+        start_id
+    }
+
     fn freeze_imm(
         inner: &Arc<DbInner>,
         key: &[u8],
@@ -1072,6 +1164,63 @@ mod tests {
         let uploaded = next_uploaded_memtable_no_wal(inner, key, value).await;
         inner.oracle.advance_durable_seq(uploaded.last_seq);
         uploaded
+    }
+
+    #[tokio::test]
+    async fn write_current_manifest_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_current_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path.clone()),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
+
+        // The safe write path should reload the live newer manifest and retry safely.
+        handler.write_current_manifest_safely().await.unwrap();
+
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert_eq!(start_id + 3, final_id);
+    }
+
+    #[tokio::test]
+    async fn write_manifest_update_safely_retries_on_boundary_conflict() {
+        // Build a manifest writer handler backed by an in-memory manifest store.
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_update_boundary_conflict",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path.clone()),
+            Arc::clone(&object_store),
+        ));
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+
+        // The handler is stale while an external writer creates a live newer version, then
+        // GC deletes and fences the handler's next id.
+        let start_id = stage_manifest_boundary_conflict(&path, Arc::clone(&object_store)).await;
+
+        // The safe update path should reload the live newer manifest and retry safely.
+        let checkpoints = handler.write_manifest_update_safely(&[]).await.unwrap();
+
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        assert!(checkpoints.is_empty());
+        assert_eq!(start_id + 3, final_id);
     }
 
     #[tokio::test]
@@ -1347,6 +1496,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_manifest_refresh_waiter_receives_error_on_fenced_shutdown() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_pending_poll_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let mut handler = new_handler_from_harness(harness);
+
+        let (tx, rx) = oneshot::channel();
+        let messages =
+            futures::stream::iter(vec![ManifestWriterCommand::PollManifest { done: Some(tx) }]);
+        crate::dispatcher::MessageHandler::cleanup(
+            &mut handler,
+            Box::pin(messages),
+            Err(SlateDBError::Fenced),
+        )
+        .await
+        .unwrap();
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_refresh_waiter_receives_error_when_manifest_writer_channel_closed() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_closed_poll_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        started
+            .closed_result
+            .write_result(Err(SlateDBError::Fenced));
+        started.shutdown().await;
+
+        let (tx, rx) = oneshot::channel();
+        let err = started.send_poll(tx).unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::Fenced),
+            "expected Fenced, got {:?}",
+            err
+        );
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_waiter_receives_error_when_manifest_writer_channel_closed() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_closed_flush_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        started
+            .closed_result
+            .write_result(Err(SlateDBError::Fenced));
+        started.shutdown().await;
+
+        let (tx, rx) = oneshot::channel();
+        let err = started.send_flush(Some(1), tx).unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::Fenced),
+            "expected Fenced, got {:?}",
+            err
+        );
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_waiter_receives_error_when_manifest_writer_channel_closed() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_closed_checkpoint_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        started
+            .closed_result
+            .write_result(Err(SlateDBError::Fenced));
+        started.shutdown().await;
+
+        let (tx, rx) = oneshot::channel();
+        let err = started
+            .send_checkpoint(Some(1), CheckpointOptions::default(), tx)
+            .unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::Fenced),
+            "expected Fenced, got {:?}",
+            err
+        );
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
     async fn flush_waiter_in_channel_receives_error_on_clean_shutdown() {
         let harness = setup_harness(
             "/tmp/test_parallel_l0_flush_manifest_writer_channel_flush_clean",
@@ -1452,26 +1748,44 @@ mod tests {
         started.shutdown().await;
     }
 
-    /// Construct an UploadedMemtable whose flush output spans multiple named
-    /// segments. The same underlying SST is reused for each handle — the
-    /// apply path routes by prefix and does not validate SST contents
-    /// against the prefix.
+    /// Construct an `UploadedMemtable` whose flush output spans
+    /// multiple named segments. Each segment handle is an
+    /// independently-uploaded SST tagged with one of the requested
+    /// `prefixes`. The apply path routes by prefix without
+    /// validating SST contents, so the synthetic fabrication is
+    /// sound for manifest-writer tests.
+    ///
+    /// Goes around `build_imm_ssts` because the synthetic setup
+    /// (one key, many fake prefixes) can't satisfy that path's
+    /// requirement that recorded prefixes match the keys.
     async fn next_uploaded_memtable_with_segments(
         inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
         prefixes: &[&[u8]],
     ) -> UploadedMemtable {
+        use crate::utils::IdGenerator;
         let imm_memtable = freeze_imm(inner, key, value);
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
         let mut segments = Vec::with_capacity(prefixes.len());
         for prefix in prefixes {
-            let handles = inner
-                .flush_l0_for_test(imm_memtable.table(), true)
+            // Each synthetic SST needs at least one entry so the
+            // resulting handle can construct an `SsTableView` in the
+            // apply path. The actual contents don't matter — the
+            // manifest writer routes by `prefix` from the surrounding
+            // `SegmentedSstHandle`, not by the SST's keys.
+            let mut builder = inner.table_store.table_builder();
+            let row = crate::types::RowEntry::new_value(prefix, value, first_seq);
+            builder.add(row).await.unwrap();
+            let encoded_sst = builder.build().await.unwrap();
+            let id = crate::db_state::SsTableId::Compacted(
+                inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
+            );
+            let sst_handle = inner
+                .upload_sst(&id, imm_memtable.table(), &encoded_sst, false)
                 .await
                 .unwrap();
-            let sst_handle = handles.into_iter().next().expect("expected single SST");
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,

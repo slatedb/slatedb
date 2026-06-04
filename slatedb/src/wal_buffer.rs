@@ -385,9 +385,11 @@ impl WalBufferManager {
         }
 
         let encoded_sst = sst_builder.build().await?;
+        let written_bytes = encoded_sst.remaining_len() as u64;
         self.table_store
             .write_sst(&SsTableId::Wal(wal_id), &encoded_sst, false)
             .await?;
+        self.db_stats.wal_flush_bytes.increment(written_bytes);
 
         self.mono_clock.fetch_max_last_durable_tick(last_tick);
         Ok(())

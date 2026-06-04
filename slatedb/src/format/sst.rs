@@ -13,6 +13,7 @@ use crate::sst_stats::{BlockStats, SstStats};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
+use futures::future::try_join_all;
 use log::warn;
 use std::collections::VecDeque;
 #[cfg(feature = "zlib")]
@@ -145,6 +146,7 @@ impl BlockBuilderWithStats {
     }
 }
 
+pub(crate) const SIZEOF_U8: usize = size_of::<u8>();
 pub(crate) const SIZEOF_U16: usize = size_of::<u16>();
 pub(crate) const SIZEOF_U32: usize = size_of::<u32>();
 pub(crate) const SIZEOF_U64: usize = size_of::<u64>();
@@ -929,28 +931,30 @@ impl SsTableFormat {
         let range = self.block_range(blocks.clone(), info, &index);
         let start_range = range.start;
         let bytes: Bytes = obj.read_range(range).await?;
-        let mut decoded_blocks = VecDeque::new();
         let compression_codec = info.compression_codec;
-        for block in blocks {
-            let block_meta = index.block_meta().get(block);
-            let block_bytes_start = usize::try_from(block_meta.offset() - start_range).expect(
-                "attempted to read byte data with size \
-                larger than 32 bits on a 32-bit system",
-            );
-            let block_bytes = if block == index.block_meta().len() - 1 {
-                bytes.slice(block_bytes_start..)
-            } else {
-                let next_block_meta = index.block_meta().get(block + 1);
-                let block_bytes_end = usize::try_from(next_block_meta.offset() - start_range)
-                    .expect(
-                        "attempted to read byte data with size \
+        let decode_futures: Vec<_> = blocks
+            .map(|block| {
+                let block_meta = index.block_meta().get(block);
+                let block_bytes_start = usize::try_from(block_meta.offset() - start_range).expect(
+                    "attempted to read byte data with size \
                         larger than 32 bits on a 32-bit system",
-                    );
-                bytes.slice(block_bytes_start..block_bytes_end)
-            };
-            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec).await?);
-        }
-        Ok(decoded_blocks)
+                );
+                let block_bytes = if block == index.block_meta().len() - 1 {
+                    bytes.slice(block_bytes_start..)
+                } else {
+                    let next_block_meta = index.block_meta().get(block + 1);
+                    let block_bytes_end = usize::try_from(next_block_meta.offset() - start_range)
+                        .expect(
+                            "attempted to read byte data with size \
+                            larger than 32 bits on a 32-bit system",
+                        );
+                    bytes.slice(block_bytes_start..block_bytes_end)
+                };
+                self.decode_block(block_bytes, compression_codec)
+            })
+            .collect();
+        let decoded_blocks = try_join_all(decode_futures).await?;
+        Ok(VecDeque::from(decoded_blocks))
     }
 
     async fn decode_block(
@@ -1023,14 +1027,19 @@ impl SsTableFormat {
             return 0;
         }
         let guess_at_average_first_key_size_bytes = 12usize;
+        let (entries_size_encoded, number_of_blocks) = self
+            .estimate_entry_size_encoded_and_number_of_blocks(entry_num, estimated_entries_size);
+
         let mut ans = self.estimate_encoded_size_data_index_metadata(
             entry_num,
-            estimated_entries_size,
+            entries_size_encoded,
+            number_of_blocks,
             guess_at_average_first_key_size_bytes,
         );
         ans += self.estimate_encoded_size_filter(entry_num);
-        // estimate sum of Stats
-        ans += 5 * SIZEOF_U64 + CHECKSUM_SIZE;
+
+        ans += self.estimate_encoded_size_stats(number_of_blocks);
+
         ans
     }
 
@@ -1042,34 +1051,62 @@ impl SsTableFormat {
         if entry_num == 0 {
             return 0;
         }
+        let (entries_size_encoded, number_of_blocks) = self
+            .estimate_entry_size_encoded_and_number_of_blocks(entry_num, estimated_entries_size);
+
         self.estimate_encoded_size_data_index_metadata(
             entry_num,
-            estimated_entries_size,
+            entries_size_encoded,
+            number_of_blocks,
             SEQNUM_SIZE,
         )
+    }
+
+    fn estimate_entry_size_encoded_and_number_of_blocks(
+        &self,
+        entry_num: usize,
+        estimated_entries_size: usize,
+    ) -> (usize, usize) {
+        let entries_size_encoded =
+            row::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
+        let number_of_blocks = usize::div_ceil(entries_size_encoded, self.block_size);
+
+        (entries_size_encoded, number_of_blocks)
     }
 
     fn estimate_encoded_size_data_index_metadata(
         &self,
         entry_num: usize,
-        estimated_entries_size: usize,
+        entries_size_encoded: usize,
+        number_of_blocks: usize,
         average_first_key_size: usize,
     ) -> usize {
-        let entries_size_encoded =
-            row::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
-
-        // estimate sum of Block
-        let number_of_blocks = usize::div_ceil(entries_size_encoded, self.block_size);
         let mut ans =
             Block::estimate_encoded_size(entry_num, entries_size_encoded, number_of_blocks);
 
         // estimate sum of Index
         let guess_at_average_first_key_size_bytes = average_first_key_size;
-        ans += (number_of_blocks * guess_at_average_first_key_size_bytes + OFFSET_SIZE)
+        ans += number_of_blocks * (guess_at_average_first_key_size_bytes + OFFSET_SIZE)
             + CHECKSUM_SIZE;
 
-        // estimate sum of Metadata
-        ans += guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + SIZEOF_U16;
+        // estimate sum of Metadata (SsTableInfo)
+        let first_entry_size = guess_at_average_first_key_size_bytes;
+        let index_offset_length_size = 2 * SIZEOF_U64;
+        let filter_offset_length_size = 2 * SIZEOF_U64;
+        let compression_format_size = SIZEOF_U8;
+        let sst_type_size = SIZEOF_U8;
+        let last_entry_size = guess_at_average_first_key_size_bytes;
+        let stats_offset_length_size = 2 * SIZEOF_U64;
+        let filter_format_size = SIZEOF_U8;
+        ans += first_entry_size
+            + index_offset_length_size
+            + filter_offset_length_size
+            + compression_format_size
+            + sst_type_size
+            + last_entry_size
+            + stats_offset_length_size
+            + filter_format_size
+            + CHECKSUM_SIZE;
 
         ans += METADATA_OFFSET_SIZE + VERSION_SIZE;
 
@@ -1092,5 +1129,13 @@ impl SsTableFormat {
         } else {
             0
         }
+    }
+
+    fn estimate_encoded_size_stats(&self, number_of_blocks: usize) -> usize {
+        let ops_stats = 3 * SIZEOF_U64;
+        let key_value_stats = 2 * SIZEOF_U64;
+        let ops_stats_per_block = 3 * SIZEOF_U16;
+
+        ops_stats + key_value_stats + (number_of_blocks * ops_stats_per_block) + CHECKSUM_SIZE
     }
 }

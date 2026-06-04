@@ -6,8 +6,9 @@
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
-    "prebuild": "node ./scripts/generate-rfcs.js",
+    "prebuild": "node ./scripts/generate-rfcs.js && node ./scripts/generate-md-mirrors.js",
     "gen:rfcs": "node ./scripts/generate-rfcs.js",
+    "gen:md-mirrors": "node ./scripts/generate-md-mirrors.js",
     "preview": "astro preview",
     "astro": "astro"
   },

@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use fail_parallel::FailPointRegistry;
 use slatedb::compactor::Compactor;
-use slatedb::{Db, DbRand, Error, MergeOperator};
+use slatedb::{Db, DbRand, Error, MergeOperator, PrefixExtractor};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::MockSystemClock;
 
@@ -181,6 +181,20 @@ impl ActorCtx {
         self.shared.startup_ctx.merge_operator()
     }
 
+    /// Returns the segment extractor configured for this harness run, if any.
+    ///
+    /// Startup factories and reopen flows should pass this handle through to
+    /// `DbBuilder::with_segment_extractor` so that the writer's per-tree
+    /// routing is consistent across the initial open and any subsequent
+    /// reopens.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn PrefixExtractor>>`: The shared segment extractor, or
+    ///   `None` when the harness was not configured with one.
+    pub fn segment_extractor(&self) -> Option<Arc<dyn PrefixExtractor>> {
+        self.shared.startup_ctx.segment_extractor()
+    }
+
     /// Returns the shared shutdown token for the current harness run.
     ///
     /// Actors may call `cancel()` to request harness shutdown, or observe the
@@ -204,6 +218,7 @@ pub struct StartupCtx {
     fp_registry: Arc<FailPointRegistry>,
     failure_controller: FailingObjectStoreController,
     merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
+    segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     rand: Arc<DbRand>,
 }
 
@@ -262,6 +277,21 @@ impl StartupCtx {
     ///   merge-operator handle, or `None`.
     pub fn merge_operator(&self) -> Option<Arc<dyn MergeOperator + Send + Sync>> {
         self.merge_operator.clone()
+    }
+
+    /// Returns the segment extractor configured for this harness run, if any.
+    ///
+    /// Startup factories should pass this handle to
+    /// `DbBuilder::with_segment_extractor` when opening a database that
+    /// participates in RFC-0024 segmentation. The same handle should be
+    /// reused on reopens (e.g. through the fencer actor) so the writer's
+    /// persisted extractor name matches across restarts.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn PrefixExtractor>>`: The shared segment extractor, or
+    ///   `None`.
+    pub fn segment_extractor(&self) -> Option<Arc<dyn PrefixExtractor>> {
+        self.segment_extractor.clone()
     }
 
     /// Returns the shared failure controller for the harness object stores.
@@ -361,6 +391,7 @@ pub struct Harness {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     clock_advance_ms: RangeInclusive<u64>,
     merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
+    segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     startup_factory: StartupFactory,
     actors: Vec<ActorRegistration>,
 }
@@ -392,6 +423,7 @@ impl Harness {
             wal_object_store: None,
             clock_advance_ms: 1..=5,
             merge_operator: None,
+            segment_extractor: None,
             startup_factory: Box::new(move |ctx| Box::pin(factory(ctx))),
             actors: Vec::new(),
         }
@@ -507,6 +539,24 @@ impl Harness {
         self
     }
 
+    /// Configures the segment extractor shared by DST components.
+    ///
+    /// The handle is exposed through [`StartupCtx::segment_extractor`] and
+    /// [`ActorCtx::segment_extractor`]. Startup factories pass it through to
+    /// `DbBuilder::with_segment_extractor`, and reopen flows (e.g. the
+    /// fencer actor) reuse the same handle so that the persisted extractor
+    /// name remains consistent across restarts.
+    ///
+    /// ## Arguments
+    /// - `segment_extractor`: The extractor handle to use for this harness run.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    pub fn with_segment_extractor(mut self, segment_extractor: Arc<dyn PrefixExtractor>) -> Self {
+        self.segment_extractor = Some(segment_extractor);
+        self
+    }
+
     /// Registers one actor task under a unique logical name.
     ///
     /// ## Arguments
@@ -569,6 +619,7 @@ impl Harness {
             wal_object_store,
             clock_advance_ms: _,
             merge_operator,
+            segment_extractor,
             startup_factory,
             actors,
         } = self;
@@ -612,6 +663,7 @@ impl Harness {
             fp_registry: Arc::clone(&fp_registry),
             failure_controller,
             merge_operator,
+            segment_extractor,
             rand: Arc::clone(&rand),
         };
 

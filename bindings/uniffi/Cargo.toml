@@ -1,7 +1,7 @@
 [package]
 name = "slatedb-uniffi"
 description = "UniFFI bindings for SlateDB"
-publish = false
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
@@ -10,7 +10,7 @@ homepage.workspace = true
 
 [lib]
 name = "slatedb_uniffi"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "staticlib"]
 doc = false
 bench = false
 

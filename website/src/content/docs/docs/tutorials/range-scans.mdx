@@ -1,0 +1,55 @@
+---
+title: Range Scans
+description: Learn how to scan and seek over ranges of keys in SlateDB
+---
+
+import { Code } from '@astrojs/starlight/components';
+import rangeScans from '/../examples/src/range_scans.rs?raw';
+
+SlateDB stores key-value pairs sorted by key in lexicographic byte order. A range scan creates an iterator over that sorted keyspace, so you can read a bounded slice, read every entry, or jump forward within an iterator.
+
+## Scan all entries
+
+Use `Db::scan(..)` to iterate over the full keyspace. Range scans follow bytewise key order, so `test_key10` sorts before `test_key2`. If numeric order matters, use fixed-width encodings such as `test_key02` and `test_key10`.
+
+```rust
+let mut entries = db.scan::<Vec<u8>, _>(..).await?;
+while let Some(kv) = entries.next().await? {
+    println!("{:?} = {:?}", kv.key, kv.value);
+}
+```
+
+## Choose range bounds
+
+Pass a Rust range to `scan` when you know the keys you want. A bounded range like `"test_key2".."test_key4"` includes the start bound and excludes the end bound.
+
+```rust
+db.scan("test_key2".."test_key4").await?;  // excludes test_key4
+db.scan("test_key2"..="test_key4").await?; // includes test_key4
+db.scan("test_key2"..).await?;             // test_key2 and later
+db.scan(.."test_key4").await?;             // before test_key4
+db.scan::<Vec<u8>, _>(..).await?;          // all keys
+```
+
+## Seek within a scan
+
+Call `seek` on an iterator to fast-forward to the first key equal to or greater than the requested key. The seek target must stay inside the original scan range and must move forward from the iterator's current position.
+
+```rust
+let mut iter = db.scan::<Vec<u8>, _>(..).await?;
+iter.seek(b"test_key3").await?;
+let kv = iter.next().await?.unwrap();
+assert_eq!(kv.key.as_ref(), b"test_key3");
+```
+
+## Scan for prefixes
+
+If your access pattern is "all keys that start with this prefix," use `scan_prefix` instead of manually building a start and end range.
+
+```rust
+let mut iter = db.scan_prefix(b"test_key").await?;
+```
+
+## Complete example
+
+<Code code={rangeScans} lang="rust" title="main.rs" />

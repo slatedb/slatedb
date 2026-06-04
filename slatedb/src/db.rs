@@ -23,11 +23,11 @@
 pub use crate::db_status::DbStatus;
 
 use crate::db_cache_manager::{self, CacheTarget};
-use std::ops::RangeBounds;
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
+use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
 use object_store::{parse_url_opts, ObjectStore};
@@ -51,13 +51,12 @@ use crate::config::{
     FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
     WriteOptions,
 };
-use crate::db_iter::DbIterator;
+use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
-use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
@@ -252,7 +251,6 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: None,
                 },
             )
@@ -275,44 +273,22 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    range_tracker: None,
                     prefix: Some(prefix),
                 },
             )
             .await
     }
 
-    /// Fences all writers with an older epoch than the provided `manifest` by flushing
-    /// an empty WAL file that acts as a barrier. Any parallel old writers will fail with
-    /// `SlateDBError::Fenced` when trying to "re-write" this file.
-    async fn fence_writers(
+    pub(crate) async fn scan_prefix_by_recency_with_options(
         &self,
-        manifest: &mut FenceableManifest,
-        next_wal_id: u64,
-    ) -> Result<(), SlateDBError> {
-        let mut empty_wal_id = next_wal_id;
-
-        loop {
-            match self.flush_empty_wal(empty_wal_id).await {
-                Ok(()) => {
-                    return Ok(());
-                }
-                Err(SlateDBError::Fenced) => {
-                    manifest.refresh().await?;
-                    let remote_dirty = manifest.prepare_dirty()?;
-                    let dirty_manifest = {
-                        let mut state = self.state.write();
-                        state.merge_remote_manifest(remote_dirty);
-                        state.state().manifest.clone()
-                    };
-                    self.status_manager.report_manifest(dirty_manifest.into());
-                    empty_wal_id += 1;
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
+        prefix: Bytes,
+        options: &ScanOptions,
+    ) -> Result<DbRecencyIterator, SlateDBError> {
+        self.check_closed()?;
+        let db_state = self.state.read().view();
+        self.reader
+            .scan_prefix_by_recency_with_options(prefix, options, &db_state)
+            .await
     }
 
     #[allow(unused_variables)]
@@ -329,7 +305,7 @@ impl DbInner {
         options: &WriteOptions,
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
-        self.db_stats.write_ops.increment(batch.ops.len() as u64);
+        self.db_stats.write_ops.increment(batch.op_count() as u64);
         self.check_closed()?;
         if batch.ops.is_empty() {
             return Err(SlateDBError::EmptyBatch);
@@ -522,7 +498,15 @@ impl DbInner {
         }
     }
 
-    async fn replay_wal(&self) -> Result<(), SlateDBError> {
+    async fn replay_wal(&self, wal_id_range: Range<u64>) -> Result<(), SlateDBError> {
+        let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "replay-wal-pause",
+            writer_epoch == 1,
+            |_| -> Result<(), SlateDBError> { Ok(()) }
+        );
+
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
@@ -541,11 +525,57 @@ impl DbInner {
         };
 
         let db_state = self.state.read().state().core().clone();
-        let mut replay_iter =
-            WalReplayIterator::new(&db_state, replay_options, Arc::clone(&self.table_store))
-                .await?;
+        let mut replay_iter = WalReplayIterator::range(
+            wal_id_range,
+            &db_state,
+            replay_options,
+            Arc::clone(&self.table_store),
+        )
+        .await?;
 
-        while let Some(replayed_table) = replay_iter.next().await? {
+        loop {
+            let replayed_table = match replay_iter.next().await {
+                Ok(Some(replayed_table)) => replayed_table,
+                Ok(None) => break,
+                // If the manifest or an SST referenced by the WAL is missing, it may
+                // indicate that a newer writer has advanced `replay_after_wal_id` and
+                // the GC has removed this WAL entry. Check the latest manifest's
+                // writer_epoch to see if this client is fenced.
+                Err(err) if err.has_object_store_not_found() => {
+                    self.memtable_flusher.refresh_manifest().await?;
+                    if self.state.read().state().manifest.value.writer_epoch > writer_epoch {
+                        return Err(SlateDBError::Fenced);
+                    }
+                    return Err(err);
+                }
+                Err(err) => return Err(err),
+            };
+
+            // RFC-0024: re-extract each replayed entry's prefix to
+            // populate the memtable's touched-segment set. Per the
+            // validation model, durable WAL entries were validated when
+            // the writer accepted them, so we do not re-run the
+            // antichain check here. An empty/absent prefix under
+            // the current extractor remains a hard error — the
+            // entry can't be routed to any segment.
+            if let Some(extractor) = self.segment_extractor.as_ref() {
+                let mut touched_segments: std::collections::BTreeSet<Bytes> =
+                    std::collections::BTreeSet::new();
+                let mut iter = replayed_table.table.table().iter();
+                while let Some(entry) = iter.next_sync() {
+                    match extractor.prefix_len(&crate::PrefixTarget::Point(entry.key.clone())) {
+                        Some(0) | None => {
+                            return Err(SlateDBError::EmptySegmentPrefix { key: entry.key });
+                        }
+                        Some(n) => {
+                            touched_segments.insert(entry.key.slice(0..n));
+                        }
+                    }
+                }
+                replayed_table
+                    .table
+                    .record_touched_segments(touched_segments);
+            }
             // Replayed rows come from WAL SSTs in remote storage, so they are already
             // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
             // the memtable flusher. The flusher calls flush_wals() to guarantee all data in the
@@ -1135,6 +1165,185 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Scan keys that share `prefix`, walking sources newest-first.
+    ///
+    /// **Warning:** this is a low-level, unopinionated iterator. It does
+    /// **no** merging, **no** deduping, and **no** interpretation of
+    /// entries across sources, unlike [`Self::scan_prefix`]. The API
+    /// makes no assumptions about what duplicates, tombstones, or merge
+    /// operands should mean; every such decision is left to the caller.
+    ///
+    /// Within each source, entries are emitted in the order requested by
+    /// `options.order`: ascending (the default) or descending. Across
+    /// sources, the walk is always newest-first, independent of
+    /// `options.order`. Each source restarts its own scan at its own
+    /// first matching key for that order, so the global emit sequence is
+    /// not a single sorted key stream and the within-source key order
+    /// resets at every source boundary. The same user key can appear
+    /// multiple times, both across sources (once per source that holds
+    /// it, newest source first) and within a single source (one entry
+    /// per stored sequence number, newest seq first within the key
+    /// group): nothing collapses versions. Tombstones and merge operands
+    /// are surfaced as raw [`crate::types::RowEntry`] values. The caller
+    /// is responsible for any dedup, delete handling, or merge
+    /// resolution. Callers that need a totally ordered, fully merged
+    /// view should use [`Self::scan_prefix`] instead; use this only when
+    /// you want freshest-first results with the option to early-stop and
+    /// are willing to interpret raw entries.
+    ///
+    /// Sources are walked in this order: active memtable, immutable
+    /// memtables, then within the single matching segment that segment's
+    /// L0 SSTs newest-first followed by its sorted runs newest-first. Each
+    /// source is fully drained before moving to the next. Sources are
+    /// lazily initialized: the filter check, index load, and first data
+    /// block fetch only happen when the recency walk reaches that source.
+    /// A prefix read whose data lives in the active memtable therefore
+    /// performs zero I/O. When the walk does have to descend to SST
+    /// sources, configuring prefix bloom filters lets the scan skip
+    /// non-matching SSTs without a data-block fetch, which keeps I/O
+    /// proportional to how recent the data is rather than to the size of
+    /// the LSM.
+    ///
+    /// **Multi-segment prefixes are rejected.** If the prefix overlaps
+    /// more than one segment, this returns an error with
+    /// [`crate::ErrorKind::Invalid`]. The recency guarantee is only
+    /// well-defined within a single segment: walking one segment's oldest
+    /// data before touching another segment's newest data would violate
+    /// freshest-first ordering. Callers that need cross-segment scans
+    /// should use [`Self::scan_prefix`] instead.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<RecencyIterator, Error>`: an iterator that yields raw
+    ///   `RowEntry` values newest-first. Use
+    ///   [`RecencyIterator::next_entry`] to pull the next entry, and
+    ///   inspect `entry.value` for the [`crate::types::ValueDeletable`]
+    ///   variant (`Value`, `Merge`, or `Tombstone`).
+    ///
+    /// ## Examples
+    ///
+    /// Pull entries from the freshest source under the prefix and stop.
+    /// Because sources are walked newest-first and lazily initialized, an
+    /// early-return like this only touches the source that holds the
+    /// freshest data. Note that *within* a source the order is set by
+    /// `options.order` (ascending by default), so the first yielded entry
+    /// is the smallest key in the freshest source, not necessarily the
+    /// most recently written key. Across sources the same key may appear
+    /// more than once, so callers that want only the freshest value per
+    /// key should dedupe.
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use slatedb::ValueDeletable;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"user:42", b"alice").await?;
+    ///     db.put(b"user:42", b"alice2").await?;
+    ///     db.put(b"user:99", b"bob").await?;
+    ///
+    ///     let mut iter = db.scan_prefix_by_recency(b"user:").await?;
+    ///     let entry = iter.next_entry().await?.unwrap();
+    ///     // All three writes live in the active memtable (the freshest
+    ///     // source). With ascending within-source order, "user:42" comes
+    ///     // out first because it sorts before "user:99". Both writes to
+    ///     // "user:42" are stored as separate sequence-numbered entries;
+    ///     // within the "user:42" key group the newest seq is yielded
+    ///     // first, so the first entry carries the latest write
+    ///     // ("alice2"). A second pull would yield the older "user:42"
+    ///     // entry ("alice") before advancing to "user:99".
+    ///     assert_eq!(entry.key.as_ref(), b"user:42");
+    ///     match entry.value {
+    ///         ValueDeletable::Value(v) => assert_eq!(v.as_ref(), b"alice2"),
+    ///         _ => panic!("expected a regular value"),
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix_by_recency<P>(
+        &self,
+        prefix: P,
+    ) -> Result<DbRecencyIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_by_recency_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Recency-ordered prefix scan with custom options.
+    ///
+    /// Same contract as [`Self::scan_prefix_by_recency`] (raw entries
+    /// emitted newest-source-first; caller handles dedupe, tombstones, and
+    /// merge operands).
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<RecencyIterator, Error>`: an iterator that yields raw
+    ///   `RowEntry` values newest-first.
+    ///
+    /// ## Examples
+    ///
+    /// Use `cache_blocks: false` to scan recent data without polluting
+    /// the block cache, and stop after pulling enough entries from the
+    /// freshest source. Combined with the recency walk's early-stop, this
+    /// is a cheap way to ask "is there a recent entry under this prefix?"
+    /// without warming the cache for cold blocks the answer doesn't depend
+    /// on.
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::ScanOptions;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"event:001", b"a").await?;
+    ///     db.put(b"event:002", b"b").await?;
+    ///
+    ///     let options = ScanOptions {
+    ///         cache_blocks: false,
+    ///         ..ScanOptions::default()
+    ///     };
+    ///     let mut iter = db
+    ///         .scan_prefix_by_recency_with_options(b"event:", &options)
+    ///         .await?;
+    ///     let first = iter.next_entry().await?.unwrap();
+    ///     // Within-source order is ascending by default, so "event:001"
+    ///     // is yielded before "event:002" even though both live in the
+    ///     // same (freshest) source. Stop here: we only needed to see
+    ///     // that something fresh exists under the prefix.
+    ///     assert_eq!(first.key.as_ref(), b"event:001");
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix_by_recency_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbRecencyIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        self.inner
+            .scan_prefix_by_recency_with_options(prefix, options)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Write a value into the database with default `WriteOptions`.
     ///
     /// ## Arguments
@@ -1658,7 +1867,7 @@ impl Db {
         let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
             Arc::from(object_store)
         } else {
-            let object_store = Arc::from(object_store);
+            let object_store: Arc<dyn ObjectStore> = Arc::from(object_store);
             Arc::new(PrefixStore::new(object_store, path))
         };
         Ok(object_store)
@@ -1850,10 +2059,10 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
-        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, Ttl,
+        WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
-    use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
     use crate::instrumented_object_store::stats::{
@@ -1873,8 +2082,8 @@ mod tests {
     use crate::seq_tracker::FindOption;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
-        assert_iterator, lookup_merge_operator_operands, OnDemandCompactionSchedulerSupplier,
-        StringConcatMergeOperator,
+        assert_iterator, lookup_merge_operator_operands, GatedObjectStore,
+        OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
@@ -1884,7 +2093,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use proptest::test_runner::{TestRng, TestRunner};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
@@ -2285,6 +2494,406 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    fn assert_value(entry: &crate::types::RowEntry, expected: &[u8]) {
+        match &entry.value {
+            crate::types::ValueDeletable::Value(v) => assert_eq!(v.as_ref(), expected),
+            other => panic!("expected Value({expected:?}), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_returns_matching_keys_from_memtable() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_memtable", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"v0").await.unwrap();
+        db.put(b"px:b", b"v1").await.unwrap();
+        db.put(b"px:c", b"v2").await.unwrap();
+        db.put(b"qq:x", b"vx").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_eq!(e2.key.as_ref(), b"px:b");
+        assert_eq!(e3.key.as_ref(), b"px:c");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_no_match_returns_none() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_no_match", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"aa", b"v0").await.unwrap();
+        db.put(b"ab", b"v1").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"zz").await.unwrap();
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_emits_both_versions_across_sources() {
+        // No dedup: a key present in both memtable (newer) and L0 (older)
+        // appears twice, newer first.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_no_dedup", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"old").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        db.put(b"px:a", b"new").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_value(&e1, b"new");
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"old");
+        assert!(e1.seq > e2.seq);
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_emits_tombstones() {
+        // Tombstones are surfaced as raw entries; the caller decides what
+        // they mean.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_tombstones", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"va").await.unwrap();
+        db.put(b"px:b", b"vb").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        db.delete(b"px:a").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        // Memtable first: tombstone for px:a.
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert!(e1.value.is_tombstone());
+        // L0 second: original values, ascending.
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"va");
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e3.key.as_ref(), b"px:b");
+        assert_value(&e3, b"vb");
+        // Tombstone is from the freshest source so its seq dominates the
+        // earlier put of px:a.
+        assert!(e1.seq > e2.seq);
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_walks_memtable_then_l0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_multi_source", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Older L0 SST: px:b (older value), px:c.
+        db.put(b"px:b", b"old_b").await.unwrap();
+        db.put(b"px:c", b"vc").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Active memtable: px:a, px:b (newer value).
+        db.put(b"px:a", b"va").await.unwrap();
+        db.put(b"px:b", b"new_b").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        // Memtable drained first, ascending within source.
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_value(&e1, b"va");
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e2.key.as_ref(), b"px:b");
+        assert_value(&e2, b"new_b");
+        // L0 next: px:b (older) then px:c. No dedup.
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e3.key.as_ref(), b"px:b");
+        assert_value(&e3, b"old_b");
+        let e4 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e4.key.as_ref(), b"px:c");
+        assert_value(&e4, b"vc");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_active_memtable_avoids_main_object_store_gets() {
+        // When the prefix is satisfied entirely by the active memtable, the
+        // recency scan should not issue any GETs against the main object
+        // store (it shouldn't even open an L0/SR iterator).
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_no_main_gets", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Older data in L0. Different prefix; we want them to be present
+        // but never visited.
+        db.put(b"qq:a", b"vqa").await.unwrap();
+        db.put(b"qq:b", b"vqb").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Active-memtable-only prefix.
+        db.put(b"px:a", b"va").await.unwrap();
+        db.put(b"px:b", b"vb").await.unwrap();
+
+        let gets_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_eq!(e2.key.as_ref(), b"px:b");
+        // Caller stops here without driving the iterator into older sources.
+
+        let gets_after =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+        assert_eq!(
+            gets_before, gets_after,
+            "scan_prefix_by_recency should not touch the main object store \
+             when the prefix is fully covered by the active memtable"
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_durability_remote_filters_unflushed() {
+        // With DurabilityLevel::Remote and the put issued without awaiting
+        // durability, only L0/SR-resident entries should be visible. The
+        // not-yet-flushed memtable write is filtered out by max_seq.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_remote_durability", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"px:a", b"va_durable").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Skip the WAL await. Without a follow-up flush, px:b lives only
+        // in the in-memory memtable.
+        db.put_with_options(
+            b"px:b",
+            b"vb_dirty",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                seqnum: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let opts = ScanOptions {
+            durability_filter: Remote,
+            ..ScanOptions::default()
+        };
+        let mut iter = db
+            .scan_prefix_by_recency_with_options(b"px:", &opts)
+            .await
+            .unwrap();
+        let e = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e.key.as_ref(), b"px:a");
+        assert_value(&e, b"va_durable");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_walks_memtable_then_compacted_run() {
+        // Walks memtable -> L0 -> compacted sorted run, verifying that the
+        // sorted-run path is constructed and drained correctly when the
+        // recency walk reaches it. Same-key versions surface from each
+        // source in newest-first order with no dedup.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_recency_compacted";
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let should_compact_clone = should_compact.clone();
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| should_compact_clone.swap(false, Ordering::SeqCst),
+        )));
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(scheduler),
+            )
+            .build()
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+
+        // Oldest write goes to a sorted run after compaction.
+        db.put(b"px:a", b"v_oldest").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Trigger compaction and wait for it to land.
+        should_compact.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                {
+                    let state = db_poll.inner.state.read();
+                    if !state.state().core().tree.compacted.is_empty() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // L0 layer (newer than the sorted run, older than the memtable).
+        db.put(b"px:a", b"v_l0").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Active memtable (freshest).
+        db.put(b"px:a", b"v_memtable").await.unwrap();
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        let e3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:a");
+        assert_value(&e1, b"v_memtable");
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"v_l0");
+        assert_eq!(e3.key.as_ref(), b"px:a");
+        assert_value(&e3, b"v_oldest");
+        assert!(e1.seq > e2.seq);
+        assert!(e2.seq > e3.seq);
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        Arc::into_inner(db)
+            .expect("db Arc should be uniquely held")
+            .close()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_errors_on_multi_segment_prefix() {
+        use crate::manifest::{LsmTreeState, Segment};
+        use std::collections::VecDeque;
+        use std::sync::Arc;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_recency_multi_segment", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Inject two non-nesting segments. Both prefixes share "hour=1"
+        // but neither is a prefix of the other, so the antichain holds.
+        // A scan with prefix b"hour=" overlaps both segments' intervals,
+        // which is the case we want to reject.
+        db.inner.state.write().modify(|m| {
+            let core = &mut m.state.manifest.value.core;
+            core.segment_extractor_name = Some("hour".into());
+            core.segments = vec![
+                Segment {
+                    prefix: Bytes::from_static(b"hour=12/"),
+                    tree: Arc::new(LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::new(),
+                        compacted: vec![],
+                    }),
+                },
+                Segment {
+                    prefix: Bytes::from_static(b"hour=13/"),
+                    tree: Arc::new(LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::new(),
+                        compacted: vec![],
+                    }),
+                },
+            ];
+        });
+
+        match db.scan_prefix_by_recency(b"hour=").await {
+            Err(e) => assert_eq!(e.kind(), crate::ErrorKind::Invalid),
+            Ok(_) => panic!("expected multi-segment error"),
+        }
+
+        // Single-segment prefixes still work.
+        let mut iter = db.scan_prefix_by_recency(b"hour=12/").await.unwrap();
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_resolve_object_store_local_prefix_store_writes_to_path() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2591,6 +3200,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_memtable_write_bytes_matches_batch_payload() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_write_bytes_matches_batch_payload",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024 * 1024, None))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"hello", b"world!").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len()) as i64,
+        );
+
+        db.put(b"k2", b"v2").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len()) as i64,
+        );
+
+        // Deletes count only the key length.
+        db.delete(b"k3").await.unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            (b"hello".len() + b"world!".len() + b"k2".len() + b"v2".len() + b"k3".len()) as i64,
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtable_write_bytes_matches_batch_payload_with_merges() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_memtable_write_bytes_matches_batch_payload_with_merges",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024 * 1024, None))
+        .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // A single merge per key is not folded by the merge iterator, so the
+        // tracked size matches key + value.
+        db.merge(b"k1", b"a").await.unwrap();
+        let mut expected = (b"k1".len() + b"a".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        // Multiple merges for the same key in a single batch are folded by the
+        // merge iterator before counting. memtable_write_bytes reflects the merged
+        // output (key + "abc"), not the sum of raw inputs (3 * key + "a" + "b" + "c").
+        let mut batch = WriteBatch::new();
+        batch.merge(b"k2", b"a");
+        batch.merge(b"k2", b"b");
+        batch.merge(b"k2", b"c");
+        db.write(batch).await.unwrap();
+        expected += (b"k2".len() + b"abc".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        // Merges to distinct keys in one batch are not folded, so each entry
+        // contributes its raw key + value.
+        let mut batch = WriteBatch::new();
+        batch.merge(b"k3", b"x");
+        batch.merge(b"k4", b"yy");
+        db.write(batch).await.unwrap();
+        expected += (b"k3".len() + b"x".len() + b"k4".len() + b"yy".len()) as i64;
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap(),
+            expected,
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wal_flush_bytes_after_explicit_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db_options = {
+            let mut db_options = test_db_options(0, 1024 * 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder(
+            "/tmp/test_wal_flush_bytes_after_explicit_flush",
+            object_store,
+        )
+        .with_settings(db_options)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put_with_options(
+            b"hello",
+            b"world",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap_or(0),
+            0,
+        );
+
+        db.flush().await.unwrap();
+
+        let wal_bytes = lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap();
+        let memtable_bytes =
+            lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap();
+        // WAL SST framing/footer makes the encoded payload at least as large as
+        // the memtable payload if no compression is used.
+        assert!(
+            wal_bytes >= memtable_bytes,
+            "wal_bytes={wal_bytes} memtable_bytes={memtable_bytes}",
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_get_with_durability_level_when_wal_disabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2724,6 +3471,7 @@ mod tests {
             object_store.clone(),
         )
         .with_settings(opts)
+        .with_db_cache_disabled()
         .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
@@ -2733,7 +3481,12 @@ mod tests {
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
-        kv_store.flush().await.unwrap();
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
 
         let got = kv_store.get(key).await.unwrap();
         let access_count1 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
@@ -2938,9 +3691,10 @@ mod tests {
         let expected_cache_parts =
             vec![
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
-            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 0),
-            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
-            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 1),
+            // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 1),
+            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 0),
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
         ];
 
@@ -2958,12 +3712,13 @@ mod tests {
     async fn test_get_with_object_store_cache_put_caching_enabled() {
         let expected_cache_parts =
             vec![
-            // not cached because manifests are put before the root is resolved, which is when
+            // not cached because this manifest is put before the root is resolved, which is when
             // `cache_puts_enabled` starts taking effect.
             ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 0),
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 0),
-            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
-            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 1),
+            // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 1),
+            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 0),
             // 1 part is cached because the put with cache_puts enabled should cache the test_key put
             ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 1),
         ];
@@ -3060,7 +3815,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
+        test_utils::assert_ranged_db_scan(table, range, IterationOrder::Ascending, &mut iter).await;
     }
 
     #[test]
@@ -3208,7 +3963,13 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;
+            test_utils::assert_ranged_db_scan(
+                table,
+                seek_range,
+                IterationOrder::Ascending,
+                &mut iter,
+            )
+            .await;
         }
     }
 
@@ -3438,7 +4199,7 @@ mod tests {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(MockSystemClock::new());
-        let mut options = test_db_options(0, 300, None);
+        let mut options = test_db_options(0, 350, None);
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -3529,7 +4290,7 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 320, None))
             .with_metrics_recorder(metrics_recorder.clone())
             .build()
             .await
@@ -3601,11 +4362,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_flushes_memtable_after_max_wal_flushes() {
+        const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 4096;
+
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_memtable_max_wal_flushes";
 
         let mut settings = test_db_options(0, usize::MAX, None);
         settings.flush_interval = None; // Disable flushing
+        settings.max_wal_flushes_before_l0_flush = MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
 
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(settings)
@@ -4643,7 +5407,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 512, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .with_fp_registry(fp_registry.clone())
             .build()
@@ -4691,7 +5455,7 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
         let db_restored = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 256, None))
+            .with_settings(test_db_options(0, 512, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .with_fp_registry(fp_registry.clone())
             .build()
@@ -5285,7 +6049,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        let mut settings = test_db_options(0, 128, None);
+        let mut settings = test_db_options(0, 256, None);
         // Disable automatic flush
         settings.flush_interval = None;
 
@@ -5467,6 +6231,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        let wal_ssts = db.inner.table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 1);
+        assert_eq!(wal_ssts[0].size, 0);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())
@@ -5516,6 +6283,253 @@ mod tests {
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_writer_paused_in_replay_wal_should_be_fenced_by_concurrent_open() {
+        // Race we're trying to reproduce:
+        // - W1 starts opening: claims writer_epoch=1, writes its fence WAL, then
+        //   enters replay_wal. We pause it inside replay_wal.
+        // - W2 starts opening: claims writer_epoch=2, writes its own fence WAL
+        //   (above W1's), replays, and finishes init.
+        // - W1 unpauses, finishes replay_wal, and returns its Db handle.
+        // - W1 issues a put. This put should fail because W1's next WAL id is taken.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_writer_paused_in_replay_wal_race";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        // Pause replay_wal for any writer that holds writer_epoch == 1
+        // (the condition is enforced inside the fail point body).
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        // Kick off W1 in the background. It will park inside replay_wal.
+        // Use a long manifest poll interval on W1 so its background poller
+        // doesn't independently observe W2's epoch bump and trip the
+        // closed/fenced check while replay is paused.
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        // Wait for W1 to write its fence WAL — at that point W1 has finished
+        // fence_writers and has either entered or is about to enter the paused
+        // replay_wal call.
+        let probe_table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        ));
+        let mut w1_paused = false;
+        for _ in 0..600 {
+            let wals = probe_table_store.list_wal_ssts(..).await.unwrap();
+            if !wals.is_empty() {
+                w1_paused = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(w1_paused, "W1 did not reach replay_wal pause in time");
+        // Small additional wait for W1 to transition from fence_writers into
+        // the paused replay_wal block.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // While W1 is paused, open W2. W2's epoch is 2, so replay_wal is not
+        // paused for W2. W2 writes its own fence WAL above W1's and finishes
+        // init.
+        let db2 = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            db2.inner.state.read().state().manifest.value.writer_epoch,
+            2
+        );
+
+        // Release W1. It finishes replay_wal and returns a Db handle.
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        let db1 = w1_handle.await.unwrap().unwrap();
+        assert_eq!(
+            db1.inner.state.read().state().manifest.value.writer_epoch,
+            1
+        );
+
+        // W1's put should fail because its now fenced
+        let result = db1
+            .put_with_options(
+                b"w1",
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    async fn wait_for_wal_sst_count(table_store: &TableStore, min_count: usize, context: &str) {
+        for _ in 0..6000 {
+            let wals = table_store.list_wal_ssts(..).await.unwrap();
+            if wals.len() >= min_count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{context}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_not_found_should_be_fenced_when_writer_epoch_advanced() {
+        let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(base_store.clone()));
+        let gated_object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let path = "/tmp/wal_replay_not_found_should_be_fenced_when_writer_epoch_advanced";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = gated_object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        let probe_table_store = TableStore::new(
+            ObjectStores::new(base_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        );
+        wait_for_wal_sst_count(
+            &probe_table_store,
+            1,
+            "W1 did not write its fence WAL in time",
+        )
+        .await;
+
+        let head_arrivals_before = gated_store.head_gate.arrivals();
+        gated_store.head_gate.close();
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        gated_store
+            .head_gate
+            .wait_for_arrivals(head_arrivals_before + 1)
+            .await;
+
+        let db2 = Db::builder(path, base_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            db2.inner.state.read().state().manifest.value.writer_epoch,
+            2
+        );
+
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
+            .await
+            .unwrap();
+        gated_store.head_gate.release();
+
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced)),
+            "expected fenced error, got {err:?}"
+        );
+
+        db2.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_not_found_should_remain_not_found_when_writer_epoch_unchanged() {
+        let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(base_store.clone()));
+        let gated_object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let path = "/tmp/wal_replay_not_found_should_remain_not_found_when_writer_epoch_unchanged";
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "pause").unwrap();
+
+        let w1_settings = {
+            let mut s = test_db_options(0, 128, None);
+            s.manifest_poll_interval = Duration::from_secs(600);
+            s
+        };
+        let w1_handle = {
+            let object_store = gated_object_store.clone();
+            let fp_registry = fp_registry.clone();
+            tokio::spawn(async move {
+                Db::builder(path, object_store)
+                    .with_settings(w1_settings)
+                    .with_fp_registry(fp_registry)
+                    .build()
+                    .await
+            })
+        };
+
+        let probe_table_store = TableStore::new(
+            ObjectStores::new(base_store.clone(), None),
+            SsTableFormat::default(),
+            path,
+            None,
+        );
+        wait_for_wal_sst_count(
+            &probe_table_store,
+            1,
+            "W1 did not write its fence WAL in time",
+        )
+        .await;
+
+        let head_arrivals_before = gated_store.head_gate.arrivals();
+        gated_store.head_gate.close();
+        fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
+        gated_store
+            .head_gate
+            .wait_for_arrivals(head_arrivals_before + 1)
+            .await;
+
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
+            .await
+            .unwrap();
+        gated_store.head_gate.release();
+
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
     }
 
     #[tokio::test]
@@ -6027,6 +7041,7 @@ mod tests {
             l0_flush_parallelism: 1,
             min_filter_keys,
             l0_sst_size_bytes,
+            max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
@@ -6645,18 +7660,23 @@ mod tests {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
+            wal_fence_options: None,
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
+                dry_run: false,
             }),
             detach_options: None,
         };
@@ -8079,6 +9099,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_reject_batch_local_merges_across_differing_ttls() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_reject_batch_local_merges_across_differing_ttls",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_merge_operator(Arc::new(StringConcatMergeOperator))
+        .build()
+        .await
+        .unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(3600),
+            },
+        );
+        batch.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAfter(7200),
+            },
+        );
+
+        let err = db.write(batch).await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert!(
+            err.to_string()
+                .contains("only one merge TTL per-key allowed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(db.get(b"key1").await.unwrap(), None);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_should_record_total_mem_size_bytes() {
         // given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -8200,6 +9261,76 @@ mod tests {
             l0_count.is_some_and(|v| v > 0),
             "expected l0_sst_count > 0, got {:?}",
             l0_count
+        );
+        // No segment extractor configured → root is the only tree, so the
+        // per-tree max equals the total. Both gauges are updated at the
+        // same call site in `merge_remote_manifest`.
+        let segment_max =
+            lookup_metric(&metrics_recorder, crate::db_stats::SEGMENT_MAX_L0_SST_COUNT);
+        assert_eq!(
+            segment_max, l0_count,
+            "expected segment_max_l0_sst_count == l0_sst_count for an unsegmented DB"
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_segment_max_l0_sst_count_with_extractor() {
+        // With a segment extractor configured, `l0_sst_count` sums L0 SSTs
+        // across every tree (root + each named segment) while
+        // `segment_max_l0_sst_count` reports the largest single tree. The
+        // two values diverge whenever segments accumulate L0 SSTs unevenly
+        // — the case the new gauge exists to catch, since `l0_max_ssts`
+        // backpressure is enforced per-tree.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let db = Db::builder(
+            "/tmp/test_should_record_segment_max_l0_sst_count_with_extractor",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_segment_extractor(extractor)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // Flush 1: two prefixes → each segment tree gets one L0 SST.
+        db.put(b"aaa-1", b"v").await.unwrap();
+        db.put(b"bbb-1", b"v").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Flush 2: only "aaa" → that tree grows to 2 L0 SSTs while "bbb"
+        // stays at 1. Final state: total = 3, per-tree max = 2.
+        db.put(b"aaa-2", b"v").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Wait for the manifest poll to refresh both gauges (interval 100ms).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let total = lookup_metric(&metrics_recorder, crate::db_stats::L0_SST_COUNT);
+        let segment_max =
+            lookup_metric(&metrics_recorder, crate::db_stats::SEGMENT_MAX_L0_SST_COUNT);
+        assert_eq!(
+            total,
+            Some(3),
+            "expected l0_sst_count to sum across trees, got {:?}",
+            total
+        );
+        assert_eq!(
+            segment_max,
+            Some(2),
+            "expected segment_max_l0_sst_count to track the largest tree, got {:?}",
+            segment_max
         );
         db.close().await.unwrap();
     }
@@ -8342,5 +9473,772 @@ mod tests {
                 Some(Bytes::copy_from_slice(value))
             );
         }
+    }
+
+    /// RFC-0024: WAL replay through a conforming extractor preserves the
+    /// keys and lets segment-aware writes resume after the next open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_replay_with_extractor_preserves_keys() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_with_extractor_preserves_keys";
+
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        for (key, value) in [
+            (b"aaa-1".as_slice(), b"v1".as_slice()),
+            (b"bbb-1".as_slice(), b"v2".as_slice()),
+        ] {
+            source
+                .put_with_options(key, value, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+        }
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+        // Drop without close so writes remain in WAL only.
+        drop(source);
+
+        let recovered = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.get(b"aaa-1").await.unwrap().unwrap().as_ref(),
+            b"v1"
+        );
+        assert_eq!(
+            recovered.get(b"bbb-1").await.unwrap().unwrap().as_ref(),
+            b"v2"
+        );
+        recovered.close().await.unwrap();
+    }
+
+    /// RFC-0024: WAL replay rejects entries whose prefix under the
+    /// current extractor would be empty. We reach this path via the
+    /// silent-swap pattern: the source writes through a conforming
+    /// fixed-3 extractor, then a reopen substitutes an aliased
+    /// `fixed-3` extractor whose `prefix_len` always returns `Some(0)`.
+    /// The open-time name check passes; replay catches the empty
+    /// prefix as `EmptySegmentPrefix`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_replay_rejects_empty_extractor_prefix() {
+        #[derive(Debug)]
+        struct AliasedAlwaysEmptyExtractor;
+        impl crate::PrefixExtractor for AliasedAlwaysEmptyExtractor {
+            fn name(&self) -> &str {
+                "fixed-3"
+            }
+            fn prefix_len(&self, _target: &crate::PrefixTarget) -> Option<usize> {
+                Some(0)
+            }
+        }
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_rejects_empty_extractor_prefix";
+
+        // Source with a conforming extractor — keys get a 3-byte
+        // prefix and reach the WAL cleanly.
+        let mut source_settings = test_db_options(0, 16 * 1024, None);
+        source_settings.flush_interval = None;
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(source_settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        source
+            .put_with_options(b"abc-1", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+        drop(source);
+
+        // Reopen with the same `name()`, but the swapped extractor's
+        // logic returns `Some(0)` for every key — replay must reject.
+        let result = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 16 * 1024, None))
+            .with_segment_extractor(Arc::new(AliasedAlwaysEmptyExtractor))
+            .build()
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected empty-prefix rejection at replay, got Ok"),
+            Err(e) => e,
+        };
+        assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+        assert!(
+            err.to_string().contains("empty prefix"),
+            "expected empty-prefix error, got: {err}"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ExtractorConfig {
+        None,
+        Fixed3,
+        Other,
+    }
+
+    impl ExtractorConfig {
+        fn to_extractor(self) -> Option<Arc<dyn crate::PrefixExtractor>> {
+            #[derive(Debug)]
+            struct OtherExtractor;
+            impl crate::PrefixExtractor for OtherExtractor {
+                fn name(&self) -> &str {
+                    "other"
+                }
+                fn prefix_len(&self, _target: &crate::PrefixTarget) -> Option<usize> {
+                    Some(3)
+                }
+            }
+            match self {
+                ExtractorConfig::None => None,
+                ExtractorConfig::Fixed3 => {
+                    Some(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+                }
+                ExtractorConfig::Other => Some(Arc::new(OtherExtractor)),
+            }
+        }
+    }
+
+    /// RFC-0024 open-time reconciliation: the configured extractor on
+    /// reopen must agree with what was persisted at creation.
+    /// `(persisted, configured) → outcome` for every combination of
+    /// `None`, the conforming `Fixed3` extractor, and a differently-named
+    /// `Other` extractor.
+    #[rstest::rstest]
+    #[case::no_extractor_round_trip(ExtractorConfig::None, ExtractorConfig::None, true)]
+    #[case::same_extractor_round_trip(ExtractorConfig::Fixed3, ExtractorConfig::Fixed3, true)]
+    #[case::name_mismatch(ExtractorConfig::Fixed3, ExtractorConfig::Other, false)]
+    #[case::removed(ExtractorConfig::Fixed3, ExtractorConfig::None, false)]
+    #[case::added(ExtractorConfig::None, ExtractorConfig::Fixed3, false)]
+    #[tokio::test]
+    async fn test_open_extractor_reconciliation(
+        #[case] initial: ExtractorConfig,
+        #[case] reopen: ExtractorConfig,
+        #[case] expect_ok: bool,
+    ) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = format!("/tmp/test_open_extractor_reconciliation_{initial:?}_{reopen:?}");
+
+        let mut builder = Db::builder(path.clone(), object_store.clone());
+        if let Some(extractor) = initial.to_extractor() {
+            builder = builder.with_segment_extractor(extractor);
+        }
+        builder.build().await.unwrap().close().await.unwrap();
+
+        let mut builder = Db::builder(path, object_store);
+        if let Some(extractor) = reopen.to_extractor() {
+            builder = builder.with_segment_extractor(extractor);
+        }
+        match (expect_ok, builder.build().await) {
+            (true, Ok(reopened)) => reopened.close().await.unwrap(),
+            (true, Err(err)) => panic!("expected reopen to succeed, got {err:?}"),
+            (false, Ok(_)) => panic!("expected reopen to fail"),
+            (false, Err(err)) => {
+                assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+            }
+        }
+    }
+
+    /// RFC-0024 open-time per-segment check: every persisted segment
+    /// prefix `p` must satisfy `prefix_len(Prefix(p)) == Some(p.len())`
+    /// under the configured extractor. This catches a silent-swap case
+    /// the name check misses — same `name()`, but the new logic no
+    /// longer treats an existing prefix as a complete segment boundary.
+    #[tokio::test]
+    async fn test_open_rejects_when_segment_prefix_unrecognized() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_open_rejects_unrecognized_segment_prefix";
+
+        let db = Db::builder(path, object_store.clone())
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        // Persist segments "abc" and "ab-": both produce 3-byte
+        // prefixes under fixed-3 and route to disjoint segments. The
+        // close() call flushes the memtable to L0, which is what
+        // creates the persisted segment entries.
+        db.put(b"abc-1", b"v1").await.unwrap();
+        db.put(b"ab--1", b"v2").await.unwrap();
+        db.close().await.unwrap();
+
+        // Reopen with an aliased extractor — same name, different
+        // logic. Under the swapped logic, `Prefix("ab-")` returns
+        // Some(2) (prefix "ab"), which does not equal `"ab-".len()`.
+        // The per-segment check must reject.
+        let result = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::AliasedFixed3PrefixExtractor))
+            .build()
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected unrecognized-prefix rejection, got Ok"),
+            Err(e) => e,
+        };
+        assert!(matches!(err.kind(), crate::error::ErrorKind::Invalid));
+        assert!(
+            err.to_string().contains("not recognized"),
+            "expected error to mention recognition, got: {err}"
+        );
+    }
+
+    /// Helper: collect the segment prefix list from `db`'s in-memory
+    /// manifest snapshot.
+    fn segment_prefixes(db: &Db) -> Vec<Bytes> {
+        let guard = db.inner.state.read();
+        let cow = guard.state();
+        cow.core()
+            .segments
+            .iter()
+            .map(|s| s.prefix.clone())
+            .collect()
+    }
+
+    /// RFC-0024: a DB created with both an extractor and a separate
+    /// WAL object store writes a V2 manifest, which intentionally
+    /// drops `wal_object_store_uri` (commit 52cead43). The reopen
+    /// path must skip the WAL-store reconfiguration check when the
+    /// persisted URI is absent, so a matching configuration on
+    /// reopen still succeeds.
+    #[tokio::test]
+    async fn test_open_with_extractor_and_wal_store_round_trips() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_open_extractor_with_wal_store";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_segment_extractor(extractor.clone())
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .with_wal_object_store(wal_object_store)
+            .build()
+            .await
+            .unwrap();
+        reopened.close().await.unwrap();
+    }
+
+    /// End-to-end: write to multiple segments, flush, close, reopen,
+    /// read every key back. The manifest carries one segment per
+    /// touched prefix and survives the encode/decode cycle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segments_round_trip_through_flush_and_reopen() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_segments_round_trip";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let entries: &[(&[u8], &[u8])] = &[
+            (b"aaa-1", b"v1"),
+            (b"aaa-2", b"v2"),
+            (b"bbb-1", b"v3"),
+            (b"ccc-1", b"v4"),
+            (b"ccc-2", b"v5"),
+        ];
+        for (k, v) in entries {
+            db.put(*k, *v).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let prefixes = segment_prefixes(&db);
+        assert_eq!(
+            prefixes,
+            vec![
+                Bytes::from_static(b"aaa"),
+                Bytes::from_static(b"bbb"),
+                Bytes::from_static(b"ccc"),
+            ],
+            "expected one segment per touched prefix, in sorted order"
+        );
+        db.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        for (k, v) in entries {
+            assert_eq!(
+                reopened.get(*k).await.unwrap().unwrap().as_ref(),
+                *v,
+                "round-trip mismatch for key {:?}",
+                k
+            );
+        }
+        // Segments survived encode/decode.
+        assert_eq!(
+            segment_prefixes(&reopened),
+            vec![
+                Bytes::from_static(b"aaa"),
+                Bytes::from_static(b"bbb"),
+                Bytes::from_static(b"ccc"),
+            ]
+        );
+        reopened.close().await.unwrap();
+    }
+
+    /// One batch covering N segments must reach the manifest atomically:
+    /// after the flush, every touched segment has exactly one L0 SST
+    /// from this flush — no partial visibility.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mixed_batch_publishes_atomically() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_mixed_batch_atomic";
+
+        let db = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put(b"aaa-1", b"v1");
+        batch.put(b"bbb-1", b"v2");
+        batch.put(b"ccc-1", b"v3");
+        db.write(batch).await.unwrap();
+
+        // Pre-flush: segments are still empty (data is in memtable / WAL).
+        assert!(segment_prefixes(&db).is_empty());
+
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Scope the read guard so it is dropped before the `await` below.
+        {
+            let guard = db.inner.state.read();
+            let cow = guard.state();
+            let core = cow.core();
+            assert_eq!(core.segments.len(), 3);
+            for segment in &core.segments {
+                assert_eq!(
+                    segment.tree.l0.len(),
+                    1,
+                    "expected exactly one L0 SST in segment {:?}, got {}",
+                    segment.prefix,
+                    segment.tree.l0.len()
+                );
+                assert!(
+                    segment.tree.compacted.is_empty(),
+                    "no compaction expected yet"
+                );
+            }
+        }
+        db.close().await.unwrap();
+    }
+
+    /// WAL replay reconstructs segment state when the source process
+    /// dropped before flushing. After reopen, replayed entries land in
+    /// the memtable; a subsequent flush then publishes them as
+    /// per-segment L0 SSTs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_replay_reconstructs_segments_from_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_replay_reconstructs_segments";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        for (k, v) in [(b"aaa-1".as_slice(), b"v1"), (b"bbb-1".as_slice(), b"v2")] {
+            source
+                .put_with_options(k, v, &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+        }
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+        // Drop without close so entries stay in WAL only.
+        drop(source);
+
+        // Reopen — the manifest still has no segments at this point.
+        let recovered = Db::builder(path, object_store)
+            .with_settings(settings)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            segment_prefixes(&recovered).is_empty(),
+            "replay should not stamp segments until the memtable flushes"
+        );
+        // Reads see the replayed data via the memtable.
+        assert_eq!(
+            recovered.get(b"aaa-1").await.unwrap().unwrap().as_ref(),
+            b"v1"
+        );
+        assert_eq!(
+            recovered.get(b"bbb-1").await.unwrap().unwrap().as_ref(),
+            b"v2"
+        );
+
+        // Force the memtable through, segments should appear.
+        recovered
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            segment_prefixes(&recovered),
+            vec![Bytes::from_static(b"aaa"), Bytes::from_static(b"bbb")]
+        );
+        recovered.close().await.unwrap();
+    }
+
+    /// A timeseries-style workload: hot writes to a "current" segment
+    /// interleaved with occasional backfill into an "older" one. Both
+    /// segments end up correctly populated and reads succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_backfill_alongside_active_segment() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_backfill_active";
+
+        let db = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        // Active segment "cur" sees most writes; segment "old" gets a
+        // sprinkle of backfill. Interleaved on purpose so several
+        // batches touch both.
+        let mut expected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for i in 0..20u32 {
+            let cur_key = format!("cur-{i:03}").into_bytes();
+            let cur_val = format!("c{i}").into_bytes();
+            db.put(&cur_key, &cur_val).await.unwrap();
+            expected.push((cur_key, cur_val));
+            if i % 7 == 0 {
+                let old_key = format!("old-{i:03}").into_bytes();
+                let old_val = format!("o{i}").into_bytes();
+                db.put(&old_key, &old_val).await.unwrap();
+                expected.push((old_key, old_val));
+            }
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            segment_prefixes(&db),
+            vec![Bytes::from_static(b"cur"), Bytes::from_static(b"old")]
+        );
+        for (k, v) in &expected {
+            assert_eq!(
+                db.get(k).await.unwrap().unwrap().as_ref(),
+                v.as_slice(),
+                "missing value for {:?}",
+                k
+            );
+        }
+        db.close().await.unwrap();
+    }
+
+    /// After a clean restart, writes resume into existing segments and
+    /// both the prior (in compacted/L0) and new (in fresh L0) entries
+    /// remain readable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_restart_resumes_writes_into_existing_segment() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_restart_resume";
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+
+        let initial = Db::builder(path, object_store.clone())
+            .with_segment_extractor(extractor.clone())
+            .build()
+            .await
+            .unwrap();
+        initial.put(b"aaa-1", b"v1").await.unwrap();
+        initial.put(b"aaa-2", b"v2").await.unwrap();
+        initial.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        // Prior writes still readable after reopen.
+        assert_eq!(
+            reopened.get(b"aaa-1").await.unwrap().unwrap().as_ref(),
+            b"v1"
+        );
+        assert_eq!(
+            reopened.get(b"aaa-2").await.unwrap().unwrap().as_ref(),
+            b"v2"
+        );
+
+        // Resume writes into the same segment.
+        reopened.put(b"aaa-3", b"v3").await.unwrap();
+        reopened.put(b"aaa-4", b"v4").await.unwrap();
+        reopened
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        // Still exactly the one "aaa" segment, now with two L0 SSTs.
+        let prefixes = segment_prefixes(&reopened);
+        assert_eq!(prefixes, vec![Bytes::from_static(b"aaa")]);
+        {
+            let guard = reopened.inner.state.read();
+            let cow = guard.state();
+            let segment = &cow.core().segments[0];
+            assert_eq!(
+                segment.tree.l0.len(),
+                2,
+                "expected two L0 SSTs after the second flush, got {}",
+                segment.tree.l0.len()
+            );
+        }
+
+        for (k, v) in [
+            (b"aaa-1".as_slice(), b"v1".as_slice()),
+            (b"aaa-2".as_slice(), b"v2".as_slice()),
+            (b"aaa-3".as_slice(), b"v3".as_slice()),
+            (b"aaa-4".as_slice(), b"v4".as_slice()),
+        ] {
+            assert_eq!(
+                reopened.get(k).await.unwrap().unwrap().as_ref(),
+                v,
+                "missing value for {:?}",
+                k
+            );
+        }
+        reopened.close().await.unwrap();
+    }
+
+    async fn create_segmented_scan_fixture(
+        path: &str,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> (Db, BTreeMap<Bytes, Bytes>) {
+        let db = Db::builder(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+
+        let table = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"aaa-003"), Bytes::from_static(b"v2")),
+            (Bytes::from_static(b"bbb-001"), Bytes::from_static(b"v3")),
+            (Bytes::from_static(b"bbb-002"), Bytes::from_static(b"v4")),
+            (Bytes::from_static(b"ddd-001"), Bytes::from_static(b"v5")),
+            (Bytes::from_static(b"ddd-004"), Bytes::from_static(b"v6")),
+        ]);
+        test_utils::seed_database(&db, &table, true).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        (db, table)
+    }
+
+    async fn assert_segmented_scan_matrix<R>(reader: &R, table: &BTreeMap<Bytes, Bytes>)
+    where
+        R: DbReadOps + Sync,
+    {
+        let mut prefix_iter = reader.scan_prefix(b"bbb").await.unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"bbb")..Bytes::from_static(b"bbc"),
+            IterationOrder::Ascending,
+            &mut prefix_iter,
+        )
+        .await;
+
+        let mut asc_iter = reader
+            .scan::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec())
+            .await
+            .unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"),
+            IterationOrder::Ascending,
+            &mut asc_iter,
+        )
+        .await;
+
+        let desc_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut desc_iter = reader
+            .scan_with_options::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec(), &desc_options)
+            .await
+            .unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"),
+            IterationOrder::Descending,
+            &mut desc_iter,
+        )
+        .await;
+
+        let mut gap_iter = reader
+            .scan::<Vec<u8>, _>(b"bbc".to_vec()..=b"ddd-002".to_vec())
+            .await
+            .unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"bbc")..=Bytes::from_static(b"ddd-002"),
+            IterationOrder::Ascending,
+            &mut gap_iter,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segmented_scans_on_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (db, table) =
+            create_segmented_scan_fixture("/tmp/test_segmented_scans_on_db", object_store).await;
+
+        assert_segmented_scan_matrix(&db, &table).await;
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segmented_scans_on_snapshot() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (db, table) =
+            create_segmented_scan_fixture("/tmp/test_segmented_scans_on_snapshot", object_store)
+                .await;
+
+        let snapshot = db.snapshot().await.unwrap();
+        assert_segmented_scan_matrix(snapshot.as_ref(), &table).await;
+        drop(snapshot);
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_segmented_scans_on_db_reader() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_segmented_scans_on_db_reader";
+        let (db, table) = create_segmented_scan_fixture(path, object_store.clone()).await;
+        db.close().await.unwrap();
+
+        let reader = DbReaderBuilder::new(path, object_store)
+            .build()
+            .await
+            .unwrap();
+        assert_segmented_scan_matrix(&reader, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_db_reader_cache_scoping() {
+        use crate::db_cache::{DbCache, SplitCache};
+
+        // Create two separate databases
+        let object_store_a: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store_b: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // Write different data to each database
+        let db_a = Db::builder("/tmp/test_reader_cache_a", object_store_a.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        db_a.put(b"key1", b"value_from_db_a").await.unwrap();
+        db_a.flush().await.unwrap();
+        db_a.close().await.unwrap();
+
+        let db_b = Db::builder("/tmp/test_reader_cache_b", object_store_b.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        db_b.put(b"key1", b"value_from_db_b").await.unwrap();
+        db_b.flush().await.unwrap();
+        db_b.close().await.unwrap();
+
+        // Create a shared cache
+        let shared_cache: Arc<dyn DbCache> = Arc::new(SplitCache::new().build());
+
+        // Open both databases as readers with the shared cache
+        let reader_a = DbReaderBuilder::new("/tmp/test_reader_cache_a", object_store_a)
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let reader_b = DbReaderBuilder::new("/tmp/test_reader_cache_b", object_store_b)
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Verify each reader returns its own data, not the other's
+        let value_a = reader_a.get(b"key1").await.unwrap();
+        assert_eq!(value_a, Some(Bytes::from("value_from_db_a")));
+
+        let value_b = reader_b.get(b"key1").await.unwrap();
+        assert_eq!(value_b, Some(Bytes::from("value_from_db_b")));
+
+        // Read again to exercise cached paths
+        let value_a_cached = reader_a.get(b"key1").await.unwrap();
+        assert_eq!(value_a_cached, Some(Bytes::from("value_from_db_a")));
+
+        let value_b_cached = reader_b.get(b"key1").await.unwrap();
+        assert_eq!(value_b_cached, Some(Bytes::from("value_from_db_b")));
     }
 }

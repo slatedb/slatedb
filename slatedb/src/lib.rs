@@ -46,7 +46,7 @@ pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_cache_manager::CacheTarget;
-pub use db_iter::DbIterator;
+pub use db_iter::{DbIterator, DbRecencyIterator};
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
@@ -80,6 +80,7 @@ pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+pub mod compaction_worker;
 pub mod compactor;
 pub mod config;
 pub mod db_cache;
@@ -90,6 +91,8 @@ pub mod seq_tracker;
 pub mod size_tiered_compaction;
 
 mod batch;
+#[cfg(feature = "bench-internal")]
+pub use batch::benches as write_batch_benches;
 mod batch_write;
 mod blob;
 mod block_iterator;
@@ -163,6 +166,7 @@ mod transaction_manager;
 mod types;
 mod utils;
 
+mod fence;
 mod wal;
 mod wal_buffer;
 mod wal_id;

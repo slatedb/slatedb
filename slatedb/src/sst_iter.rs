@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
-use crate::db_state::{SsTableId, SsTableView};
+use crate::db_state::SsTableView;
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter_policy::{FilterContext, FilterQuery, NamedFilter};
@@ -308,10 +308,6 @@ impl<'a> InternalSstIterator<'a> {
             descending_buffer,
             pending_entry: None,
         })
-    }
-
-    fn table_id(&self) -> SsTableId {
-        self.view.table_as_ref().sst.id
     }
 
     fn view(&self) -> &SstView<'a> {
@@ -779,10 +775,6 @@ impl<'a> FilterIterator<'a> {
         }
     }
 
-    fn table_id(&self) -> SsTableId {
-        self.inner.table_id()
-    }
-
     fn is_filtered_out(&self) -> bool {
         self.filter.is_filtered_out()
     }
@@ -1025,13 +1017,6 @@ impl<'a> SstIterator<'a> {
                 Ok(Some(iterator))
             }
             None => Ok(None),
-        }
-    }
-
-    pub(crate) fn table_id(&self) -> SsTableId {
-        match &self.delegate {
-            SstIteratorDelegate::Direct(inner) => inner.table_id(),
-            SstIteratorDelegate::Filter(inner) => inner.table_id(),
         }
     }
 }

@@ -156,32 +156,32 @@ pub struct CompactionWorkerOptions {
   pub max_concurrent_compactions: usize,
 
   // How often a worker checks `.compactions` for new jobs.
-  pub compactions_poll_interval_ms: u64,
+  pub compactions_poll_interval: Duration,
 
   // How many bytes a worker must process before emitting a heartbeat.
   pub heartbeat_bytes: u64,
 
   // Minimum wall-clock time between heartbeat writes.
-  pub heartbeat_min_interval_ms: u64,
+  pub heartbeat_min_interval: Duration,
 }
 ```
 
 - `max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
-- `compactions_poll_interval_ms` is used for polling frequency. Each poll sleeps for `compactions_poll_interval_ms + random(0, compactions_poll_interval_ms * 0.1)` to prevent workers from synchronizing on `.compactions` reads. This jitter is applied on every poll and requires no configuration.
+- `compactions_poll_interval` is used for polling frequency. Each poll sleeps for `compactions_poll_interval + random(0, compactions_poll_interval * 0.1)` to prevent workers from synchronizing on `.compactions` reads. This jitter is applied on every poll and requires no configuration.
 
 - `heartbeat_bytes` is used to tie heartbeats to compaction progress and gives the coordinator a liveness guarantee. A worker that falls behind this rate will be reclaimed and its job handed off, regardless of whether its event loop is still alive.
 
-- `heartbeat_min_interval_ms` suppresses heartbeats triggered by `heartbeat_bytes` when processing is fast and should be set well below the coordinator's `worker_heartbeat_timeout_ms`.
+- `heartbeat_min_interval` suppresses heartbeats triggered by `heartbeat_bytes` when processing is fast and should be set well below the coordinator's `worker_heartbeat_timeout_ms`.
 
 New `CompactionWorkerBuilder` entrypoint for `CompactionWorker` processes:
 
 ```rust
 let options = CompactionWorkerOptions {
     max_concurrent_compactions: 2,
-    compactions_poll_interval_ms: 1000,
+    compactions_poll_interval: Duration::from_secs(1),
     heartbeat_bytes: 100_000,
-    heartbeat_min_interval_ms: 10000,
+    heartbeat_min_interval: Duration::from_secs(10),
 };
 
 let worker = CompactionWorkerBuilder::new("/path/to/db", object_store.clone())
@@ -217,7 +217,7 @@ table Compaction {
 
 Workers use optimistic concurrency on `.compactions`. SlateDB implements this uniformly across all object stores, including those with native CAS support, using create-if-not-exists on sequentially-numbered files (e.g. `00000000000000000003.compactions`). Writing a new version means writing the next numbered file; if another writer got there first the write fails with `AlreadyExists` and the worker retries. See [RFC-0001](0001-manifest.md) for the full protocol.
 
-1. Poll `.compactions` every `compactions_poll_interval_ms`.
+1. Poll `.compactions` every `compactions_poll_interval`.
 2. Find up to `max_concurrent_compactions` `Compaction` entries with `status == Submitted` and empty `worker_id`.
 3. Write the full updated state with `status = Running`, `worker_id = <self>`, `last_heartbeat_ms = now()` to the next sequence number.
 4. On success: begin execution. On `AlreadyExists`: re-read latest and retry from step 2.
@@ -230,15 +230,14 @@ Workers claim up to `max_concurrent_compactions` jobs at a time, limiting the nu
 
 1. On each output SST write, piggyback `last_heartbeat_ms = now()` onto the RFC-0013 progress-persistence write to `.compactions`.
 2. Additionally, after every `heartbeat_bytes` bytes processed: if `now() - last_heartbeat_ms >= heartbeat_min_interval_ms`, write updated `.compactions` with `last_heartbeat_ms = now()` for all `Running` jobs owned by this worker. This ties liveness directly to compaction throughput. A degraded machine that is alive but slow will miss the threshold and be reclaimed.
-3. On `AlreadyExists`: re-read latest and retry the write.
-4. Reset `bytes_since_last_heartbeat = 0` after a successful heartbeat write.
+3. On `AlreadyExists`: re-read latest. If the compaction is now `Submitted` or claimed by another `worker_id`, the worker has lost the assignment: discard local state for that compaction, abort execution, and return to the poll/claim loop. Otherwise retry the write.
 
 Polls do not emit heartbeats. Liveness is driven entirely by compaction progress.
 
 **Failure Detection Protocol** (coordinator):
 
 1. On each coordinator poll tick, read latest `.compactions`.
-2. For each `Running` compaction where `now() - max(last_heartbeat_ms, coordinator_start_time_ms) > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`. The `coordinator_start_time_ms` floor (captured in memory when the coordinator boots, not persisted) gives surviving workers one full timeout window after a coordinator restart to emit a heartbeat, preventing spurious reclaim due to clock skew or boot delay. After every worker has heartbeated at least once post-restart, the `max` is a no-op. This avoids destroying in-flight work on healthy workers that survived the coordinator restart.
+2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
 3. If any compactions were reclaimed in step 2, write updated state via `write_compactions_safely()`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator`.
 4. On `AlreadyExists`: re-read latest and retry from step 1.
 
@@ -511,8 +510,9 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 
 Phases:
 1. **Schema extension:** add `WorkerSpec` containing `worker_id` and `last_heartbeat_ms` to `Compaction` in `compactor.fbs`.
-2. **Worker implementation:** implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`. Move `max_concurrent_compactions` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
-3. **Failure detection:** heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
+2. **Manifest Commit Protocol:** coordinator merges compactions with `Compacted` status from remote workers, transitions them to either `Failed` or `Completed`, and commits their output to the manifest.
+3. **Worker implementation:** implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`. Move `max_concurrent_compactions` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
+4. **Failure detection:** heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
 
 ### Docs Updates
 
@@ -543,7 +543,7 @@ Use gossip to distribute jobs directly.
 
 Routing compactions to specific workers or worker classes (e.g. L0 jobs to an embedded worker, major compactions to a beefy short-lived node). The claim protocol in this RFC is designed so that selectivity can be added entirely on the worker side without coordinator or schema changes: a worker can filter `Submitted` entries by `CompactionSpec` properties (level, input bytes, etc.) before attempting a claim. Common shapes worth exploring:
 
-- **L0 affinity:** embedded workers preferentially claim L0 jobs to keep flush-side latency low; remote workers handle larger compactions.
+- **L0 affinity:** embedded workers preferentially claim L0 jobs to keep flush-side latency low; remote workers handle larger compactions. Naively prioritizing L0 jobs interacts with `max_concurrent_compactions`: a single worker could greedily claim every available L0 job, bottlenecking them on one worker's CPU/IO rather than spreading them across the pool. In practice we expect only one or two L0 compactions outstanding at a time, so simple prioritization is likely fine; a pluggable work-scheduling trait is a natural extension if fairer policies are ever needed.
 - **Size-class pools:** small jobs go to long-lived workers; large major compactions go to a separate pool of beefy short-lived nodes that can scale to zero between jobs.
 
 ### Multi-DB workers

@@ -49,6 +49,7 @@
 //! manifest_update_timeout = "300s"
 //! min_filter_keys = 1000
 //! l0_sst_size_bytes = 67108864
+//! max_wal_flushes_before_l0_flush = 4096
 //! l0_max_ssts = 8
 //! l0_max_ssts_per_key = 8
 //! l0_flush_parallelism = 4
@@ -97,6 +98,7 @@
 //!  "manifest_update_timeout": "300s",
 //!  "min_filter_keys": 1000,
 //!  "l0_sst_size_bytes": 67108864,
+//!  "max_wal_flushes_before_l0_flush": 4096,
 //!  "l0_max_ssts": 8,
 //!  "l0_max_ssts_per_key": 8,
 //!  "l0_flush_parallelism": 4,
@@ -148,6 +150,7 @@
 //! manifest_update_timeout: '300s'
 //! min_filter_keys: 1000
 //! l0_sst_size_bytes: 67108864
+//! max_wal_flushes_before_l0_flush: 4096
 //! l0_max_ssts: 8
 //! l0_max_ssts_per_key: 8
 //! l0_flush_parallelism: 1
@@ -669,6 +672,17 @@ pub struct Settings {
     ///   secondary readers to see new data.
     pub l0_sst_size_bytes: usize,
 
+    /// The maximum number of WAL flushes that can occur before the active memtable is
+    /// frozen and flushed to L0, regardless of memtable size.
+    ///
+    /// For databases with low write throughput, this can cause data to be available in
+    /// L0 SSTs sooner, making it accessible to readers.
+    ///
+    /// This also bounds the amount of WAL data that needs to be replayed on recovery: once
+    /// this many WAL flushes have occurred since the last memtable freeze, the active
+    /// memtable will be frozen even if it has not reached `l0_sst_size_bytes`.
+    pub max_wal_flushes_before_l0_flush: u64,
+
     /// Defines the max total number of SSTs in L0 across the entire key space. Memtables
     /// will not be flushed if the total L0 count (including in-flight uploads) would exceed
     /// this value, until compaction can compact the ssts into compacted.
@@ -746,6 +760,10 @@ impl std::fmt::Debug for Settings {
             .field("min_filter_keys", &self.min_filter_keys)
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
+            .field(
+                "max_wal_flushes_before_l0_flush",
+                &self.max_wal_flushes_before_l0_flush,
+            )
             .field("l0_max_ssts", &self.l0_max_ssts)
             .field("l0_max_ssts_per_key", &self.l0_max_ssts_per_key)
             .field("l0_flush_parallelism", &self.l0_flush_parallelism)
@@ -944,6 +962,7 @@ impl Default for Settings {
             min_filter_keys: 1000,
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_wal_flushes_before_l0_flush: 4096,
             l0_max_ssts: 8,
             l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 4,
@@ -958,7 +977,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DbReaderOptions {
     /// How frequently to poll for new manifest files and WAL data. Refreshing the manifest
     /// file allows readers to detect newly compacted data. The reader will also look for
@@ -1109,6 +1128,48 @@ impl std::fmt::Debug for CompactorOptions {
     }
 }
 
+/// Options for the compactor.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CompactionWorkerOptions {
+    // How many jobs a single worker may hold simultaneously.
+    pub max_concurrent_compactions: usize,
+
+    // How often a worker checks `.compactions` for new jobs.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub compactions_poll_interval: Duration,
+
+    // How many bytes a worker must process before emitting a heartbeat.
+    pub heartbeat_bytes: u64,
+
+    // Minimum wall-clock time between heartbeat writes.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub heartbeat_min_interval: Duration,
+
+    /// Maximum size of an output SST before a new one is rolled.
+    pub max_sst_size: usize,
+
+    /// Maximum number of concurrent tasks for fetching SST blocks during
+    /// compaction. Higher values can improve throughput but use more resources.
+    pub max_fetch_tasks: usize,
+}
+
+/// Default options for the compaction worker.
+impl Default for CompactionWorkerOptions {
+    /// Returns a `CompactionWorkerOptions` with a 5 second poll interval
+    fn default() -> Self {
+        Self {
+            max_concurrent_compactions: 4,
+            compactions_poll_interval: Duration::from_secs(5),
+            heartbeat_bytes: 5_242_880,
+            heartbeat_min_interval: Duration::from_secs(5),
+            max_sst_size: 256 * 1024 * 1024,
+            max_fetch_tasks: 4,
+        }
+    }
+}
+
 /// Options for the Size-Tiered Compaction Scheduler
 #[derive(Clone, Copy, Debug)]
 pub struct SizeTieredCompactionSchedulerOptions {
@@ -1214,6 +1275,26 @@ pub struct GarbageCollectorOptions {
     /// None means garbage collection is disabled for the WAL directory.
     pub wal_options: Option<GarbageCollectorDirectoryOptions>,
 
+    /// Garbage collection options for zero-byte WAL fence objects.
+    ///
+    /// WARNING: Setting this to a non-None value can cause data loss if set
+    /// too aggressively. It's possible for the following scenario to occur:
+    ///
+    /// - t0: A writer W1 calculates position 7 for its next WAL entry
+    /// - t1: A writer W2 writes a fence at position 7
+    /// - t2: `min_age` + 1 passes
+    /// - t3: The garbage collector runs and deletes the fence at position 7
+    /// - t4: W1 writes its WAL entry at position 7 and returns success
+    ///
+    /// Because the fence at position 7 was deleted, W1's write will succeed,
+    /// but the data at position 7 is invalid. The only way to protect against
+    /// this scenario is to ensure fence writes are never deleted. In practice,
+    /// setting `min_age` to a very high number (longer than any writer is
+    /// expected to run) should be sufficient to prevent this scenario.
+    ///
+    /// None means garbage collection is disabled for WAL fence objects.
+    pub wal_fence_options: Option<GarbageCollectorDirectoryOptions>,
+
     /// Garbage collection options for the compacted directory.
     ///
     /// None means garbage collection is disabled for the compacted directory.
@@ -1239,6 +1320,7 @@ impl GarbageCollectorOptions {
     pub fn is_empty(&self) -> bool {
         self.manifest_options.is_none()
             && self.wal_options.is_none()
+            && self.wal_fence_options.is_none()
             && self.compacted_options.is_none()
             && self.compactions_options.is_none()
             && self.detach_options.is_none()
@@ -1254,6 +1336,7 @@ impl Default for GarbageCollectorDirectoryOptions {
         Self {
             interval: Some(DEFAULT_INTERVAL),
             min_age: DEFAULT_MIN_AGE,
+            dry_run: false,
         }
     }
 }
@@ -1264,9 +1347,9 @@ pub struct GarbageCollectorDirectoryOptions {
     /// The interval at which the garbage collector will run in the background
     /// thread.
     ///
-    /// If set to None, recurring garbage collection will be disabled for the
-    /// directory, but one-time garbage collection can still be triggered
-    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
+    /// If set to None while the parent directory options are enabled, recurring
+    /// garbage collection uses the default interval. To disable garbage
+    /// collection for a directory, set the parent `*_options` field to None.
     #[serde(deserialize_with = "deserialize_option_duration")]
     #[serde(serialize_with = "serialize_option_duration")]
     pub interval: Option<Duration>,
@@ -1275,6 +1358,10 @@ pub struct GarbageCollectorDirectoryOptions {
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub min_age: Duration,
+
+    /// If true, log files that would be deleted without deleting them.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// Schedule options for a GC task that has no file-age threshold.
@@ -1282,9 +1369,9 @@ pub struct GarbageCollectorDirectoryOptions {
 pub struct GarbageCollectorScheduleOptions {
     /// The interval at which the task will run in the background thread.
     ///
-    /// If set to None, recurring execution is disabled, but a one-time pass
-    /// can still be triggered via
-    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
+    /// If set to None while the parent task options are enabled, recurring
+    /// execution uses the default interval. To disable the task, set the parent
+    /// options field to None.
     #[serde(deserialize_with = "deserialize_option_duration")]
     #[serde(serialize_with = "serialize_option_duration")]
     pub interval: Option<Duration>,
@@ -1301,8 +1388,16 @@ impl Default for GarbageCollectorScheduleOptions {
 /// Default options for the garbage collector.
 ///
 /// By default, garbage collection is enabled for all managed directories
-/// (manifest, WAL, compacted SSTs, and compactions) using
+/// (manifest, WAL, WAL fence, compacted SSTs, and compactions) using
 /// [`GarbageCollectorDirectoryOptions::default()`].
+/// WAL fence garbage collection runs in dry-run mode by default.
+///
+/// WAL fence GC is visible by default but does not delete until users
+/// explicitly disable `dry_run`. This is a very conservative setting.
+/// Users can enable fence GC with a high `min_age` if they want to
+/// clean up old fences. Alternatively, this log can be silenced entirely
+/// by setting `wal_fence_options` to `None`. See
+/// [`GarbageCollectorOptions::wal_fence_options`] for more details.
 ///
 /// To disable garbage collection for a specific file type, set that
 /// directory option to `None`.
@@ -1311,6 +1406,10 @@ impl Default for GarbageCollectorOptions {
         Self {
             manifest_options: Some(GarbageCollectorDirectoryOptions::default()),
             wal_options: Some(GarbageCollectorDirectoryOptions::default()),
+            wal_fence_options: Some(GarbageCollectorDirectoryOptions {
+                dry_run: true,
+                ..GarbageCollectorDirectoryOptions::default()
+            }),
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
             detach_options: Some(GarbageCollectorScheduleOptions::default()),

@@ -27,3 +27,5 @@ bindings/node/prebuilds/
 .claude/
 CLAUDE.md
 website/src/content/docs/rfcs/*.md
+specs/**/*.json
+specs/**/out/

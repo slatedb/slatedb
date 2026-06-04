@@ -7,7 +7,7 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::{Manifest, ManifestCore};
+use crate::manifest::{Manifest, ManifestCore, ProjectionConfig};
 use crate::object_stores::ObjectStoreType::{Main, Wal};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
@@ -16,12 +16,24 @@ use crate::utils::IdGenerator;
 use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use slatedb_common::clock::SystemClock;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+/// User-supplied predicate deciding whether a segment is included in the
+/// clone. Receives the segment's prefix (the unsegmented tree participates as
+/// the empty prefix). Returning `false` drops the segment entirely.
+pub(crate) type SegmentFilterFn = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
+
+/// User-supplied projector returning the effective range for a segment. The
+/// returned range's bounded ends must fall within `[prefix, prefix++)`;
+/// `Unbounded` ends resolve to the segment edges. Empty ranges surface to the
+/// caller as `SlateDBError::InvalidProjection`.
+pub(crate) type SegmentProjectionFn =
+    Arc<dyn Fn(&[u8]) -> Result<BytesRange, SlateDBError> + Send + Sync>;
 
 pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
     clone_sources: Vec<CloneSourceSpec<R>>,
@@ -31,6 +43,8 @@ pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
     projection_range: Option<R>,
+    segment_filter: Option<SegmentFilterFn>,
+    segment_projection: Option<SegmentProjectionFn>,
 ) -> Result<(), SlateDBError> {
     let clone_path = clone_path.into();
 
@@ -44,6 +58,8 @@ pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
         rand,
         fp_registry.clone(),
         projection_range,
+        segment_filter,
+        segment_projection,
     )
     .await?;
 
@@ -80,6 +96,8 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
     rand: Arc<DbRand>,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
     projection_range: Option<R>,
+    segment_filter: Option<SegmentFilterFn>,
+    segment_projection: Option<SegmentProjectionFn>,
 ) -> Result<StoredManifest, SlateDBError> {
     let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
 
@@ -121,6 +139,8 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                     &system_clock,
                     &rand,
                     &projection_range,
+                    segment_filter.as_ref(),
+                    segment_projection.as_ref(),
                 )
                 .await?;
 
@@ -206,7 +226,8 @@ pub(crate) struct CloneSource {
 
 /// Builds a list of clone sources from the provided specifications. For each source spec, a
 /// manifest at the specified checkpoint is loaded (if the checkpoint is not specified then it is
-/// created). Additionally, if projection_range is specified then it is applied to the returned
+/// created). Additionally, if any of `projection_range`, `segment_filter`, or
+/// `segment_projection` are specified then they are applied to the returned
 /// manifests using `Manifest::projected`.
 async fn build_sources<R: RangeBounds<Bytes> + Clone>(
     source_specs: &Vec<CloneSourceSpec<R>>,
@@ -214,6 +235,8 @@ async fn build_sources<R: RangeBounds<Bytes> + Clone>(
     system_clock: &Arc<dyn SystemClock>,
     rand: &Arc<DbRand>,
     projection_range: &Option<R>,
+    segment_filter: Option<&SegmentFilterFn>,
+    segment_projection: Option<&SegmentProjectionFn>,
 ) -> Result<Vec<CloneSource>, SlateDBError> {
     let mut result: Vec<CloneSource> = vec![];
     for source in source_specs {
@@ -233,9 +256,15 @@ async fn build_sources<R: RangeBounds<Bytes> + Clone>(
             (None, None) => None,
         };
 
-        manifest_at_checkpoint = match range {
-            Some(range) => Manifest::projected(&manifest_at_checkpoint, range),
-            None => manifest_at_checkpoint,
+        let config = ProjectionConfig {
+            global_range: range,
+            segment_filter: segment_filter.cloned(),
+            segment_projection: segment_projection.cloned(),
+        };
+        manifest_at_checkpoint = if config.is_noop() {
+            manifest_at_checkpoint
+        } else {
+            Manifest::projected(&manifest_at_checkpoint, &config)?
         };
 
         result.push(CloneSource {
@@ -435,6 +464,7 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
+    use crate::iter::IterationOrder;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::manifest::ManifestCore;
@@ -452,7 +482,9 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::SystemClock;
-    use std::ops::RangeFull;
+    use std::collections::BTreeMap;
+    use std::ops::Bound;
+    use std::ops::{RangeBounds, RangeFull};
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -478,6 +510,8 @@ mod tests {
             fp_registry,
             system_clock,
             rand,
+            None,
+            None,
             None,
         )
         .await
@@ -518,7 +552,8 @@ mod tests {
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
         clone_db.close().await.unwrap();
     }
 
@@ -586,7 +621,13 @@ mod tests {
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
-        test_utils::assert_ranged_db_scan(&checkpoint_table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(
+            &checkpoint_table,
+            ..,
+            IterationOrder::Ascending,
+            &mut db_iter,
+        )
+        .await;
         clone_db.close().await.unwrap();
     }
 
@@ -1138,5 +1179,595 @@ mod tests {
                     ObjectStoreError::NotFound { path, .. } if path == &expected_missing_wal_path
                 )
         ));
+    }
+
+    fn segmented_table() -> BTreeMap<Bytes, Bytes> {
+        BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"aaa-003"), Bytes::from_static(b"v2")),
+            (Bytes::from_static(b"bbb-001"), Bytes::from_static(b"v3")),
+            (Bytes::from_static(b"bbb-002"), Bytes::from_static(b"v4")),
+            (Bytes::from_static(b"ddd-001"), Bytes::from_static(b"v5")),
+            (Bytes::from_static(b"ddd-004"), Bytes::from_static(b"v6")),
+        ])
+    }
+
+    #[cfg(feature = "wal_disable")]
+    fn wal_disabled_settings() -> Settings {
+        Settings {
+            wal_enabled: false,
+            ..Settings::default()
+        }
+    }
+
+    async fn build_segmented_parent(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
+        settings: Settings,
+        table: &BTreeMap<Bytes, Bytes>,
+    ) {
+        let db = Db::builder(path.clone(), object_store)
+            .with_settings(settings)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap();
+        // await_durable would deadlock under wal_enabled=false because the
+        // memtable flush is gated on the explicit call below.
+        test_utils::seed_database(&db, table, false).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+    }
+
+    async fn open_segmented_clone(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
+        settings: Settings,
+    ) -> Db {
+        Db::builder(path.clone(), object_store)
+            .with_settings(settings)
+            .with_segment_extractor(extractor)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    async fn run_segmented_clone<R: RangeBounds<Bytes> + Clone>(
+        sources: Vec<CloneSourceSpec<R>>,
+        clone_path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        projection: Option<R>,
+    ) {
+        crate::clone::create_clone(
+            sources,
+            clone_path.clone(),
+            ObjectStores::new(object_store.clone(), Some(object_store)),
+            Arc::new(FailPointRegistry::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            projection,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn assert_clone_segments(
+        clone_path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        expected_prefixes: &[&[u8]],
+    ) {
+        let store = ManifestStore::new(clone_path, object_store);
+        let stored = store.read_latest_manifest().await.unwrap();
+        assert_eq!(
+            stored.manifest.core.segment_extractor_name.as_deref(),
+            Some("fixed-3")
+        );
+        let actual: Vec<Bytes> = stored
+            .manifest
+            .core
+            .segments
+            .iter()
+            .map(|s| s.prefix.clone())
+            .collect();
+        let want: Vec<Bytes> = expected_prefixes
+            .iter()
+            .map(|b| Bytes::copy_from_slice(b))
+            .collect();
+        assert_eq!(actual, want);
+    }
+
+    async fn assert_segment_prefix_scan(
+        db: &Db,
+        expected: &BTreeMap<Bytes, Bytes>,
+        prefix_lo: &'static [u8],
+        prefix_hi: &'static [u8],
+    ) {
+        let mut iter = db.scan_prefix(prefix_lo).await.unwrap();
+        test_utils::assert_ranged_db_scan(
+            expected,
+            Bytes::from_static(prefix_lo)..Bytes::from_static(prefix_hi),
+            IterationOrder::Ascending,
+            &mut iter,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_filter_segments_via_clone_builder() {
+        // Drop the `bbb` segment using filter_segments; verify only `aaa` and
+        // `ddd` remain in the clone.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_seg_filter");
+        let clone_path = Path::from("/tmp/test_clone_seg_filter");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let table = segmented_table();
+
+        build_segmented_parent(
+            &parent_path,
+            object_store.clone(),
+            extractor.clone(),
+            Settings::default(),
+            &table,
+        )
+        .await;
+
+        crate::db::builder::CloneBuilder::new(
+            clone_path.clone(),
+            CloneSourceSpec::new(parent_path.clone()),
+            object_store.clone(),
+        )
+        .with_wal_object_store(object_store.clone())
+        .with_segment_filter(|prefix| prefix != b"bbb")
+        .build()
+        .await
+        .unwrap();
+
+        assert_clone_segments(&clone_path, object_store.clone(), &[b"aaa", b"ddd"]).await;
+    }
+
+    #[tokio::test]
+    async fn should_apply_segment_projection_via_clone_builder() {
+        // Narrow the `aaa` segment to only keys >= "aaa-002" via
+        // with_segment_projection; other segments retain full ranges.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_seg_proj");
+        let clone_path = Path::from("/tmp/test_clone_seg_proj");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let table = segmented_table();
+
+        build_segmented_parent(
+            &parent_path,
+            object_store.clone(),
+            extractor.clone(),
+            Settings::default(),
+            &table,
+        )
+        .await;
+
+        crate::db::builder::CloneBuilder::new(
+            clone_path.clone(),
+            CloneSourceSpec::new(parent_path.clone()),
+            object_store.clone(),
+        )
+        .with_wal_object_store(object_store.clone())
+        .with_segment_projection(|prefix| {
+            if prefix == b"aaa" {
+                let mut start = prefix.to_vec();
+                start.extend_from_slice(b"-002");
+                (Bound::Included(Bytes::from(start)), Bound::Unbounded)
+            } else {
+                (Bound::Unbounded, Bound::Unbounded)
+            }
+        })
+        .build()
+        .await
+        .unwrap();
+
+        let clone_db = open_segmented_clone(
+            &clone_path,
+            object_store.clone(),
+            extractor,
+            Settings::default(),
+        )
+        .await;
+        // aaa-001 was filtered out by the projection; aaa-003 remains. Other
+        // segments are untouched.
+        let mut expected = table.clone();
+        expected.remove(&Bytes::from_static(b"aaa-001"));
+        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        clone_db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_clone_segmented_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_seg_clone");
+        let clone_path = Path::from("/tmp/test_clone_seg_clone");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let table = segmented_table();
+
+        build_segmented_parent(
+            &parent_path,
+            object_store.clone(),
+            extractor.clone(),
+            Settings::default(),
+            &table,
+        )
+        .await;
+
+        run_segmented_clone(
+            vec![CloneSourceSpec::new(parent_path.clone())],
+            &clone_path,
+            object_store.clone(),
+            None,
+        )
+        .await;
+
+        assert_clone_segments(&clone_path, object_store.clone(), &[b"aaa", b"bbb", b"ddd"]).await;
+
+        let clone_db = open_segmented_clone(
+            &clone_path,
+            object_store.clone(),
+            extractor,
+            Settings::default(),
+        )
+        .await;
+        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        assert_segment_prefix_scan(&clone_db, &table, b"bbb", b"bbc").await;
+        let mut cross_iter = clone_db
+            .scan::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec())
+            .await
+            .unwrap();
+        test_utils::assert_ranged_db_scan(
+            &table,
+            Bytes::from_static(b"aaa")..=Bytes::from_static(b"ddd-999"),
+            IterationOrder::Ascending,
+            &mut cross_iter,
+        )
+        .await;
+        clone_db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_union_segmented_dbs() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path_a = Path::from("/tmp/test_parent_seg_union_a");
+        let parent_path_b = Path::from("/tmp/test_parent_seg_union_b");
+        let clone_path = Path::from("/tmp/test_clone_seg_union");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let settings = wal_disabled_settings();
+
+        let table_a = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"bbb-001"), Bytes::from_static(b"v2")),
+            (Bytes::from_static(b"bbb-002"), Bytes::from_static(b"v3")),
+        ]);
+        let table_b = BTreeMap::from([
+            (Bytes::from_static(b"ddd-001"), Bytes::from_static(b"v4")),
+            (Bytes::from_static(b"eee-001"), Bytes::from_static(b"v5")),
+            (Bytes::from_static(b"eee-002"), Bytes::from_static(b"v6")),
+        ]);
+
+        build_segmented_parent(
+            &parent_path_a,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_a,
+        )
+        .await;
+        build_segmented_parent(
+            &parent_path_b,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_b,
+        )
+        .await;
+
+        run_segmented_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()),
+            ],
+            &clone_path,
+            object_store.clone(),
+            None,
+        )
+        .await;
+
+        assert_clone_segments(
+            &clone_path,
+            object_store.clone(),
+            &[b"aaa", b"bbb", b"ddd", b"eee"],
+        )
+        .await;
+        let store = ManifestStore::new(&clone_path, object_store.clone());
+        let stored = store.read_latest_manifest().await.unwrap();
+        assert_eq!(stored.manifest.external_dbs.len(), 2);
+
+        let mut expected: BTreeMap<Bytes, Bytes> = table_a.clone();
+        expected.extend(table_b.clone());
+        let clone_db =
+            open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
+        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
+        assert_segment_prefix_scan(&clone_db, &expected, b"eee", b"eef").await;
+        clone_db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_union_projected_segmented_dbs() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path_a = Path::from("/tmp/test_parent_seg_proj_union_a");
+        let parent_path_b = Path::from("/tmp/test_parent_seg_proj_union_b");
+        let clone_path = Path::from("/tmp/test_clone_seg_proj_union");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let settings = wal_disabled_settings();
+
+        // Parents have overlapping key spaces; per-source projection carves
+        // out disjoint slices so the union is exactly each parent's slice.
+        let table_a = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"bbb-001"), Bytes::from_static(b"v2")),
+            (Bytes::from_static(b"bbb-002"), Bytes::from_static(b"v3")),
+            (
+                Bytes::from_static(b"ccc-001"),
+                Bytes::from_static(b"vA-ccc"),
+            ),
+            (
+                Bytes::from_static(b"ddd-001"),
+                Bytes::from_static(b"vA-ddd"),
+            ),
+        ]);
+        let table_b = BTreeMap::from([
+            (
+                Bytes::from_static(b"aaa-001"),
+                Bytes::from_static(b"vB-aaa"),
+            ),
+            (
+                Bytes::from_static(b"bbb-001"),
+                Bytes::from_static(b"vB-bbb"),
+            ),
+            (Bytes::from_static(b"ccc-001"), Bytes::from_static(b"v4")),
+            (Bytes::from_static(b"ddd-001"), Bytes::from_static(b"v5")),
+            (Bytes::from_static(b"eee-001"), Bytes::from_static(b"v6")),
+        ]);
+
+        build_segmented_parent(
+            &parent_path_a,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_a,
+        )
+        .await;
+        build_segmented_parent(
+            &parent_path_b,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_b,
+        )
+        .await;
+
+        let range_a = (
+            Bound::Included(Bytes::from_static(b"aaa")),
+            Bound::Excluded(Bytes::from_static(b"ccc")),
+        );
+        let range_b = (
+            Bound::Included(Bytes::from_static(b"ccc")),
+            Bound::Unbounded,
+        );
+
+        run_segmented_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()).with_projection_range(range_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()).with_projection_range(range_b.clone()),
+            ],
+            &clone_path,
+            object_store.clone(),
+            None,
+        )
+        .await;
+
+        assert_clone_segments(
+            &clone_path,
+            object_store.clone(),
+            &[b"aaa", b"bbb", b"ccc", b"ddd", b"eee"],
+        )
+        .await;
+        let store = ManifestStore::new(&clone_path, object_store.clone());
+        let stored = store.read_latest_manifest().await.unwrap();
+        assert_eq!(stored.manifest.external_dbs.len(), 2);
+
+        let mut expected: BTreeMap<Bytes, Bytes> = BTreeMap::new();
+        expected.extend(
+            table_a
+                .iter()
+                .filter(|(k, _)| range_a.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        expected.extend(
+            table_b
+                .iter()
+                .filter(|(k, _)| range_b.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+
+        let clone_db =
+            open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
+        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
+        assert_segment_prefix_scan(&clone_db, &expected, b"ddd", b"dde").await;
+        clone_db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_union_projected_segmented_dbs_with_shared_segment() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path_a = Path::from("/tmp/test_parent_seg_shared_union_a");
+        let parent_path_b = Path::from("/tmp/test_parent_seg_shared_union_b");
+        let clone_path = Path::from("/tmp/test_clone_seg_shared_union");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let settings = wal_disabled_settings();
+
+        // Both parents have a `bbb` segment with disjoint keys within it.
+        // Per-source projection slices each parent so the union has to merge
+        // their `bbb` segments — L0 SSTs from both parents land in the same
+        // output segment.
+        let table_a = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"bbb-001"), Bytes::from_static(b"v2")),
+            (Bytes::from_static(b"bbb-002"), Bytes::from_static(b"v3")),
+        ]);
+        let table_b = BTreeMap::from([
+            (Bytes::from_static(b"bbb-007"), Bytes::from_static(b"v4")),
+            (Bytes::from_static(b"bbb-008"), Bytes::from_static(b"v5")),
+            (Bytes::from_static(b"ccc-001"), Bytes::from_static(b"v6")),
+        ]);
+
+        build_segmented_parent(
+            &parent_path_a,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_a,
+        )
+        .await;
+        build_segmented_parent(
+            &parent_path_b,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_b,
+        )
+        .await;
+
+        let range_a = (
+            Bound::Included(Bytes::from_static(b"aaa")),
+            Bound::Excluded(Bytes::from_static(b"bbb-005")),
+        );
+        let range_b = (
+            Bound::Included(Bytes::from_static(b"bbb-005")),
+            Bound::Unbounded,
+        );
+
+        run_segmented_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()).with_projection_range(range_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()).with_projection_range(range_b.clone()),
+            ],
+            &clone_path,
+            object_store.clone(),
+            None,
+        )
+        .await;
+
+        assert_clone_segments(&clone_path, object_store.clone(), &[b"aaa", b"bbb", b"ccc"]).await;
+
+        // The shared `bbb` segment in the union must hold one L0 SST
+        // contributed by each parent.
+        let store = ManifestStore::new(&clone_path, object_store.clone());
+        let stored = store.read_latest_manifest().await.unwrap();
+        let bbb_segment = stored
+            .manifest
+            .core
+            .segments
+            .iter()
+            .find(|s| s.prefix == Bytes::from_static(b"bbb"))
+            .expect("bbb segment");
+        assert_eq!(bbb_segment.tree.l0.len(), 2);
+        assert_eq!(stored.manifest.external_dbs.len(), 2);
+
+        let mut expected: BTreeMap<Bytes, Bytes> = BTreeMap::new();
+        expected.extend(
+            table_a
+                .iter()
+                .filter(|(k, _)| range_a.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        expected.extend(
+            table_b
+                .iter()
+                .filter(|(k, _)| range_b.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+
+        let clone_db =
+            open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
+        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        // The prefix scan on the shared `bbb` segment must surface rows from
+        // both parents through a single segment-routed read path.
+        assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
+        clone_db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_project_segmented_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_seg_project");
+        let clone_path = Path::from("/tmp/test_clone_seg_project");
+        let extractor = Arc::new(test_utils::FixedThreeBytePrefixExtractor);
+        let settings = wal_disabled_settings();
+        let table = segmented_table();
+
+        build_segmented_parent(
+            &parent_path,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table,
+        )
+        .await;
+
+        let range = (
+            Bound::Included(Bytes::from_static(b"bbb")),
+            Bound::Excluded(Bytes::from_static(b"ddd")),
+        );
+        run_segmented_clone(
+            vec![CloneSourceSpec::new(parent_path.clone())],
+            &clone_path,
+            object_store.clone(),
+            Some(range),
+        )
+        .await;
+
+        assert_clone_segments(&clone_path, object_store.clone(), &[b"bbb"]).await;
+
+        let clone_db =
+            open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
+        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(
+            &table,
+            Bytes::from_static(b"bbb")..Bytes::from_static(b"ddd"),
+            IterationOrder::Ascending,
+            &mut full_iter,
+        )
+        .await;
+        assert_segment_prefix_scan(&clone_db, &table, b"bbb", b"bbc").await;
+        clone_db.close().await.unwrap();
     }
 }

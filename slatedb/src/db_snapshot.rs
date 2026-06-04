@@ -187,7 +187,6 @@ impl DbSnapshot {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: Some(self.started_seq),
-                    range_tracker: None,
                     prefix,
                 },
             )

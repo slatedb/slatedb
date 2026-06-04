@@ -5,7 +5,9 @@ description: Learn about SlateDB's garbage collection strategy
 
 SlateDB's garbage collector runs as a background task in the client process, periodically checking for obsolete files in the database storage.
 
-The garbage collector has a configurable minimum age and interval for each file type (WAL SSTs, compacted SSTs, and manifests). Garbage collection for a file type can be disabled by setting its options to `None`. The collector runs every `interval` seconds and will delete files older than `min_age` that are not referenced by any active manifest or checkpoint.
+The garbage collector has a configurable minimum age and interval for each file type (WAL SSTs, WAL fence SSTs, compacted SSTs, manifests, and compactions). Garbage collection for a file type can be disabled by setting its options to `None`. The collector runs every `interval` seconds and will delete files older than `min_age` that are not referenced by any active manifest or checkpoint.
+
+Each garbage collection directory type supports a `dry_run` option. When enabled, the collector logs files that would be deleted without actually deleting them. This is useful for testing or verifying garbage collection behavior before enabling actual deletion.
 
 Below is a diagram illustrating the high-level flow of garbage collection in SlateDB:
 
@@ -31,3 +33,11 @@ flowchart TD
 
     C3 & D3 & E3 --> G[Wait for Next Interval or Shutdown]
 ```
+
+## Default Garbage Collection Behavior
+
+By default, garbage collection is enabled for all managed directories (manifest, WAL, WAL fence, compacted SSTs, and compactions) using standard interval and minimum age settings.
+
+WAL fence garbage collection runs in dry-run mode by default. This means it logs files that would be deleted without actually deleting them. This conservative default prevents accidental data loss while still providing visibility into what would be cleaned up.
+
+To enable actual deletion for WAL fence GC, set `dry_run: false` with a high `min_age` to safely clean up old fences. Alternatively, to silence the dry-run logging entirely, set `wal_fence_options: None`.

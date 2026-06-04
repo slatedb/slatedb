@@ -343,7 +343,11 @@ impl EncodedSsTableBuilder<'_> {
     /// |  +---------------------------------------------+  |
     /// +---------------------------------------------------+
     /// |                Metadata Block                     |
-    /// |    (SsTableInfo encoded with FlatBuffers)         |
+    /// |  +---------------------------------------------+  |
+    /// |  | (SsTableInfo encoded with FlatBuffers)      |  |
+    /// |  +---------------------------------------------+  |
+    /// |  | 4-byte Checksum (CRC32 of metadata)         |  |
+    /// |  +---------------------------------------------+  |
     /// +---------------------------------------------------+
     /// |             8-byte Metadata Offset                |
     /// +---------------------------------------------------+
@@ -458,6 +462,113 @@ mod tests {
         let size_without_filter =
             format.estimate_encoded_size_compacted(num_entries, encoded_entry_size * num_entries);
         assert!(size_with_filter > size_without_filter); // Should be larger due to filter
+    }
+
+    /// If this test fails the size of encoded SSTs changed.
+    /// This test is a reminder to update
+    /// [`SsTableFormat::estimate_encoded_size_compacted`] and
+    /// [`SsTableFormat::estimate_encoded_size_wal`].
+    #[tokio::test]
+    async fn test_estimate_vs_actual_encoded_size() {
+        use crate::paths::PathResolver;
+        use crate::types::ValueDeletable;
+        use object_store::ObjectStoreExt;
+
+        let format = SsTableFormat {
+            block_size: 1024,
+            min_filter_keys: 0, // always build a filter
+            ..SsTableFormat::default()
+        };
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            format.clone(),
+            root_path.clone(),
+            None,
+        );
+        let path_resolver = PathResolver::new(root_path);
+
+        // 16-byte keys/values, no timestamps. Keys are spread across the
+        // keyspace (bit-reversed counter in the leading bytes) so adjacent keys
+        // share almost no prefix — the estimate does not model the block's
+        // prefix compression, so highly-similar keys would skew the comparison.
+        let num_entries = 500usize;
+        let mut keys: Vec<Bytes> = (0..num_entries as u64)
+            .map(|i| {
+                let mut k = [0u8; 16];
+                k[..8].copy_from_slice(&i.reverse_bits().to_be_bytes());
+                k[8..].copy_from_slice(&i.to_be_bytes());
+                Bytes::copy_from_slice(&k)
+            })
+            .collect();
+        keys.sort();
+        let entries: Vec<RowEntry> = keys
+            .into_iter()
+            .enumerate()
+            .map(|(i, key)| {
+                RowEntry::new(
+                    key,
+                    ValueDeletable::Value(Bytes::from(format!("val{i:013}").into_bytes())),
+                    (i + 1) as u64,
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let estimated_entries_size: usize = entries.iter().map(|e| e.estimated_size()).sum();
+
+        let actual_size = |id: &SsTableId| {
+            let object_store = object_store.clone();
+            let path = path_resolver.table_path(id);
+            async move { object_store.head(&path).await.unwrap().size as usize }
+        };
+
+        let report = |label: &str, estimate: usize, actual: usize, expected_diff: usize| {
+            assert_eq!(
+                estimate as i64 - actual as i64,
+                expected_diff as i64,
+                "If this test fails the size of {label} SSTs changed. \
+                This is a reminder to update SsTableFormat::estimate_encoded_size_{label}() \
+                and/or this test, if needed."
+            );
+        };
+
+        // --- compacted ---
+        let mut builder = table_store.table_builder();
+        for entry in &entries {
+            builder.add(entry.clone()).await.unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let compacted_id = SsTableId::Compacted(ulid::Ulid::new());
+        table_store
+            .write_sst(&compacted_id, &encoded, false)
+            .await
+            .unwrap();
+        report(
+            "compacted",
+            format.estimate_encoded_size_compacted(num_entries, estimated_entries_size),
+            actual_size(&compacted_id).await,
+            3065,
+        );
+
+        // --- wal ---
+        let mut wal_builder = table_store.wal_table_builder();
+        for entry in &entries {
+            wal_builder.add(entry.clone()).await.unwrap();
+        }
+        let wal_encoded = wal_builder.build().await.unwrap();
+        let wal_id = SsTableId::Wal(1);
+        table_store
+            .write_sst(&wal_id, &wal_encoded, false)
+            .await
+            .unwrap();
+        report(
+            "wal",
+            format.estimate_encoded_size_wal(num_entries, estimated_entries_size),
+            actual_size(&wal_id).await,
+            2993,
+        );
     }
 
     fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorLatest<Arc<Block>> {

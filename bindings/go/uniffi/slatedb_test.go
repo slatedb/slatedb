@@ -287,7 +287,7 @@ func newTestMetricsRecorder() *testMetricsRecorder {
 	}
 }
 
-func (r *testMetricsRecorder) RegisterCounter(name string, _ string, labels []slatedb.MetricLabel) slatedb.Counter {
+func (r *testMetricsRecorder) RegisterCounter(name string, _ *string, labels []slatedb.MetricLabel) slatedb.Counter {
 	key := metricKey(name, labels)
 
 	r.mu.Lock()
@@ -301,7 +301,7 @@ func (r *testMetricsRecorder) RegisterCounter(name string, _ string, labels []sl
 	})
 }
 
-func (r *testMetricsRecorder) RegisterGauge(name string, _ string, labels []slatedb.MetricLabel) slatedb.Gauge {
+func (r *testMetricsRecorder) RegisterGauge(name string, _ *string, labels []slatedb.MetricLabel) slatedb.Gauge {
 	key := metricKey(name, labels)
 
 	r.mu.Lock()
@@ -315,7 +315,7 @@ func (r *testMetricsRecorder) RegisterGauge(name string, _ string, labels []slat
 	})
 }
 
-func (r *testMetricsRecorder) RegisterUpDownCounter(name string, _ string, labels []slatedb.MetricLabel) slatedb.UpDownCounter {
+func (r *testMetricsRecorder) RegisterUpDownCounter(name string, _ *string, labels []slatedb.MetricLabel) slatedb.UpDownCounter {
 	key := metricKey(name, labels)
 
 	r.mu.Lock()
@@ -329,7 +329,7 @@ func (r *testMetricsRecorder) RegisterUpDownCounter(name string, _ string, label
 	})
 }
 
-func (r *testMetricsRecorder) RegisterHistogram(name string, _ string, labels []slatedb.MetricLabel, _ []float64) slatedb.Histogram {
+func (r *testMetricsRecorder) RegisterHistogram(name string, _ *string, labels []slatedb.MetricLabel, _ []float64) slatedb.Histogram {
 	key := metricKey(name, labels)
 
 	r.mu.Lock()
@@ -1879,14 +1879,12 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 	}
 
 	var allRows []slatedb.RowEntry
+	nonEmptyFiles := 0
 
 	for i, file := range files {
 		metadata, err := file.Metadata()
 		if err != nil {
 			t.Fatalf("WalFile.Metadata() for file %d: %v", i, err)
-		}
-		if metadata.SizeBytes == 0 {
-			t.Fatalf("WalFile.Metadata() for file %d: SizeBytes = 0", i)
 		}
 		if metadata.Location == "" {
 			t.Fatalf("WalFile.Metadata() for file %d: Location is empty", i)
@@ -1899,12 +1897,24 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		t.Cleanup(iter.Destroy)
 
 		rows := drainWalIterator(t, iter)
+		if metadata.SizeBytes == 0 {
+			if len(rows) != 0 {
+				t.Fatalf("zero-byte WAL file %d returned %d rows, want 0", i, len(rows))
+			}
+			continue
+		}
+		nonEmptyFiles++
+
 		for j, row := range rows {
 			if row.Seq == 0 {
 				t.Fatalf("row %d in file %d: Seq = 0", j, i)
 			}
 		}
 		allRows = append(allRows, rows...)
+	}
+
+	if nonEmptyFiles == 0 {
+		t.Fatal("no non-empty WAL files found")
 	}
 
 	if len(allRows) != 4 {
@@ -2053,10 +2063,12 @@ func TestDefaultMetricsRecorderSnapshot(t *testing.T) {
 	recorder := slatedb.NewDefaultMetricsRecorder()
 	t.Cleanup(recorder.Destroy)
 
-	counter := recorder.RegisterCounter("test.counter", "counter", nil)
-	gauge := recorder.RegisterGauge("test.gauge", "gauge", nil)
-	upDownCounter := recorder.RegisterUpDownCounter("test.up_down_counter", "up/down counter", nil)
-	histogram := recorder.RegisterHistogram("test.histogram", "histogram", nil, []float64{1.0, 2.0})
+	counterDesc, gaugeDesc := "counter", "gauge"
+	upDownDesc, histogramDesc := "up/down counter", "histogram"
+	counter := recorder.RegisterCounter("test.counter", &counterDesc, nil)
+	gauge := recorder.RegisterGauge("test.gauge", &gaugeDesc, nil)
+	upDownCounter := recorder.RegisterUpDownCounter("test.up_down_counter", &upDownDesc, nil)
+	histogram := recorder.RegisterHistogram("test.histogram", &histogramDesc, nil, []float64{1.0, 2.0})
 
 	counter.Increment(3)
 	gauge.Set(-7)

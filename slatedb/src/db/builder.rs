@@ -118,6 +118,7 @@ use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::CachedObjectStore;
+use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
@@ -140,12 +141,13 @@ use crate::db_reader::DbReader;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::fence::{WriterFenceResult, WriterFencer};
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
-use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
@@ -214,12 +216,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
     }
 
-    /// Set the segment extractor (RFC-0024). Internal-only for now —
-    /// public API surface lands once the read/write paths are wired up.
-    // TODO(rfc-24): remove allow(dead_code) and lift to public API once
-    // the full segment write/read path is integrated.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn with_segment_extractor(
+    /// Set the segment extractor (RFC-0024). When configured, every
+    /// write is routed through the extractor and the database tracks
+    /// per-segment LSM state. The extractor must be configured at
+    /// database creation time and cannot be changed thereafter.
+    pub fn with_segment_extractor(
         mut self,
         extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
     ) -> Self {
@@ -402,6 +403,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 "invalid configuration: l0_flush_parallelism must be at least 1".into(),
             ));
         }
+        if self.settings.max_wal_flushes_before_l0_flush < 4096 {
+            return Err(crate::Error::invalid(
+                "invalid configuration: max_wal_flushes_before_l0_flush must be at least 4096"
+                    .into(),
+            ));
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -485,20 +492,30 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup the manifest store and load latest manifest
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
-            maybe_cached_main_object_store.clone(),
+            retrying_main_object_store.clone(),
         ));
         let compactions_store = Arc::new(CompactionsStore::new(
             &path,
-            maybe_cached_main_object_store.clone(),
+            retrying_main_object_store.clone(),
         ));
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
-        // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
-            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
-                return Err(SlateDBError::WalStoreReconfigurationError.into());
-            }
+            latest_manifest
+                .db_state()
+                .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
+        }
+
+        // RFC-0024: when the database already exists, the configured
+        // extractor must match what is persisted in the manifest, and
+        // the persisted segment prefixes must still be claimed by the
+        // current extractor. For a fresh database the extractor name
+        // (if any) is stamped onto the new manifest below.
+        if let Some(latest_manifest) = &latest_manifest {
+            latest_manifest
+                .db_state()
+                .validate_extractor_configuration(self.segment_extractor.as_deref())?;
         }
 
         // Extract external SSTs from manifest if available
@@ -526,33 +543,34 @@ impl<P: Into<Path>> DbBuilder<P> {
             }),
         ));
 
-        // Get next WAL ID before writing manifest
-        let replay_after_wal_id = match &latest_manifest {
-            Some(latest_stored_manifest) => latest_stored_manifest.db_state().replay_after_wal_id,
-            None => 0,
-        };
-        let next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
-
         // Initialize the database
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
             None => {
-                let state = ManifestCore::new_with_wal_object_store(wal_object_store_uri);
+                let mut state = ManifestCore::new_with_wal_object_store(wal_object_store_uri);
+                // RFC-0024 lazy V2 bump: when the user configures an
+                // extractor at creation time, persist its name on the
+                // initial manifest so reopens can detect any later
+                // reconfiguration. Databases without an extractor keep
+                // writing V1 manifests.
+                if let Some(extractor) = &self.segment_extractor {
+                    state.segment_extractor_name = Some(extractor.name().to_string());
+                }
                 StoredManifest::create_new_db(manifest_store.clone(), state, system_clock.clone())
                     .await?
             }
         };
 
-        let mut manifest = FenceableManifest::init_writer(
-            stored_manifest,
-            self.settings.manifest_update_timeout,
-            system_clock.clone(),
-        )
-        .await?;
+        let fencer = WriterFencer::new(table_store.clone(), &self.settings, system_clock.clone());
+        let WriterFenceResult {
+            manifest,
+            replay_range,
+        } = fencer.fence(stored_manifest).await?;
+
+        let manifest_dirty = manifest.prepare_dirty()?;
 
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
-        let manifest_dirty = manifest.prepare_dirty()?;
         let status_manager = DbStatusManager::new_with_manifest(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),
@@ -581,11 +599,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
             .await?,
         );
-
-        // Fence writers if WAL is enabled
-        if inner.wal_enabled {
-            inner.fence_writers(&mut manifest, next_wal_id).await?;
-        }
 
         // Setup background tasks
         let tokio_handle = Handle::current();
@@ -687,7 +700,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
-        inner.replay_wal().await?;
+        inner.replay_wal(replay_range).await?;
 
         // Preload cache if enabled
         if let Some(cached_obj_store) = cached_object_store {
@@ -1407,24 +1420,33 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
         let object_store: Arc<dyn ObjectStore> = match &maybe_cached {
             Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
-            None => retrying_object_store,
+            None => retrying_object_store.clone(),
         };
 
         // Validate WAL object store configuration.
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store.clone()));
         let latest_manifest =
             StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
         if let Some(latest_manifest) = &latest_manifest {
-            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
-                return Err(SlateDBError::WalStoreReconfigurationError.into());
-            }
+            latest_manifest
+                .db_state()
+                .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
         }
+
+        let wrapped_cache = self.db_cache.as_ref().map(|c| {
+            Arc::new(DbCacheWrapper::new(
+                c.clone(),
+                &self.recorder,
+                self.system_clock.clone(),
+            )) as Arc<dyn DbCache>
+        });
 
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
             object_store,
+            manifest_object_store: retrying_object_store,
             wal_object_store: retrying_wal_object_store,
-            block_cache: self.db_cache.clone(),
+            block_cache: wrapped_cache,
             block_transformer: self.block_transformer.clone(),
             filter_policies: self.filter_policies.clone(),
         };
@@ -1521,6 +1543,8 @@ pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Byt
     system_clock: Option<Arc<dyn SystemClock>>,
     rand: Option<Arc<DbRand>>,
     projection_range: Option<R>,
+    segment_filter: Option<SegmentFilterFn>,
+    segment_projection: Option<SegmentProjectionFn>,
 }
 
 impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
@@ -1537,6 +1561,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
             system_clock: None,
             rand: None,
             projection_range: None,
+            segment_filter: None,
+            segment_projection: None,
         }
     }
 
@@ -1565,6 +1591,43 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
         self
     }
 
+    /// Restrict the clone to segments for which `f` returns `true`. The
+    /// unsegmented LSM tree participates as a logical segment with the empty
+    /// prefix `b""`, so e.g. `|p| !p.is_empty()` keeps only named segments
+    /// and `|p| p.is_empty()` keeps only the unsegmented tree.
+    pub fn with_segment_filter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&[u8]) -> bool + Send + Sync + 'static,
+    {
+        self.segment_filter = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a per-segment projection range. `f` receives each segment's prefix
+    /// and returns the range to retain. The returned range's bounded ends must
+    /// fall within `[prefix, prefix++)`; `Unbounded` ends resolve to the
+    /// segment edges. The result is intersected with any global
+    /// `projection_range`. Empty returned ranges surface as
+    /// `SlateDBError::InvalidProjection`.
+    pub fn with_segment_projection<F, Range>(mut self, f: F) -> Self
+    where
+        F: Fn(&[u8]) -> Range + Send + Sync + 'static,
+        Range: RangeBounds<Bytes>,
+    {
+        self.segment_projection = Some(Arc::new(move |prefix| {
+            let r = f(prefix);
+            crate::bytes_range::BytesRange::try_new(
+                r.start_bound().cloned(),
+                r.end_bound().cloned(),
+            )
+            .ok_or_else(|| crate::error::SlateDBError::InvalidProjection {
+                prefix: Bytes::copy_from_slice(prefix),
+                reason: "empty range".into(),
+            })
+        }));
+        self
+    }
+
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = Some(system_clock);
         self
@@ -1586,6 +1649,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
                 .unwrap_or_else(|| Arc::new(DefaultSystemClock::new())),
             self.rand.unwrap_or_else(|| Arc::new(Default::default())),
             self.projection_range,
+            self.segment_filter,
+            self.segment_projection,
         )
         .await?;
         Ok(())
@@ -1659,11 +1724,17 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::Settings;
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{
         lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder,
     };
@@ -1754,6 +1825,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_db_builder_rejects_low_max_wal_flushes_before_l0_flush() {
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_low_max_wal_flushes_before_l0_flush",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            max_wal_flushes_before_l0_flush: 4095,
+            ..Settings::default()
+        })
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid max_wal_flushes_before_l0_flush to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        assert!(
+            err.to_string()
+                .contains("max_wal_flushes_before_l0_flush must be at least 4096"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_shared_recorder_registers_object_store_metrics_for_db_gc_and_compactor() {
         // given:
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -1806,6 +1903,51 @@ mod tests {
             ),
             Some(0)
         );
+
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_object_store_cache_does_not_cache_metadata_store_reads() {
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("test_object_store_cache_does_not_cache_metadata_store_reads");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .expect("failed to seed manifest");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        StoredCompactions::create(compactions_store, 0)
+            .await
+            .expect("failed to seed compactions");
+
+        let cache_dir = tempfile::Builder::new()
+            .prefix("metadata_store_cache_test_")
+            .tempdir()
+            .expect("failed to create cache dir");
+        let cache_path = cache_dir.path().to_path_buf();
+        let mut settings = Settings {
+            garbage_collector_options: None,
+            ..Settings::default()
+        };
+        settings.object_store_cache_options.root_folder = Some(cache_path.clone());
+        settings.object_store_cache_options.part_size_bytes = 1024;
+
+        let db = crate::Db::builder(path.clone(), object_store)
+            .with_settings(settings)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .expect("failed to build db");
+
+        let cached_db_path = cache_path.join(path.as_ref());
+        assert!(!cached_db_path.join("manifest").exists());
+        assert!(!cached_db_path.join("compactions").exists());
+        assert!(!cached_db_path.join("gc").exists());
 
         db.close().await.expect("failed to close db");
     }

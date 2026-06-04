@@ -12,9 +12,11 @@
 //! - manifest durability sequencing
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::debug;
+use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
@@ -28,6 +30,42 @@ use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+
+macro_rules! memtable_flush_stat_name {
+    ($suffix:expr) => {
+        concat!("slatedb.memtable_flush.", $suffix)
+    };
+}
+
+pub(crate) const MEMTABLE_FREEZE_COUNT: &str = memtable_flush_stat_name!("memtable_freeze_count");
+pub(crate) const CHECKPOINT_REQUEST_COUNT: &str =
+    memtable_flush_stat_name!("checkpoint_request_count");
+pub(crate) const FLUSH_REQUEST_COUNT: &str = memtable_flush_stat_name!("flush_request_count");
+pub(crate) const L0_UPLOAD_COUNT: &str = memtable_flush_stat_name!("l0_upload_count");
+pub(crate) const L0_FLUSH_COUNT: &str = memtable_flush_stat_name!("l0_flush_count");
+pub(crate) const MANIFEST_REFRESH_COUNT: &str = memtable_flush_stat_name!("manifest_refresh_count");
+
+pub(crate) struct FlushTrackerStats {
+    pub(crate) memtable_freeze_count: Arc<dyn CounterFn>,
+    pub(crate) checkpoint_request_count: Arc<dyn CounterFn>,
+    pub(crate) flush_request_count: Arc<dyn CounterFn>,
+    pub(crate) l0_upload_count: Arc<dyn CounterFn>,
+    pub(crate) l0_flush_count: Arc<dyn CounterFn>,
+    pub(crate) manifest_refresh_count: Arc<dyn CounterFn>,
+}
+
+impl FlushTrackerStats {
+    pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
+        Self {
+            memtable_freeze_count: recorder.counter(MEMTABLE_FREEZE_COUNT).register(),
+            checkpoint_request_count: recorder.counter(CHECKPOINT_REQUEST_COUNT).register(),
+            flush_request_count: recorder.counter(FLUSH_REQUEST_COUNT).register(),
+            l0_upload_count: recorder.counter(L0_UPLOAD_COUNT).register(),
+            l0_flush_count: recorder.counter(L0_FLUSH_COUNT).register(),
+            manifest_refresh_count: recorder.counter(MANIFEST_REFRESH_COUNT).register(),
+        }
+    }
+}
 
 /// Unified message type for the flush tracker's event loop.
 pub(crate) enum TrackerMessage {
@@ -83,6 +121,7 @@ pub(super) struct FlushTracker {
     uploader: Uploader,
     manifest_writer: ManifestWriter,
     frontier: TrackedImmFrontier,
+    stats: FlushTrackerStats,
 }
 
 impl FlushTracker {
@@ -91,11 +130,13 @@ impl FlushTracker {
         uploader: Uploader,
         manifest_writer: ManifestWriter,
     ) -> Self {
+        let stats = FlushTrackerStats::new(&inner.recorder);
         Self {
             inner,
             uploader,
             manifest_writer,
             frontier: TrackedImmFrontier::new(),
+            stats,
         }
     }
 }
@@ -104,8 +145,12 @@ impl FlushTracker {
 impl MessageHandler<TrackerMessage> for FlushTracker {
     async fn handle(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
         match message {
-            TrackerMessage::MemtableFrozen => self.reconcile_and_dispatch().await,
+            TrackerMessage::MemtableFrozen => {
+                self.stats.memtable_freeze_count.increment(1);
+                self.reconcile_and_dispatch().await
+            }
             TrackerMessage::FlushRequest { target, sender } => {
+                self.stats.flush_request_count.increment(1);
                 self.handle_flush_request(target, sender).await
             }
             TrackerMessage::CheckpointRequest {
@@ -113,15 +158,23 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 options,
                 sender,
             } => {
+                self.stats.checkpoint_request_count.increment(1);
                 self.handle_checkpoint_request(target, options, sender)
                     .await
             }
-            TrackerMessage::UploadComplete(uploaded) => self.handle_uploaded(uploaded).await,
+            TrackerMessage::UploadComplete(uploaded) => {
+                self.stats.l0_upload_count.increment(1);
+                self.handle_uploaded(uploaded).await
+            }
             TrackerMessage::FlushComplete { through_seq } => {
+                self.stats.l0_flush_count.increment(1);
                 self.frontier.retire_through(through_seq);
                 self.reconcile_and_dispatch().await
             }
-            TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
+            TrackerMessage::ManifestRefreshed => {
+                self.stats.manifest_refresh_count.increment(1);
+                self.reconcile_and_dispatch().await
+            }
             TrackerMessage::PollManifest { sender } => self.manifest_writer.send_poll(sender),
         }
     }
@@ -150,7 +203,10 @@ impl FlushTracker {
             "flush-memtable-to-l0",
             |_| { Ok(()) }
         );
-        self.reconcile_and_dispatch().await?;
+        if let Err(err) = self.reconcile_and_dispatch().await {
+            let _ = sender.send(Err(err.clone()));
+            return Err(err);
+        }
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer.send_flush(through_seq, sender)?;
         Ok(())
@@ -162,7 +218,10 @@ impl FlushTracker {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.reconcile_and_dispatch().await?;
+        if let Err(err) = self.reconcile_and_dispatch().await {
+            let _ = sender.send(Err(err.clone()));
+            return Err(err);
+        }
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer
             .send_checkpoint(through_seq, options, sender)?;
@@ -199,26 +258,93 @@ impl FlushTracker {
         self.dispatch_ready_memtables()
     }
 
-    fn available_l0_slots(&self) -> usize {
-        let (l0_len, peak) = {
-            let state = self.inner.state.read().state();
-            let l0 = &state.core().tree.l0;
-            (l0.len(), crate::db_state::max_l0_overlap(l0))
-        };
-        let reserved = self.frontier.reserved_l0_slots();
+    /// RFC-0024 §Backpressure: returns `true` iff every segment the
+    /// next memtable will touch has room for one more L0 SST under
+    /// both `l0_max_ssts` and `l0_max_ssts_per_key`. A memtable that
+    /// touches multiple segments waits for all of them — its SSTs
+    /// publish atomically and the global `last_l0_seq` invariant
+    /// pins commits to seqno order.
+    ///
+    /// When the imm's touched-segment set is empty (no extractor
+    /// configured, or the imm came from a path that bypassed
+    /// validation) we fall back to the max-across-trees heuristic.
+    fn can_dispatch(&self, imm: &crate::mem_table::ImmutableMemtable) -> bool {
+        let state = self.inner.state.read().state();
+        let core = state.core();
         let settings = &self.inner.settings;
-        let total_slots = settings.l0_max_ssts.saturating_sub(l0_len + reserved);
-        // Each reserved (in-flight) upload is treated as +1 at every point
-        // because its output key range is not yet known.
-        let per_key_slots = settings.l0_max_ssts_per_key.saturating_sub(peak + reserved);
-        total_slots.min(per_key_slots)
+        let touched = imm.touched_segments();
+        if touched.is_empty() {
+            // Fallback path — no precomputed segment set. Use the
+            // legacy max-across-trees heuristic with `reserved`
+            // counted against every tree.
+            let (max_l0_len, max_peak) =
+                core.trees().fold((0_usize, 0_usize), |(len, peak), tree| {
+                    (
+                        len.max(tree.l0.len()),
+                        peak.max(crate::db_state::max_l0_overlap(&tree.l0)),
+                    )
+                });
+            let reserved = self.frontier.reserved_l0_slots();
+            if max_l0_len + reserved >= settings.l0_max_ssts {
+                self.inner.db_stats.l0_stall_count_num_ssts.increment(1);
+                return false;
+            }
+            if max_peak + reserved >= settings.l0_max_ssts_per_key {
+                self.inner
+                    .db_stats
+                    .l0_stall_count_num_ssts_per_key
+                    .increment(1);
+                return false;
+            }
+            return true;
+        }
+        // Per-segment check: every touched segment must have room
+        // accounting for in-flight reservations against that segment.
+        // `core.segments` is sorted by prefix, so use a binary search
+        // rather than a linear scan.
+        for prefix in touched.iter() {
+            let (tree_l0_len, tree_peak) =
+                match core.segments.binary_search_by(|s| s.prefix.cmp(prefix)) {
+                    Ok(idx) => {
+                        let tree = &core.segments[idx].tree;
+                        (tree.l0.len(), crate::db_state::max_l0_overlap(&tree.l0))
+                    }
+                    Err(_) => (0, 0),
+                };
+            let reserved = self.frontier.reserved_l0_slots_for(prefix);
+            if tree_l0_len + reserved >= settings.l0_max_ssts {
+                self.inner.db_stats.l0_stall_count_num_ssts.increment(1);
+                return false;
+            }
+            if tree_peak + reserved >= settings.l0_max_ssts_per_key {
+                self.inner
+                    .db_stats
+                    .l0_stall_count_num_ssts_per_key
+                    .increment(1);
+                return false;
+            }
+        }
+        true
     }
 
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
-        while self.available_l0_slots() > 0 {
-            let Some(tracked) = self.frontier.prepare_next_upload() else {
+        loop {
+            // Strict seq order: skipping a blocked older imm
+            // deadlocks against the manifest writer's FIFO commit
+            // (#1687).
+            let next_idx = self
+                .frontier
+                .tracked
+                .iter()
+                .position(|t| matches!(t.state, TrackedImmState::PendingDispatch));
+            let Some(idx) = next_idx else {
                 return Ok(());
             };
+            if !self.can_dispatch(&self.frontier.tracked[idx].imm_memtable) {
+                return Ok(());
+            }
+            self.frontier.tracked[idx].state = TrackedImmState::Uploading;
+            let tracked = &self.frontier.tracked[idx];
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
             let last_seq = tracked.last_seq;
             debug!(
@@ -228,7 +354,6 @@ impl FlushTracker {
 
             self.uploader.submit(UploadJob::new(imm_memtable))?;
         }
-        Ok(())
     }
 
     /// Drain remaining messages during shutdown. Process completions so
@@ -314,6 +439,8 @@ impl TrackedImmFrontier {
     }
 
     /// Number of in-flight slots (uploading or writing manifest).
+    /// Used by the legacy fallback path in `can_dispatch` when no
+    /// touched-segment set is available.
     fn reserved_l0_slots(&self) -> usize {
         self.tracked
             .iter()
@@ -326,7 +453,32 @@ impl TrackedImmFrontier {
             .count()
     }
 
+    /// Number of in-flight slots that target the segment with the
+    /// given `prefix`. An in-flight imm with a populated
+    /// `touched_segments` is counted iff the set contains `prefix`.
+    /// An in-flight imm with an *empty* set is conservatively counted
+    /// against every prefix — its targets are unknown so we can't
+    /// rule it out. In a fully wired pipeline (writes + replay both
+    /// stamp the set) this fallback path doesn't fire.
+    fn reserved_l0_slots_for(&self, prefix: &Bytes) -> usize {
+        self.tracked
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    TrackedImmState::Uploading | TrackedImmState::WritingManifest
+                )
+            })
+            .filter(|t| {
+                t.imm_memtable
+                    .table()
+                    .touched_segments_empty_or_contains(prefix)
+            })
+            .count()
+    }
+
     /// Transition the next `PendingDispatch` entry to `Uploading` and return it.
+    #[cfg(test)]
     fn prepare_next_upload(&mut self) -> Option<&TrackedImm> {
         let index = self
             .tracked
@@ -372,11 +524,15 @@ mod tests {
     use crate::db_state::{
         FilterFormat, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
+    use crate::db_stats::{
+        L0_STALL_COUNT, L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS, L0_STALL_TYPE_NUM_SSTS_PER_KEY,
+    };
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
+    use crate::memtable_flusher::uploader::Uploader;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -390,7 +546,10 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::metrics::{
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
+        MetricsRecorderHelper,
+    };
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
@@ -408,11 +567,20 @@ mod tests {
         settings: Settings,
         fp_registry: Arc<FailPointRegistry>,
     ) -> TestHarness {
+        setup_harness_with_recorder(path, settings, fp_registry, MetricsRecorderHelper::noop())
+            .await
+    }
+
+    async fn setup_harness_with_recorder(
+        path: &str,
+        settings: Settings,
+        fp_registry: Arc<FailPointRegistry>,
+        db_metrics: MetricsRecorderHelper,
+    ) -> TestHarness {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = path.to_string();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
-        let db_metrics = MetricsRecorderHelper::noop();
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(path.clone()),
             Arc::clone(&object_store),
@@ -538,12 +706,14 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.tree.l0.clear();
+        Arc::make_mut(&mut dirty.value.core.tree).l0.clear();
         for (first, last) in ranges {
-            dirty.value.core.tree.l0.push_back(SsTableView::new(
-                ulid::Ulid::new(),
-                seeded_l0_handle_with_bounds(first, Some(last)),
-            ));
+            Arc::make_mut(&mut dirty.value.core.tree)
+                .l0
+                .push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle_with_bounds(first, Some(last)),
+                ));
         }
         stored_manifest.update(dirty).await.unwrap();
     }
@@ -551,14 +721,11 @@ mod tests {
     fn set_local_l0_disjoint(harness: &TestHarness, ranges: &[(&[u8], &[u8])]) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.tree.l0.clear();
+            Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                .l0
+                .clear();
             for (first, last) in ranges {
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -575,27 +742,49 @@ mod tests {
                 .await
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.tree.l0.clear();
+        Arc::make_mut(&mut dirty.value.core.tree).l0.clear();
         for idx in 0..l0_len {
-            dirty.value.core.tree.l0.push_back(SsTableView::new(
-                ulid::Ulid::new(),
-                seeded_l0_handle(format!("seed-{idx}").as_bytes()),
-            ));
+            Arc::make_mut(&mut dirty.value.core.tree)
+                .l0
+                .push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle(format!("seed-{idx}").as_bytes()),
+                ));
         }
         stored_manifest.update(dirty).await.unwrap();
+    }
+
+    fn set_local_segment_l0_len(harness: &TestHarness, prefix: &[u8], l0_len: usize) {
+        use crate::manifest::{LsmTreeState, Segment};
+        let mut guard = harness.inner.state.write();
+        guard.modify(|modifier| {
+            let mut l0 = std::collections::VecDeque::new();
+            for idx in 0..l0_len {
+                l0.push_back(SsTableView::new(
+                    ulid::Ulid::new(),
+                    seeded_l0_handle(format!("local-segment-seed-{idx}").as_bytes()),
+                ));
+            }
+            modifier.state.manifest.value.core.segments = vec![Segment {
+                prefix: Bytes::copy_from_slice(prefix),
+                tree: Arc::new(LsmTreeState {
+                    last_compacted_l0_sst_view_id: None,
+                    last_compacted_l0_sst_id: None,
+                    l0,
+                    compacted: vec![],
+                }),
+            }];
+        });
     }
 
     fn set_local_l0_len(harness: &TestHarness, l0_len: usize) {
         let mut guard = harness.inner.state.write();
         guard.modify(|modifier| {
-            modifier.state.manifest.value.core.tree.l0.clear();
+            Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                .l0
+                .clear();
             for idx in 0..l0_len {
-                modifier
-                    .state
-                    .manifest
-                    .value
-                    .core
-                    .tree
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
@@ -609,11 +798,17 @@ mod tests {
         inner: Arc<DbInner>,
         flusher: MemtableFlusher,
         executor: crate::dispatcher::MessageHandlerExecutor,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     }
 
     impl StartedFlusher {
         async fn shutdown(&self) {
             MemtableFlusher::shutdown(&self.executor).await;
+        }
+
+        async fn shutdown_uploader_with_error(&self, err: SlateDBError) {
+            self.closed_result.write_result(Err(err));
+            Uploader::shutdown(&self.executor).await;
         }
     }
 
@@ -647,6 +842,7 @@ mod tests {
             inner,
             flusher,
             executor,
+            closed_result,
         }
     }
 
@@ -861,6 +1057,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flush_waiter_receives_error_when_reconcile_fails_before_manifest_writer() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_reconcile_flush_error",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
+        flusher
+            .shutdown_uploader_with_error(SlateDBError::Fenced)
+            .await;
+
+        let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap();
+        assert!(
+            matches!(flush_result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            flush_result
+        );
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_waiter_receives_error_when_reconcile_fails_before_manifest_writer() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_reconcile_checkpoint_error",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
+        flusher
+            .shutdown_uploader_with_error(SlateDBError::Fenced)
+            .await;
+
+        let checkpoint_result = timeout(
+            Duration::from_secs(5),
+            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(checkpoint_result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            checkpoint_result
+        );
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn should_wait_for_manifest_refresh_before_dispatching_when_l0_is_full() {
         let settings = Settings {
             l0_max_ssts: 1,
@@ -890,7 +1141,11 @@ mod tests {
             // Clear both local and remote L0 so the flusher can make progress.
             {
                 let mut guard = flusher.inner.state.write();
-                guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+                guard.modify(|modifier| {
+                    Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                        .l0
+                        .clear()
+                });
             }
             set_remote_l0_len(&path, object_store, 0).await;
 
@@ -900,6 +1155,74 @@ mod tests {
                 .unwrap();
             assert_eq!(result.durable_seq, 1);
         }
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn l0_stall_count_increments_when_l0_is_full() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(
+            metrics_recorder.clone() as Arc<dyn MetricsRecorder>,
+            MetricLevel::default(),
+        );
+        let harness = setup_harness_with_recorder(
+            "/tmp/test_parallel_l0_flush_flusher_l0_stall_count",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+            helper,
+        )
+        .await;
+        set_local_l0_len(&harness, 1);
+        set_remote_l0_len(&harness.path, Arc::clone(&harness.object_store), 1).await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+        assert!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            )
+            .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS_PER_KEY)],
+            ),
+            Some(0)
+        );
+
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| {
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .clear()
+            });
+        }
+        set_remote_l0_len(&path, object_store, 0).await;
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
 
         flusher.shutdown().await;
     }
@@ -933,6 +1256,144 @@ mod tests {
         set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
         let flusher = start_flusher(harness);
         freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    /// RFC-0024 §Backpressure: l0_max_ssts is per-tree, not global.
+    /// A full segment must stall flushes even when the unsegmented
+    /// tree is empty. Mirrors `should_wait_for_manifest_refresh_before_dispatching_when_l0_is_full`
+    /// but pre-populates a *segment's* L0 instead of the unsegmented one.
+    #[tokio::test]
+    async fn flush_blocked_when_segment_l0_is_full() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_segment_backpressure",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        // Unsegmented tree stays empty; segment "aaa" is at the limit.
+        set_local_segment_l0_len(&harness, b"aaa", 1);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"aaa-1", b"v1", 41);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        // Blocked — segment "aaa" is at l0_max_ssts.
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+
+        // Drain the segment locally; flush should now progress.
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| {
+                modifier.state.manifest.value.core.segments.clear();
+            });
+        }
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    /// RFC-0024 §Backpressure: per-segment isolation. When the
+    /// memtable's `touched_segments` is precomputed, a saturated
+    /// segment that the memtable does *not* touch must not block
+    /// dispatch. Pre-populates segment "aaa" past the limit, freezes
+    /// a memtable whose touched-segment set is `{"bbb"}` only, and
+    /// expects the flush to dispatch normally.
+    #[tokio::test]
+    async fn flush_proceeds_when_saturated_segment_is_untouched() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_per_segment_isolation",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        // Saturate segment "aaa" — but the memtable below only
+        // claims to touch "bbb", so dispatch should not block.
+        set_local_segment_l0_len(&harness, b"aaa", 1);
+        let flusher = start_flusher(harness);
+        // Stamp `{"bbb"}` onto the active memtable before freezing
+        // so the imm carries that touched-segment set forward.
+        {
+            let guard = flusher.inner.state.write();
+            let mut bbb_only = std::collections::BTreeSet::new();
+            bbb_only.insert(Bytes::from_static(b"bbb"));
+            guard.memtable().record_touched_segments(bbb_only);
+        }
+        freeze_value_imm(&flusher.inner, b"bbb-1", b"v1", 41);
+
+        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    /// Cold/empty segments must not stall flushes when nothing else is
+    /// over the limit. With `l0_max_ssts = 4`, three empty segments
+    /// alongside an unsegmented tree of length 0 should still let a
+    /// fresh flush dispatch immediately.
+    #[tokio::test]
+    async fn flush_proceeds_when_segments_are_below_limit() {
+        use crate::manifest::{LsmTreeState, Segment};
+        let settings = Settings {
+            l0_max_ssts: 4,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_cold_segments",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        // Three sibling segments, each well below the limit.
+        {
+            let mut guard = harness.inner.state.write();
+            guard.modify(|modifier| {
+                modifier.state.manifest.value.core.segments = vec![
+                    Segment {
+                        prefix: Bytes::from_static(b"aaa"),
+                        tree: Arc::new(LsmTreeState::default()),
+                    },
+                    Segment {
+                        prefix: Bytes::from_static(b"bbb"),
+                        tree: Arc::new(LsmTreeState::default()),
+                    },
+                    Segment {
+                        prefix: Bytes::from_static(b"ccc"),
+                        tree: Arc::new(LsmTreeState::default()),
+                    },
+                ];
+            });
+        }
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"aaa-1", b"v1", 41);
 
         let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
             .await
@@ -978,7 +1439,81 @@ mod tests {
         // Drain L0 locally and remotely; flush should now progress.
         {
             let mut guard = flusher.inner.state.write();
-            guard.modify(|modifier| modifier.state.manifest.value.core.tree.l0.clear());
+            guard.modify(|modifier| {
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .clear()
+            });
+        }
+        set_remote_l0_disjoint(&path, object_store, &[]).await;
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn l0_stall_count_increments_for_per_key_cap() {
+        let settings = Settings {
+            l0_max_ssts: 100,
+            l0_max_ssts_per_key: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(
+            metrics_recorder.clone() as Arc<dyn MetricsRecorder>,
+            MetricLevel::default(),
+        );
+        let harness = setup_harness_with_recorder(
+            "/tmp/test_parallel_l0_flush_flusher_l0_stall_count_per_key",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+            helper,
+        )
+        .await;
+        let ranges: &[(&[u8], &[u8])] = &[(b"aaa", b"zzz")];
+        set_local_l0_disjoint(&harness, ranges);
+        set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 42);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            ),
+            Some(0)
+        );
+        assert!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS_PER_KEY)],
+            )
+            .unwrap_or(0)
+                > 0
+        );
+
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| {
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .clear()
+            });
         }
         set_remote_l0_disjoint(&path, object_store, &[]).await;
 

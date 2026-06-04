@@ -37,14 +37,14 @@ moka = { workspace = true, features = ["future"], optional = true }
 object_store = { workspace = true }
 object_store_opendal = { workspace = true, optional = true }
 opendal = { workspace = true, optional = true }
-once_cell = { workspace = true }
 ouroboros = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rand_xoshiro = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
+smallvec = { workspace = true }
 slatedb-common = { workspace = true, features = ["serde"] }
 slatedb-txn-obj = { workspace = true }
 snap = { workspace = true, optional = true }
@@ -155,6 +155,15 @@ harness = false
 name = "block_iterator_v2"
 harness = false
 required-features = ["bench-internal"]
+
+[[bench]]
+name = "write_batch"
+harness = false
+required-features = ["bench-internal"]
+
+[[bench]]
+name = "db_transaction"
+harness = false
 
 [lints]
 workspace = true
