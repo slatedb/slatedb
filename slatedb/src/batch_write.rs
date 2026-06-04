@@ -299,9 +299,8 @@ impl DbInner {
         let memtable = guard.memtable();
         memtable.record_touched_segments(touched_segments.clone());
         entries.into_iter().for_each(|entry| memtable.put(entry));
-        let watcher = memtable.table().durable_watcher();
         self.status_manager.add_memtable_segments(touched_segments);
-        watcher
+        memtable.table().durable_watcher()
     }
 
     fn record_memtable_sequence(&self, seq: u64) {
