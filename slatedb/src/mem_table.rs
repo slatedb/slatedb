@@ -328,16 +328,6 @@ impl ImmutableMemtable {
     /// remains the same.
     pub(crate) fn filter_after_seq(&self, seq: u64) -> Self {
         let new_table = WritableKVTable::new();
-        // Recompute the touched-segment set from the surviving rows rather than
-        // copying the original: filtering by seq can drop every row of a prefix
-        // (e.g. WAL replay grouped prefixes `a` and `b`, and only `a` was below
-        // `seq`), and reporting `a` here would leave it in the published
-        // in-memory segment set with no live memtable backing it. The set is an
-        // antichain, so each key falls under at most one prefix; stop scanning
-        // once every prefix is accounted for. For a segmented DB every written
-        // key recorded its prefix, so a non-empty filtered table still yields a
-        // populated set (the invariant the build path relies on); for a
-        // non-segmented DB the original set is empty and this is a no-op.
         let original_segments = self.table.touched_segments();
         let mut surviving_segments = std::collections::BTreeSet::new();
         let mut table_iter = self.table.iter();
