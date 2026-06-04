@@ -5,6 +5,7 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
+use crate::manifest::invariants::manifest_invariants;
 use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
 use chrono::Utc;
 use log::debug;
@@ -69,6 +70,14 @@ impl FenceableManifest {
 
     pub(crate) fn local_epoch(&self) -> u64 {
         self.inner.local_epoch()
+    }
+
+    /// The current **committed** manifest state — the same value the
+    /// `l0_ulid_cutoff` invariant compares the dirty manifest against in
+    /// `SimpleTransactionalObject::update`. Used by the flusher to normalize
+    /// staged L0 ULIDs against the L0 watermark before publishing.
+    pub(crate) fn db_state(&self) -> &ManifestCore {
+        &self.inner.object().core
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
@@ -172,6 +181,16 @@ pub(crate) struct StoredManifest {
 }
 
 impl StoredManifest {
+    /// The single place a `StoredManifest` is assembled from its inner txn-obj.
+    /// Attaches the RFC-0025 manifest invariants here so every construction path
+    /// enforces them — no constructor can forget.
+    fn new(inner: SimpleTransactionalObject<Manifest>, clock: Arc<dyn SystemClock>) -> Self {
+        Self {
+            inner: inner.with_invariants(manifest_invariants()),
+            clock,
+        }
+    }
+
     async fn init(
         store: Arc<ManifestStore>,
         manifest: Manifest,
@@ -184,7 +203,7 @@ impl StoredManifest {
             manifest.clone(),
         )
         .await?;
-        Ok(Self { inner, clock })
+        Ok(Self::new(inner, clock))
     }
 
     /// Create the initial manifest for a new database.
@@ -219,7 +238,7 @@ impl StoredManifest {
         else {
             return Ok(None);
         };
-        Ok(Some(Self { inner, clock }))
+        Ok(Some(Self::new(inner, clock)))
     }
 
     /// Load the current manifest from the supplied manifest store. If successful,
@@ -229,11 +248,9 @@ impl StoredManifest {
         store: Arc<ManifestStore>,
         clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)
-            as Arc<dyn TransactionalStorageProtocol<Manifest, MonotonicId>>)
-        .await?
-        .map(|inner| Self { inner, clock })
-        .ok_or(LatestTransactionalObjectVersionMissing)
+        Self::try_load(store, clock)
+            .await?
+            .ok_or(LatestTransactionalObjectVersionMissing)
     }
 
     #[allow(dead_code)]
@@ -652,6 +669,61 @@ mod tests {
         let version = ms.read_latest_manifest().await.unwrap().id;
 
         assert_eq!(version, 2);
+    }
+
+    /// End-to-end check that the RFC-0025 `l0_ulid_cutoff` invariant is actually
+    /// registered on the `StoredManifest` update path (not just unit-tested as a
+    /// bare predicate). Publishing an L0 above the watermark succeeds; a later
+    /// update adding an L0 whose SST ULID is strictly below the watermark is
+    /// rejected with `InvalidClockTick` before the CAS write.
+    #[tokio::test]
+    async fn test_update_rejects_l0_below_ulid_watermark() {
+        use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView};
+        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+        use ulid::Ulid;
+
+        fn l0_view(ts_ms: u64) -> SsTableView {
+            let id = Ulid::from_parts(ts_ms, 0);
+            let handle = SsTableHandle::new(
+                SsTableId::Compacted(id),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            );
+            SsTableView::new(id, handle)
+        }
+
+        let ms = new_memory_manifest_store();
+        let mut sm = StoredManifest::create_new_db(
+            ms.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        // Publish an L0 at timestamp 100 — establishes the watermark.
+        let mut dirty = sm.prepare_dirty().unwrap();
+        Arc::make_mut(&mut dirty.value.core.tree)
+            .l0
+            .push_front(l0_view(100));
+        sm.update(dirty).await.unwrap();
+
+        // Adding an L0 whose SST ULID is below the watermark must be rejected.
+        let mut dirty = sm.prepare_dirty().unwrap();
+        Arc::make_mut(&mut dirty.value.core.tree)
+            .l0
+            .push_front(l0_view(50));
+        let err = sm.update(dirty).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SlateDBError::InvalidClockTick {
+                    last_tick: 100,
+                    next_tick: 50
+                }
+            ),
+            "expected InvalidClockTick, got {err:?}"
+        );
     }
 
     #[tokio::test]

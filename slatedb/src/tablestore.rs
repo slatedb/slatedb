@@ -434,6 +434,25 @@ impl TableStore {
         object_store.delete(&path).await.map_err(SlateDBError::from)
     }
 
+    /// Copy an SSTable blob to a new id, leaving the source in place. Used by
+    /// the flusher to re-mint an L0 SST's ULID (which is its object key) when
+    /// the originally-minted id falls below the committed L0 watermark; the new
+    /// id is published instead and the orphaned source is reclaimed by the GC.
+    /// Both ids must route to the same object store (true for `Compacted` ids).
+    pub(crate) async fn copy_sst(
+        &self,
+        from: &SsTableId,
+        to: &SsTableId,
+    ) -> Result<(), SlateDBError> {
+        let object_store = self.object_stores.store_for(to);
+        let from_path = self.path(from);
+        let to_path = self.path(to);
+        object_store
+            .copy(&from_path, &to_path)
+            .await
+            .map_err(SlateDBError::from)
+    }
+
     /// Reads metadata for a specific SST object (WAL or compacted).
     ///
     /// ## Arguments
@@ -1499,6 +1518,41 @@ mod tests {
         assert_eq!(os.put_attempts(), 0);
         assert_eq!(os.multipart_attempts(), 1);
         ts.open_sst(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_copy_sst_duplicates_blob_under_new_id() {
+        // given: a compacted SST written under `from`.
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        ));
+        let from = SsTableId::Compacted(ulid::Ulid::new());
+        let to = SsTableId::Compacted(ulid::Ulid::new());
+        let sst = build_test_sst(&format, 3).await;
+        let from_handle = ts.write_sst(&from, &sst, false).await.unwrap();
+
+        // when: copied to a fresh id (mirrors the flusher re-minting an L0 ULID).
+        ts.copy_sst(&from, &to).await.unwrap();
+
+        // then: the source survives and the copy is byte-identical and opens as
+        // a valid SST with the same structure.
+        let from_bytes = os
+            .get(&ts.path(&from))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let to_bytes = os.get(&ts.path(&to)).await.unwrap().bytes().await.unwrap();
+        assert_eq!(from_bytes, to_bytes);
+        let to_handle = ts.open_sst(&to).await.unwrap();
+        assert_eq!(to_handle.id, to);
+        assert_eq!(to_handle.info, from_handle.info);
     }
 
     #[tokio::test]
