@@ -36,7 +36,7 @@ Table of Contents:
 
 <!-- TOC end -->
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
@@ -146,6 +146,7 @@ The object store cache lives inside the SlateDB crate. Several problems follow:
    govern which one each call uses. Same shape as problem (3), and the
    same shape will reappear for any future component that wants per-call
    cache behavior.
+5. **Cached ObjectStore is not DST friendly.** `CachedObjectStore` directly uses `spawn_blocking` so it can't be tested it in DST.
 
 These all point at the same fix. A generic layer that abstracts the cache
 behind a uniform call protocol means every component talks to one
