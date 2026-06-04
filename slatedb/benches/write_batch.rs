@@ -9,6 +9,7 @@ use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{MergeOptions, PutOptions, Ttl};
 use slatedb::{write_batch_benches, MergeOperator, MergeOperatorError, WriteBatch};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 
 const VALUE_SIZE: usize = 128;
@@ -142,6 +143,8 @@ fn bench_write_batch(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("write_batch");
     group.sample_size(1_000);
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(10));
 
     group.bench_function("put_bytes_with_options/empty_batch", |b| {
         b.iter_batched(
