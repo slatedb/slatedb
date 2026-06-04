@@ -254,7 +254,8 @@ impl ObjectStore for RetryingObjectStore {
 
             // Range read: buffer the body and validate against the expected
             // size (requested range truncated at file size).
-            let expected_len = Self::expected_range_len(&options_range.unwrap(), file_size);
+            let expected_len =
+                Self::expected_range_len(&options_range.expect("range is set"), file_size);
             let range = result.range.clone();
             let attributes = result.attributes.clone();
             let bytes = result.bytes().await?;
