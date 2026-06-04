@@ -160,7 +160,7 @@ impl DbTransaction {
         let range = BytesRange::from_slice(key_slice..=key_slice);
         let write_batch_iter = {
             let mut guard = self.write_batch.write();
-            guard.sorted();
+            guard.sort();
             Some(WriteBatchIterator::new_sorted(
                 &guard,
                 range,
@@ -296,7 +296,7 @@ impl DbTransaction {
         // semantics even after large transactions switched to a HashMap.
         let write_batch_iter = {
             let mut guard = self.write_batch.write();
-            guard.sorted();
+            guard.sort();
             Some(WriteBatchIterator::new_sorted(
                 &guard,
                 range.clone(),

@@ -367,7 +367,13 @@ fn bench_write_batch(c: &mut Criterion) {
 
     group.bench_function("extract_entries/no_merges", |b| {
         b.to_async(&runtime).iter_batched(
-            || batch_without_merges.clone(),
+            || {
+                let mut batch = batch_without_merges.clone();
+                if !write_batch_benches::is_sorted(&batch) {
+                    write_batch_benches::sort(&mut batch);
+                }
+                batch
+            },
             |batch| async move {
                 black_box(
                     write_batch_benches::extract_entries(&batch, 100, 1_000, None, None, None)
@@ -389,7 +395,13 @@ fn bench_write_batch(c: &mut Criterion) {
             batch_with_merges,
             |b, batch_with_merges| {
                 b.to_async(&runtime).iter_batched(
-                    || batch_with_merges.clone(),
+                    || {
+                        let mut batch = (*batch_with_merges).clone();
+                        if !write_batch_benches::is_sorted(&batch) {
+                            write_batch_benches::sort(&mut batch);
+                        }
+                        batch
+                    },
                     |batch| async move {
                         black_box(
                             write_batch_benches::extract_entries(

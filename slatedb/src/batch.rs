@@ -36,6 +36,7 @@ impl Default for WriteBatchMap {
 }
 
 impl WriteBatchMap {
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Hashed(map) => map.len(),
@@ -43,6 +44,7 @@ impl WriteBatchMap {
         }
     }
 
+    #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -55,6 +57,7 @@ impl WriteBatchMap {
         }
     }
 
+    #[inline]
     fn get_mut(&mut self, key: &[u8]) -> Option<&mut WriteOpList> {
         match self {
             Self::Hashed(map) => map.get_mut(key),
@@ -62,6 +65,7 @@ impl WriteBatchMap {
         }
     }
 
+    #[inline]
     fn insert(&mut self, key: Bytes, ops: WriteOpList) -> Option<WriteOpList> {
         match self {
             Self::Hashed(map) => map.insert(key, ops),
@@ -69,6 +73,7 @@ impl WriteBatchMap {
         }
     }
 
+    #[inline]
     fn maybe_use_hashmap(&mut self) {
         if let Self::Sorted(map) = self {
             if map.len() >= MIN_HASHMAP_KEY_COUNT {
@@ -78,7 +83,13 @@ impl WriteBatchMap {
         }
     }
 
-    fn sorted(&mut self) {
+    #[inline]
+    fn is_sorted(&self) -> bool {
+        matches!(self, Self::Sorted(_))
+    }
+
+    #[inline]
+    fn sort(&mut self) {
         if let Self::Hashed(map) = self {
             let map = std::mem::take(map);
             *self = Self::Sorted(map.into_iter().collect());
@@ -122,6 +133,7 @@ pub struct WriteBatch {
     pub(crate) op_count: usize,
     pub(crate) txn_id: Option<Uuid>,
     pub(crate) has_merge_ops: bool,
+    force_sorted: bool,
 }
 
 impl Default for WriteBatch {
@@ -164,6 +176,7 @@ impl std::fmt::Debug for WriteOp {
 
 impl WriteOp {
     /// Convert WriteOp to RowEntry for queries
+    #[inline]
     pub(crate) fn to_row_entry(
         &self,
         key: &Bytes,
@@ -209,6 +222,7 @@ impl WriteBatch {
             op_count: 0,
             txn_id: None,
             has_merge_ops: false,
+            force_sorted: false,
         }
     }
 
@@ -218,9 +232,11 @@ impl WriteBatch {
             op_count: self.op_count,
             txn_id: Some(txn_id),
             has_merge_ops: self.has_merge_ops,
+            force_sorted: self.force_sorted,
         }
     }
 
+    #[inline]
     fn assert_kv<K, V>(&self, key: &K, value: &V)
     where
         K: AsRef<[u8]>,
@@ -306,7 +322,7 @@ impl WriteBatch {
         if let Some(previous) = previous {
             self.op_count -= previous.len();
         } else {
-            self.ops.maybe_use_hashmap();
+            self.maybe_use_hashmap();
         }
     }
 
@@ -334,7 +350,7 @@ impl WriteBatch {
             ops.push(op);
         } else {
             self.ops.insert(Bytes::copy_from_slice(key), smallvec![op]);
-            self.ops.maybe_use_hashmap();
+            self.maybe_use_hashmap();
         }
 
         self.has_merge_ops = true;
@@ -354,22 +370,26 @@ impl WriteBatch {
         if let Some(previous) = previous {
             self.op_count -= previous.len();
         } else {
-            self.ops.maybe_use_hashmap();
+            self.maybe_use_hashmap();
         }
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
 
+    #[inline]
     pub(crate) fn has_merge_ops(&self) -> bool {
         self.has_merge_ops
     }
 
+    #[inline]
     pub(crate) fn op_count(&self) -> usize {
         self.op_count
     }
 
+    #[inline]
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
         match &self.ops {
             WriteBatchMap::Hashed(map) => map.keys().cloned().collect(),
@@ -377,8 +397,24 @@ impl WriteBatch {
         }
     }
 
-    pub(crate) fn sorted(&mut self) {
-        self.ops.sorted();
+    #[inline]
+    pub(crate) fn sort(&mut self) {
+        self.force_sorted = true;
+        if !self.is_sorted() {
+            self.ops.sort();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_sorted(&self) -> bool {
+        self.ops.is_sorted()
+    }
+
+    #[inline]
+    fn maybe_use_hashmap(&mut self) {
+        if !self.force_sorted {
+            self.ops.maybe_use_hashmap();
+        }
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with
@@ -473,6 +509,15 @@ pub mod benches {
 
     pub fn keys(batch: &WriteBatch) -> HashSet<Bytes> {
         batch.keys()
+    }
+
+    #[inline]
+    pub fn sort(batch: &mut WriteBatch) {
+        batch.sort();
+    }
+
+    pub fn is_sorted(batch: &WriteBatch) -> bool {
+        batch.is_sorted()
     }
 
     pub async fn extract_entries(
@@ -721,6 +766,7 @@ mod tests {
     fn should_default_to_sorted_map() {
         let batch = WriteBatch::new();
 
+        assert!(batch.is_sorted());
         assert!(matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.is_empty()));
     }
 
@@ -747,6 +793,7 @@ mod tests {
         assert!(
             matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.len() == MIN_HASHMAP_KEY_COUNT - 1)
         );
+        assert!(batch.is_sorted());
 
         batch.put_bytes(
             numbered_key(MIN_HASHMAP_KEY_COUNT - 1),
@@ -756,6 +803,21 @@ mod tests {
         assert!(
             matches!(&batch.ops, WriteBatchMap::Hashed(map) if map.len() == MIN_HASHMAP_KEY_COUNT)
         );
+        assert!(!batch.is_sorted());
+        assert_eq!(batch.op_count(), MIN_HASHMAP_KEY_COUNT);
+    }
+
+    #[test]
+    fn should_not_switch_to_hashmap_after_sort_is_called() {
+        let mut batch = WriteBatch::new();
+
+        batch.sort();
+        put_numbered_keys(&mut batch, MIN_HASHMAP_KEY_COUNT);
+
+        assert!(
+            matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.len() == MIN_HASHMAP_KEY_COUNT)
+        );
+        assert!(batch.is_sorted());
         assert_eq!(batch.op_count(), MIN_HASHMAP_KEY_COUNT);
     }
 
@@ -780,10 +842,15 @@ mod tests {
         put_numbered_keys(&mut batch, MIN_HASHMAP_KEY_COUNT);
         assert!(matches!(&batch.ops, WriteBatchMap::Hashed(_)));
 
-        batch.sorted();
+        batch.sort();
+        batch.put_bytes(
+            numbered_key(MIN_HASHMAP_KEY_COUNT),
+            numbered_value(MIN_HASHMAP_KEY_COUNT),
+        );
 
+        assert!(batch.is_sorted());
         assert!(
-            matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.len() == MIN_HASHMAP_KEY_COUNT)
+            matches!(&batch.ops, WriteBatchMap::Sorted(map) if map.len() == MIN_HASHMAP_KEY_COUNT + 1)
         );
         match only_op(&batch, numbered_key(7).as_ref()) {
             WriteOp::Put(value, _) => assert_eq!(value, &numbered_value(7)),
