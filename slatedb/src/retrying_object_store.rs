@@ -11,9 +11,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
-    Attribute, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload,
-    PutResult, RenameOptions,
+    Attribute, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
+    MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
+    PutPayload, PutResult, RenameOptions,
 };
 
 use crate::rand::DbRand;
@@ -152,6 +152,20 @@ impl RetryingObjectStore {
         );
         new_attrs
     }
+
+    /// Compute the expected byte length of a range read, truncating at the
+    /// actual file size. This handles the case where a `GetRange::Bounded`
+    /// end exceeds the file length.
+    fn expected_range_len(range: &GetRange, file_size: u64) -> u64 {
+        match range {
+            GetRange::Bounded(r) => {
+                let end = r.end.min(file_size);
+                end.saturating_sub(r.start)
+            }
+            GetRange::Offset(offset) => file_size.saturating_sub(*offset),
+            GetRange::Suffix(suffix) => (*suffix).min(file_size),
+        }
+    }
 }
 
 impl std::fmt::Display for RetryingObjectStore {
@@ -224,17 +238,41 @@ impl ObjectStore for RetryingObjectStore {
         // `get_range` lives on `ObjectStoreExt` and reads the body after
         // `get_opts` returns, so without this buffering the body bytes
         // would fall outside the retry loop.
-        let buffer_body = options.range.is_some();
         (|| async {
             // Options and location must be owned per-attempt.
-            let result = self.inner.get_opts(location, options.clone()).await?;
-            if !buffer_body {
+            let options = options.clone();
+            let options_range = options.range.clone();
+            let result = self.inner.get_opts(location, options).await?;
+            let meta = result.meta.clone();
+            let file_size = meta.size;
+
+            if options_range.is_none() {
+                // No range requested — don't buffer the body. The buffer size
+                // can't be validated wihtout buffering.
                 return Ok(result);
             }
-            let meta = result.meta.clone();
+
+            // Range read: buffer the body and validate against the expected
+            // size (requested range truncated at file size).
+            let expected_len =
+                Self::expected_range_len(&options_range.expect("range is set"), file_size);
             let range = result.range.clone();
             let attributes = result.attributes.clone();
             let bytes = result.bytes().await?;
+            let bytes_len = bytes.len() as u64;
+
+            if bytes_len != expected_len {
+                return Err(object_store::Error::Generic {
+                    store: "retrying_object_store",
+                    source: format!(
+                        "Size check failed: {bytes_len} bytes read, but expected \
+                         {expected_len} bytes (requested range truncated at file \
+                         size {file_size})"
+                    )
+                    .into(),
+                });
+            }
+
             Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed()),
                 meta,
@@ -943,5 +981,68 @@ mod tests {
             .attributes
             .get(&Attribute::Metadata(Cow::Borrowed(super::PUT_ID_ATTRIBUTE)))
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_opts_range_read_size_check_passes() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let path = Path::from("/data/obj");
+
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let result = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    range: Some((0..5).into()),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect("range read should pass size check");
+
+        let bytes = result.bytes().await.unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn test_get_opts_range_read_size_mismatch_returns_error() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/data/obj");
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_truncate_get_range_bytes(1, 1));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+
+        // First attempt returns truncated body (1 byte vs 5 expected),
+        // triggering the size check error. The retry succeeds normally.
+        let result = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    range: Some((0..5).into()),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect("should succeed after retrying past truncated response");
+
+        let bytes = result.bytes().await.unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"hello"));
+        // 1 truncated attempt + 1 successful retry
+        assert_eq!(flaky.get_range_attempts(), 2);
     }
 }
