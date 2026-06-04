@@ -20,7 +20,7 @@
 //! }
 //! ```
 
-pub use crate::db_status::DbStatus;
+pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::{Range, RangeBounds};
@@ -53,7 +53,7 @@ use crate::config::{
 };
 use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
-use crate::db_state::{DbState, SsTableId};
+use crate::db_state::{collect_touched_segments, DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -589,6 +589,10 @@ impl DbInner {
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
+
+        let view = self.state.read().view();
+        self.status_manager
+            .report_memtable_segments(collect_touched_segments(&view));
 
         Ok(())
     }
@@ -9599,6 +9603,155 @@ mod tests {
             err.to_string().contains("empty prefix"),
             "expected empty-prefix error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn should_report_new_in_memory_segments_in_subscription() {
+        use crate::config::DurabilityLevel;
+
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_subscribe_reports_in_memory_segments";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        assert!(rx
+            .borrow_and_update()
+            .list_segments(DurabilityLevel::Memory)
+            .unwrap()
+            .is_empty());
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // when
+        db.put_with_options(b"abc-1", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments(DurabilityLevel::Memory)
+                .unwrap()
+                .iter()
+                .any(|seg| seg.prefix.as_ref() == b"abc")
+        })
+        .await
+        .unwrap();
+
+        // when
+        db.put_with_options(b"xyz-1", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments(DurabilityLevel::Memory)
+                .unwrap()
+                .into_iter()
+                .map(|seg| seg.prefix)
+                .collect::<Vec<_>>()
+                == vec![Bytes::from_static(b"abc"), Bytes::from_static(b"xyz")]
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_report_persisted_segments_after_flush() {
+        use crate::config::DurabilityLevel;
+
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_shrinks_in_memory_segments";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        db.put_with_options(
+            b"abc-1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments(DurabilityLevel::Memory)
+                .unwrap()
+                .iter()
+                .any(|seg| seg.prefix.as_ref() == b"abc")
+        })
+        .await
+        .unwrap();
+
+        // when
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments(DurabilityLevel::Remote)
+                .unwrap()
+                .into_iter()
+                .map(|seg| seg.prefix)
+                .collect::<Vec<_>>()
+                == vec![Bytes::from_static(b"abc")]
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.status()
+                .list_segments(DurabilityLevel::Memory)
+                .unwrap()
+                .into_iter()
+                .map(|seg| seg.prefix)
+                .collect::<Vec<_>>(),
+            vec![Bytes::from_static(b"abc")]
+        );
+
+        // when
+        // the segments are deleted from the manifest (as a full compaction would)
+        db.inner
+            .state
+            .write()
+            .modify(|m| m.state.manifest.value.core.segments.clear());
+        let manifest = db.inner.state.read().state().manifest.clone();
+        db.inner.status_manager.report_manifest(manifest.into());
+
+        // then
+        let status = db.status();
+        assert!(status
+            .list_segments(DurabilityLevel::Remote)
+            .unwrap()
+            .is_empty());
+        assert!(status
+            .list_segments(DurabilityLevel::Memory)
+            .unwrap()
+            .is_empty());
     }
 
     #[derive(Clone, Copy, Debug)]

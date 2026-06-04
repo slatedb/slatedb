@@ -521,7 +521,7 @@ pub trait DbMetadataOps {
     /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
     /// reflects the latest database status. The status includes the latest durable
     /// sequence number and the current manifest snapshot observed by this
-    /// handle. For [`Db`](crate::Db) is is the current in-memory snapshot and
+    /// handle. For [`Db`](crate::Db) is the current in-memory snapshot and
     /// for [`DbReader`](crate::DbReader) it is the latest manifest polled from object storage.
     /// For example, you can wait for a specific sequence number to
     /// become durable:
@@ -530,6 +530,25 @@ pub trait DbMetadataOps {
     /// let seq = 42; // sequence number from a write operation
     /// let mut rx = db.subscribe();
     /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("db dropped");
+    /// ```
+    ///
+    /// The status also exposes the segment prefixes (RFC-0024) known to the
+    /// handle via [`DbStatus::list_segments`](crate::DbStatus::list_segments),
+    /// which returns the persisted set (`Remote`) or the union of persisted and
+    /// in-memory prefixes not yet folded into the manifest (`Memory`). For
+    /// example, you can wait for a segment to appear:
+    ///
+    /// ```ignore
+    /// use slatedb::config::DurabilityLevel;
+    /// let want = b"prefix".to_vec();
+    /// let mut rx = db.subscribe();
+    /// rx.wait_for(|s| {
+    ///     s.list_segments(DurabilityLevel::Memory)
+    ///         .map(|segs| segs.iter().any(|seg| seg.prefix == want))
+    ///         .unwrap_or(false)
+    /// })
+    /// .await
+    /// .expect("db dropped");
     /// ```
     ///
     /// # Deadlock risk

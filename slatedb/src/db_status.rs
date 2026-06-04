@@ -1,9 +1,24 @@
+use std::collections::BTreeSet;
+
+use bytes::Bytes;
 use tokio::sync::watch;
 
+use crate::config::DurabilityLevel;
 use crate::error::SlateDBError;
 use crate::manifest::VersionedManifest;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
+
+/// A segment (RFC-0024), identified by the key prefix it owns; the segment
+/// spans the key interval `[prefix, prefix++)`.
+///
+/// Note: this is distinct from [`crate::manifest::Segment`], which also carries
+/// per-segment LSM state. This type is prefix-only.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SegmentPrefix {
+    /// The key prefix owned by the segment.
+    pub prefix: Bytes,
+}
 
 /// Current status of the database, exposed via [`crate::Db::subscribe`].
 ///
@@ -20,8 +35,68 @@ pub struct DbStatus {
     /// The current in-memory manifest snapshot observed by this handle,
     /// paired with its manifest version ID.
     pub current_manifest: VersionedManifest,
+    /// In-memory segment prefixes (RFC-0024) touched by writes or WAL replay on
+    /// this handle that have not yet been folded into the manifest. Empty when
+    /// no segment extractor is configured. Read it via
+    /// [`DbStatus::list_segments`], which merges in the persisted segments.
+    inmemory_segments: Vec<SegmentPrefix>,
+    /// Whether this handle has a segment extractor configured. Determines
+    /// whether [`list_segments`](DbStatus::list_segments) can satisfy a
+    /// [`DurabilityLevel::Memory`] request.
+    has_segment_extractor: bool,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
+}
+
+impl DbStatus {
+    /// List segment prefixes (RFC-0024) at the requested durability level.
+    ///
+    /// - [`DurabilityLevel::Remote`]: only segments persisted in the current
+    ///   manifest.
+    /// - [`DurabilityLevel::Memory`]: persisted segments plus in-memory
+    ///   prefixes not yet flushed to object storage.
+    ///
+    /// The result is sorted ascending by prefix and deduplicated.
+    ///
+    /// [`DurabilityLevel::Remote`] always succeeds — the persisted segments come
+    /// from the manifest and need no extractor, so a handle without one still
+    /// observes them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when [`DurabilityLevel::Memory`] is requested on a
+    /// *segmented* database whose handle has no segment extractor configured —
+    /// the in-memory set cannot be derived, so the answer would be silently
+    /// incomplete. This can happen for a [`DbReader`](crate::DbReader) opened
+    /// without an extractor; a [`Db`](crate::Db) validates its extractor at open
+    /// time, so this method never errors for a writer.
+    pub fn list_segments(
+        &self,
+        durability_level: DurabilityLevel,
+    ) -> Result<Vec<SegmentPrefix>, crate::Error> {
+        let mut set: BTreeSet<Bytes> = self
+            .current_manifest
+            .core()
+            .segments
+            .iter()
+            .map(|segment| segment.prefix().clone())
+            .collect();
+        if matches!(durability_level, DurabilityLevel::Memory) {
+            let db_is_segmented = self
+                .current_manifest
+                .core()
+                .segment_extractor_name
+                .is_some();
+            if db_is_segmented && !self.has_segment_extractor {
+                return Err(SlateDBError::SegmentExtractorRequired.into());
+            }
+            set.extend(self.inmemory_segments.iter().map(|s| s.prefix.clone()));
+        }
+        Ok(set
+            .into_iter()
+            .map(|prefix| SegmentPrefix { prefix })
+            .collect())
+    }
 }
 
 pub(crate) trait ClosedResultWriter: std::fmt::Debug + Send + Sync + 'static {
@@ -48,16 +123,20 @@ impl DbStatusManager {
                 id: 1,
                 manifest: Manifest::initial(ManifestCore::new()),
             },
+            false,
         )
     }
 
     pub(crate) fn new_with_manifest(
         initial_durable_seq: u64,
         initial_manifest: VersionedManifest,
+        has_segment_extractor: bool,
     ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
             current_manifest: initial_manifest,
+            inmemory_segments: Vec::new(),
+            has_segment_extractor,
             close_reason: None,
         });
         Self {
@@ -85,6 +164,55 @@ impl DbStatusManager {
             } else {
                 false
             }
+        });
+    }
+
+    /// Replace the published set of in-memory segment prefixes (RFC-0024) with
+    /// the union over the handle's currently live memtables. This is the path
+    /// that lets the set *shrink*: it is called when establishing the set (open
+    /// / WAL replay / checkpoint refresh) and right after a flush pops a memtable
+    /// and folds its prefixes into the manifest, so a prefix held only by the
+    /// flushed memtable drops out. Notifies subscribers only when the sorted set
+    /// actually changes.
+    pub(crate) fn report_memtable_segments(&self, prefixes: BTreeSet<Bytes>) {
+        let segments: Vec<SegmentPrefix> = prefixes
+            .into_iter()
+            .map(|prefix| SegmentPrefix { prefix })
+            .collect();
+        self.tx.send_if_modified(|s| {
+            if s.inmemory_segments != segments {
+                s.inmemory_segments = segments;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// Add newly touched in-memory segment prefixes (RFC-0024) to the published
+    /// set. This is the write-path counterpart to
+    /// [`Self::report_memtable_segments`]: a write can only *grow* the set, so
+    /// rather than recomputing the full union over all live memtables on the hot
+    /// path, we insert just the prefixes this write touched and notify only when
+    /// at least one was not already published. Prefixes leave the set via
+    /// [`Self::report_memtable_segments`] when their memtable is flushed. Keeps
+    /// `segments` sorted ascending.
+    pub(crate) fn add_memtable_segments(&self, prefixes: BTreeSet<Bytes>) {
+        if prefixes.is_empty() {
+            return;
+        }
+        self.tx.send_if_modified(|s| {
+            let mut changed = false;
+            for prefix in prefixes {
+                if let Err(idx) = s
+                    .inmemory_segments
+                    .binary_search_by(|sp| sp.prefix.cmp(&prefix))
+                {
+                    s.inmemory_segments.insert(idx, SegmentPrefix { prefix });
+                    changed = true;
+                }
+            }
+            changed
         });
     }
 
@@ -147,11 +275,242 @@ mod tests {
         }
     }
 
+    fn manifest_with_segments(id: u64, prefixes: &[&[u8]]) -> VersionedManifest {
+        use crate::manifest::{LsmTreeState, Segment};
+        use std::sync::Arc;
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some("test".to_string());
+        core.segments = prefixes
+            .iter()
+            .map(|p| Segment {
+                prefix: Bytes::from(p.to_vec()),
+                tree: Arc::new(LsmTreeState::default()),
+            })
+            .collect();
+        VersionedManifest {
+            id,
+            manifest: Manifest::initial(core),
+        }
+    }
+
+    fn segment_prefix(prefix: &[u8]) -> SegmentPrefix {
+        SegmentPrefix {
+            prefix: Bytes::from(prefix.to_vec()),
+        }
+    }
+
+    /// The published in-memory segments as an order-independent set (ordering is
+    /// a property of `list_segments`, not of the raw field).
+    fn segment_set(status: &DbStatus) -> BTreeSet<SegmentPrefix> {
+        status.inmemory_segments.iter().cloned().collect()
+    }
+
+    #[test]
+    fn should_initialize_with_no_segments_from_empty_manifest() {
+        // given
+        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(1), false);
+
+        // when
+        let status = mgr.status();
+
+        // then
+        assert!(status
+            .list_segments(DurabilityLevel::Remote)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn should_initialize_with_segments_from_manifest() {
+        // given
+        let mgr =
+            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]), true);
+
+        // when
+        let status = mgr.status();
+
+        // then
+        assert_eq!(
+            status.list_segments(DurabilityLevel::Remote).unwrap(),
+            vec![segment_prefix(b"a"), segment_prefix(b"b")]
+        );
+    }
+
+    #[test]
+    fn should_list_only_manifest_segments_for_remote() {
+        // given
+        let mgr =
+            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]), true);
+        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"c")]));
+
+        // when
+        let remote = mgr.status().list_segments(DurabilityLevel::Remote).unwrap();
+
+        // then
+        assert_eq!(remote, vec![segment_prefix(b"a"), segment_prefix(b"b")]);
+    }
+
+    #[test]
+    fn should_union_and_dedup_segments_for_memory() {
+        // given
+        let mgr =
+            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]), true);
+        mgr.report_memtable_segments(BTreeSet::from([
+            Bytes::from_static(b"b"),
+            Bytes::from_static(b"c"),
+        ]));
+
+        // when
+        let memory = mgr.status().list_segments(DurabilityLevel::Memory).unwrap();
+
+        // then
+        assert_eq!(
+            memory,
+            vec![
+                segment_prefix(b"a"),
+                segment_prefix(b"b"),
+                segment_prefix(b"c")
+            ]
+        );
+    }
+
+    #[test]
+    fn should_return_sorted_segments_for_memory() {
+        // given
+        let mgr =
+            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"d", b"b"]), true);
+        mgr.report_memtable_segments(BTreeSet::from([
+            Bytes::from_static(b"c"),
+            Bytes::from_static(b"a"),
+        ]));
+
+        // when
+        let memory = mgr.status().list_segments(DurabilityLevel::Memory).unwrap();
+
+        // then
+        assert_eq!(
+            memory,
+            vec![
+                segment_prefix(b"a"),
+                segment_prefix(b"b"),
+                segment_prefix(b"c"),
+                segment_prefix(b"d")
+            ]
+        );
+    }
+
+    #[test]
+    fn should_error_for_memory_without_extractor() {
+        // given
+        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a"]), false);
+        let status = mgr.status();
+
+        // when
+        let err = status.list_segments(DurabilityLevel::Memory).unwrap_err();
+
+        // then
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        let source = std::error::Error::source(&err).and_then(|s| s.downcast_ref::<SlateDBError>());
+        assert!(matches!(
+            source,
+            Some(SlateDBError::SegmentExtractorRequired)
+        ));
+        assert_eq!(
+            status.list_segments(DurabilityLevel::Remote).unwrap(),
+            vec![segment_prefix(b"a")]
+        );
+    }
+
+    #[test]
+    fn should_notify_when_reported_segments_change() {
+        // given
+        let mgr = DbStatusManager::new(0);
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
+
+        // then
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(
+            rx.borrow_and_update().inmemory_segments,
+            vec![segment_prefix(b"x")]
+        );
+    }
+
+    #[test]
+    fn should_notify_when_adding_a_new_segment() {
+        // given
+        let mgr = DbStatusManager::new(0);
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"m")]));
+
+        // then
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(
+            segment_set(&rx.borrow_and_update()),
+            BTreeSet::from([segment_prefix(b"m")])
+        );
+
+        // when
+        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"a")]));
+
+        // then
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(
+            segment_set(&rx.borrow_and_update()),
+            BTreeSet::from([segment_prefix(b"a"), segment_prefix(b"m")])
+        );
+    }
+
+    #[test]
+    fn should_not_notify_when_adding_a_known_segment() {
+        // given
+        let mgr = DbStatusManager::new(0);
+        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+
+        // when
+        mgr.add_memtable_segments(BTreeSet::from([
+            Bytes::from_static(b"x"),
+            Bytes::from_static(b"y"),
+        ]));
+
+        // then
+        assert!(rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn should_not_notify_when_reported_segments_unchanged() {
+        // given
+        let mgr = DbStatusManager::new(0);
+        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+    }
+
     #[test]
     fn should_not_notify_on_same_manifest() {
         // given
         let initial = versioned_manifest(1);
-        let mgr = DbStatusManager::new_with_manifest(0, initial.clone());
+        let mgr = DbStatusManager::new_with_manifest(0, initial.clone(), false);
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 
@@ -165,7 +524,7 @@ mod tests {
     #[test]
     fn should_not_notify_on_older_manifest() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(5));
+        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(5), false);
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 

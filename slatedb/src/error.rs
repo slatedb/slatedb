@@ -103,6 +103,12 @@ pub(crate) enum SlateDBError {
     #[error("segment extractor produced an empty prefix for key {key:?}")]
     EmptySegmentPrefix { key: Bytes },
 
+    #[error(
+        "listing in-memory segments requires a segment extractor, but none is \
+         configured on this handle"
+    )]
+    SegmentExtractorRequired,
+
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
 
@@ -616,6 +622,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::SegmentExtractorMismatch { .. } => Error::invalid(msg),
             SlateDBError::SegmentPrefixNotRecognized { .. } => Error::invalid(msg),
             SlateDBError::EmptySegmentPrefix { .. } => Error::invalid(msg),
+            SlateDBError::SegmentExtractorRequired => {
+                Error::invalid(msg).with_source(Box::new(SlateDBError::SegmentExtractorRequired))
+            }
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),

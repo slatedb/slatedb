@@ -575,6 +575,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let status_manager = DbStatusManager::new_with_manifest(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),
+            self.segment_extractor.is_some(),
         );
 
         // Setup communication channels wired to the shared closed state.
@@ -1275,6 +1276,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
+    segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -1293,6 +1295,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             merge_operator: None,
             block_transformer: None,
             filter_policies: default_filter_policies(),
+            segment_extractor: None,
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
@@ -1317,6 +1320,18 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Sets the merge operator to use when reading merge operands.
     pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
         self.merge_operator = Some(merge_operator);
+        self
+    }
+
+    /// Sets the segment extractor (RFC-0024). When configured, the reader
+    /// re-derives each WAL-replayed entry's segment prefix so that in-memory
+    /// segments are reported via [`DbReader::subscribe`]. Must match the
+    /// extractor the database was created with.
+    pub fn with_segment_extractor(
+        mut self,
+        extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
+    ) -> Self {
+        self.segment_extractor = Some(extractor);
         self
     }
 
@@ -1472,6 +1487,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             &store_provider,
             self.checkpoint_id,
             self.merge_operator,
+            self.segment_extractor,
             self.options,
             self.system_clock,
             self.rand,
