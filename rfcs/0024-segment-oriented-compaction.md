@@ -436,7 +436,7 @@ pub struct SegmentPrefix {
 impl DbStatus {
     pub fn list_segments(
         &self,
-        durability_filter: DurabilityLevel,
+        durability_level: DurabilityLevel,
     ) -> Result<Vec<SegmentPrefix>, crate::Error>;    // new
 }
 ```
