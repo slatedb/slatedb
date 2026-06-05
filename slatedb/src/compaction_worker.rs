@@ -343,6 +343,10 @@ impl CompactionWorkerHandler {
                 }
             }
             if to_claim.is_empty() {
+                debug!(
+                    "No claimable compactions; skipping .compactions CAS write and executor dispatch [worker_id={}]",
+                    self.worker_id
+                );
                 return Ok(());
             }
 
@@ -572,6 +576,10 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
         if !self.ensure_loaded().await? {
+            warn!(
+                ".compactions does not exist yet; retrying on the next poll [worker_id={}]",
+                self.worker_id
+            );
             return Ok(());
         }
         match message {
