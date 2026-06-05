@@ -1089,6 +1089,13 @@ pub struct CompactorOptions {
     /// more resources. The default is 4.
     pub max_fetch_tasks: usize,
 
+    /// The number of blocks to fetch in a single read-ahead request while
+    /// iterating over input SSTs during compaction. Higher values issue larger
+    /// reads against the object store, improving throughput at the cost of more
+    /// memory per fetch. The default is 512 (2MiB at the default 4KiB block
+    /// size).
+    pub blocks_to_fetch: usize,
+
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
@@ -1106,6 +1113,7 @@ impl Default for CompactorOptions {
             max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
             max_fetch_tasks: 4,
+            blocks_to_fetch: 512,
             scheduler_options: HashMap::new(),
         }
     }
@@ -1123,6 +1131,7 @@ impl std::fmt::Debug for CompactorOptions {
                 &self.max_concurrent_compactions,
             )
             .field("max_fetch_tasks", &self.max_fetch_tasks)
+            .field("blocks_to_fetch", &self.blocks_to_fetch)
             .field("scheduler_options", &self.scheduler_options)
             .finish()
     }
@@ -1153,6 +1162,11 @@ pub struct CompactionWorkerOptions {
     /// Maximum number of concurrent tasks for fetching SST blocks during
     /// compaction. Higher values can improve throughput but use more resources.
     pub max_fetch_tasks: usize,
+
+    /// Number of blocks to fetch in a single read-ahead request while iterating
+    /// over input SSTs during compaction. The default is 512 (2MiB at the
+    /// default 4KiB block size).
+    pub blocks_to_fetch: usize,
 }
 
 /// Default options for the compaction worker.
@@ -1166,6 +1180,7 @@ impl Default for CompactionWorkerOptions {
             heartbeat_min_interval: Duration::from_secs(5),
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
+            blocks_to_fetch: 512,
         }
     }
 }

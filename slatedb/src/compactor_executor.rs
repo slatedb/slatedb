@@ -297,7 +297,7 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         };
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: self.options.max_fetch_tasks,
-            blocks_to_fetch: 256,
+            blocks_to_fetch: self.options.blocks_to_fetch,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
             order: IterationOrder::Ascending,
