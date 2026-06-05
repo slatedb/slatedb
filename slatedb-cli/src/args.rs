@@ -154,8 +154,8 @@ pub(crate) enum CliCommands {
     /// `--no-embedded-worker` when you want to run workers as separate
     /// `run-worker` processes instead.
     RunCompactor {
-        /// Disable the in-process compaction worker. Use this when running one
-        /// or more standalone `run-worker` instances against the same database.
+        /// Disable the in-process compaction worker. The Compactor can run an embedded worker
+        /// alongside distributed workers or disable the embedded worker and use only distributed workers.
         #[arg(long, default_value_t = false)]
         no_embedded_worker: bool,
     },
