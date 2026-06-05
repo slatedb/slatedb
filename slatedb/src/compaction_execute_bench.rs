@@ -22,7 +22,7 @@ use crate::compactor_executor::{
     TokioCompactionExecutorOptions,
 };
 use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-use crate::config::{CompactorOptions, CompressionCodec};
+use crate::config::{CompactionWorkerOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
@@ -331,7 +331,7 @@ impl CompactionExecuteBench {
             None,
         ));
         let (tx, rx) = async_channel::unbounded();
-        let compactor_options = CompactorOptions::default();
+        let worker_options = CompactionWorkerOptions::default();
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();
@@ -340,7 +340,7 @@ impl CompactionExecuteBench {
 
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle: Handle::current(),
-            options: Arc::new(compactor_options),
+            options: Arc::new(worker_options),
             worker_tx: tx,
             table_store: table_store.clone(),
             rand: self.rand.clone(),

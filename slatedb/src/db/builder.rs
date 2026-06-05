@@ -631,13 +631,8 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
-                let mut builder =
-                    CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
-                        .with_options(opts.clone());
-                if let Some(worker_opts) = &self.settings.compaction_worker_options {
-                    builder = builder.with_worker_options(worker_opts.clone());
-                }
-                builder
+                CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                    .with_options(opts.clone())
             })
         });
 
@@ -651,7 +646,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 builder = builder.with_merge_operator(operator);
             }
 
-            let (handler, rx, worker) = builder
+            let compactor_handlers = builder
                 .build_handler(
                     uncached_table_store.clone(),
                     manifest_store.clone(),
@@ -660,11 +655,11 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .await?;
             task_executor.add_handler(
                 COMPACTOR_TASK_NAME.to_string(),
-                Box::new(handler),
-                rx,
+                Box::new(compactor_handlers.handler),
+                compactor_handlers.rx,
                 &tokio_handle,
             )?;
-            if let Some((worker_handler, worker_rx)) = worker {
+            if let Some((worker_handler, worker_rx)) = compactor_handlers.worker {
                 task_executor.add_handler(
                     COMPACTION_WORKER_TASK_NAME.to_string(),
                     Box::new(worker_handler),
@@ -952,6 +947,22 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     }
 }
 
+/// The compactor coordinator handler and optional embedded worker handler produced by
+/// [`CompactorBuilder::build_handler`]. Each handler and its receiver must be registered
+/// with the task executor in `DbBuilder::build`.
+pub(crate) struct CompactorHandlers {
+    /// The coordinator event handler.
+    pub(crate) handler: CompactorEventHandler,
+    /// Receiver for the coordinator's messages.
+    pub(crate) rx: async_channel::Receiver<CompactorMessage>,
+    /// The embedded worker handler and its receiver, present when
+    /// [`CompactorOptions::worker`] is `Some`.
+    pub(crate) worker: Option<(
+        crate::compaction_worker::CompactionWorkerHandler,
+        async_channel::Receiver<WorkerMessage>,
+    )>,
+}
+
 /// Builder for creating new Compactor instances.
 ///
 /// This provides a fluent API for configuring a Compactor object.
@@ -960,7 +971,6 @@ pub struct CompactorBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     compaction_runtime: Handle,
     options: CompactorOptions,
-    worker_options: CompactionWorkerOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
     recorder: MetricsRecorderHelper,
@@ -981,7 +991,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             main_object_store,
             compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
-            worker_options: CompactionWorkerOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
@@ -1001,7 +1010,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             main_object_store: self.main_object_store,
             compaction_runtime: self.compaction_runtime,
             options: self.options,
-            worker_options: self.worker_options,
             scheduler_supplier: self.scheduler_supplier,
             rand: self.rand,
             recorder: self.recorder,
@@ -1028,13 +1036,13 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the options for the embedded compaction worker.
+    /// Sets the options for the embedded compaction worker and enables it.
     ///
-    /// Only has effect when [`CompactorOptions::embedded_worker`] is `true`.
-    /// When `None` (the default), worker options are derived from the
-    /// coordinator's [`CompactorOptions`].
+    /// Equivalent to setting [`CompactorOptions::worker`] to `Some(options)`.
+    /// To run without an embedded worker, set [`CompactorOptions::worker`] to
+    /// `None` via [`with_options`](Self::with_options).
     pub fn with_worker_options(mut self, options: CompactionWorkerOptions) -> Self {
-        self.worker_options = options;
+        self.options.worker = Some(options);
         self
     }
 
@@ -1162,7 +1170,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compactions_store,
             table_store,
             self.options,
-            self.worker_options,
             scheduler_supplier,
             self.compaction_runtime,
             self.rand,
@@ -1178,25 +1185,15 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Build a CompactorEventHandler and optionally an embedded worker from this builder's
     /// configuration.
     ///
-    /// Returns the coordinator handler + receiver, and `Some((worker_handler, worker_rx))` when
-    /// [`CompactorOptions::embedded_worker`] is `true`. Both, when present, must be registered
-    /// with the task executor in DbBuilder::build.
+    /// The embedded worker handler is present when [`CompactorOptions::worker`] is `Some`.
+    /// Each handler and its receiver must be registered with the task executor in
+    /// DbBuilder::build.
     pub(crate) async fn build_handler(
         self,
         table_store: Arc<TableStore>,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
-    ) -> Result<
-        (
-            CompactorEventHandler,
-            async_channel::Receiver<CompactorMessage>,
-            Option<(
-                crate::compaction_worker::CompactionWorkerHandler,
-                async_channel::Receiver<WorkerMessage>,
-            )>,
-        ),
-        SlateDBError,
-    > {
+    ) -> Result<CompactorHandlers, SlateDBError> {
         let options = Arc::new(self.options);
         let scheduler_supplier = self
             .scheduler_supplier
@@ -1214,19 +1211,12 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.system_clock.clone(),
         )
         .await?;
-        let worker = if options.embedded_worker {
-            // For the embedded worker: use a fixed fast poll interval and inherit the
-            // coordinator's max_sst_size so output SSTs match the configured split threshold.
-            let worker_options = Arc::new(crate::config::CompactionWorkerOptions {
-                compactions_poll_interval: std::time::Duration::from_millis(100),
-                max_sst_size: options.max_sst_size,
-                ..self.worker_options
-            });
-            Some(build_worker_handler(
+        let worker = options.worker.clone().map(|worker_options| {
+            build_worker_handler(
                 manifest_store,
                 compactions_store,
                 table_store,
-                worker_options,
+                Arc::new(worker_options),
                 self.compaction_runtime,
                 self.rand,
                 stats,
@@ -1234,11 +1224,13 @@ impl<P: Into<Path>> CompactorBuilder<P> {
                 self.merge_operator,
                 #[cfg(feature = "compaction_filters")]
                 self.compaction_filter_supplier,
-            ))
-        } else {
-            None
-        };
-        Ok((handler, rx, worker))
+            )
+        });
+        Ok(CompactorHandlers {
+            handler,
+            rx,
+            worker,
+        })
     }
 }
 

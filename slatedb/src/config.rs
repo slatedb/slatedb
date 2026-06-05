@@ -57,8 +57,10 @@
 //!
 //! [compactor_options]
 //! poll_interval = "5s"
-//! max_sst_size = 1073741824
 //! max_concurrent_compactions = 4
+//!
+//! [compactor_options.worker]
+//! max_sst_size = 1073741824
 //!
 //! [compactor_options.scheduler_options]
 //! min_compaction_sources = "4"
@@ -105,8 +107,10 @@
 //!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
-//!    "max_sst_size": 1073741824,
 //!    "max_concurrent_compactions": 4,
+//!    "worker": {
+//!      "max_sst_size": 1073741824
+//!    },
 //!    "scheduler_options": {
 //!      "min_compaction_sources": "4",
 //!      "max_compaction_sources": "8",
@@ -157,8 +161,9 @@
 //! max_unflushed_bytes: 536870912
 //! compactor_options:
 //!   poll_interval: '5s'
-//!   max_sst_size: 1073741824
 //!   max_concurrent_compactions: 4
+//!   worker:
+//!     max_sst_size: 1073741824
 //!   scheduler_options:
 //!     min_compaction_sources: "4"
 //!     max_compaction_sources: "8"
@@ -719,12 +724,9 @@ pub struct Settings {
     /// to object storage.
     pub max_unflushed_bytes: usize,
 
-    /// Configuration options for the compactor.
+    /// Configuration options for the compactor. The embedded compaction worker
+    /// is configured via [`CompactorOptions::worker`].
     pub compactor_options: Option<CompactorOptions>,
-
-    /// Configuration options for a standalone compaction worker (`run-worker`).
-    /// When `None`, worker defaults are used.
-    pub compaction_worker_options: Option<CompactionWorkerOptions>,
 
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
@@ -971,7 +973,6 @@ impl Default for Settings {
             l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
-            compaction_worker_options: Some(CompactionWorkerOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
@@ -1081,48 +1082,38 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub manifest_update_timeout: Duration,
 
-    /// A compacted SSTable's maximum size (in bytes). If more data needs to be
-    /// written to a Sorted Run during a compaction, a new SSTable will be created
-    /// in the Sorted Run when this size is exceeded.
-    pub max_sst_size: usize,
-
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
-
-    /// The maximum number of concurrent tasks for fetching blocks during
-    /// compaction. Higher values can improve compaction throughput but use
-    /// more resources. The default is 4.
-    pub max_fetch_tasks: usize,
 
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
 
-    /// Whether to spawn an in-process [`CompactionWorker`](crate::compaction_worker::CompactionWorker)
-    /// alongside the coordinator. Defaults to true. Set to false when all
-    /// workers run as separate processes.
-    #[serde(default = "default_embedded_worker")]
-    pub embedded_worker: bool,
+    /// Options for the in-process compaction worker spawned alongside the
+    /// coordinator. When `Some` (the default), an embedded
+    /// [`CompactionWorkerHandle`](crate::compaction_worker::CompactionWorkerHandle)
+    /// executes compactions in the same process. Set to `None` when all workers
+    /// run as separate processes.
+    #[serde(default = "default_worker_options")]
+    pub worker: Option<CompactionWorkerOptions>,
 }
 
-fn default_embedded_worker() -> bool {
-    true
+fn default_worker_options() -> Option<CompactionWorkerOptions> {
+    Some(CompactionWorkerOptions::default())
 }
 
 /// Default options for the compactor. Currently, only a
 /// `SizeTieredCompactionScheduler` compaction strategy is implemented.
 impl Default for CompactorOptions {
-    /// Returns a `CompactorOptions` with a 5 second poll interval and a 256MiB max
-    /// SSTable size.
+    /// Returns a `CompactorOptions` with a 5 second poll interval and an embedded
+    /// worker enabled with default [`CompactionWorkerOptions`].
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
-            max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
-            max_fetch_tasks: 4,
             scheduler_options: HashMap::new(),
-            embedded_worker: true,
+            worker: Some(CompactionWorkerOptions::default()),
         }
     }
 }
@@ -1133,14 +1124,12 @@ impl std::fmt::Debug for CompactorOptions {
         f.debug_struct("CompactorOptions")
             .field("poll_interval", &self.poll_interval)
             .field("manifest_update_timeout", &self.manifest_update_timeout)
-            .field("max_sst_size", &self.max_sst_size)
             .field(
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
-            .field("max_fetch_tasks", &self.max_fetch_tasks)
             .field("scheduler_options", &self.scheduler_options)
-            .field("embedded_worker", &self.embedded_worker)
+            .field("worker", &self.worker)
             .finish()
     }
 }

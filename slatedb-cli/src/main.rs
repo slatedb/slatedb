@@ -7,8 +7,8 @@ use slatedb::compactor::{
     CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
 };
 use slatedb::config::{
-    CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-    Settings,
+    CheckpointOptions, CompactionWorkerOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions, Settings,
 };
 use slatedb::seq_tracker::FindOption;
 use std::error::Error;
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .run_compactor_with_options(
                     cancellation_token.clone(),
                     CompactorOptions {
-                        embedded_worker: !no_embedded_worker,
+                        worker: (!no_embedded_worker).then(CompactionWorkerOptions::default),
                         ..CompactorOptions::default()
                     },
                 )
@@ -364,7 +364,10 @@ async fn exec_run_worker(
 ) -> Result<(), Box<dyn Error>> {
     let options = match Settings::load() {
         Ok(s) => {
-            let opts = s.compaction_worker_options.unwrap_or_default();
+            let opts = s
+                .compactor_options
+                .and_then(|c| c.worker)
+                .unwrap_or_default();
             tracing::info!(
                 "loaded worker options from SlateDb.toml [options={:?}]",
                 opts
@@ -384,14 +387,9 @@ async fn exec_run_worker(
         .build()
         .await?;
 
-    let mut run_task = tokio::spawn({
-        let worker = worker.clone();
-        async move { worker.run().await }
-    });
-
     tokio::select! {
-        result = &mut run_task => {
-            return Ok(result??);
+        result = worker.run() => {
+            return Ok(result?);
         }
         _ = cancellation_token.cancelled() => {
             // fall through to graceful shutdown

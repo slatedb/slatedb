@@ -594,15 +594,15 @@ impl Compactions {
         self.core.recent_compactions.values().filter(|c| c.active())
     }
 
-    /// Returns an iterator over all compactions with the given status.
-    pub(crate) fn iter_with_status(
-        &self,
-        status: CompactionStatus,
-    ) -> impl Iterator<Item = &Compaction> {
+    /// Returns an iterator over all compactions whose status is one of `statuses`.
+    pub(crate) fn iter_with_status<'a>(
+        &'a self,
+        statuses: &'a [CompactionStatus],
+    ) -> impl Iterator<Item = &'a Compaction> {
         self.core
             .recent_compactions
             .values()
-            .filter(move |c| c.status() == status)
+            .filter(move |c| statuses.contains(&c.status()))
     }
 
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
@@ -689,11 +689,11 @@ impl CompactorState {
         self.compactions.value.iter_active()
     }
 
-    pub(crate) fn compactions_with_status(
-        &self,
-        status: CompactionStatus,
-    ) -> impl Iterator<Item = &Compaction> {
-        self.compactions.value.iter_with_status(status)
+    pub(crate) fn compactions_with_status<'a>(
+        &'a self,
+        statuses: &'a [CompactionStatus],
+    ) -> impl Iterator<Item = &'a Compaction> {
+        self.compactions.value.iter_with_status(statuses)
     }
 
     /// Returns the dirty compactions tracked by this state.

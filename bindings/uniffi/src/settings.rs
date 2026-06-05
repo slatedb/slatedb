@@ -249,7 +249,7 @@ mod tests {
 
         settings
             .set(
-                "compactor_options.max_sst_size".to_owned(),
+                "compactor_options.worker.max_sst_size".to_owned(),
                 "33554432".to_owned(),
             )
             .unwrap();
@@ -259,6 +259,8 @@ mod tests {
                 .inner()
                 .compactor_options
                 .expect("compactor options should exist")
+                .worker
+                .expect("worker options should exist")
                 .max_sst_size,
             33_554_432
         );

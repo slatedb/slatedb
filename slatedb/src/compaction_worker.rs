@@ -1,6 +1,6 @@
 //! Distributed-compaction worker (RFC-0025).
 //!
-//! A [`CompactionWorker`] polls `.compactions` for `Scheduled` entries, claims
+//! A [`CompactionWorkerHandle`] polls `.compactions` for `Scheduled` entries, claims
 //! them via the optimistic CAS protocol described in RFC-0025, executes the
 //! compaction with the same code path the in-process executor uses, and writes
 //! `Compacted` (with the produced `output_ssts`) back to `.compactions`. The
@@ -33,7 +33,7 @@ use crate::compactor_executor::{
     TokioCompactionExecutorOptions,
 };
 use crate::compactor_state::{Compaction, CompactionStatus, SourceId, WorkerSpec};
-use crate::config::{CompactionWorkerOptions, CompactorOptions};
+use crate::config::CompactionWorkerOptions;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
@@ -77,14 +77,13 @@ pub(crate) enum WorkerMessage {
 /// Stateless executor of compaction jobs claimed from `.compactions`.
 ///
 /// Build one with [`CompactionWorkerBuilder`] and drive its event loop with
-/// [`CompactionWorker::run`]. Call [`CompactionWorker::stop`] to gracefully
+/// [`CompactionWorkerHandle::run`]. Call [`CompactionWorkerHandle::stop`] to gracefully
 /// release any in-flight claims.
-#[derive(Clone)]
-pub struct CompactionWorker {
+pub struct CompactionWorkerHandle {
     task_executor: Arc<MessageHandlerExecutor>,
 }
 
-impl CompactionWorker {
+impl CompactionWorkerHandle {
     /// Runs the worker until cancellation or fatal error. The worker polls
     /// `.compactions` every [`CompactionWorkerOptions::compactions_poll_interval`],
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
@@ -107,7 +106,7 @@ impl CompactionWorker {
     }
 }
 
-/// Builder for [`CompactionWorker`].
+/// Builder for [`CompactionWorkerHandle`].
 ///
 /// Mirrors `CompactorBuilder`: the user supplies a DB path and object store,
 /// optionally overrides options/clock/seed/merge operator, then calls
@@ -180,7 +179,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         self
     }
 
-    pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
+    pub async fn build(self) -> Result<CompactionWorkerHandle, crate::Error> {
         let path: Path = self.path.into();
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
@@ -220,7 +219,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
                 &Handle::current(),
             )
             .expect("failed to spawn compaction worker task");
-        Ok(CompactionWorker { task_executor })
+        Ok(CompactionWorkerHandle { task_executor })
     }
 }
 
@@ -318,7 +317,7 @@ impl CompactionWorkerHandler {
             let mut batch_destinations: HashSet<u32> = HashSet::new();
             for c in dirty_compactions
                 .value
-                .iter_with_status(CompactionStatus::Scheduled)
+                .iter_with_status(&[CompactionStatus::Scheduled])
                 .filter(|c| c.worker().is_none())
             {
                 if to_claim.len() >= capacity {
@@ -655,15 +654,10 @@ pub(crate) fn build_handler(
     async_channel::Receiver<WorkerMessage>,
 ) {
     let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
-    let executor_compactor_options = Arc::new(CompactorOptions {
-        max_sst_size: options.max_sst_size,
-        max_fetch_tasks: options.max_fetch_tasks,
-        ..CompactorOptions::default()
-    });
     let executor = Arc::new(TokioCompactionExecutor::new(
         TokioCompactionExecutorOptions {
             handle: worker_runtime.clone(),
-            options: executor_compactor_options,
+            options: options.clone(),
             worker_tx: tx,
             table_store: table_store.clone(),
             rand: rand.clone(),

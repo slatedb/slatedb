@@ -2027,7 +2027,6 @@ mod tests {
             l0_sst_size_bytes,
             max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
-            compaction_worker_options: None,
             compression_codec: None,
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,

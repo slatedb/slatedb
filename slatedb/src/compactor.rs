@@ -307,7 +307,6 @@ pub struct Compactor {
     compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
-    worker_options: crate::config::CompactionWorkerOptions,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
     task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
@@ -326,7 +325,6 @@ impl Compactor {
         compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         options: CompactorOptions,
-        worker_options: crate::config::CompactionWorkerOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
@@ -348,7 +346,6 @@ impl Compactor {
             compactions_store,
             table_store,
             options: Arc::new(options),
-            worker_options,
             scheduler_supplier,
             task_executor,
             compactor_runtime,
@@ -370,7 +367,7 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
-        // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
+        // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorkerHandle`]
         // either spawned in this process (`embedded_worker = true`) or running standalone.
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
@@ -396,12 +393,12 @@ impl Compactor {
         // Spawn an in-process worker if configured. The worker shares the
         // coordinator's `MessageHandlerExecutor`, so `Compactor::stop` shuts
         // both down together.
-        if self.options.embedded_worker {
+        if let Some(worker_options) = self.options.worker.clone() {
             let (worker_handler, worker_rx) = build_handler(
                 self.manifest_store.clone(),
                 self.compactions_store.clone(),
                 self.table_store.clone(),
-                Arc::new(self.worker_options()),
+                Arc::new(worker_options),
                 self.compactor_runtime.clone(),
                 self.rand.clone(),
                 self.stats.clone(),
@@ -425,11 +422,6 @@ impl Compactor {
             .join_task(COMPACTOR_TASK_NAME)
             .await
             .map_err(|e| e.into())
-    }
-
-    /// Returns the options to pass to the embedded compaction worker.
-    fn worker_options(&self) -> crate::config::CompactionWorkerOptions {
-        self.worker_options.clone()
     }
 
     /// Gracefully stops the compactor task and waits for it to finish.
@@ -640,7 +632,6 @@ impl CompactorEventHandler {
         self.stats.total_throughput.set(total_throughput as i64);
     }
 
-    /// Calculates the estimated total source bytes for a compaction.
     /// Returns 0 for any source that is no longer present in the manifest
     /// (e.g. already committed by a worker) — this is a metrics-only path.
     fn calculate_estimated_source_bytes(compaction: &Compaction, db_state: &ManifestCore) -> u64 {
@@ -703,7 +694,7 @@ impl CompactorEventHandler {
     async fn commit_compacted_entries(&mut self) -> Result<(), SlateDBError> {
         let compacted = self
             .state()
-            .compactions_with_status(CompactionStatus::Compacted)
+            .compactions_with_status(&[CompactionStatus::Compacted])
             .cloned()
             .collect::<Vec<_>>();
 
@@ -851,13 +842,10 @@ impl CompactorEventHandler {
             // being validated (and would see itself), Compacted is pending commit.
             let active_l0_in_same_segment = self
                 .state()
-                .active_compactions()
-                .filter(|c| {
-                    matches!(
-                        c.status(),
-                        CompactionStatus::Scheduled | CompactionStatus::Running
-                    )
-                })
+                .compactions_with_status(&[
+                    CompactionStatus::Scheduled,
+                    CompactionStatus::Running,
+                ])
                 .any(|c| c.spec().has_l0_sources() && c.spec().segment() == target_segment);
             if active_l0_in_same_segment {
                 warn!(
@@ -1008,7 +996,7 @@ impl CompactorEventHandler {
     async fn maybe_validate_submitted_compactions(&mut self) -> Result<(), SlateDBError> {
         let submitted_compactions = self
             .state()
-            .compactions_with_status(CompactionStatus::Submitted)
+            .compactions_with_status(&[CompactionStatus::Submitted])
             .cloned()
             .collect::<Vec<_>>();
 
@@ -4280,6 +4268,7 @@ mod tests {
     impl CompactorEventHandlerTestFixture {
         async fn new() -> Self {
             let compactor_options = Arc::new(compactor_options());
+            let worker_options = Arc::new(CompactionWorkerOptions::default());
             let options = db_options(None);
 
             let os = Arc::new(InMemory::new());
@@ -4302,7 +4291,7 @@ mod tests {
             let real_executor = Arc::new(TokioCompactionExecutor::new(
                 TokioCompactionExecutorOptions {
                     handle: Handle::current(),
-                    options: compactor_options.clone(),
+                    options: worker_options.clone(),
                     worker_tx: real_executor_tx,
                     table_store,
                     rand: rand.clone(),

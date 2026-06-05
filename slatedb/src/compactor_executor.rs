@@ -8,7 +8,7 @@ use crate::compaction_filter::CompactionFilterSupplier;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter_iterator::CompactionFilterIterator;
 use crate::compaction_worker::WorkerMessage;
-use crate::config::CompactorOptions;
+use crate::config::CompactionWorkerOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
@@ -178,7 +178,7 @@ pub(crate) trait CompactionExecutor {
 /// Options for creating a [`TokioCompactionExecutor`].
 pub(crate) struct TokioCompactionExecutorOptions {
     pub handle: tokio::runtime::Handle,
-    pub options: Arc<CompactorOptions>,
+    pub options: Arc<CompactionWorkerOptions>,
     pub worker_tx: async_channel::Sender<WorkerMessage>,
     pub table_store: Arc<TableStore>,
     pub rand: Arc<DbRand>,
@@ -239,7 +239,7 @@ struct TokioCompactionTask {
 }
 
 pub(crate) struct TokioCompactionExecutorInner {
-    options: Arc<CompactorOptions>,
+    options: Arc<CompactionWorkerOptions>,
     handle: tokio::runtime::Handle,
     worker_tx: async_channel::Sender<WorkerMessage>,
     table_store: Arc<TableStore>,
@@ -979,7 +979,7 @@ mod tests {
         #[case] expected_rows: Vec<RowEntry>,
     ) {
         let handle = tokio::runtime::Handle::current();
-        let options = Arc::new(CompactorOptions::default());
+        let options = Arc::new(CompactionWorkerOptions::default());
         let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let root_path = Path::from("testdb-load-iterators");
@@ -1183,7 +1183,7 @@ mod tests {
                 };
 
                 let handle = tokio::runtime::Handle::current();
-                let options = CompactorOptions {
+                let options = CompactionWorkerOptions {
                     max_sst_size: MAX_SST_SIZE,
                     ..Default::default()
                 };
@@ -1358,7 +1358,7 @@ mod tests {
 
         async fn build(self) -> TestContext {
             let handle = tokio::runtime::Handle::current();
-            let options = Arc::new(CompactorOptions::default());
+            let options = Arc::new(CompactionWorkerOptions::default());
             let (tx, rx) = async_channel::unbounded();
             let os = Arc::new(InMemory::new());
             let clock = Arc::new(DefaultSystemClock::new());

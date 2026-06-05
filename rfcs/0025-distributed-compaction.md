@@ -125,26 +125,31 @@ Separates the **Compaction Coordinator** (scheduler + manifest committer) from o
 
 ```rust
 pub struct CompactorOptions {
-    // ... existing fields unchanged ...
+    // ... existing coordinator-only fields (aside from max_sst_size, max_fetch_tasks) unchanged ...
 
     /// How long before a worker with no heartbeat is considered stale and its job reclaimed.
     pub worker_heartbeat_timeout_ms: u64,
 
-    /// Whether to spawn an in-process CompactionWorker alongside the coordinator.
-    /// Defaults to true. Set to false when all workers run as separate processes.
-    pub embedded_worker: bool,
+    /// Options for the in-process CompactionWorkerHandle spawned alongside the
+    /// coordinator. `Some(..)` (the default) spawns an embedded worker; `None`
+    /// runs the coordinator alone and expects workers as separate processes.
+    pub worker: Option<CompactionWorkerOptions>,
 }
 ```
+
+Execution-only knobs (`max_sst_size`, `max_fetch_tasks`) live on `CompactionWorkerOptions`, not `CompactorOptions`. The coordinator never executes compactions itself, so it has no use for them. An embedded worker is configured through `CompactorOptions::worker`.
 
 Via settings:
 
 ```toml
 [compactor_options]
 worker_heartbeat_timeout_ms = 10000
-embedded_worker = true
+
+[compactor_options.worker]
+max_sst_size = 268435456
 ```
 
-The coordinator always uses `RemoteCompactionExecutor`. `embedded_worker = true` (the default) spawns a `CompactionWorker` in the same process. `embedded_worker = false` expects workers to run as separate `CompactionWorker` processes.
+`worker = Some(..)` (the default) spawns a `CompactionWorkerHandle` in the same process. `worker = None` expects workers to run as separate `CompactionWorkerHandle` processes.
 
 #### Workers
 
@@ -163,8 +168,16 @@ pub struct CompactionWorkerOptions {
 
   // Minimum wall-clock time between heartbeat writes.
   pub heartbeat_min_interval: Duration,
+
+  // Max size of an output SST produced by a compaction.
+  pub max_sst_size: usize,
+
+  // Max number of source SSTs fetched concurrently during a compaction.
+  pub max_fetch_tasks: usize,
 }
 ```
+
+`max_sst_size` and `max_fetch_tasks` are execution-only knobs that previously lived on `CompactorOptions`; they now belong to the worker, which is the only component that executes compactions.
 
 - `max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
@@ -323,7 +336,7 @@ let db = Db::builder("db", object_store)
     .with_settings(Settings {
         compactor_options: Some(CompactorOptions {
             worker_heartbeat_timeout_ms: 30_000,
-            ..Default::default() // embedded_worker defaults to true
+            ..Default::default() // worker defaults to Some(CompactionWorkerOptions::default())
         }),
         ..Default::default()
     })
@@ -334,11 +347,11 @@ let db = Db::builder("db", object_store)
 2. **Coordinator + remote workers:** coordinator runs in the DB process; workers are separate processes.
 
 ```rust
-// Disable the embedded compaction worker by setting embedded_worker to false.
+// Disable the embedded compaction worker by setting worker to None.
 let db = Db::builder("db", object_store)
     .with_settings(Settings {
         compactor_options: Some(CompactorOptions {
-            embedded_worker: false,
+            worker: None,
             worker_heartbeat_timeout_ms: 30_000,
             ..Default::default()
         }),
@@ -375,7 +388,7 @@ let db = Db::builder("db", object_store)
 let compactor = CompactorBuilder::new("db", object_store)
     .with_options(CompactorOptions {
         worker_heartbeat_timeout_ms: 30_000,
-        ..Default::default() // embedded_worker defaults to true
+        ..Default::default() // worker defaults to Some(CompactionWorkerOptions::default())
     })
     .build();
 compactor.run().await?;
@@ -393,7 +406,7 @@ let db = Db::builder("db", object_store)
 // Standalone coordinator process
 let compactor = CompactorBuilder::new("db", object_store)
     .with_options(CompactorOptions {
-        embedded_worker: false,
+        worker: None,
         worker_heartbeat_timeout_ms: 30_000,
         ..Default::default()
     })
@@ -508,7 +521,7 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 ### Compatibility
 
 - **Object storage**: Backward compatible. New fields default to unclaimed/0; no migration needed.
-- **Public API**: DB read/write API unchanged. `CompactionWorkerBuilder` and `CompactionWorker` are additive. **Breaking:** `max_concurrent_compactions` moves from `CompactorOptions` to `CompactionWorkerOptions`; users setting it on `CompactorOptions` must move it to the `CompactionWorkerOptions` of the embedded or remote worker.
+- **Public API**: DB read/write API unchanged. `CompactionWorkerBuilder` and `CompactionWorkerHandle` are additive. **Breaking:** execution-only knobs (`max_sst_size`, `max_fetch_tasks`, `max_concurrent_compactions`) move from `CompactorOptions` to `CompactionWorkerOptions`. Users setting any of these on `CompactorOptions` must move them onto the embedded worker via `CompactorOptions::worker` (or onto the remote worker's `CompactionWorkerOptions`).
 - **Rolling upgrades**: Upgrade coordinator first, then start workers. Old standalone compactors safely ignore new fields.
 
 ## Testing
@@ -526,7 +539,7 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 Phases:
 1. **Schema extension:** add `WorkerSpec` containing `worker_id` and `last_heartbeat_ms` to `Compaction` in `compactor.fbs`.
 2. **Manifest Commit Protocol:** coordinator merges compactions with `Compacted` status from remote workers, transitions them to either `Failed` or `Completed`, and commits their output to the manifest.
-3. **Worker implementation:** implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`. Move `max_concurrent_compactions` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
+3. **Worker implementation:** implement `CompactionWorkerBuilder` and `CompactionWorker`; coordinator always uses `CompactionWorker`. Move `max_concurrent_compactions`, `max_sst_size`, `max_fetch_tasks` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
 4. **Failure detection:** heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
 
 ### Docs Updates

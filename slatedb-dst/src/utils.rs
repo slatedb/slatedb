@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use rand::Rng;
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, DbReaderOptions, GarbageCollectorDirectoryOptions,
-    GarbageCollectorOptions, GarbageCollectorScheduleOptions, SizeTieredCompactionSchedulerOptions,
+    CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions,
+    GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,
+    SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{DbRand, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -95,16 +96,18 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         poll_interval: rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         manifest_update_timeout: rng
             .random_range(Duration::from_millis(100)..Duration::from_secs(60)),
-        max_sst_size: rng.random_range(KIB_8..GIB_2),
         max_concurrent_compactions: rng.random_range(1..=4),
-        max_fetch_tasks: rng.random_range(1..=8),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
             min_compaction_sources,
             max_compaction_sources,
             include_size_threshold: rng.random_range(2.0..=8.0),
         }
         .into(),
-        embedded_worker: true,
+        worker: Some(CompactionWorkerOptions {
+            max_sst_size: rng.random_range(KIB_8..GIB_2),
+            max_fetch_tasks: rng.random_range(1..=8),
+            ..CompactionWorkerOptions::default()
+        }),
     }
 }
 
