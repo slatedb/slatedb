@@ -104,6 +104,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
             include_size_threshold: rng.random_range(2.0..=8.0),
         }
         .into(),
+        metric_level: None,
     }
 }
 
@@ -134,6 +135,7 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
         detach_options: Some(GarbageCollectorScheduleOptions {
             interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
         }),
+        metric_level: None,
     }
 }
 
