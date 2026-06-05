@@ -1542,7 +1542,6 @@ mod tests {
             let options =
                 Settings::from_env("SLATEDB_").expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
-            assert_eq!(MetricLevel::Info, options.metric_level);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1563,6 +1562,12 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_db_options_default_metric_level() {
+        let options = Settings::default();
+        assert_eq!(MetricLevel::default(), options.metric_level);
     }
 
     #[test]
@@ -1619,6 +1624,7 @@ mod tests {
                 "config.toml",
                 r#"
 flush_interval = "1s"
+metric_level = "Debug"
 [object_store_cache_options]
 root_folder = "/tmp/slatedb-root"
 "#,
@@ -1628,6 +1634,7 @@ root_folder = "/tmp/slatedb-root"
             let options = Settings::from_file("config.toml")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
+            assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1643,6 +1650,7 @@ root_folder = "/tmp/slatedb-root"
                 "config.yaml",
                 r#"
 flush_interval: "1s"
+metric_level: Debug
 object_store_cache_options:
     root_folder: "/tmp/slatedb-root"
 "#,
@@ -1652,6 +1660,7 @@ object_store_cache_options:
             let options = Settings::from_file("config.yaml")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
+            assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
