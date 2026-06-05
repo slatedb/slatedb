@@ -14,6 +14,7 @@ Table of Contents:
   - [Persistence & Schema](#persistence--schema)
   - [Boundary Selection (Heuristic)](#boundary-selection-heuristic)
   - [Configuration](#configuration)
+  - [Compaction Filters](#compaction-filters)
 - [Impact Analysis](#impact-analysis)
 - [Operations](#operations)
   - [Performance & Cost](#performance--cost)
@@ -27,7 +28,7 @@ Table of Contents:
 
 <!-- TOC end -->
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
@@ -35,9 +36,11 @@ Authors:
 
 ## Summary
 
-This RFC proposes subcompactions, which can execute one logical compaction as
-multiple, non-overlapping key-range compactions in parallel. Subcompactions are
-a new durable concept to allow resuming compactions at the subcompaction level.
+This RFC proposes subcompactions, compactions over non-overlapping sub-ranges
+of the key space, persisted durably as part of a logical parent compaction.
+Partitioning a logical compaction into subcompactions lets us execute the
+sub-ranges in parallel while still still resuming a compaction at subcompaction
+granularity after a failure.
 
 ## Motivation
 
@@ -53,7 +56,8 @@ compactions](https://github.com/slatedb/slatedb/blob/main/rfcs/0025-distributed-
 Distributed compactions allow concurrent compactions to execute on multiple workers
 while subcompactions allow an individual worker to parallelize execution of a single
 compaction. We can eventually extend SlateDB to allow subcompactions to execute
-on the distributed worker framework, but that is out of scope for this RFC.
+on separate workers within the distributed worker framework, but that is out of
+scope for this RFC.
 
 ## Goals
 
@@ -265,6 +269,17 @@ We could optionally introduce `max_concurrent_subcompactions` to allow schedulin
 subcompactions than we run concurrently actively, but until we decide to integrate this
 with the distributed compaction worker framework I think it's better to delay that.
 
+### Compaction Filters
+
+Each subcompaction creates its own `CompactionFilter` via the supplier and invokes
+`on_compaction_end` once when its sub-range is exhausted, so a logical compaction now fires
+`on_compaction_end` once per subcompaction (concurrently) rather than once overall. This is
+safe for the documented use cases of the hook—flushing state, logging statistics, or cleaning
+up resources—since each is naturally scoped to the entries that instance observed, and it
+generalizes the existing resume contract where a resumed compaction already builds a fresh
+filter that observes only a partial key stream. Filters that instead need to aggregate across
+the full keyspace must do so via shared state on the `CompactionFilterSupplier`.
+
 ## Impact Analysis
 
 SlateDB features and components that this RFC interacts with. Check all that apply.
@@ -412,6 +427,7 @@ to optimize a single sub-compaction we could also apply parallelism within a
 single subcompaction (or a top level compaction, which shares the same logic).
 
 ## Open Questions
+
 
 ## References
 
