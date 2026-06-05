@@ -102,7 +102,7 @@ impl BlockFormat {
 }
 
 impl SsTableFormat {
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'static> {
         let mut builder = EncodedSsTableBuilder::new(
             self.block_size,
             self.min_filter_keys,
