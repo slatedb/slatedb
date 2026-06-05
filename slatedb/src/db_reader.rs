@@ -1466,7 +1466,7 @@ mod tests {
             .and_then(|s| s.downcast_ref::<crate::error::SlateDBError>());
         assert!(matches!(
             source,
-            Some(crate::error::SlateDBError::SegmentExtractorRequired)
+            Some(crate::error::SlateDBError::SegmentExtractorMismatch { .. })
         ));
     }
 

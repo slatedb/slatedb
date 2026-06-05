@@ -63,13 +63,13 @@ impl DbStatus {
     /// [`Db`](crate::Db) validates its extractor at open time, so this method
     /// never errors for a writer.
     pub fn list_segments(&self) -> Result<Vec<SegmentPrefix>, crate::Error> {
-        let db_is_segmented = self
-            .current_manifest
-            .core()
-            .segment_extractor_name
-            .is_some();
-        if db_is_segmented && !self.has_segment_extractor {
-            return Err(SlateDBError::SegmentExtractorRequired.into());
+        let persisted_extractor = self.current_manifest.core().segment_extractor_name.clone();
+        if persisted_extractor.is_some() && !self.has_segment_extractor {
+            return Err(SlateDBError::SegmentExtractorMismatch {
+                persisted: persisted_extractor,
+                configured: None,
+            }
+            .into());
         }
         let mut set: BTreeSet<Bytes> = self
             .current_manifest
@@ -383,7 +383,7 @@ mod tests {
         let source = std::error::Error::source(&err).and_then(|s| s.downcast_ref::<SlateDBError>());
         assert!(matches!(
             source,
-            Some(SlateDBError::SegmentExtractorRequired)
+            Some(SlateDBError::SegmentExtractorMismatch { .. })
         ));
     }
 
