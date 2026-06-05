@@ -8205,17 +8205,13 @@ mod tests {
         // or the first put deadlocks on backpressure. We keep max_unflushed_bytes
         // small so the *unflushed-data* backpressure path still triggers when
         // the 16KB frozen memtable exceeds it.
-        let min_buffer_capacity = MIN_WRITE_BUFFER_SIZE; // headroom for data
         let db = Db::builder(
             "/tmp/test_txn_conflict_commit_seq_gap_blocks_l0_manifest_retirement",
             object_store,
         )
         .with_seed(REPRO_SEED)
         .with_settings(options)
-        .with_write_buffer_manager(ByteBufferManager::new(
-            min_buffer_capacity,
-            min_buffer_capacity,
-        ))
+        .with_write_buffer_manager(ByteBufferManager::new(usize::MAX, usize::MAX))
         .build()
         .await
         .unwrap();

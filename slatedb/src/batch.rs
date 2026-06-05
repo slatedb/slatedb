@@ -56,6 +56,7 @@ pub struct WriteBatch {
     pub(crate) op_count: usize,
     pub(crate) txn_id: Option<Uuid>,
     pub(crate) has_merge_ops: bool,
+    pub(crate) write_buffer_permit: Option<Arc<ByteBufferPermit>>,
 }
 
 impl Default for WriteBatch {
@@ -74,25 +75,9 @@ pub(crate) enum WriteOp {
 impl Clone for WriteOp {
     fn clone(&self) -> Self {
         match self {
-            WriteOp::Put {
-                key,
-                value,
-                options,
-            } => WriteOp::Put {
-                key: key.clone(),
-                value: value.clone(),
-                options: options.clone(),
-            },
-            WriteOp::Delete { key } => WriteOp::Delete { key: key.clone() },
-            WriteOp::Merge {
-                key,
-                value,
-                options,
-            } => WriteOp::Merge {
-                key: key.clone(),
-                value: value.clone(),
-                options: options.clone(),
-            },
+            WriteOp::Put(value, options) => WriteOp::Put(value.clone(), options.clone()),
+            WriteOp::Delete => WriteOp::Delete,
+            WriteOp::Merge(value, options) => WriteOp::Merge(value.clone(), options.clone()),
         }
     }
 }
@@ -100,31 +85,9 @@ impl Clone for WriteOp {
 impl PartialEq for WriteOp {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (
-                WriteOp::Put {
-                    key: k1,
-                    value: v1,
-                    options: o1,
-                },
-                WriteOp::Put {
-                    key: k2,
-                    value: v2,
-                    options: o2,
-                },
-            ) => k1 == k2 && v1 == v2 && o1 == o2,
-            (WriteOp::Delete { key: k1 }, WriteOp::Delete { key: k2 }) => k1 == k2,
-            (
-                WriteOp::Merge {
-                    key: k1,
-                    value: v1,
-                    options: o1,
-                },
-                WriteOp::Merge {
-                    key: k2,
-                    value: v2,
-                    options: o2,
-                },
-            ) => k1 == k2 && v1 == v2 && o1 == o2,
+            (WriteOp::Put(v1, o1), WriteOp::Put(v2, o2)) => v1 == v2 && o1 == o2,
+            (WriteOp::Delete, WriteOp::Delete) => true,
+            (WriteOp::Merge(v1, o1), WriteOp::Merge(v2, o2)) => v1 == v2 && o1 == o2,
             _ => false,
         }
     }
@@ -189,24 +152,15 @@ impl WriteOp {
                 seq,
                 create_ts,
                 expire_ts,
-            },
-            WriteOp::Merge { key, value, .. } => RowEntry {
-                key: key.clone(),
-                value: ValueDeletable::Merge(value.clone()),
-                seq,
-                create_ts,
-                expire_ts,
-            },
+            ),
         }
     }
 
     /// Returns the estimated key/value byte size of this write operation
-    pub(crate) fn estimated_kv_size(&self) -> usize {
+    pub(crate) fn estimated_kv_size(&self, key: &Bytes) -> usize {
         match self {
-            WriteOp::Put { key, value, .. } | WriteOp::Merge { key, value, .. } => {
-                key.len() + value.len()
-            }
-            WriteOp::Delete { key } => key.len(),
+            WriteOp::Put(value, _) | WriteOp::Merge(value, _) => key.len() + value.len(),
+            WriteOp::Delete => key.len(),
         }
     }
 }
@@ -218,6 +172,7 @@ impl WriteBatch {
             op_count: 0,
             txn_id: None,
             has_merge_ops: false,
+            write_buffer_permit: None,
         }
     }
 
@@ -227,6 +182,7 @@ impl WriteBatch {
             op_count: self.op_count,
             txn_id: Some(txn_id),
             has_merge_ops: self.has_merge_ops,
+            write_buffer_permit: self.write_buffer_permit,
         }
     }
 
@@ -394,7 +350,7 @@ impl WriteBatch {
     /// When `extractor` is `None`, the returned prefix set is empty.
     #[allow(clippy::panic)]
     pub(crate) async fn extract_entries(
-        &mut self,
+        &self,
         seq: u64,
         now: i64,
         default_ttl: Option<u64>,
@@ -468,7 +424,14 @@ impl WriteBatch {
     /// Currently we don't track the size of the channel that the WriteBatch is
     /// sent to so we only account for the key/value size here.
     pub(crate) fn estimated_size(&self) -> usize {
-        self.ops.values().map(|op| op.estimated_kv_size()).sum()
+        self.ops
+            .iter()
+            .map(|(key, ops)| {
+                ops.iter()
+                    .map(|op| op.estimated_kv_size(key))
+                    .sum::<usize>()
+            })
+            .sum()
     }
 }
 
