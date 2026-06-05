@@ -504,17 +504,10 @@ A reader that has no extractor configured cannot truthfully list all segments:
 its WAL-replayed memtables carry no touched prefixes, so the returned
 list would silently omit segments that are not persisted in the manifest.
 The implementation therefore rejects listing segments for readers without an
-extractor with a typed error.
+extractor with typed error `SegmentExtractorMismatch`. The same error is already
+used when a writer opens a segmented database without a prefix extractor.
 
-A new error variant is added:
-
-```rust
-#[error("listing segments requires a configured segment extractor")]
-SegmentExtractorRequired,
-```
-
-This variant maps to `ErrorKind::Invalid` via `Error::invalid(msg)`,
-matching the other extractor-related variants.
+This variant maps to `ErrorKind::Invalid` via `Error::invalid(msg)`.
 
 `DbStatus` received from the writer (`Db`) never raises this error.
 The writer's open-time validation in `DbBuilder::build` already guarantees
@@ -543,7 +536,7 @@ A reader opened with no extractor against the same segmented database:
 
 ```rust
 db_status.list_segments()
-// -> Err(SegmentExtractorRequired) [ErrorKind::Invalid]
+// -> Err(SegmentExtractorMismatch) [ErrorKind::Invalid]
 ```
 
 A reader opened with the matching extractor:
