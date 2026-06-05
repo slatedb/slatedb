@@ -534,16 +534,15 @@ pub trait DbMetadataOps {
     ///
     /// The status also exposes the segment prefixes (RFC-0024) known to the
     /// handle via [`DbStatus::list_segments`](crate::DbStatus::list_segments),
-    /// which returns the persisted set (`Remote`) or the union of persisted and
-    /// in-memory prefixes not yet folded into the manifest (`Memory`). For
-    /// example, you can wait for a segment to appear:
+    /// which returns all segments — the union of those in the manifest and those
+    /// touched in the memtables but not yet flushed. For example, you can wait
+    /// for a segment to appear:
     ///
     /// ```ignore
-    /// use slatedb::config::DurabilityLevel;
     /// let want = b"prefix".to_vec();
     /// let mut rx = db.subscribe();
     /// rx.wait_for(|s| {
-    ///     s.list_segments(DurabilityLevel::Memory)
+    ///     s.list_segments()
     ///         .map(|segs| segs.iter().any(|seg| seg.prefix == want))
     ///         .unwrap_or(false)
     /// })

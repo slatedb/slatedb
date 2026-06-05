@@ -661,7 +661,7 @@ impl DbStateReader for DbStateView {
 /// Union of the segment prefixes (RFC-0024) touched across a handle's live
 /// memtables — the active memtable plus every immutable memtable.
 ///
-/// Used to (re)establish or shrink the published in-memory segment set at the
+/// Used to (re)establish or shrink the published memtable segment set at the
 /// points where the live-memtable set changes in a way a single write cannot
 /// express: open / WAL replay / checkpoint refresh, and right after a flush pops
 /// a memtable and folds its prefixes into the manifest. Recomputing the union

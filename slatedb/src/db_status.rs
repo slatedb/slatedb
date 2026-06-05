@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use bytes::Bytes;
 use tokio::sync::watch;
 
-use crate::config::DurabilityLevel;
 use crate::error::SlateDBError;
 use crate::manifest::VersionedManifest;
 use crate::utils::WatchableOnceCell;
@@ -35,45 +34,43 @@ pub struct DbStatus {
     /// The current in-memory manifest snapshot observed by this handle,
     /// paired with its manifest version ID.
     pub current_manifest: VersionedManifest,
-    /// In-memory segment prefixes (RFC-0024) touched by writes or WAL replay on
-    /// this handle that have not yet been folded into the manifest. Empty when
-    /// no segment extractor is configured. Read it via
-    /// [`DbStatus::list_segments`], which merges in the persisted segments.
-    inmemory_segments: Vec<SegmentPrefix>,
+    /// Segment prefixes (RFC-0024) touched by writes or WAL replay in this
+    /// handle's memtables but not yet flushed to the manifest. Empty when no
+    /// segment extractor is configured. Read it via
+    /// [`DbStatus::list_segments`], which merges in the segments in the manifest.
+    memtable_segments: Vec<SegmentPrefix>,
     /// Whether this handle has a segment extractor configured. Determines
-    /// whether [`list_segments`](DbStatus::list_segments) can satisfy a
-    /// [`DurabilityLevel::Memory`] request.
+    /// whether [`list_segments`](DbStatus::list_segments) can derive the
+    /// segments in the memtables.
     has_segment_extractor: bool,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
 }
 
 impl DbStatus {
-    /// List segment prefixes (RFC-0024) at the requested durability level.
-    ///
-    /// - [`DurabilityLevel::Remote`]: only segments persisted in the current
-    ///   manifest.
-    /// - [`DurabilityLevel::Memory`]: persisted segments plus in-memory
-    ///   prefixes not yet flushed to object storage.
+    /// List all segment prefixes (RFC-0024): those in the current manifest
+    /// unioned with those touched in this handle's memtables but not yet
+    /// flushed.
     ///
     /// The result is sorted ascending by prefix and deduplicated.
     ///
-    /// [`DurabilityLevel::Remote`] always succeeds — the persisted segments come
-    /// from the manifest and need no extractor, so a handle without one still
-    /// observes them.
-    ///
     /// # Errors
     ///
-    /// Returns an error only when [`DurabilityLevel::Memory`] is requested on a
-    /// *segmented* database whose handle has no segment extractor configured —
-    /// the in-memory set cannot be derived, so the answer would be silently
-    /// incomplete. This can happen for a [`DbReader`](crate::DbReader) opened
-    /// without an extractor; a [`Db`](crate::Db) validates its extractor at open
-    /// time, so this method never errors for a writer.
-    pub fn list_segments(
-        &self,
-        durability_level: DurabilityLevel,
-    ) -> Result<Vec<SegmentPrefix>, crate::Error> {
+    /// Returns an error on a *segmented* database whose handle has no segment
+    /// extractor configured — the memtable segments cannot be derived, so the
+    /// answer would be silently incomplete. This can happen for a
+    /// [`DbReader`](crate::DbReader) opened without an extractor; a
+    /// [`Db`](crate::Db) validates its extractor at open time, so this method
+    /// never errors for a writer.
+    pub fn list_segments(&self) -> Result<Vec<SegmentPrefix>, crate::Error> {
+        let db_is_segmented = self
+            .current_manifest
+            .core()
+            .segment_extractor_name
+            .is_some();
+        if db_is_segmented && !self.has_segment_extractor {
+            return Err(SlateDBError::SegmentExtractorRequired.into());
+        }
         let mut set: BTreeSet<Bytes> = self
             .current_manifest
             .core()
@@ -81,17 +78,7 @@ impl DbStatus {
             .iter()
             .map(|segment| segment.prefix().clone())
             .collect();
-        if matches!(durability_level, DurabilityLevel::Memory) {
-            let db_is_segmented = self
-                .current_manifest
-                .core()
-                .segment_extractor_name
-                .is_some();
-            if db_is_segmented && !self.has_segment_extractor {
-                return Err(SlateDBError::SegmentExtractorRequired.into());
-            }
-            set.extend(self.inmemory_segments.iter().map(|s| s.prefix.clone()));
-        }
+        set.extend(self.memtable_segments.iter().map(|s| s.prefix.clone()));
         Ok(set
             .into_iter()
             .map(|prefix| SegmentPrefix { prefix })
@@ -135,7 +122,7 @@ impl DbStatusManager {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
             current_manifest: initial_manifest,
-            inmemory_segments: Vec::new(),
+            memtable_segments: Vec::new(),
             has_segment_extractor,
             close_reason: None,
         });
@@ -167,7 +154,7 @@ impl DbStatusManager {
         });
     }
 
-    /// Replace the published set of in-memory segment prefixes (RFC-0024) with
+    /// Replace the published set of memtable segment prefixes (RFC-0024) with
     /// the union over the handle's currently live memtables. This is the path
     /// that lets the set *shrink*: it is called when establishing the set (open
     /// / WAL replay / checkpoint refresh) and right after a flush pops a memtable
@@ -180,8 +167,8 @@ impl DbStatusManager {
             .map(|prefix| SegmentPrefix { prefix })
             .collect();
         self.tx.send_if_modified(|s| {
-            if s.inmemory_segments != segments {
-                s.inmemory_segments = segments;
+            if s.memtable_segments != segments {
+                s.memtable_segments = segments;
                 true
             } else {
                 false
@@ -189,7 +176,7 @@ impl DbStatusManager {
         });
     }
 
-    /// Add newly touched in-memory segment prefixes (RFC-0024) to the published
+    /// Add newly touched memtable segment prefixes (RFC-0024) to the published
     /// set. This is the write-path counterpart to
     /// [`Self::report_memtable_segments`]: a write can only *grow* the set, so
     /// rather than recomputing the full union over all live memtables on the hot
@@ -205,10 +192,10 @@ impl DbStatusManager {
             let mut changed = false;
             for prefix in prefixes {
                 if let Err(idx) = s
-                    .inmemory_segments
+                    .memtable_segments
                     .binary_search_by(|sp| sp.prefix.cmp(&prefix))
                 {
-                    s.inmemory_segments.insert(idx, SegmentPrefix { prefix });
+                    s.memtable_segments.insert(idx, SegmentPrefix { prefix });
                     changed = true;
                 }
             }
@@ -299,10 +286,10 @@ mod tests {
         }
     }
 
-    /// The published in-memory segments as an order-independent set (ordering is
+    /// The published memtable segments as an order-independent set (ordering is
     /// a property of `list_segments`, not of the raw field).
     fn segment_set(status: &DbStatus) -> BTreeSet<SegmentPrefix> {
-        status.inmemory_segments.iter().cloned().collect()
+        status.memtable_segments.iter().cloned().collect()
     }
 
     #[test]
@@ -314,10 +301,7 @@ mod tests {
         let status = mgr.status();
 
         // then
-        assert!(status
-            .list_segments(DurabilityLevel::Remote)
-            .unwrap()
-            .is_empty());
+        assert!(status.list_segments().unwrap().is_empty());
     }
 
     #[test]
@@ -331,27 +315,13 @@ mod tests {
 
         // then
         assert_eq!(
-            status.list_segments(DurabilityLevel::Remote).unwrap(),
+            status.list_segments().unwrap(),
             vec![segment_prefix(b"a"), segment_prefix(b"b")]
         );
     }
 
     #[test]
-    fn should_list_only_manifest_segments_for_remote() {
-        // given
-        let mgr =
-            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]), true);
-        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"c")]));
-
-        // when
-        let remote = mgr.status().list_segments(DurabilityLevel::Remote).unwrap();
-
-        // then
-        assert_eq!(remote, vec![segment_prefix(b"a"), segment_prefix(b"b")]);
-    }
-
-    #[test]
-    fn should_union_and_dedup_segments_for_memory() {
+    fn should_union_and_dedup_segments() {
         // given
         let mgr =
             DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]), true);
@@ -361,11 +331,11 @@ mod tests {
         ]));
 
         // when
-        let memory = mgr.status().list_segments(DurabilityLevel::Memory).unwrap();
+        let segments = mgr.status().list_segments().unwrap();
 
         // then
         assert_eq!(
-            memory,
+            segments,
             vec![
                 segment_prefix(b"a"),
                 segment_prefix(b"b"),
@@ -375,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn should_return_sorted_segments_for_memory() {
+    fn should_return_sorted_segments() {
         // given
         let mgr =
             DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"d", b"b"]), true);
@@ -385,11 +355,11 @@ mod tests {
         ]));
 
         // when
-        let memory = mgr.status().list_segments(DurabilityLevel::Memory).unwrap();
+        let segments = mgr.status().list_segments().unwrap();
 
         // then
         assert_eq!(
-            memory,
+            segments,
             vec![
                 segment_prefix(b"a"),
                 segment_prefix(b"b"),
@@ -400,13 +370,13 @@ mod tests {
     }
 
     #[test]
-    fn should_error_for_memory_without_extractor() {
+    fn should_error_without_extractor() {
         // given
         let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a"]), false);
         let status = mgr.status();
 
         // when
-        let err = status.list_segments(DurabilityLevel::Memory).unwrap_err();
+        let err = status.list_segments().unwrap_err();
 
         // then
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
@@ -415,10 +385,6 @@ mod tests {
             source,
             Some(SlateDBError::SegmentExtractorRequired)
         ));
-        assert_eq!(
-            status.list_segments(DurabilityLevel::Remote).unwrap(),
-            vec![segment_prefix(b"a")]
-        );
     }
 
     #[test]
@@ -434,7 +400,7 @@ mod tests {
         // then
         assert!(rx.has_changed().unwrap());
         assert_eq!(
-            rx.borrow_and_update().inmemory_segments,
+            rx.borrow_and_update().memtable_segments,
             vec![segment_prefix(b"x")]
         );
     }

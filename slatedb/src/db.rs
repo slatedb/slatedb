@@ -9606,12 +9606,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_report_new_in_memory_segments_in_subscription() {
-        use crate::config::DurabilityLevel;
-
+    async fn should_report_new_memtable_segments_in_subscription() {
         // given
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_subscribe_reports_in_memory_segments";
+        let path = "/tmp/test_subscribe_reports_memtable_segments";
         let mut settings = test_db_options(0, 16 * 1024, None);
         settings.flush_interval = None;
         let db = Db::builder(path, object_store.clone())
@@ -9621,11 +9619,7 @@ mod tests {
             .await
             .unwrap();
         let mut rx = db.subscribe();
-        assert!(rx
-            .borrow_and_update()
-            .list_segments(DurabilityLevel::Memory)
-            .unwrap()
-            .is_empty());
+        assert!(rx.borrow_and_update().list_segments().unwrap().is_empty());
         let write_opts = WriteOptions {
             await_durable: false,
             ..Default::default()
@@ -9638,7 +9632,7 @@ mod tests {
 
         // then
         rx.wait_for(|s| {
-            s.list_segments(DurabilityLevel::Memory)
+            s.list_segments()
                 .unwrap()
                 .iter()
                 .any(|seg| seg.prefix.as_ref() == b"abc")
@@ -9653,7 +9647,7 @@ mod tests {
 
         // then
         rx.wait_for(|s| {
-            s.list_segments(DurabilityLevel::Memory)
+            s.list_segments()
                 .unwrap()
                 .into_iter()
                 .map(|seg| seg.prefix)
@@ -9665,12 +9659,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_report_persisted_segments_after_flush() {
-        use crate::config::DurabilityLevel;
-
+    async fn should_report_segments_in_manifest_after_flush() {
         // given
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_flush_shrinks_in_memory_segments";
+        let path = "/tmp/test_report_segments_in_manifest_after_flush";
         let mut settings = test_db_options(0, 16 * 1024, None);
         settings.flush_interval = None;
         let db = Db::builder(path, object_store.clone())
@@ -9697,7 +9689,7 @@ mod tests {
 
         // then
         rx.wait_for(|s| {
-            s.list_segments(DurabilityLevel::Memory)
+            s.list_segments()
                 .unwrap()
                 .iter()
                 .any(|seg| seg.prefix.as_ref() == b"abc")
@@ -9714,7 +9706,7 @@ mod tests {
 
         // then
         rx.wait_for(|s| {
-            s.list_segments(DurabilityLevel::Remote)
+            s.list_segments()
                 .unwrap()
                 .into_iter()
                 .map(|seg| seg.prefix)
@@ -9723,15 +9715,6 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(
-            db.status()
-                .list_segments(DurabilityLevel::Memory)
-                .unwrap()
-                .into_iter()
-                .map(|seg| seg.prefix)
-                .collect::<Vec<_>>(),
-            vec![Bytes::from_static(b"abc")]
-        );
 
         // when
         // the segments are deleted from the manifest (as a full compaction would)
@@ -9743,15 +9726,7 @@ mod tests {
         db.inner.status_manager.report_manifest(manifest.into());
 
         // then
-        let status = db.status();
-        assert!(status
-            .list_segments(DurabilityLevel::Remote)
-            .unwrap()
-            .is_empty());
-        assert!(status
-            .list_segments(DurabilityLevel::Memory)
-            .unwrap()
-            .is_empty());
+        assert!(db.status().list_segments().unwrap().is_empty());
     }
 
     #[derive(Clone, Copy, Debug)]

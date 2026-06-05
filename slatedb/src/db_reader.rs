@@ -1257,8 +1257,8 @@ mod tests {
     use super::CheckpointState;
     use crate::clock::MonotonicClock;
     use crate::config::{
-        CheckpointOptions, CheckpointScope, DurabilityLevel, FlushOptions, FlushType, MergeOptions,
-        PutOptions, Settings, WriteOptions,
+        CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, PutOptions,
+        Settings, WriteOptions,
     };
     use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
     use crate::db_state::SsTableId;
@@ -1415,10 +1415,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_report_in_memory_segments_to_subscription() {
+    async fn should_report_memtable_segments_to_subscription() {
         // given
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_reader_subscribe_reports_in_memory_segments";
+        let path = "/tmp/test_reader_subscribe_reports_memtable_segments";
         let db = Db::builder(path, object_store.clone())
             .with_settings(Settings::default())
             .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
@@ -1448,7 +1448,7 @@ mod tests {
         // then
         let prefixes: Vec<Bytes> = reader
             .status()
-            .list_segments(DurabilityLevel::Memory)
+            .list_segments()
             .unwrap()
             .into_iter()
             .map(|seg| seg.prefix)
@@ -1460,62 +1460,7 @@ mod tests {
 
         // then
         let status = reader_no_extractor.status();
-        let err = status.list_segments(DurabilityLevel::Memory).unwrap_err();
-        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
-        let source = std::error::Error::source(&err)
-            .and_then(|s| s.downcast_ref::<crate::error::SlateDBError>());
-        assert!(matches!(
-            source,
-            Some(crate::error::SlateDBError::SegmentExtractorRequired)
-        ));
-        assert!(status
-            .list_segments(DurabilityLevel::Remote)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn should_list_remote_segments_without_extractor() {
-        // given
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_reader_lists_remote_segments_without_extractor";
-        let db = Db::builder(path, object_store.clone())
-            .with_settings(Settings::default())
-            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
-            .build()
-            .await
-            .unwrap();
-        db.put_with_options(
-            b"abc-1",
-            b"v1",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::MemTable,
-        })
-        .await
-        .unwrap();
-        db.close().await.unwrap();
-
-        // when
-        let reader = DbReader::builder(path, object_store).build().await.unwrap();
-
-        // then
-        let status = reader.status();
-        let remote: Vec<Bytes> = status
-            .list_segments(DurabilityLevel::Remote)
-            .unwrap()
-            .into_iter()
-            .map(|seg| seg.prefix)
-            .collect();
-        assert_eq!(remote, vec![Bytes::from_static(b"abc")]);
-        let err = status.list_segments(DurabilityLevel::Memory).unwrap_err();
+        let err = status.list_segments().unwrap_err();
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
         let source = std::error::Error::source(&err)
             .and_then(|s| s.downcast_ref::<crate::error::SlateDBError>());
@@ -1615,21 +1560,14 @@ mod tests {
             .unwrap();
 
         // then
-        let status = reader.status();
-        let remote: Vec<Bytes> = status
-            .list_segments(DurabilityLevel::Remote)
+        let segments: Vec<Bytes> = reader
+            .status()
+            .list_segments()
             .unwrap()
             .into_iter()
             .map(|seg| seg.prefix)
             .collect();
-        assert_eq!(remote, vec![Bytes::from_static(b"abc")]);
-        let memory: Vec<Bytes> = status
-            .list_segments(DurabilityLevel::Memory)
-            .unwrap()
-            .into_iter()
-            .map(|seg| seg.prefix)
-            .collect();
-        assert_eq!(memory, vec![Bytes::from_static(b"abc")]);
+        assert_eq!(segments, vec![Bytes::from_static(b"abc")]);
     }
 
     #[tokio::test]
