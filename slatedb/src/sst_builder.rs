@@ -102,7 +102,7 @@ impl BlockFormat {
 }
 
 impl SsTableFormat {
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'static> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         let mut builder = EncodedSsTableBuilder::new(
             self.block_size,
             self.min_filter_keys,
@@ -123,14 +123,14 @@ impl SsTableFormat {
 }
 
 /// Builds an SSTable from key-value pairs.
-pub(crate) struct EncodedSsTableBuilder<'a> {
+pub(crate) struct EncodedSsTableBuilder {
     builder: BlockBuilderWithStats,
-    index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
-    first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    index_builder: flatbuffers::FlatBufferBuilder<'static, DefaultAllocator>,
+    first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'static, u8>>>,
     sst_first_key: Option<Bytes>,
     sst_last_key: Option<Bytes>,
     current_block_max_key: Option<Bytes>,
-    block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
+    block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'static>>>,
     current_len: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
@@ -144,7 +144,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
-impl EncodedSsTableBuilder<'_> {
+impl EncodedSsTableBuilder {
     /// Create a builder based on target block size.
     pub(crate) fn new(
         block_size: usize,

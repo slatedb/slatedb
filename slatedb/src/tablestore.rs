@@ -287,7 +287,7 @@ impl TableStore {
         }
     }
 
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'static> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
     }
 
@@ -1019,7 +1019,7 @@ async fn write_sst_streaming_in_object_store(
 
 pub(crate) struct EncodedSsTableWriter {
     id: SsTableId,
-    builder: EncodedSsTableBuilder<'static>,
+    builder: EncodedSsTableBuilder,
     writer: BufWriter,
     table_store: Arc<TableStore>,
     #[cfg(test)]
