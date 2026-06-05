@@ -458,6 +458,18 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
             None;
 
         while let Some(kv) = all_iter.next().await? {
+            // Opportunistically collect a finished background close without
+            // stalling the merge loop to promptly lets us report progress
+            // and persist the newly uploaded output SST in compactor state
+            // as soon as the close finishes, rather than waiting until the
+            // next SST fills up.
+            if let Some(pending) = pending_close.take_if(|p| p.is_finished()) {
+                self.collect_close(pending, &mut output_ssts).await?;
+                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
+                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
+                last_progress_report = self.clock.now();
+            }
+
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
