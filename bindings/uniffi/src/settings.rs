@@ -353,7 +353,10 @@ flush_interval = "1s"
                 settings.inner().flush_interval,
                 Some(Duration::from_secs(1))
             );
-            assert_eq!(settings.inner().metric_level, slatedb::MetricLevel::Debug);
+            assert_eq!(
+                settings.inner().metric_level,
+                slatedb::config::MetricLevel::Debug
+            );
 
             Ok(())
         });

@@ -742,9 +742,9 @@ impl Drop for DbTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MetricLevel;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_store::memory::InMemory;
-    use crate::MetricLevel;
     use rstest::rstest;
     use std::sync::Arc;
 

@@ -17,10 +17,10 @@ This example shows all three configuration layers in one place:
 
 ```rust
 use slatedb::{
-    config::{DbReaderOptions, ReadOptions, Settings},
+    config::{DbReaderOptions, MetricLevel, ReadOptions, Settings},
     db_cache::foyer::FoyerCache,
     object_store::{memory::InMemory, ObjectStore},
-    Db, DbReader, Error, MetricLevel,
+    Db, DbReader, Error,
 };
 use std::sync::Arc;
 use std::time::Duration;

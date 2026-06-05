@@ -21,7 +21,7 @@ all metric operations are silently discarded with nearly no overhead.
 Pass your recorder to `DbBuilder`:
 
 ```rust
-use slatedb::{Db, MetricLevel, Settings};
+use slatedb::{config::MetricLevel, Db, Settings};
 use slatedb::object_store::memory::InMemory;
 use slatedb_common::metrics::MetricsRecorder;
 use std::sync::Arc;

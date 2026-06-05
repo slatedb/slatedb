@@ -194,11 +194,12 @@ use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
 use log::warn;
 use serde::{Deserialize, Serialize, Serializer};
-use slatedb_common::metrics::MetricLevel;
 use std::collections::HashMap;
 use std::path::Path;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
+
+pub use slatedb_common::metrics::MetricLevel;
 
 use crate::error::SlateDBError;
 
