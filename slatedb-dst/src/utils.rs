@@ -98,6 +98,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         max_sst_size: rng.random_range(KIB_8..GIB_2),
         max_concurrent_compactions: rng.random_range(1..=4),
         max_fetch_tasks: rng.random_range(1..=8),
+        bytes_to_fetch: rng.random_range(KIB_8..=(8 * MIB_1)),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
             min_compaction_sources,
             max_compaction_sources,
