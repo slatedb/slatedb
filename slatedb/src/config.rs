@@ -1089,12 +1089,21 @@ pub struct CompactorOptions {
     /// more resources. The default is 4.
     pub max_fetch_tasks: usize,
 
-    /// The number of blocks to fetch in a single read-ahead request while
-    /// iterating over input SSTs during compaction. Higher values issue larger
-    /// reads against the object store, improving throughput at the cost of more
-    /// memory per fetch. The default is 512 (2MiB at the default 4KiB block
-    /// size).
-    pub blocks_to_fetch: usize,
+    /// The number of bytes to fetch in a single read-ahead request while
+    /// iterating over input SSTs during compaction. The value is rounded up to
+    /// the nearest block size when fetching from object storage. Higher values
+    /// issue larger reads against the object store, improving throughput at the
+    /// cost of more memory per fetch. The default is 2MiB.
+    ///
+    /// This works together with [`CompactorOptions::max_fetch_tasks`], which
+    /// bounds how many of these requests are in flight concurrently per input
+    /// SST. `bytes_to_fetch` is the size of each individual read-ahead request,
+    /// while `max_fetch_tasks` is how many of them run at once, so the peak
+    /// outstanding read-ahead per SST iterator is roughly
+    /// `bytes_to_fetch * max_fetch_tasks`. For example, with the defaults of
+    /// `bytes_to_fetch = 2MiB` and `max_fetch_tasks = 4`, the iterator keeps up
+    /// to four ~2MiB reads in flight, prefetching ~8MiB ahead of the cursor.
+    pub bytes_to_fetch: usize,
 
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
@@ -1113,7 +1122,7 @@ impl Default for CompactorOptions {
             max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
             max_fetch_tasks: 4,
-            blocks_to_fetch: 512,
+            bytes_to_fetch: 2 * 1024 * 1024,
             scheduler_options: HashMap::new(),
         }
     }
@@ -1131,7 +1140,7 @@ impl std::fmt::Debug for CompactorOptions {
                 &self.max_concurrent_compactions,
             )
             .field("max_fetch_tasks", &self.max_fetch_tasks)
-            .field("blocks_to_fetch", &self.blocks_to_fetch)
+            .field("bytes_to_fetch", &self.bytes_to_fetch)
             .field("scheduler_options", &self.scheduler_options)
             .finish()
     }
@@ -1163,10 +1172,18 @@ pub struct CompactionWorkerOptions {
     /// compaction. Higher values can improve throughput but use more resources.
     pub max_fetch_tasks: usize,
 
-    /// Number of blocks to fetch in a single read-ahead request while iterating
-    /// over input SSTs during compaction. The default is 512 (2MiB at the
-    /// default 4KiB block size).
-    pub blocks_to_fetch: usize,
+    /// Number of bytes to fetch in a single read-ahead request while iterating
+    /// over input SSTs during compaction. The value is rounded up to the nearest
+    /// block size when fetching from object storage. The default is 2MiB.
+    ///
+    /// This pairs with [`CompactionWorkerOptions::max_fetch_tasks`]:
+    /// `bytes_to_fetch` is the size of each read-ahead request while
+    /// `max_fetch_tasks` is how many run concurrently per input SST, so peak
+    /// outstanding read-ahead per SST iterator is roughly
+    /// `bytes_to_fetch * max_fetch_tasks`. With the defaults
+    /// (`bytes_to_fetch = 2MiB`, `max_fetch_tasks = 4`) that is ~8MiB prefetched
+    /// ahead of the cursor.
+    pub bytes_to_fetch: usize,
 }
 
 /// Default options for the compaction worker.
@@ -1180,7 +1197,7 @@ impl Default for CompactionWorkerOptions {
             heartbeat_min_interval: Duration::from_secs(5),
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
-            blocks_to_fetch: 512,
+            bytes_to_fetch: 2 * 1024 * 1024,
         }
     }
 }
