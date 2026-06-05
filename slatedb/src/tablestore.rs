@@ -1069,6 +1069,10 @@ impl EncodedSsTableWriter {
         self.builder.is_drained()
     }
 
+    pub(crate) fn id(&self) -> SsTableId {
+        self.id
+    }
+
     #[cfg(test)]
     pub(crate) fn blocks_written(&self) -> usize {
         self.blocks_written

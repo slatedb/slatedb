@@ -461,8 +461,6 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
-                // Report only the durable prefix (output_ssts); a still-in-flight
-                // close is folded in when it's drained at the next SST boundary.
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 self.send_compaction_progress(args.id, total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
@@ -485,14 +483,12 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
                     )),
                 );
                 pending_close = Some(AbortOnDropHandle::new(spawn_bg_task(
-                    "compactor_sst_close".to_string(),
+                    format!("compactor_sst_close:{:?}", finished_writer.id()),
                     &self.handle,
                     |_| {},
                     async move { finished_writer.close().await },
                 )));
                 bytes_written = 0;
-                // Report progress for the durable prefix only; the SST that is
-                // now closing is excluded until it completes.
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 self.send_compaction_progress(args.id, total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
