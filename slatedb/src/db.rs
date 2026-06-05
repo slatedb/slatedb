@@ -7681,6 +7681,7 @@ mod tests {
                 dry_run: false,
             }),
             detach_options: None,
+            metric_level: None,
         };
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())

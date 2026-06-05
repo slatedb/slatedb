@@ -168,6 +168,25 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
 use uuid::Uuid;
 
+#[derive(Clone)]
+enum BuilderMetricsRecorder {
+    Raw(Arc<dyn MetricsRecorder>),
+    Helper(MetricsRecorderHelper),
+}
+
+impl BuilderMetricsRecorder {
+    fn noop() -> Self {
+        Self::Raw(Arc::new(NoopMetricsRecorder::new()))
+    }
+
+    fn helper(&self, metric_level: MetricLevel) -> MetricsRecorderHelper {
+        match self {
+            Self::Raw(recorder) => MetricsRecorderHelper::new(recorder.clone(), metric_level),
+            Self::Helper(recorder) => recorder.clone(),
+        }
+    }
+}
+
 /// A builder for creating a new Db instance.
 ///
 /// This builder provides a fluent API for configuring and opening a SlateDB database.
@@ -419,6 +438,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             .system_clock
             .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
 
+        let metrics_recorder = self.metrics_recorder.clone();
         let recorder =
             MetricsRecorderHelper::new(self.metrics_recorder, self.settings.metric_level);
         let retrying_main_object_store = instrumented_retrying_object_store(
@@ -636,9 +656,15 @@ impl<P: Into<Path>> DbBuilder<P> {
         });
 
         if let Some(compactor_builder) = compactor_builder {
+            let compactor_metric_level = compactor_builder
+                .options
+                .metric_level
+                .unwrap_or(self.settings.metric_level);
+            let compactor_recorder =
+                MetricsRecorderHelper::new(metrics_recorder.clone(), compactor_metric_level);
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
-                .with_recorder(recorder.clone())
+                .with_recorder(compactor_recorder)
                 .with_seed(rand.rng().next_u64());
 
             if let Some(operator) = self.merge_operator {
@@ -671,9 +697,14 @@ impl<P: Into<Path>> DbBuilder<P> {
         });
 
         if let Some(gc_builder) = gc_builder {
+            let gc_metric_level = gc_builder
+                .options
+                .metric_level
+                .unwrap_or(self.settings.metric_level);
+            let gc_recorder = MetricsRecorderHelper::new(metrics_recorder.clone(), gc_metric_level);
             let gc = gc_builder
                 .with_system_clock(system_clock.clone())
-                .with_recorder(recorder.clone())
+                .with_recorder(gc_recorder)
                 .with_seed(rand.rng().next_u64())
                 .build_collector(
                     uncached_table_store.clone(),
@@ -802,7 +833,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     options: GarbageCollectorOptions,
-    recorder: MetricsRecorderHelper,
+    recorder: BuilderMetricsRecorder,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
 }
@@ -814,7 +845,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             main_object_store,
             wal_object_store: None,
             options: GarbageCollectorOptions::default(),
-            recorder: MetricsRecorderHelper::noop(),
+            recorder: BuilderMetricsRecorder::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
         }
@@ -841,13 +872,13 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
 
     /// Sets a user-provided metrics recorder for the garbage collector.
     pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
+        self.recorder = BuilderMetricsRecorder::Raw(recorder);
         self
     }
 
     /// Sets the internal recorder (used when GC is created via DbBuilder).
     pub(crate) fn with_recorder(mut self, recorder: MetricsRecorderHelper) -> Self {
-        self.recorder = recorder;
+        self.recorder = BuilderMetricsRecorder::Helper(recorder);
         self
     }
 
@@ -877,13 +908,16 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         compactions_store: Arc<CompactionsStore>,
         object_store: Arc<dyn ObjectStore>,
     ) -> GarbageCollector {
+        let recorder = self
+            .recorder
+            .helper(self.options.metric_level.unwrap_or_default());
         GarbageCollector::new(
             manifest_store,
             compactions_store,
             table_store,
             object_store,
             self.options,
-            &self.recorder,
+            &recorder,
             self.system_clock,
         )
     }
@@ -891,9 +925,12 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
+        let recorder = self
+            .recorder
+            .helper(self.options.metric_level.unwrap_or_default());
         let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
-            &self.recorder,
+            &recorder,
             ObjectStoreComponent::Gc,
             ObjectStoreType::Main,
             self.rand.clone(),
@@ -902,7 +939,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         let retrying_wal_object_store = self.wal_object_store.map(|s| {
             instrumented_retrying_object_store(
                 s,
-                &self.recorder,
+                &recorder,
                 ObjectStoreComponent::Gc,
                 ObjectStoreType::Wal,
                 self.rand.clone(),
@@ -932,7 +969,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             table_store,
             retrying_main_object_store,
             self.options,
-            &self.recorder,
+            &recorder,
             self.system_clock,
         )
     }
@@ -948,7 +985,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
-    recorder: MetricsRecorderHelper,
+    recorder: BuilderMetricsRecorder,
     system_clock: Arc<dyn SystemClock>,
     closed_result: Arc<dyn ClosedResultWriter>,
     merge_operator: Option<MergeOperatorType>,
@@ -968,7 +1005,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             options: CompactorOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
-            recorder: MetricsRecorderHelper::noop(),
+            recorder: BuilderMetricsRecorder::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             closed_result: Arc::new(WatchableOnceCell::new()),
             merge_operator: None,
@@ -1013,13 +1050,13 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
     /// Sets a user-provided metrics recorder for the compactor.
     pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
+        self.recorder = BuilderMetricsRecorder::Raw(recorder);
         self
     }
 
     /// Sets the internal recorder (used when compactor is created via DbBuilder).
     pub(crate) fn with_recorder(mut self, recorder: MetricsRecorderHelper) -> Self {
-        self.recorder = recorder;
+        self.recorder = BuilderMetricsRecorder::Helper(recorder);
         self
     }
 
@@ -1098,9 +1135,12 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
+        let recorder = self
+            .recorder
+            .helper(self.options.metric_level.unwrap_or_default());
         let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
-            &self.recorder,
+            &recorder,
             ObjectStoreComponent::Compactor,
             ObjectStoreType::Main,
             self.rand.clone(),
@@ -1138,7 +1178,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             scheduler_supplier,
             self.compaction_runtime,
             self.rand,
-            &self.recorder,
+            &recorder,
             self.system_clock,
             self.closed_result,
             self.merge_operator,
@@ -1164,6 +1204,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         ),
         SlateDBError,
     > {
+        let recorder = self
+            .recorder
+            .helper(self.options.metric_level.unwrap_or_default());
         let options = Arc::new(self.options);
         let handle = self.compaction_runtime;
         let scheduler_supplier = self
@@ -1171,7 +1214,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
         let (tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
-        let stats = Arc::new(CompactionStats::new(&self.recorder));
+        let stats = Arc::new(CompactionStats::new(&recorder));
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
                 handle,
@@ -1266,7 +1309,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
-    recorder: MetricsRecorderHelper,
+    metrics_recorder: Arc<dyn MetricsRecorder>,
 }
 
 impl<P: Into<Path>> DbReaderBuilder<P> {
@@ -1284,7 +1327,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
-            recorder: MetricsRecorderHelper::noop(),
+            metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
         }
     }
 
@@ -1347,7 +1390,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
     /// Sets the metrics recorder to use for the reader.
     pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
+        self.metrics_recorder = recorder;
         self
     }
 
@@ -1386,11 +1429,15 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
+        let recorder = MetricsRecorderHelper::new(
+            self.metrics_recorder,
+            self.options.metric_level.unwrap_or_default(),
+        );
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
         let retrying_object_store = instrumented_retrying_object_store(
             self.object_store,
-            &self.recorder,
+            &recorder,
             ObjectStoreComponent::Reader,
             ObjectStoreType::Main,
             self.rand.clone(),
@@ -1401,7 +1448,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.wal_object_store.map(|s| {
                 instrumented_retrying_object_store(
                     s,
-                    &self.recorder,
+                    &recorder,
                     ObjectStoreComponent::Reader,
                     ObjectStoreType::Wal,
                     self.rand.clone(),
@@ -1413,7 +1460,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let maybe_cached = CachedObjectStore::from_config(
             retrying_object_store.clone(),
             &self.options.object_store_cache_options,
-            &self.recorder,
+            &recorder,
             self.system_clock.clone(),
             self.rand.clone(),
         )
@@ -1437,7 +1484,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let wrapped_cache = self.db_cache.as_ref().map(|c| {
             Arc::new(DbCacheWrapper::new(
                 c.clone(),
-                &self.recorder,
+                &recorder,
                 self.system_clock.clone(),
             )) as Arc<dyn DbCache>
         });
@@ -1459,7 +1506,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.options,
             self.system_clock,
             self.rand,
-            self.recorder,
+            recorder,
         )
         .await
         .map_err(crate::Error::from)?;
@@ -1726,7 +1773,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 #[cfg(test)]
 mod tests {
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::config::Settings;
+    use crate::config::{CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings};
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
@@ -1737,7 +1784,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{
-        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder,
+        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
     };
     use std::sync::Arc;
 
@@ -1753,6 +1800,16 @@ mod tests {
             ("op", op),
             ("api", api),
         ]
+    }
+
+    fn assert_debug_metric_registered(
+        recorder: &DefaultMetricsRecorder,
+        helper: MetricsRecorderHelper,
+        name: &str,
+    ) {
+        let counter = helper.counter(name).level(MetricLevel::Debug).register();
+        counter.increment(1);
+        assert_eq!(lookup_metric(recorder, name), Some(1));
     }
 
     #[tokio::test]
@@ -1848,6 +1905,43 @@ mod tests {
             err.to_string()
                 .contains("max_wal_flushes_before_l0_flush must be at least 4096"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_standalone_maintenance_builder_metric_level_is_order_independent() {
+        let object_store = Arc::new(InMemory::new());
+
+        let compactor_options = CompactorOptions {
+            metric_level: Some(MetricLevel::Debug),
+            ..Default::default()
+        };
+        let compactor_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let compactor =
+            crate::CompactorBuilder::new("test_compactor_metric_level_order", object_store.clone())
+                .with_metrics_recorder(compactor_recorder.clone())
+                .with_options(compactor_options);
+        assert_debug_metric_registered(
+            &compactor_recorder,
+            compactor
+                .recorder
+                .helper(compactor.options.metric_level.unwrap_or_default()),
+            "test.compactor_debug_metric",
+        );
+
+        let gc_options = GarbageCollectorOptions {
+            metric_level: Some(MetricLevel::Debug),
+            ..Default::default()
+        };
+        let gc_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let gc = crate::GarbageCollectorBuilder::new("test_gc_metric_level_order", object_store)
+            .with_options(gc_options)
+            .with_metrics_recorder(gc_recorder.clone());
+        assert_debug_metric_registered(
+            &gc_recorder,
+            gc.recorder
+                .helper(gc.options.metric_level.unwrap_or_default()),
+            "test.gc_debug_metric",
         );
     }
 

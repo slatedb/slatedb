@@ -258,6 +258,7 @@ async fn exec_gc_once(
             compacted_options: None,
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         },
         GcResource::Wal => GarbageCollectorOptions {
             manifest_options: None,
@@ -266,6 +267,7 @@ async fn exec_gc_once(
             compacted_options: None,
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         },
         GcResource::WalFence => GarbageCollectorOptions {
             manifest_options: None,
@@ -274,6 +276,7 @@ async fn exec_gc_once(
             compacted_options: None,
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         },
         GcResource::Compacted => GarbageCollectorOptions {
             manifest_options: None,
@@ -282,6 +285,7 @@ async fn exec_gc_once(
             compacted_options: create_gc_dir_opts(min_age),
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         },
         GcResource::Compactions => GarbageCollectorOptions {
             manifest_options: None,
@@ -290,6 +294,7 @@ async fn exec_gc_once(
             compacted_options: None,
             compactions_options: create_gc_dir_opts(min_age),
             detach_options: None,
+            metric_level: None,
         },
     };
     admin.run_gc_once(gc_opts).await?;
@@ -318,6 +323,7 @@ async fn schedule_gc(
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
         compactions_options: compactions_schedule.and_then(create_gc_dir_opts),
         detach_options: None,
+        metric_level: None,
     };
 
     admin.run_gc(gc_opts).await?;

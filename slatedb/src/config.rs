@@ -1026,6 +1026,10 @@ pub struct DbReaderOptions {
     ///
     /// Defaults to false.
     pub skip_wal_replay: bool,
+
+    /// Optional metrics reporting level for standalone readers. Defaults to
+    /// [`MetricLevel::default`] when unset.
+    pub metric_level: Option<MetricLevel>,
 }
 
 impl Default for DbReaderOptions {
@@ -1036,6 +1040,7 @@ impl Default for DbReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
+            metric_level: None,
         }
     }
 }
@@ -1106,6 +1111,11 @@ pub struct CompactorOptions {
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
+
+    /// Optional metrics reporting level for standalone compactors. When a
+    /// compactor is owned by a [`Settings`] configured DB, unset means inherit
+    /// [`Settings::metric_level`].
+    pub metric_level: Option<MetricLevel>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -1121,6 +1131,7 @@ impl Default for CompactorOptions {
             max_concurrent_compactions: 4,
             max_fetch_tasks: 4,
             scheduler_options: HashMap::new(),
+            metric_level: None,
         }
     }
 }
@@ -1167,6 +1178,10 @@ pub struct CompactionWorkerOptions {
     /// Maximum number of concurrent tasks for fetching SST blocks during
     /// compaction. Higher values can improve throughput but use more resources.
     pub max_fetch_tasks: usize,
+
+    /// Optional metrics reporting level for standalone compaction workers.
+    /// Defaults to [`MetricLevel::default`] when unset.
+    pub metric_level: Option<MetricLevel>,
 }
 
 /// Default options for the compaction worker.
@@ -1180,6 +1195,7 @@ impl Default for CompactionWorkerOptions {
             heartbeat_min_interval: Duration::from_secs(5),
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
+            metric_level: None,
         }
     }
 }
@@ -1328,6 +1344,11 @@ pub struct GarbageCollectorOptions {
     ///
     /// None means detach is disabled.
     pub detach_options: Option<GarbageCollectorScheduleOptions>,
+
+    /// Optional metrics reporting level for standalone garbage collectors. When
+    /// a garbage collector is owned by a [`Settings`] configured DB, unset means
+    /// inherit [`Settings::metric_level`].
+    pub metric_level: Option<MetricLevel>,
 }
 
 impl GarbageCollectorOptions {
@@ -1427,6 +1448,7 @@ impl Default for GarbageCollectorOptions {
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
             detach_options: Some(GarbageCollectorScheduleOptions::default()),
+            metric_level: None,
         }
     }
 }

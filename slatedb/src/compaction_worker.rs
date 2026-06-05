@@ -46,7 +46,7 @@ use crate::rand::DbRand;
 use crate::tablestore::TableStore;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-use slatedb_common::metrics::{MetricLevel, MetricsRecorder, MetricsRecorderHelper};
+use slatedb_common::metrics::{MetricsRecorder, MetricsRecorderHelper, NoopMetricsRecorder};
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
@@ -135,7 +135,7 @@ pub struct CompactionWorkerBuilder<P: Into<Path>> {
     worker_runtime: Option<Handle>,
     options: CompactionWorkerOptions,
     rand: Arc<DbRand>,
-    recorder: MetricsRecorderHelper,
+    metrics_recorder: Arc<dyn MetricsRecorder>,
     system_clock: Arc<dyn SystemClock>,
     merge_operator: Option<MergeOperatorType>,
     #[cfg(feature = "compaction_filters")]
@@ -150,7 +150,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             worker_runtime: None,
             options: CompactionWorkerOptions::default(),
             rand: Arc::new(DbRand::default()),
-            recorder: MetricsRecorderHelper::noop(),
+            metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
             merge_operator: None,
             #[cfg(feature = "compaction_filters")]
@@ -179,7 +179,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     }
 
     pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
+        self.metrics_recorder = recorder;
         self
     }
 
@@ -208,7 +208,11 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             path,
             None,
         ));
-        let stats = Arc::new(CompactionStats::new(&self.recorder));
+        let recorder = MetricsRecorderHelper::new(
+            self.metrics_recorder,
+            self.options.metric_level.unwrap_or_default(),
+        );
+        let stats = Arc::new(CompactionStats::new(&recorder));
         let worker_runtime = self.worker_runtime.unwrap_or_else(Handle::current);
         let options = Arc::new(self.options);
         let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
