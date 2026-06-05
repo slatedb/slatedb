@@ -95,7 +95,7 @@ The `ByteBufferManager` addresses these opportunities by:
   - This will not track buffers used for compaction.
   - DbReader instances should be able to use the memory budget in future interactions. 
 - The buffer memory limits should be observed as strictly as possible. Erroring towards over counting if needed. KVTable and other container struct allocation size do not count towards this.
-- Provide an RAII permit lifecycle: acquire before write, release on memtable
+- Provide an RAII permit lifecycle: acquire before write, release on memtable abd WAL
   drop.
 - Complement (not replace) the existing `max_unflushed_bytes` backpressure.
 - Avoid locking the database state for budget tracking.
