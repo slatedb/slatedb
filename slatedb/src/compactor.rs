@@ -577,7 +577,11 @@ impl CompactorEventHandler {
         let mut total_bytes_processed = 0u64;
         let mut total_elapsed_secs = 0.0f64;
 
-        for compaction in self.state().active_compactions() {
+        for compaction in self
+            .state()
+            .active_compactions()
+            .filter(|c| c.status() != CompactionStatus::Compacted)
+        {
             let estimated_source_bytes =
                 Self::calculate_estimated_source_bytes(compaction, db_state);
             total_estimated_bytes += estimated_source_bytes;
@@ -632,12 +636,11 @@ impl CompactorEventHandler {
         self.stats.total_throughput.set(total_throughput as i64);
     }
 
-    /// Returns 0 for any source that is no longer present in the manifest
-    /// (e.g. already committed by a worker) — this is a metrics-only path.
+    /// Calculates the estimated total source bytes for a compaction.
     fn calculate_estimated_source_bytes(compaction: &Compaction, db_state: &ManifestCore) -> u64 {
-        let Some(tree) = db_state.tree_for_segment(compaction.spec().segment()) else {
-            return 0;
-        };
+        let tree = db_state
+            .tree_for_segment(compaction.spec().segment())
+            .expect("compaction target segment missing from manifest");
 
         let views_by_id: HashMap<Ulid, &SsTableView> =
             tree.l0.iter().map(|view| (view.id, view)).collect();
@@ -649,12 +652,14 @@ impl CompactorEventHandler {
             .sources()
             .iter()
             .map(|source| match source {
-                SourceId::SstView(id) => {
-                    views_by_id.get(id).map(|v| v.estimate_size()).unwrap_or(0)
-                }
-                SourceId::SortedRun(id) => {
-                    srs_by_id.get(id).map(|sr| sr.estimate_size()).unwrap_or(0)
-                }
+                SourceId::SstView(id) => views_by_id
+                    .get(id)
+                    .expect("compaction source view not found in L0")
+                    .estimate_size(),
+                SourceId::SortedRun(id) => srs_by_id
+                    .get(id)
+                    .expect("compaction source sorted run not found")
+                    .estimate_size(),
             })
             .sum()
     }
@@ -842,10 +847,7 @@ impl CompactorEventHandler {
             // being validated (and would see itself), Compacted is pending commit.
             let active_l0_in_same_segment = self
                 .state()
-                .compactions_with_status(&[
-                    CompactionStatus::Scheduled,
-                    CompactionStatus::Running,
-                ])
+                .compactions_with_status(&[CompactionStatus::Scheduled, CompactionStatus::Running])
                 .any(|c| c.spec().has_l0_sources() && c.spec().segment() == target_segment);
             if active_l0_in_same_segment {
                 warn!(
