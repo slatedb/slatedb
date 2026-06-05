@@ -3276,6 +3276,7 @@ dependencies = [
  "siphasher",
  "slatedb-common",
  "slatedb-txn-obj",
+ "smallvec",
  "snap",
  "sysinfo",
  "tempfile",

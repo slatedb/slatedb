@@ -17,6 +17,7 @@ use serde::Serialize;
 use slatedb_txn_obj::DirtyObject;
 use uuid::Uuid;
 
+pub(crate) mod invariants;
 pub(crate) mod store;
 
 pub use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -510,6 +511,41 @@ impl ManifestCore {
                 .ok()?;
             Some(Arc::make_mut(&mut self.segments[idx].tree))
         }
+    }
+
+    /// The max L0 ULID watermark across all trees (the unsegmented root and
+    /// every segment), or `None` for a fresh manifest with no L0 history.
+    ///
+    /// This mirrors the GC's `newest_l0_dt` (see
+    /// `garbage_collector::compacted_gc`) exactly, so the cutoff invariant
+    /// compares against the same watermark the GC uses to delete compacted SSTs.
+    /// Per tree: if the tree has active L0s, take the max of their physical SST
+    /// ULIDs (`view.sst.id.unwrap_compacted_id()` — the ID the GC keys its cutoff
+    /// and deletion filter off, *not* the separately-allocated `view.id`);
+    /// otherwise fall back to that tree's `last_compacted_l0_sst_view_id` marker.
+    /// The result is the max of those per-tree values across the unsegmented root
+    /// and every segment. Returned as a `Ulid` (not a raw timestamp) so the L0
+    /// cutoff invariant ([`l0_ulid_cutoff`](crate::manifest::invariants::l0_ulid_cutoff))
+    /// and the open-time skew check share one definition of the watermark.
+    // TODO: Wire this into the manifest update path in a follow-up PR for
+    // https://github.com/slatedb/slatedb/issues/1707
+    // until then unit-tested via `l0_ulid_cutoff`.
+    #[allow(dead_code)]
+    pub(crate) fn max_l0_ulid_timestamp_across_trees(&self) -> Option<ulid::Ulid> {
+        self.trees()
+            .filter_map(|tree| {
+                if tree.l0.is_empty() {
+                    // No active L0s: fall back to the last-compacted marker, as
+                    // the GC does. (The GC uses the *view* id here; mirror it.)
+                    tree.last_compacted_l0_sst_view_id
+                } else {
+                    tree.l0
+                        .iter()
+                        .map(|view| view.sst.id.unwrap_compacted_id())
+                        .max()
+                }
+            })
+            .max()
     }
 
     /// Iterate every SST view referenced by this manifest — L0 views and

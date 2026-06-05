@@ -285,8 +285,18 @@ impl FlushTracker {
                     )
                 });
             let reserved = self.frontier.reserved_l0_slots();
-            return max_l0_len + reserved < settings.l0_max_ssts
-                && max_peak + reserved < settings.l0_max_ssts_per_key;
+            if max_l0_len + reserved >= settings.l0_max_ssts {
+                self.inner.db_stats.l0_stall_count_num_ssts.increment(1);
+                return false;
+            }
+            if max_peak + reserved >= settings.l0_max_ssts_per_key {
+                self.inner
+                    .db_stats
+                    .l0_stall_count_num_ssts_per_key
+                    .increment(1);
+                return false;
+            }
+            return true;
         }
         // Per-segment check: every touched segment must have room
         // accounting for in-flight reservations against that segment.
@@ -303,9 +313,14 @@ impl FlushTracker {
                 };
             let reserved = self.frontier.reserved_l0_slots_for(prefix);
             if tree_l0_len + reserved >= settings.l0_max_ssts {
+                self.inner.db_stats.l0_stall_count_num_ssts.increment(1);
                 return false;
             }
             if tree_peak + reserved >= settings.l0_max_ssts_per_key {
+                self.inner
+                    .db_stats
+                    .l0_stall_count_num_ssts_per_key
+                    .increment(1);
                 return false;
             }
         }
@@ -510,6 +525,9 @@ mod tests {
     use crate::db_state::{
         FilterFormat, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
+    use crate::db_stats::{
+        L0_STALL_COUNT, L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS, L0_STALL_TYPE_NUM_SSTS_PER_KEY,
+    };
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
@@ -529,7 +547,10 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::metrics::{
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
+        MetricsRecorderHelper,
+    };
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
@@ -547,11 +568,20 @@ mod tests {
         settings: Settings,
         fp_registry: Arc<FailPointRegistry>,
     ) -> TestHarness {
+        setup_harness_with_recorder(path, settings, fp_registry, MetricsRecorderHelper::noop())
+            .await
+    }
+
+    async fn setup_harness_with_recorder(
+        path: &str,
+        settings: Settings,
+        fp_registry: Arc<FailPointRegistry>,
+        db_metrics: MetricsRecorderHelper,
+    ) -> TestHarness {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = path.to_string();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
-        let db_metrics = MetricsRecorderHelper::noop();
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(path.clone()),
             Arc::clone(&object_store),
@@ -1134,6 +1164,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn l0_stall_count_increments_when_l0_is_full() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(
+            metrics_recorder.clone() as Arc<dyn MetricsRecorder>,
+            MetricLevel::default(),
+        );
+        let harness = setup_harness_with_recorder(
+            "/tmp/test_parallel_l0_flush_flusher_l0_stall_count",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+            helper,
+        )
+        .await;
+        set_local_l0_len(&harness, 1);
+        set_remote_l0_len(&harness.path, Arc::clone(&harness.object_store), 1).await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+        assert!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            )
+            .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS_PER_KEY)],
+            ),
+            Some(0)
+        );
+
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| {
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .clear()
+            });
+        }
+        set_remote_l0_len(&path, object_store, 0).await;
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn flush_proceeds_when_l0_total_high_but_disjoint_ranges() {
         // Mirrors a post-rescaling (union) manifest: L0 total exceeds the
         // single-source `l0_max_ssts`, but each L0 covers a disjoint key
@@ -1343,6 +1441,76 @@ mod tests {
             .is_err());
 
         // Drain L0 locally and remotely; flush should now progress.
+        {
+            let mut guard = flusher.inner.state.write();
+            guard.modify(|modifier| {
+                Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
+                    .l0
+                    .clear()
+            });
+        }
+        set_remote_l0_disjoint(&path, object_store, &[]).await;
+
+        let result = timeout(Duration::from_secs(5), &mut flush)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn l0_stall_count_increments_for_per_key_cap() {
+        let settings = Settings {
+            l0_max_ssts: 100,
+            l0_max_ssts_per_key: 1,
+            manifest_poll_interval: Duration::from_millis(10),
+            ..Settings::default()
+        };
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(
+            metrics_recorder.clone() as Arc<dyn MetricsRecorder>,
+            MetricLevel::default(),
+        );
+        let harness = setup_harness_with_recorder(
+            "/tmp/test_parallel_l0_flush_flusher_l0_stall_count_per_key",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+            helper,
+        )
+        .await;
+        let ranges: &[(&[u8], &[u8])] = &[(b"aaa", b"zzz")];
+        set_local_l0_disjoint(&harness, ranges);
+        set_remote_l0_disjoint(&harness.path, Arc::clone(&harness.object_store), ranges).await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 42);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        assert!(timeout(Duration::from_millis(100), &mut flush)
+            .await
+            .is_err());
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            ),
+            Some(0)
+        );
+        assert!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS_PER_KEY)],
+            )
+            .unwrap_or(0)
+                > 0
+        );
+
         {
             let mut guard = flusher.inner.state.write();
             guard.modify(|modifier| {

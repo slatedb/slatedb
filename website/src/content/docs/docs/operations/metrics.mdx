@@ -81,6 +81,7 @@ All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
 | `slatedb.db.write_ops` | counter | | Write operations |
 | `slatedb.db.write_batch_count` | counter | | Write batches |
 | `slatedb.db.backpressure_count` | counter | | Backpressure events |
+| `slatedb.db.l0_stall_count` | counter | `type`: num_ssts, num_ssts_per_key | L0 flush dispatch stalls by cause |
 | `slatedb.db.immutable_memtable_flushes` | counter | | Immutable memtable flushes |
 | `slatedb.db.wal_buffer_flushes` | counter | | WAL buffer flushes |
 | `slatedb.db.wal_buffer_flush_requests` | counter | | WAL buffer flush requests |

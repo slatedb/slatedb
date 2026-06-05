@@ -451,6 +451,9 @@ mod tests {
                 wb,
                 BytesRange::from_slice(key..=key),
                 IterationOrder::Ascending,
+                u64::MAX,
+                None,
+                None,
             )
         })
     }
@@ -462,7 +465,7 @@ mod tests {
     ) -> Option<WriteBatchIterator> {
         write_batch
             .as_ref()
-            .map(|wb| WriteBatchIterator::new(wb, range.clone(), order))
+            .map(|wb| WriteBatchIterator::new(wb, range.clone(), order, u64::MAX, None, None))
     }
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::db_status::DbStatusManager;

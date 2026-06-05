@@ -3387,7 +3387,8 @@ mod tests {
 
         // when: await_compaction advances clock by 60s per iteration,
         // so compaction_start_ts will be well past expire_at=10
-        let db_state = await_compaction(&db, Some(insert_clock)).await;
+        let db_state =
+            await_compaction_matching(&db, Some(insert_clock), has_single_output_sst).await;
 
         // then: key 1 should be expired (expire_at=10 < compaction_time),
         //       key 2 should survive (expire_at=i64::MAX), key 3 has no expiry
@@ -3515,7 +3516,8 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, Some(insert_clock)).await;
+        let db_state =
+            await_compaction_matching(&db, Some(insert_clock), has_single_output_sst).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -5780,6 +5782,14 @@ mod tests {
         db: &Db,
         clock: Option<Arc<dyn SystemClock>>,
     ) -> Option<ManifestCore> {
+        await_compaction_matching(db, clock, |_| true).await
+    }
+
+    async fn await_compaction_matching(
+        db: &Db,
+        clock: Option<Arc<dyn SystemClock>>,
+        predicate: impl Fn(&ManifestCore) -> bool,
+    ) -> Option<ManifestCore> {
         run_for(Duration::from_secs(10), || async {
             if let Some(clock) = &clock {
                 clock.as_ref().advance(Duration::from_millis(60000)).await;
@@ -5796,12 +5806,26 @@ mod tests {
 
             let empty_l0 = core_db_state.tree.l0.is_empty();
             let compaction_ran = !core_db_state.tree.compacted.is_empty();
-            if empty_wal && empty_memtable && empty_l0 && compaction_ran {
+            if empty_wal
+                && empty_memtable
+                && empty_l0
+                && compaction_ran
+                && predicate(&core_db_state)
+            {
                 return Some(core_db_state);
             }
             None
         })
         .await
+    }
+
+    fn has_single_output_sst(db_state: &ManifestCore) -> bool {
+        db_state.tree.compacted.len() == 1
+            && db_state
+                .tree
+                .compacted
+                .first()
+                .is_some_and(|sr| sr.sst_views.len() == 1)
     }
 
     /// If a clock is provided, it will be advanced the clock by 60 seconds on each iteration to
