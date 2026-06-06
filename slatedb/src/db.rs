@@ -303,6 +303,7 @@ impl DbInner {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
+        txn: Option<crate::db_transaction::DbTransaction>,
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
         self.db_stats.write_ops.increment(batch.op_count() as u64);
@@ -316,6 +317,7 @@ impl DbInner {
             batch,
             options: options.clone(),
             done: tx,
+            txn,
         };
 
         self.maybe_apply_backpressure().await?;
@@ -1707,7 +1709,7 @@ impl Db {
         options: &WriteOptions,
     ) -> Result<WriteHandle, crate::Error> {
         self.inner
-            .write_with_options(batch, options)
+            .write_with_options(batch, options, None)
             .await
             .map_err(Into::into)
     }
@@ -7927,6 +7929,7 @@ mod tests {
                     await_durable: false,
                     ..Default::default()
                 },
+                None,
             )
             .await
             .unwrap_err();
@@ -8088,16 +8091,16 @@ mod tests {
         // Give the writer a moment to reach the actual pause point.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Cancel txn1's commit future. This drops the DbTransaction,
-        // which calls drop_txn and removes txn1 from active_txns.
+        // Cancel txn1's commit future. The DbTransaction was moved into the
+        // writer's queue message at commit time, so cancelling the future does
+        // NOT drop it on the caller side and therefore cannot call drop_txn.
         txn1_commit.abort();
         let _ = txn1_commit.await;
 
-        // BUG: txn1 was removed from active_txns by Drop, even though the
-        // writer hasn't finished processing it yet. This should be is_some().
+        // txn1 stays in active_txns (the writer now owns it, not the caller).
         assert!(
-            db.inner.txn_manager.min_active_seq().is_none(),
-            "txn1 was removed from active_txns by Drop"
+            db.inner.txn_manager.min_active_seq().is_some(),
+            "txn1 should still be in active_txns (writer owns the in-flight txn)"
         );
 
         // Start txn2 while the writer is still paused (committed_seq has not
@@ -8110,26 +8113,151 @@ mod tests {
         );
         txn2.put(b"x", b"txn2_value").unwrap();
 
-        // Un-pause the writer. It will try to track txn1's committed state but
-        // will not find txn1 in active_txns (already removed by Drop), so the
-        // committed state is silently lost.
+        // Un-pause the writer. It will track txn1's committed state properly
+        // because txn1 is still in active_txns.
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
 
         // Wait for the writer to finish processing txn1's batch.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Commit txn2. Both txn1 and txn2 wrote key "x" from the same snapshot.
-        // A correct implementation would detect a write-write conflict here.
+        // A correct implementation detects a write-write conflict here.
         let result = txn2.commit().await;
-        // BUG: txn2 should detect a WW conflict with txn1, but the commit
-        // succeeds because txn1's committed state was lost when its commit
-        // future was cancelled before the writer tracked it.
         assert!(
-            result.is_ok(),
-            "demonstrates the bug: txn2 commits without detecting WW conflict"
+            result.is_err(),
+            "txn2 should detect a WW conflict with txn1"
         );
 
         db.close().await.unwrap();
+    }
+
+    /// Verify that the writer cleans up active_txns when a cancelled commit's
+    /// batch fails (e.g., TransactionConflict). Because commit moves the
+    /// DbTransaction into the writer's queue message, cancelling the future does
+    /// not drop it caller-side; the writer owns it and drops it (running drop_txn)
+    /// when it finishes processing the message. Without that ownership transfer
+    /// the txn would leak in active_txns, pinning min_active_seq and blocking
+    /// compaction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cancelled_commit_writer_error_cleans_up_active_txn() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_cancelled_commit_writer_error_cleans_up_active_txn",
+            object_store,
+        )
+        .with_fp_registry(fp_registry.clone())
+        .build()
+        .await
+        .unwrap();
+
+        let initial_seq = db.inner.oracle.last_seq();
+
+        // Start txn_a and txn_b at the same snapshot.
+        let txn_a = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_b = db.begin(IsolationLevel::Snapshot).await.unwrap();
+
+        // Both write the same key — txn_b will conflict with txn_a.
+        txn_a.put(b"y", b"txn_a_value").unwrap();
+        txn_b.put(b"y", b"txn_b_value").unwrap();
+
+        // Pause the writer AFTER txn_a's commit is tracked (post-commit).
+        // This ensures txn_a's state is in recent_committed_txns, so when
+        // the writer later processes txn_b it will detect a WW conflict.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "pause").unwrap();
+
+        // Commit txn_a — writer processes it, tracks it, pauses at post-commit.
+        let txn_a_commit = tokio::spawn(async move { txn_a.commit().await });
+
+        // Wait for the writer to start processing txn_a.
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if db.inner.oracle.last_seq() > initial_seq {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(reached.is_ok(), "writer did not start processing txn_a");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Now the writer is paused mid-txn_a. Spawn txn_b's commit — the batch
+        // is enqueued behind the paused txn_a.
+        let txn_b_commit = tokio::spawn(async move { txn_b.commit().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Cancel txn_b's commit. The enqueue succeeded, so the writer owns txn_b
+        // (it was moved into the queued message); cancelling the future does not
+        // drop it caller-side — the writer cleans it up when it processes it.
+        txn_b_commit.abort();
+        let _ = txn_b_commit.await;
+
+        // txn_b should still be in active_txns.
+        assert!(
+            db.inner.txn_manager.min_active_seq().is_some(),
+            "txn_b should still be in active_txns (writer owns the in-flight txn)"
+        );
+
+        // Un-pause the writer. It finishes txn_a, then processes txn_b.
+        // txn_b hits a WW conflict; the writer drops the queued message, whose
+        // owned DbTransaction runs drop_txn to clean it up.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "off").unwrap();
+        let _ = txn_a_commit.await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // After the writer processes (and rejects) txn_b, dropping the queued
+        // message ran drop_txn, removing txn_b from active_txns.
+        assert!(
+            db.inner.txn_manager.min_active_seq().is_none(),
+            "txn_b should have been cleaned up from active_txns by the writer"
+        );
+
+        db.close().await.unwrap();
+    }
+
+    /// When the commit's enqueue fails (e.g. the writer channel is closed), the
+    /// DbTransaction was moved into `enqueue_write_batch` but never made it onto
+    /// the queue. Ownership therefore stays on the caller side: the moved-in txn
+    /// drops inside the failing enqueue and runs drop_txn, so the txn must not
+    /// leak in active_txns and commit must surface the error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_commit_enqueue_failure_cleans_up_active_txn() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_commit_enqueue_failure_cleans_up_active_txn",
+            object_store,
+        )
+        .build()
+        .await
+        .unwrap();
+
+        // Capture a handle to the txn manager before closing the db so we can
+        // assert on active_txns afterwards.
+        let txn_manager = db.inner.txn_manager.clone();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.put(b"k", b"v").unwrap();
+        assert!(
+            txn_manager.min_active_seq().is_some(),
+            "txn should be registered in active_txns before commit"
+        );
+
+        // Close the db, shutting down the writer and its channel. The txn keeps
+        // its own Arc<DbInner>, so it remains usable for the commit attempt.
+        db.close().await.unwrap();
+
+        // Commit now fails to enqueue. The moved-in DbTransaction drops on the
+        // caller side and cleans itself up.
+        let result = txn.commit().await;
+        assert!(
+            result.is_err(),
+            "commit should fail once the writer is closed"
+        );
+        assert!(
+            txn_manager.min_active_seq().is_none(),
+            "txn must be cleaned up on the caller side when enqueue fails"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

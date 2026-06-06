@@ -45,6 +45,7 @@ use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
 use slatedb_common::clock::SystemClock;
+use uuid::Uuid;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
@@ -60,6 +61,10 @@ pub(crate) struct WriteBatchMessage {
     pub(crate) batch: WriteBatch,
     pub(crate) options: WriteOptions,
     pub(crate) done: tokio::sync::oneshot::Sender<WriteBatchResult>,
+    /// Holds the committing transaction once it is enqueued, ownership
+    /// transfers from the caller to the writer. `None` for
+    /// non-transactional writes. Fix for #1732.
+    pub(crate) txn: Option<crate::db_transaction::DbTransaction>,
 }
 
 impl std::fmt::Debug for WriteBatchMessage {
@@ -93,8 +98,10 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
             batch,
             options,
             done,
+            txn,
         } = message;
-        let result = self.db_inner.write_batch(batch, &options).await;
+        let txn_id = txn.as_ref().map(|t| t.id());
+        let result = self.db_inner.write_batch(batch, &options, txn_id).await;
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
@@ -127,7 +134,12 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
 impl DbInner {
     #[allow(clippy::panic)]
     #[instrument(level = "trace", skip_all, fields(batch_size = batch.op_count()))]
-    async fn write_batch(&self, batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
+    async fn write_batch(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+        txn_id: Option<Uuid>,
+    ) -> WriteBatchResult {
         let _options = options;
         #[cfg(not(dst))]
         let now = self.mono_clock.now().await?;
@@ -153,7 +165,7 @@ impl DbInner {
 
         // Check for transaction conflicts before proceeding with the write batch
         // if this batch is part of a transaction.
-        if let Some(txn_id) = batch.txn_id.as_ref() {
+        if let Some(txn_id) = txn_id.as_ref() {
             if self.txn_manager.check_has_conflict(txn_id) {
                 return Err(SlateDBError::TransactionConflict);
             }
@@ -212,7 +224,7 @@ impl DbInner {
 
         // track the recent committed txn for conflict check. if txn_id is not supplied,
         // we still consider this as an transaction commit.
-        if let Some(txn_id) = &batch.txn_id {
+        if let Some(txn_id) = &txn_id {
             self.txn_manager
                 .track_recent_committed_txn(txn_id, commit_seq);
         } else {
@@ -368,6 +380,27 @@ mod tests {
     use crate::object_store::memory::InMemory;
     use crate::Db;
 
+    /// Build a transaction-less `WriteBatchMessage` and its result receiver,
+    /// keeping the `txn: None` and channel boilerplate out of individual tests.
+    fn test_message(
+        batch: WriteBatch,
+        options: WriteOptions,
+    ) -> (
+        WriteBatchMessage,
+        tokio::sync::oneshot::Receiver<WriteBatchResult>,
+    ) {
+        let (done, rx) = tokio::sync::oneshot::channel();
+        (
+            WriteBatchMessage {
+                batch,
+                options,
+                done,
+                txn: None,
+            },
+            rx,
+        )
+    }
+
     #[tokio::test]
     async fn test_is_first_write_set_false_after_first_write() {
         let object_store = Arc::new(InMemory::new());
@@ -384,15 +417,8 @@ mod tests {
         let mut batch = WriteBatch::new();
         batch.put(b"key", b"value");
 
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        handler
-            .handle(WriteBatchMessage {
-                batch,
-                options: WriteOptions::default(),
-                done: done_tx,
-            })
-            .await
-            .unwrap();
+        let (msg, done_rx) = test_message(batch, WriteOptions::default());
+        handler.handle(msg).await.unwrap();
 
         let result = done_rx.await.unwrap();
         assert!(result.is_ok());
@@ -411,33 +437,22 @@ mod tests {
         // Write with a user-defined seqnum
         let mut batch = WriteBatch::new();
         batch.put(b"key1", b"value1");
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        handler
-            .handle(WriteBatchMessage {
-                batch,
-                options: WriteOptions {
-                    seqnum: 42,
-                    ..Default::default()
-                },
-                done: done_tx,
-            })
-            .await
-            .unwrap();
+        let (msg, done_rx) = test_message(
+            batch,
+            WriteOptions {
+                seqnum: 42,
+                ..Default::default()
+            },
+        );
+        handler.handle(msg).await.unwrap();
         let (write_handle, _) = done_rx.await.unwrap().unwrap();
         assert_eq!(write_handle.seqnum(), 42);
 
         // Write without a seqnum and verify auto-assigned is > 42
         let mut batch = WriteBatch::new();
         batch.put(b"key2", b"value2");
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        handler
-            .handle(WriteBatchMessage {
-                batch,
-                options: WriteOptions::default(),
-                done: done_tx,
-            })
-            .await
-            .unwrap();
+        let (msg, done_rx) = test_message(batch, WriteOptions::default());
+        handler.handle(msg).await.unwrap();
         let (write_handle, _) = done_rx.await.unwrap().unwrap();
         assert!(write_handle.seqnum() > 42);
     }
@@ -457,33 +472,22 @@ mod tests {
         // First, do a normal write to advance the oracle
         let mut batch = WriteBatch::new();
         batch.put(b"key1", b"value1");
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        handler
-            .handle(WriteBatchMessage {
-                batch,
-                options: WriteOptions::default(),
-                done: done_tx,
-            })
-            .await
-            .unwrap();
+        let (msg, done_rx) = test_message(batch, WriteOptions::default());
+        handler.handle(msg).await.unwrap();
         let (write_handle, _) = done_rx.await.unwrap().unwrap();
         let first_seq = write_handle.seqnum();
 
         // Try to write with a seqnum <= the current max
         let mut batch = WriteBatch::new();
         batch.put(b"key2", b"value2");
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        handler
-            .handle(WriteBatchMessage {
-                batch,
-                options: WriteOptions {
-                    seqnum: 1,
-                    ..Default::default()
-                },
-                done: done_tx,
-            })
-            .await
-            .unwrap();
+        let (msg, done_rx) = test_message(
+            batch,
+            WriteOptions {
+                seqnum: 1,
+                ..Default::default()
+            },
+        );
+        handler.handle(msg).await.unwrap();
         let result = done_rx.await.unwrap();
         assert!(matches!(
             result,
