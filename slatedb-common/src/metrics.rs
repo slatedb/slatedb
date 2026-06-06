@@ -145,9 +145,11 @@ pub trait HistogramFn: Send + Sync {
 pub enum MetricLevel {
     /// High-frequency or high-cardinality metrics on the hot path.
     /// Only active when the configured level is `Debug`.
+    #[cfg_attr(feature = "serde", serde(alias = "debug", alias = "DEBUG"))]
     Debug,
     /// Standard operational metrics. Always active at the default level.
     #[default]
+    #[cfg_attr(feature = "serde", serde(alias = "info", alias = "INFO"))]
     Info,
 }
 

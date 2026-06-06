@@ -1588,6 +1588,25 @@ mod tests {
     }
 
     #[test]
+    fn test_db_options_load_metric_level_case_insensitive() {
+        for (value, expected) in [
+            ("debug", MetricLevel::Debug),
+            ("DEBUG", MetricLevel::Debug),
+            ("Debug", MetricLevel::Debug),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("SLATEDB_METRIC_LEVEL", value);
+
+                let options = Settings::from_env("SLATEDB_")
+                    .expect("failed to load db options from environment");
+                assert_eq!(expected, options.metric_level);
+
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
