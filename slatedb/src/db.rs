@@ -6210,6 +6210,7 @@ mod tests {
                 manifest_update_timeout: Duration::from_secs(300),
                 worker: Some(CompactionWorkerOptions {
                     max_sst_size: 256,
+                    compactions_poll_interval: Duration::from_millis(100),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -6229,6 +6230,7 @@ mod tests {
                 max_concurrent_compactions: 1,
                 worker: Some(CompactionWorkerOptions {
                     max_sst_size: 256,
+                    compactions_poll_interval: Duration::from_millis(100),
                     ..Default::default()
                 }),
                 ..Default::default()

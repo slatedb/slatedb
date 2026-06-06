@@ -445,6 +445,11 @@ impl Compaction {
         self.status = status;
     }
 
+    /// Sets the current worker of this compaction.
+    pub(crate) fn set_worker(&mut self, worker: Option<WorkerSpec>) {
+        self.worker = worker;
+    }
+
     /// Returns the worker that has claimed this compaction, if any.
     pub fn worker(&self) -> Option<&WorkerSpec> {
         self.worker.as_ref()
@@ -733,12 +738,15 @@ impl CompactorState {
         // `Scheduled`, so a Vacant entry in any of those states is anomalous and
         // logged.
         //
-        // For known compactions (Occupied), only accept `Compacted` — the worker's
-        // signal that execution finished and the coordinator should commit the
-        // manifest. Other remote updates (e.g., a worker's `Scheduled → Running`
-        // claim) are visible to the coordinator only as a side-effect of the next
-        // refresh and don't need to overwrite the coordinator's local view of the
-        // entry.
+        // For known compactions (Occupied), accept two remote transitions:
+        //   - `Compacted`: the worker's signal that execution finished; the
+        //     coordinator must commit the output SSTs to the manifest.
+        //   - `Scheduled → Running`: a worker has claimed the job; adopt the
+        //     Running entry so the coordinator's local copy carries the worker
+        //     claim. Without this, write_compactions_safely() would overwrite
+        //     the claim with a stale Scheduled/no-worker copy, causing the
+        //     worker to discard its result and potentially re-run the job.
+        // All other remote updates are ignored.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
                 Entry::Vacant(v) => {
@@ -752,12 +760,17 @@ impl CompactorState {
                     v.insert(compaction.clone());
                 }
                 Entry::Occupied(mut o) => {
-                    if matches!(compaction.status(), CompactionStatus::Compacted) {
+                    let adopt = matches!(compaction.status(), CompactionStatus::Compacted)
+                        || (matches!(compaction.status(), CompactionStatus::Running)
+                            && matches!(o.get().status(), CompactionStatus::Scheduled));
+                    if adopt {
                         o.insert(compaction.clone());
                     } else {
                         debug!(
-                            "ignoring remote compaction update with non-Compacted status [compaction={:?}]",
-                            compaction,
+                            "ignoring remote compaction update [id={}, local_status={:?}, remote_status={:?}]",
+                            compaction.id(),
+                            o.get().status(),
+                            compaction.status(),
                         );
                     }
                 }

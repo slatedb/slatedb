@@ -155,6 +155,7 @@ impl CompactorStateWriter {
                 CompactionStatus::Running | CompactionStatus::Scheduled
             ) {
                 c.set_status(CompactionStatus::Submitted);
+                c.set_worker(None);
             }
         });
         dirty_compactions.value.retain_active_and_last_finished();

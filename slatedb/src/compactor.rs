@@ -390,9 +390,9 @@ impl Compactor {
             )
             .expect("failed to spawn compactor task");
 
-        // Spawn an in-process worker if configured. The worker shares the
-        // coordinator's `MessageHandlerExecutor`, so `Compactor::stop` shuts
-        // both down together.
+        // Spawn an in-process worker if configured. The worker runs under its
+        // own cancellation token; Compactor::stop and run() are responsible for
+        // shutting it down alongside the coordinator.
         if let Some(worker_options) = self.options.worker.clone() {
             let (worker_handler, worker_rx) = build_handler(
                 self.manifest_store.clone(),
@@ -432,7 +432,14 @@ impl Compactor {
         self.task_executor
             .shutdown_task(COMPACTOR_TASK_NAME)
             .await
-            .map_err(|e| e.into())
+            .map_err(crate::Error::from)?;
+        if self.options.worker.is_some() {
+            self.task_executor
+                .shutdown_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
+                .await
+                .map_err(crate::Error::from)?;
+        }
+        Ok(())
     }
 
     /// Persist a [`CompactionSpec`] as a new [`Compaction`] in the compactions store.
