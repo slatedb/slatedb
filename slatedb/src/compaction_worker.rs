@@ -18,35 +18,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
-use object_store::path::Path;
-use object_store::ObjectStore;
 use rand::Rng;
 use tokio::runtime::Handle;
 use ulid::Ulid;
 
-#[cfg(feature = "compaction_filters")]
-use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
-use crate::compactor::stats::CompactionStats;
-use crate::compactor_executor::{
-    CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
-    TokioCompactionExecutorOptions,
-};
+use crate::compactor_executor::{CompactionExecutor, StartCompactionJobArgs};
 use crate::compactor_state::{Compaction, CompactionStatus, SourceId, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
-use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
-use crate::format::sst::SsTableFormat;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
-use crate::merge_operator::MergeOperatorType;
-use crate::object_stores::ObjectStores;
 use crate::rand::DbRand;
-use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, WatchableOnceCell};
-use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-use slatedb_common::metrics::{MetricLevel, MetricsRecorder, MetricsRecorderHelper};
+use slatedb_common::clock::SystemClock;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
@@ -84,6 +69,10 @@ pub struct CompactionWorker {
 }
 
 impl CompactionWorker {
+    pub(crate) fn new(task_executor: Arc<MessageHandlerExecutor>) -> Self {
+        Self { task_executor }
+    }
+
     /// Runs the worker until cancellation or fatal error. The worker polls
     /// `.compactions` every [`CompactionWorkerOptions::compactions_poll_interval`],
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
@@ -103,123 +92,6 @@ impl CompactionWorker {
             .shutdown_task(COMPACTION_WORKER_TASK_NAME)
             .await
             .map_err(|e| e.into())
-    }
-}
-
-/// Builder for [`CompactionWorker`].
-///
-/// Mirrors `CompactorBuilder`: the user supplies a DB path and object store,
-/// optionally overrides options/clock/seed/merge operator, then calls
-/// [`CompactionWorkerBuilder::build`].
-pub struct CompactionWorkerBuilder<P: Into<Path>> {
-    path: P,
-    main_object_store: Arc<dyn ObjectStore>,
-    worker_runtime: Option<Handle>,
-    options: CompactionWorkerOptions,
-    rand: Arc<DbRand>,
-    recorder: MetricsRecorderHelper,
-    system_clock: Arc<dyn SystemClock>,
-    merge_operator: Option<MergeOperatorType>,
-    #[cfg(feature = "compaction_filters")]
-    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
-}
-
-impl<P: Into<Path>> CompactionWorkerBuilder<P> {
-    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
-        Self {
-            path,
-            main_object_store,
-            worker_runtime: None,
-            options: CompactionWorkerOptions::default(),
-            rand: Arc::new(DbRand::default()),
-            recorder: MetricsRecorderHelper::noop(),
-            system_clock: Arc::new(DefaultSystemClock::default()),
-            merge_operator: None,
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: None,
-        }
-    }
-
-    pub fn with_options(mut self, options: CompactionWorkerOptions) -> Self {
-        self.options = options;
-        self
-    }
-
-    pub fn with_runtime(mut self, runtime: Handle) -> Self {
-        self.worker_runtime = Some(runtime);
-        self
-    }
-
-    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
-        self.system_clock = system_clock;
-        self
-    }
-
-    pub fn with_seed(mut self, seed: u64) -> Self {
-        self.rand = Arc::new(DbRand::new(seed));
-        self
-    }
-
-    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
-        self
-    }
-
-    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
-        self.merge_operator = Some(merge_operator);
-        self
-    }
-
-    #[cfg(feature = "compaction_filters")]
-    pub fn with_compaction_filter_supplier(
-        mut self,
-        supplier: Arc<dyn CompactionFilterSupplier>,
-    ) -> Self {
-        self.compaction_filter_supplier = Some(supplier);
-        self
-    }
-
-    pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
-        let path: Path = self.path.into();
-        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
-        let compactions_store =
-            Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.main_object_store, None),
-            SsTableFormat::default(),
-            path,
-            None,
-        ));
-        let stats = Arc::new(CompactionStats::new(&self.recorder));
-        let worker_runtime = self.worker_runtime.unwrap_or_else(Handle::current);
-        let options = Arc::new(self.options);
-        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-        let task_executor = Arc::new(MessageHandlerExecutor::new(
-            closed_result,
-            self.system_clock.clone(),
-        ));
-        let (handler, rx) = build_handler(
-            manifest_store,
-            compactions_store,
-            table_store,
-            options,
-            worker_runtime,
-            self.rand,
-            stats,
-            self.system_clock,
-            self.merge_operator,
-            #[cfg(feature = "compaction_filters")]
-            self.compaction_filter_supplier,
-        );
-        task_executor
-            .add_handler(
-                COMPACTION_WORKER_TASK_NAME.to_string(),
-                Box::new(handler),
-                rx,
-                &Handle::current(),
-            )
-            .expect("failed to spawn compaction worker task");
-        Ok(CompactionWorker { task_executor })
     }
 }
 
@@ -630,63 +502,6 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
     }
 }
 
-/// Builds the worker's [`CompactionWorkerHandler`] and the receiver that
-/// the handler reads completion messages from. Shared between the
-/// standalone `run()` path and the embedded-worker path in `Compactor::run`.
-pub(crate) fn build_handler(
-    manifest_store: Arc<ManifestStore>,
-    compactions_store: Arc<CompactionsStore>,
-    table_store: Arc<TableStore>,
-    options: Arc<CompactionWorkerOptions>,
-    worker_runtime: Handle,
-    rand: Arc<DbRand>,
-    stats: Arc<CompactionStats>,
-    system_clock: Arc<dyn SystemClock>,
-    merge_operator: Option<MergeOperatorType>,
-    #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
-        Arc<dyn CompactionFilterSupplier>,
-    >,
-) -> (
-    CompactionWorkerHandler,
-    async_channel::Receiver<WorkerMessage>,
-) {
-    let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
-    let executor = Arc::new(TokioCompactionExecutor::new(
-        TokioCompactionExecutorOptions {
-            handle: worker_runtime.clone(),
-            options: options.clone(),
-            worker_tx: tx,
-            table_store: table_store.clone(),
-            rand: rand.clone(),
-            stats: stats.clone(),
-            clock: system_clock.clone(),
-            manifest_store: manifest_store.clone(),
-            merge_operator: merge_operator.clone(),
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: compaction_filter_supplier.clone(),
-        },
-    ));
-
-    let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
-    info!(
-        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
-        worker_id,
-        options.max_concurrent_compactions,
-        options.compactions_poll_interval,
-    );
-
-    let handler = CompactionWorkerHandler::new(
-        worker_id,
-        options.clone(),
-        compactions_store.clone(),
-        manifest_store.clone(),
-        executor,
-        system_clock.clone(),
-        rand.clone(),
-    );
-    (handler, rx)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +513,8 @@ mod tests {
     use bytes::Bytes;
     use futures::stream::StreamExt;
     use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
     use parking_lot::Mutex;
     use slatedb_common::clock::DefaultSystemClock;
 
