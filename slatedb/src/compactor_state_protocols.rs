@@ -150,11 +150,14 @@ impl CompactorStateWriter {
             // post-restart manifest before any worker can claim them again. Submitted
             // compactions are left intact for future scheduling. Keep only the most recent
             // finished compaction for GC safety (#1044).
+            let now_ms = system_clock.now().timestamp_millis() as u64;
+            let timeout_ms = options.worker_heartbeat_timeout.as_millis() as u64;
             dirty_compactions.value.iter_mut().for_each(|c| {
-                if matches!(
-                    c.status(),
-                    CompactionStatus::Running | CompactionStatus::Scheduled
-                ) {
+                let stale_running = matches!(c.status(), CompactionStatus::Running)
+                    && c.worker()
+                        .map(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
+                        .unwrap_or(true);
+                if matches!(c.status(), CompactionStatus::Scheduled) || stale_running {
                     c.set_status(CompactionStatus::Submitted);
                     c.set_worker(None);
                 }
