@@ -1,7 +1,9 @@
+use crate::data::{DataEncoding, DataFormat};
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use slatedb::compactor::CompactionRequest;
 use slatedb::seq_tracker::FindOption;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -165,6 +167,40 @@ pub(crate) enum CliCommands {
         round: FindOption,
     },
 
+    /// Import logical key/value rows from CSV, TSV, or JSON.
+    ImportData {
+        /// Input file path. Use '-' to read from standard input.
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Input file format.
+        #[arg(short, long, value_enum)]
+        format: DataFormat,
+
+        /// How key and value bytes are represented in the input.
+        #[arg(long, value_enum, default_value = "utf8")]
+        encoding: DataEncoding,
+
+        /// Number of rows to include in each SlateDB write batch.
+        #[arg(long, default_value_t = 1000)]
+        batch_size: usize,
+    },
+
+    /// Export logical key/value rows to CSV, TSV, or JSON.
+    ExportData {
+        /// Output file path. Use '-' to write to standard output.
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Output file format.
+        #[arg(short, long, value_enum)]
+        format: DataFormat,
+
+        /// How key and value bytes are represented in the output.
+        #[arg(long, value_enum, default_value = "utf8")]
+        encoding: DataEncoding,
+    },
+
     /// Submit a compaction request.
     #[command(group(
         ArgGroup::new("compaction_request")
@@ -313,8 +349,10 @@ fn parse_find_option(s: &str) -> Result<FindOption, String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_gc_schedule, CliArgs, CliCommands, GcResource};
+    use crate::data::{DataEncoding, DataFormat};
     use clap::Parser;
     use rstest::rstest;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     #[rstest]
@@ -414,6 +452,90 @@ mod tests {
             } => {
                 assert_eq!(schedule.min_age, Duration::from_secs(600));
                 assert_eq!(schedule.period, Duration::from_secs(60));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_import_data_command() {
+        let args = CliArgs::try_parse_from([
+            "slatedb",
+            "--path",
+            "/tmp/slatedb",
+            "import-data",
+            "--input",
+            "seed.csv",
+            "--format",
+            "csv",
+            "--encoding",
+            "base64",
+            "--batch-size",
+            "25",
+        ])
+        .unwrap();
+
+        match args.command {
+            CliCommands::ImportData {
+                input,
+                format,
+                encoding,
+                batch_size,
+            } => {
+                assert_eq!(input, PathBuf::from("seed.csv"));
+                assert_eq!(format, DataFormat::Csv);
+                assert_eq!(encoding, DataEncoding::Base64);
+                assert_eq!(batch_size, 25);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_export_data_command() {
+        let args = CliArgs::try_parse_from([
+            "slatedb",
+            "--path",
+            "/tmp/slatedb",
+            "export-data",
+            "--output",
+            "dump.json",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+
+        match args.command {
+            CliCommands::ExportData {
+                output,
+                format,
+                encoding,
+            } => {
+                assert_eq!(output, PathBuf::from("dump.json"));
+                assert_eq!(format, DataFormat::Json);
+                assert_eq!(encoding, DataEncoding::Utf8);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_jsonl_export_data_command() {
+        let args = CliArgs::try_parse_from([
+            "slatedb",
+            "--path",
+            "/tmp/slatedb",
+            "export-data",
+            "--output",
+            "dump.jsonl",
+            "--format",
+            "jsonl",
+        ])
+        .unwrap();
+
+        match args.command {
+            CliCommands::ExportData { format, .. } => {
+                assert_eq!(format, DataFormat::Jsonl);
             }
             command => panic!("unexpected command: {command:?}"),
         }

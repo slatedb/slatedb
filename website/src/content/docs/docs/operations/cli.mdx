@@ -32,6 +32,17 @@ Every command requires the `--path` option, which specifies the root directory i
 
 Run the CLI with `slatedb --help` to see a list of available commands and options.
 
+## Import and export logical data
+
+The CLI can import and export logical key/value rows through the public SlateDB API:
+
+```bash
+slatedb --env-file .env --path <db-path> import-data --input seed.csv --format csv
+slatedb --env-file .env --path <db-path> export-data --output dump.json --format json --encoding base64
+```
+
+Supported formats are `csv`, `tsv`, `json`, and `jsonl`. CSV and TSV files use `key` and `value` header columns. JSON input can be a JSON array or newline-delimited JSON objects with `key` and `value` string fields. JSONL uses one JSON object per line. The default encoding is `utf8`; use `--encoding base64` when keys or values contain arbitrary bytes.
+
 ## Run the standalone compactor
 
 Run compaction as a standalone process (instead of inside your `Db` clients):

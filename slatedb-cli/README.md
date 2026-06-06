@@ -62,6 +62,37 @@ Options:
 - `-s, --start <START>`: Optionally specify a start ID for the range of manifests to lookup
 - `-e, --end <END>`: Optionally specify an end ID for the range of manifests to lookup
 
+#### Import Data
+
+Imports logical key/value rows into a SlateDB database:
+
+```bash
+slatedb --path <PATH> import-data --input <INPUT> --format <FORMAT> [OPTIONS]
+```
+
+Options:
+- `-i, --input <INPUT>`: Input file path. Use `-` to read from standard input.
+- `-f, --format <FORMAT>`: Input format. Supported values: `csv`, `tsv`, `json`, `jsonl`.
+- `--encoding <ENCODING>`: Key/value encoding. Supported values: `utf8`, `base64`. Defaults to `utf8`.
+- `--batch-size <BATCH_SIZE>`: Number of rows per SlateDB write batch. Defaults to `1000`.
+
+CSV and TSV input must include `key` and `value` header columns. JSON input accepts either a JSON array or newline-delimited JSON objects with `key` and `value` string fields. JSONL input uses one JSON object per line.
+
+#### Export Data
+
+Exports logical key/value rows from a SlateDB database:
+
+```bash
+slatedb --path <PATH> export-data --output <OUTPUT> --format <FORMAT> [OPTIONS]
+```
+
+Options:
+- `-o, --output <OUTPUT>`: Output file path. Use `-` to write to standard output.
+- `-f, --format <FORMAT>`: Output format. Supported values: `csv`, `tsv`, `json`, `jsonl`.
+- `--encoding <ENCODING>`: Key/value encoding. Supported values: `utf8`, `base64`. Defaults to `utf8`.
+
+Use `--encoding base64` when keys or values are not valid UTF-8.
+
 #### Checkpoints
 
 SlateDB supports creating, refreshing, deleting, and listing checkpoints:
@@ -138,6 +169,24 @@ slatedb --path my-database read-manifest
 
 ```bash
 slatedb --path my-database list-manifests
+```
+
+### Importing CSV Data
+
+```bash
+slatedb --path my-database import-data --input seed.csv --format csv
+```
+
+### Exporting JSON Data
+
+```bash
+slatedb --path my-database export-data --output dump.json --format json --encoding base64
+```
+
+### Exporting JSONL Data
+
+```bash
+slatedb --path my-database export-data --output dump.jsonl --format jsonl
 ```
 
 ### Creating a Checkpoint with 7-Day Expiry
