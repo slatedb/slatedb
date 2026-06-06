@@ -454,6 +454,9 @@ pub(crate) struct FlakyObjectStore {
     // get_range: transient failures on first N attempts
     fail_first_get_range: AtomicUsize,
     get_range_attempts: AtomicUsize,
+    // get_range: truncate response body to this many bytes on first N attempts (0 = no truncation)
+    truncate_get_range_bytes: AtomicUsize,
+    truncate_get_range_count: AtomicUsize,
 }
 
 impl FlakyObjectStore {
@@ -477,6 +480,8 @@ impl FlakyObjectStore {
             list_with_offset_attempts: AtomicUsize::new(0),
             fail_first_get_range: AtomicUsize::new(0),
             get_range_attempts: AtomicUsize::new(0),
+            truncate_get_range_bytes: AtomicUsize::new(0),
+            truncate_get_range_count: AtomicUsize::new(0),
         }
     }
 
@@ -557,6 +562,12 @@ impl FlakyObjectStore {
         self
     }
 
+    pub(crate) fn with_truncate_get_range_bytes(self, bytes: usize, count: usize) -> Self {
+        self.truncate_get_range_bytes.store(bytes, Ordering::SeqCst);
+        self.truncate_get_range_count.store(count, Ordering::SeqCst);
+        self
+    }
+
     pub(crate) fn get_range_attempts(&self) -> usize {
         self.get_range_attempts.load(Ordering::SeqCst)
     }
@@ -622,7 +633,7 @@ impl ObjectStore for FlakyObjectStore {
             }
         } else if options.range.is_some() {
             self.get_range_attempts.fetch_add(1, Ordering::SeqCst);
-            if self
+            let should_fail = self
                 .fail_first_get_range
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                     if v > 0 {
@@ -631,14 +642,42 @@ impl ObjectStore for FlakyObjectStore {
                         None
                     }
                 })
-                .is_ok()
-            {
+                .is_ok();
+            if should_fail {
                 return Err(object_store::Error::Generic {
                     store: "flaky_get_range",
                     source: Box::new(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "injected get_range timeout",
                     )),
+                });
+            }
+            let truncate_bytes = self.truncate_get_range_bytes.load(Ordering::SeqCst);
+            let should_truncate = truncate_bytes > 0
+                && self
+                    .truncate_get_range_count
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                        if v > 0 {
+                            Some(v - 1)
+                        } else {
+                            None
+                        }
+                    })
+                    .is_ok();
+            if should_truncate {
+                let result = self.inner.get_opts(location, options).await?;
+                let meta = result.meta.clone();
+                let range = result.range.clone();
+                let attributes = result.attributes.clone();
+                let body = result.bytes().await?;
+                let truncated = body.slice(..truncate_bytes.min(body.len()));
+                return Ok(object_store::GetResult {
+                    payload: object_store::GetResultPayload::Stream(
+                        futures::stream::once(async { Ok(truncated) }).boxed(),
+                    ),
+                    meta,
+                    range,
+                    attributes,
                 });
             }
         }

@@ -274,20 +274,20 @@ impl TableStore {
         Ok(self.last_seen_wal_id(wal_id_last_compacted).await? + 1)
     }
 
-    pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter<'_> {
+    pub(crate) fn table_writer(self: &Arc<Self>, id: SsTableId) -> EncodedSsTableWriter {
         let object_store = self.object_stores.store_for(&id);
         let path = self.path(&id);
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
             writer: BufWriter::new(object_store, path),
-            table_store: self,
+            table_store: self.clone(),
             #[cfg(test)]
             blocks_written: 0,
         }
     }
 
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
     }
 
@@ -1017,16 +1017,16 @@ async fn write_sst_streaming_in_object_store(
     Ok(())
 }
 
-pub(crate) struct EncodedSsTableWriter<'a> {
+pub(crate) struct EncodedSsTableWriter {
     id: SsTableId,
-    builder: EncodedSsTableBuilder<'a>,
+    builder: EncodedSsTableBuilder,
     writer: BufWriter,
-    table_store: &'a TableStore,
+    table_store: Arc<TableStore>,
     #[cfg(test)]
     blocks_written: usize,
 }
 
-impl EncodedSsTableWriter<'_> {
+impl EncodedSsTableWriter {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
@@ -1067,6 +1067,10 @@ impl EncodedSsTableWriter<'_> {
 
     pub(crate) fn is_drained(&self) -> bool {
         self.builder.is_drained()
+    }
+
+    pub(crate) fn id(&self) -> SsTableId {
+        self.id
     }
 
     #[cfg(test)]

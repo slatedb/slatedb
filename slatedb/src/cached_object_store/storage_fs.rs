@@ -332,28 +332,6 @@ impl LocalCacheEntry for FsCacheEntry {
         self.atomic_write(part_path, buf).await
     }
 
-    async fn delete_part(&self, part_number: usize) -> object_store::Result<()> {
-        let part_path = Self::make_part_path(
-            self.root_folder.clone(),
-            &self.location,
-            part_number,
-            self.part_size,
-        );
-
-        let file_cache = self.file_handle_cache.clone();
-        #[allow(clippy::disallowed_methods)]
-        tokio::task::spawn_blocking(move || {
-            let result = match std::fs::remove_file(&part_path) {
-                Ok(()) => Ok(()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(err) => Err(wrap_io_err(err)),
-            };
-            file_cache.invalidate(&part_path);
-            result
-        })
-        .await?
-    }
-
     async fn read_part(
         &self,
         part_number: usize,

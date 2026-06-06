@@ -666,6 +666,7 @@ pub(crate) fn build_handler(
     let executor_compactor_options = Arc::new(CompactorOptions {
         max_sst_size: options.max_sst_size,
         max_fetch_tasks: options.max_fetch_tasks,
+        bytes_to_fetch: options.bytes_to_fetch,
         ..CompactorOptions::default()
     });
     let executor = Arc::new(TokioCompactionExecutor::<WorkerMessage>::new(
