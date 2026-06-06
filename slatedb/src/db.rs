@@ -6472,12 +6472,10 @@ mod tests {
             2
         );
 
-        let result = probe_table_store
-            .delete_ssts(&[SsTableId::Wal(1)])
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
             .await
             .unwrap();
-        assert_eq!(result.deleted, 1);
-        assert_eq!(result.failed, 0);
         gated_store.head_gate.release();
 
         let err = match w1_handle.await.unwrap() {
@@ -6540,12 +6538,10 @@ mod tests {
             .wait_for_arrivals(head_arrivals_before + 1)
             .await;
 
-        let result = probe_table_store
-            .delete_ssts(&[SsTableId::Wal(1)])
+        probe_table_store
+            .delete_sst(&SsTableId::Wal(1))
             .await
             .unwrap();
-        assert_eq!(result.deleted, 1);
-        assert_eq!(result.failed, 0);
         gated_store.head_gate.release();
 
         let err = match w1_handle.await.unwrap() {

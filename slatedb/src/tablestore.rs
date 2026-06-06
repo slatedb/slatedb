@@ -29,15 +29,6 @@ use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
 use crate::wal::wal_sst_builder::EncodedWalSsTableBuilder;
 
-/// Counts from a [`TableStore::delete_ssts`] batch.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DeleteResult {
-    /// Objects confirmed gone (successful deletes plus `NotFound`, already gone).
-    pub(crate) deleted: usize,
-    /// Objects whose delete still failed after retries.
-    pub(crate) failed: usize,
-}
-
 pub(crate) struct TableStore {
     object_stores: ObjectStores,
     sst_format: SsTableFormat,
@@ -283,20 +274,20 @@ impl TableStore {
         Ok(self.last_seen_wal_id(wal_id_last_compacted).await? + 1)
     }
 
-    pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter<'_> {
+    pub(crate) fn table_writer(self: &Arc<Self>, id: SsTableId) -> EncodedSsTableWriter {
         let object_store = self.object_stores.store_for(&id);
         let path = self.path(&id);
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
             writer: BufWriter::new(object_store, path),
-            table_store: self,
+            table_store: self.clone(),
             #[cfg(test)]
             blocks_written: 0,
         }
     }
 
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
     }
 
@@ -435,57 +426,12 @@ impl TableStore {
         decoded
     }
 
-    /// Delete a batch of SSTables from the object store in a single
-    /// `delete_stream` call.
-    ///
-    /// All `ids` in one call must be of the same kind (all
-    /// [`SsTableId::Compacted`] or all [`SsTableId::Wal`]) so they route to the
-    /// same store; the GC `collect` functions that call this always satisfy
-    /// that, and a mixed batch returns [`SlateDBError::InvalidDeletion`].
-    /// Forwarding the whole batch lets backends that support bulk delete
-    /// (S3, Azure) collapse thousands of deletes into a handful of API calls.
-    ///
-    /// `NotFound` is treated as success — the object is already gone, so the
-    /// deletion goal is met (idempotent across S3/Azure/GCP, where deleting a
-    /// missing object yields `NotFound` rather than `Ok`).
-    ///
-    /// The whole stream is drained even when some deletes fail, so a per-path
-    /// failure is recorded in [`DeleteResult::failed`] rather than aborting the
-    /// batch.
-    pub(crate) async fn delete_ssts(
-        &self,
-        ids: &[SsTableId],
-    ) -> Result<DeleteResult, SlateDBError> {
-        if ids.is_empty() {
-            return Ok(DeleteResult::default());
-        }
-        // ids in a single call must all be the same kind, so they route to one store.
-        if ids
-            .iter()
-            .any(|id| std::mem::discriminant(id) != std::mem::discriminant(&ids[0]))
-        {
-            return Err(SlateDBError::InvalidDeletion);
-        }
-        let object_store = self.object_stores.store_for(&ids[0]);
-        let paths: Vec<Path> = ids.iter().map(|id| self.path(id)).collect();
-        debug!("deleting {} SSTs", paths.len());
-        let path_stream =
-            futures::stream::iter(paths.into_iter().map(Ok::<Path, object_store::Error>)).boxed();
-
-        let mut stream = object_store.delete_stream(path_stream);
-        let mut result = DeleteResult::default();
-        while let Some(outcome) = stream.next().await {
-            match outcome {
-                // NotFound = object already gone = deletion goal met (idempotent
-                // across S3/Azure/GCP)
-                Ok(_) | Err(object_store::Error::NotFound { .. }) => result.deleted += 1,
-                Err(e) => {
-                    result.failed += 1;
-                    warn!("error deleting SST [error={}]", e);
-                }
-            }
-        }
-        Ok(result)
+    /// Delete an SSTable from the object store.
+    pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
+        let object_store = self.object_stores.store_for(id);
+        let path = self.path(id);
+        debug!("deleting SST [path={}]", path);
+        object_store.delete(&path).await.map_err(SlateDBError::from)
     }
 
     /// Reads metadata for a specific SST object (WAL or compacted).
@@ -1071,16 +1017,16 @@ async fn write_sst_streaming_in_object_store(
     Ok(())
 }
 
-pub(crate) struct EncodedSsTableWriter<'a> {
+pub(crate) struct EncodedSsTableWriter {
     id: SsTableId,
-    builder: EncodedSsTableBuilder<'a>,
+    builder: EncodedSsTableBuilder,
     writer: BufWriter,
-    table_store: &'a TableStore,
+    table_store: Arc<TableStore>,
     #[cfg(test)]
     blocks_written: usize,
 }
 
-impl EncodedSsTableWriter<'_> {
+impl EncodedSsTableWriter {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
@@ -1123,6 +1069,10 @@ impl EncodedSsTableWriter<'_> {
         self.builder.is_drained()
     }
 
+    pub(crate) fn id(&self) -> SsTableId {
+        self.id
+    }
+
     #[cfg(test)]
     pub(crate) fn blocks_written(&self) -> usize {
         self.blocks_written
@@ -1158,7 +1108,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::tablestore::{DeleteResult, TableStore};
+    use crate::tablestore::TableStore;
     use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
@@ -2289,9 +2239,7 @@ mod tests {
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        let result = ts.delete_ssts(&[id1]).await.unwrap();
-        assert_eq!(result.deleted, 1);
-        assert_eq!(result.failed, 0);
+        ts.delete_sst(&id1).await.unwrap();
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
@@ -2303,82 +2251,6 @@ mod tests {
         } else {
             assert_eq!(count_ssts_in(&main_store).await, 1);
         }
-    }
-
-    #[tokio::test]
-    async fn test_delete_ssts_reports_counts() {
-        let main_store = make_store();
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), None),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
-
-        let ids: Vec<SsTableId> = (0..3)
-            .map(|_| SsTableId::Compacted(ulid::Ulid::new()))
-            .collect();
-        for id in &ids {
-            main_store
-                .put(&ts.path(id), Bytes::new().into())
-                .await
-                .unwrap();
-        }
-
-        // All three exist -> all counted as deleted, none failed.
-        let result = ts.delete_ssts(&ids).await.unwrap();
-        assert_eq!(result.deleted, 3);
-        assert_eq!(result.failed, 0);
-        assert_eq!(count_ssts_in(&main_store).await, 0);
-
-        // Empty batch is a no-op with zeroed counts.
-        let result = ts.delete_ssts(&[]).await.unwrap();
-        assert_eq!(result, DeleteResult::default());
-    }
-
-    #[tokio::test]
-    async fn test_delete_ssts_mixed_kinds_errors() {
-        // A batch mixing Wal and Compacted ids would route to two different
-        // stores, so it must be rejected rather than partially deleted.
-        let main_store = make_store();
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), Some(make_store())),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
-
-        let ids = vec![SsTableId::Compacted(ulid::Ulid::new()), SsTableId::Wal(1)];
-        let err = ts.delete_ssts(&ids).await.unwrap_err();
-        assert!(matches!(err, error::SlateDBError::InvalidDeletion));
-    }
-
-    #[tokio::test]
-    async fn test_delete_ssts_not_found() {
-        // Azure/GCP return NotFound (not Ok) when deleting an already-gone
-        // object. `delete_ssts` must treat those as deleted, not as
-        // failures, and the batch must not short-circuit on them.
-        let store: Arc<dyn ObjectStore> =
-            Arc::new(FlakyObjectStore::new(Arc::new(InMemory::new()), 0).with_delete_not_found());
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(store, None),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
-
-        let ids: Vec<SsTableId> = (0..3)
-            .map(|_| SsTableId::Compacted(ulid::Ulid::new()))
-            .collect();
-
-        let result = ts.delete_ssts(&ids).await.unwrap();
-        assert_eq!(
-            result,
-            DeleteResult {
-                deleted: 3,
-                failed: 0
-            }
-        );
     }
 
     #[rstest]
@@ -2421,9 +2293,7 @@ mod tests {
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
 
-        let result = ts.delete_ssts(&[id1]).await.unwrap();
-        assert_eq!(result.deleted, 1);
-        assert_eq!(result.failed, 0);
+        ts.delete_sst(&id1).await.unwrap();
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);

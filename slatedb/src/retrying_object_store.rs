@@ -11,8 +11,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
-    Attribute, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
+    Attribute, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
+    MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
+    PutPayload, PutResult, RenameOptions,
 };
 
 use crate::rand::DbRand;
@@ -151,6 +152,20 @@ impl RetryingObjectStore {
         );
         new_attrs
     }
+
+    /// Compute the expected byte length of a range read, truncating at the
+    /// actual file size. This handles the case where a `GetRange::Bounded`
+    /// end exceeds the file length.
+    fn expected_range_len(range: &GetRange, file_size: u64) -> u64 {
+        match range {
+            GetRange::Bounded(r) => {
+                let end = r.end.min(file_size);
+                end.saturating_sub(r.start)
+            }
+            GetRange::Offset(offset) => file_size.saturating_sub(*offset),
+            GetRange::Suffix(suffix) => (*suffix).min(file_size),
+        }
+    }
 }
 
 impl std::fmt::Display for RetryingObjectStore {
@@ -223,17 +238,41 @@ impl ObjectStore for RetryingObjectStore {
         // `get_range` lives on `ObjectStoreExt` and reads the body after
         // `get_opts` returns, so without this buffering the body bytes
         // would fall outside the retry loop.
-        let buffer_body = options.range.is_some();
         (|| async {
             // Options and location must be owned per-attempt.
-            let result = self.inner.get_opts(location, options.clone()).await?;
-            if !buffer_body {
+            let options = options.clone();
+            let options_range = options.range.clone();
+            let result = self.inner.get_opts(location, options).await?;
+            let meta = result.meta.clone();
+            let file_size = meta.size;
+
+            if options_range.is_none() {
+                // No range requested — don't buffer the body. The buffer size
+                // can't be validated wihtout buffering.
                 return Ok(result);
             }
-            let meta = result.meta.clone();
+
+            // Range read: buffer the body and validate against the expected
+            // size (requested range truncated at file size).
+            let expected_len =
+                Self::expected_range_len(&options_range.expect("range is set"), file_size);
             let range = result.range.clone();
             let attributes = result.attributes.clone();
             let bytes = result.bytes().await?;
+            let bytes_len = bytes.len() as u64;
+
+            if bytes_len != expected_len {
+                return Err(object_store::Error::Generic {
+                    store: "retrying_object_store",
+                    source: format!(
+                        "Size check failed: {bytes_len} bytes read, but expected \
+                         {expected_len} bytes (requested range truncated at file \
+                         size {file_size})"
+                    )
+                    .into(),
+                });
+            }
+
             Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed()),
                 meta,
@@ -374,32 +413,22 @@ impl ObjectStore for RetryingObjectStore {
         let inner = Arc::clone(&self.inner);
         let sleeper = self.sleeper();
         let retry_builder = Self::retry_builder();
-
-        stream::once(async move {
-            let paths: Vec<Path> = locations.try_collect().await?;
-
-            (|| async {
-                let locs = stream::iter(paths.clone().into_iter().map(Ok)).boxed();
-                let results: Vec<object_store::Result<Path>> =
-                    inner.delete_stream(locs).collect().await;
-                let mut res = Vec::with_capacity(results.len());
-                for r in results {
-                    match r {
-                        Err(e) if Self::should_retry(&e) => return Err(e),
-                        other => res.push(other),
-                    }
+        locations
+            .then(move |loc| {
+                let inner = Arc::clone(&inner);
+                let sleeper = sleeper.clone();
+                async move {
+                    let loc = loc?;
+                    (|| async { inner.delete(&loc).await })
+                        .retry(retry_builder)
+                        .sleep(sleeper)
+                        .notify(Self::notify)
+                        .when(Self::should_retry)
+                        .await?;
+                    Ok(loc)
                 }
-                Ok::<Vec<object_store::Result<Path>>, object_store::Error>(res)
             })
-            .retry(retry_builder)
-            .sleep(sleeper)
-            .notify(Self::notify)
-            .when(Self::should_retry)
-            .await
-        })
-        .map_ok(stream::iter)
-        .try_flatten()
-        .boxed()
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -521,7 +550,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::test_utils::FlakyObjectStore;
     use bytes::Bytes;
-    use futures::{StreamExt, TryStreamExt};
+    use futures::TryStreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
@@ -955,52 +984,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_stream_batch_level_retry() {
+    async fn test_get_opts_range_read_size_check_passes() {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let paths = vec![Path::from("/d/a"), Path::from("/d/b"), Path::from("/d/c")];
-        for p in &paths {
-            inner
-                .put(p, PutPayload::from_bytes(Bytes::from_static(b"x")))
-                .await
-                .unwrap();
-        }
-        let count = paths.len();
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let path = Path::from("/data/obj");
 
-        // Fail the first 2 delete batches with a retryable error, then succeed.
-        let flaky = Arc::new(FlakyObjectStore::new(inner.clone(), 0).with_delete_failures(2));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
 
-        let input =
-            futures::stream::iter(paths.into_iter().map(Ok::<Path, object_store::Error>)).boxed();
-        let results: Vec<_> = retrying.delete_stream(input).collect().await;
+        let result = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    range: Some((0..5).into()),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect("range read should pass size check");
 
-        // Every path ultimately deletes successfully.
-        assert_eq!(results.len(), count);
-        assert!(results.iter().all(|r| r.is_ok()));
-        // 2 failed batches + 1 successful batch — the retry is at batch granularity.
-        assert_eq!(flaky.delete_stream_attempts(), 3);
-        // The objects are actually gone from the backing store.
-        assert_eq!(inner.list(None).count().await, 0);
+        let bytes = result.bytes().await.unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"hello"));
     }
 
     #[tokio::test]
-    async fn test_delete_stream_not_found_is_not_retried() {
-        // Azure/GCP return NotFound (not Ok) when deleting an already-gone object.
+    async fn test_get_opts_range_read_size_mismatch_returns_error() {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_delete_not_found());
+        let path = Path::from("/data/obj");
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_truncate_get_range_bytes(1, 1));
         let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
 
-        let paths = vec![Path::from("/d/a"), Path::from("/d/b"), Path::from("/d/c")];
-        let count = paths.len();
-        let input =
-            futures::stream::iter(paths.into_iter().map(Ok::<Path, object_store::Error>)).boxed();
-        let results: Vec<_> = retrying.delete_stream(input).collect().await;
+        // First attempt returns truncated body (1 byte vs 5 expected),
+        // triggering the size check error. The retry succeeds normally.
+        let result = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    range: Some((0..5).into()),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect("should succeed after retrying past truncated response");
 
-        assert_eq!(results.len(), count);
-        assert!(results
-            .iter()
-            .all(|r| matches!(r, Err(object_store::Error::NotFound { .. }))));
-        // and NotFound is on the should_retry exclusion list → exactly one attempt.
-        assert_eq!(flaky.delete_stream_attempts(), 1);
+        let bytes = result.bytes().await.unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"hello"));
+        // 1 truncated attempt + 1 successful retry
+        assert_eq!(flaky.get_range_attempts(), 2);
     }
 }

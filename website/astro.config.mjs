@@ -256,6 +256,10 @@ export default defineConfig({
 							link: '/docs/tutorials/gcs/',
 						},
 						{
+							label: 'Range Scans',
+							link: '/docs/tutorials/range-scans/',
+						},
+						{
 							label: 'Checkpoint & Restore',
 							link: '/docs/tutorials/checkpoint/',
 						},

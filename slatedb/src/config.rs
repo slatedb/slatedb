@@ -1159,6 +1159,19 @@ pub struct CompactionWorkerOptions {
     /// Maximum number of concurrent tasks for fetching SST blocks during
     /// compaction. Higher values can improve throughput but use more resources.
     pub max_fetch_tasks: usize,
+
+    /// Number of bytes to fetch in a single read-ahead request while iterating
+    /// over input SSTs during compaction. The value is rounded up to the nearest
+    /// block size when fetching from object storage. The default is 2MiB.
+    ///
+    /// This pairs with [`CompactionWorkerOptions::max_fetch_tasks`]:
+    /// `bytes_to_fetch` is the size of each read-ahead request while
+    /// `max_fetch_tasks` is how many run concurrently per input SST, so peak
+    /// outstanding read-ahead per SST iterator is roughly
+    /// `bytes_to_fetch * max_fetch_tasks`. With the defaults
+    /// (`bytes_to_fetch = 2MiB`, `max_fetch_tasks = 4`) that is ~8MiB prefetched
+    /// ahead of the cursor.
+    pub bytes_to_fetch: usize,
 }
 
 /// Default options for the compaction worker.
@@ -1172,6 +1185,7 @@ impl Default for CompactionWorkerOptions {
             heartbeat_min_interval: Duration::from_secs(5),
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
+            bytes_to_fetch: 2 * 1024 * 1024,
         }
     }
 }

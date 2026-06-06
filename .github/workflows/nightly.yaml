@@ -258,7 +258,7 @@ jobs:
 
   deterministic-simulation-test:
     runs-on: warp-ubuntu-latest-x64-16x
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2

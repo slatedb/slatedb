@@ -3230,7 +3230,9 @@ mod tests {
 
         // when: await_compaction advances clock by 60s per iteration,
         // so compaction_start_ts will be well past expire_at=10
-        let db_state = await_compaction(&db, os.clone(), Some(insert_clock)).await;
+        let db_state =
+            await_compaction_matching(&db, os.clone(), Some(insert_clock), has_single_output_sst)
+                .await;
 
         // then: key 1 should be expired (expire_at=10 < compaction_time),
         //       key 2 should survive (expire_at=i64::MAX), key 3 has no expiry
@@ -3358,7 +3360,9 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, os.clone(), Some(insert_clock)).await;
+        let db_state =
+            await_compaction_matching(&db, os.clone(), Some(insert_clock), has_single_output_sst)
+                .await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -5415,6 +5419,15 @@ mod tests {
         os: Arc<dyn ObjectStore>,
         clock: Option<Arc<dyn SystemClock>>,
     ) -> Option<ManifestCore> {
+        await_compaction_matching(db, os, clock, |_| true).await
+    }
+
+    async fn await_compaction_matching(
+        db: &Db,
+        os: Arc<dyn ObjectStore>,
+        clock: Option<Arc<dyn SystemClock>>,
+        predicate: impl Fn(&ManifestCore) -> bool,
+    ) -> Option<ManifestCore> {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let compactions_store = Arc::new(CompactionsStore::new(&Path::from(PATH), os.clone()));
         run_for(Duration::from_secs(10), || async {
@@ -5441,11 +5454,21 @@ mod tests {
                 .is_some_and(|compactions| !compactions.compactions.iter().any(|c| c.active()));
 
             if empty_wal && empty_memtable && empty_l0 && compaction_ran && no_active_compactions {
-                return Some(get_db_state(manifest_store.clone()).await);
+                let state = get_db_state(manifest_store.clone()).await;
+                return predicate(&state).then_some(state);
             }
             None
         })
         .await
+    }
+
+    fn has_single_output_sst(db_state: &ManifestCore) -> bool {
+        db_state.tree.compacted.len() == 1
+            && db_state
+                .tree
+                .compacted
+                .first()
+                .is_some_and(|sr| sr.sst_views.len() == 1)
     }
 
     /// If a clock is provided, it will be advanced the clock by 60 seconds on each iteration to
