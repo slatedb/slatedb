@@ -1878,7 +1878,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_standalone_maintenance_builder_metric_level_is_order_independent() {
+    async fn test_standalone_compactor_and_gc_builder_metric_level_is_order_independent() {
         let object_store = Arc::new(InMemory::new());
 
         let compactor_options = CompactorOptions {
