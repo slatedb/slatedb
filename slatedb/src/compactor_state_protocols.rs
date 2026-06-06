@@ -144,16 +144,19 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Move running and scheduled compactions back to submitted so we can resume them
-        // after restart. Re-routing through Submitted forces re-validation against the
-        // post-restart manifest before any worker can claim them again. Submitted
-        // compactions are left intact for future scheduling. Keep only the most recent
-        // finished compaction for GC safety (#1044).
+        // Reset scheduled and stale running compactions back to submitted on restart.
+        // Scheduled compactions have no worker yet, so they always reset. Running
+        // compactions are only reset if the worker's heartbeat has gone stale — a
+        // worker that is still alive and heartbeating is left in Running so it can
+        // finish without being interrupted by the restarted coordinator.
+        let now_ms = system_clock.now().timestamp_millis() as u64;
+        let timeout_ms = options.worker_heartbeat_timeout.as_millis() as u64;
         dirty_compactions.value.iter_mut().for_each(|c| {
-            if matches!(
-                c.status(),
-                CompactionStatus::Running | CompactionStatus::Scheduled
-            ) {
+            let stale_running = matches!(c.status(), CompactionStatus::Running)
+                && c.worker()
+                    .map(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
+                    .unwrap_or(true);
+            if matches!(c.status(), CompactionStatus::Scheduled) || stale_running {
                 c.set_status(CompactionStatus::Submitted);
                 c.set_worker(None);
             }

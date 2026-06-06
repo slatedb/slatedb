@@ -54,7 +54,7 @@
 //! represents a description (Spec), a durable decision (Compaction), or a running
 //! attempt (JobSpec).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,7 +85,7 @@ use crate::rand::DbRand;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
-use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::metrics::{GaugeFn, MetricsRecorderHelper};
 
 pub use crate::compactor_state::{
     Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
@@ -312,6 +312,7 @@ pub struct Compactor {
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
+    recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
     merge_operator: Option<MergeOperatorType>,
     #[cfg(feature = "compaction_filters")]
@@ -351,6 +352,7 @@ impl Compactor {
             compactor_runtime,
             rand,
             stats,
+            recorder: recorder.clone(),
             system_clock,
             merge_operator,
             #[cfg(feature = "compaction_filters")]
@@ -378,6 +380,7 @@ impl Compactor {
             scheduler,
             self.rand.clone(),
             self.stats.clone(),
+            self.recorder.clone(),
             self.system_clock.clone(),
         )
         .await?;
@@ -496,6 +499,13 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    /// Recorder kept for lazily registering per-worker heartbeat gauges.
+    recorder: MetricsRecorderHelper,
+    /// IDs of `Running` compactions observed on the previous tick; used to
+    /// detect new claims and increment `jobs_claimed`.
+    prev_running_jobs: HashSet<Ulid>,
+    /// Lazily-created per-worker heartbeat gauges keyed by `worker_id`.
+    worker_heartbeat_gauges: HashMap<String, Arc<dyn GaugeFn>>,
 }
 
 #[async_trait]
@@ -546,6 +556,7 @@ impl CompactorEventHandler {
         scheduler: Arc<dyn CompactionScheduler + Send + Sync>,
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
+        recorder: MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
@@ -564,7 +575,10 @@ impl CompactorEventHandler {
             scheduler,
             rand,
             stats,
+            recorder,
             system_clock,
+            prev_running_jobs: HashSet::new(),
+            worker_heartbeat_gauges: HashMap::new(),
         })
     }
 
@@ -682,8 +696,57 @@ impl CompactorEventHandler {
     async fn handle_ticker(&mut self) -> Result<(), SlateDBError> {
         self.state_writer.refresh().await?;
         self.commit_compacted_entries().await?;
+        self.reclaim_stale_workers().await?;
         self.maybe_schedule_compactions().await?;
         self.maybe_validate_submitted_compactions().await?;
+        Ok(())
+    }
+
+    /// Reclaims `Running` compactions whose workers have not emitted a heartbeat
+    /// within [`CompactorOptions::worker_heartbeat_timeout`]. Reclaimed compactions
+    /// are reset to `Submitted` (with no worker) so they can be picked up again.
+    ///
+    /// This is the coordinator-side half of the failure-detection protocol described
+    /// in RFC-0025. The worker side emits heartbeats (updating `last_heartbeat_ms`)
+    /// periodically; the coordinator scans for stale entries on each tick.
+    async fn reclaim_stale_workers(&mut self) -> Result<(), SlateDBError> {
+        let now_ms = self.system_clock.now().timestamp_millis() as u64;
+        let timeout_ms = self.options.worker_heartbeat_timeout.as_millis() as u64;
+
+        let stale: Vec<Ulid> = self
+            .state()
+            .compactions_with_status(&[CompactionStatus::Running])
+            .filter(|c| {
+                c.worker()
+                    .map(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
+                    .unwrap_or(false)
+            })
+            .map(|c| c.id())
+            .collect();
+
+        if stale.is_empty() {
+            return Ok(());
+        }
+
+        for id in &stale {
+            info!(
+                "reclaiming stale compaction [worker_id={}, id={}]",
+                self.state()
+                    .compactions()
+                    .value
+                    .get(id)
+                    .and_then(|c| c.worker())
+                    .map(|w| w.worker_id.as_str())
+                    .unwrap_or("unknown"),
+                id
+            );
+            self.state_mut().update_compaction(id, |c| {
+                c.set_status(CompactionStatus::Submitted);
+                c.set_worker(None);
+            });
+        }
+
+        self.state_writer.write_compactions_safely().await?;
         Ok(())
     }
 
@@ -1127,6 +1190,7 @@ pub mod stats {
     pub const COMPACTOR_EPOCH: &str = compactor_stat_name!("epoch");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
+    pub const SSTS_WRITTEN: &str = compactor_stat_name!("ssts_written");
     pub const TOTAL_BYTES_BEING_COMPACTED: &str =
         compactor_stat_name!("total_bytes_being_compacted");
     pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
@@ -1139,6 +1203,13 @@ pub mod stats {
     pub const ENTRY_TYPE_LABEL: &str = "entry_type";
     pub const ENTRY_TYPE_VALUE: &str = "value";
     pub const ENTRY_TYPE_MERGE: &str = "merge";
+    /// Coordinator-side counter: `Submitted → Running` transitions observed via `.compactions`.
+    pub const JOBS_CLAIMED: &str = compactor_stat_name!("jobs_claimed");
+    /// Coordinator-side counter: stale `Running` jobs reset to `Submitted`.
+    pub const JOBS_RECLAIMED: &str = compactor_stat_name!("jobs_reclaimed");
+    /// Coordinator-side gauge: last observed heartbeat timestamp (ms) per worker.
+    pub const WORKER_LAST_HEARTBEAT_MS: &str = compactor_stat_name!("worker_last_heartbeat_ms");
+    pub const WORKER_ID_LABEL: &str = "worker_id";
 
     pub(crate) struct CompactionStats {
         pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
@@ -1150,6 +1221,8 @@ pub mod stats {
         pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_value: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
+        pub(crate) jobs_claimed: Arc<dyn CounterFn>,
+        pub(crate) jobs_reclaimed: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1176,6 +1249,8 @@ pub mod stats {
                     .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE)])
                     .description(EXPIRED_ENTRIES_PURGED_DESCRIPTION)
                     .register(),
+                jobs_claimed: recorder.counter(JOBS_CLAIMED).register(),
+                jobs_reclaimed: recorder.counter(JOBS_RECLAIMED).register(),
             }
         }
 
@@ -1214,7 +1289,7 @@ mod tests {
     };
     use crate::compactor_state::Compaction;
     use crate::compactor_state::CompactionStatus;
-    use crate::compactor_state::SourceId;
+    use crate::compactor_state::{SourceId, WorkerSpec};
     use crate::config::{
         CompactionWorkerOptions, FlushOptions, FlushType, MergeOptions, PutOptions, Settings,
         SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
@@ -4322,6 +4397,7 @@ mod tests {
                 scheduler.clone(),
                 rand.clone(),
                 compactor_stats.clone(),
+                recorder,
                 Arc::new(DefaultSystemClock::new()),
             )
             .await
@@ -4330,6 +4406,76 @@ mod tests {
                 StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
                     .await
                     .unwrap();
+            Self {
+                manifest,
+                manifest_store,
+                compactions_store,
+                options,
+                db,
+                scheduler,
+                real_executor_rx,
+                real_executor,
+                test_recorder,
+                handler,
+            }
+        }
+
+        /// Like `new()` but accepts an explicit `system_clock` so tests can
+        /// control time (e.g. to exercise heartbeat-timeout reclamation).
+        async fn new_with_clock(
+            system_clock: Arc<dyn SystemClock>,
+            compactor_options: Arc<CompactorOptions>,
+        ) -> Self {
+            let options = db_options(None);
+
+            let os = Arc::new(InMemory::new());
+            let (manifest_store, compactions_store, table_store) = build_test_stores(os.clone());
+            let db = Db::builder(PATH, os.clone())
+                .with_settings(options.clone())
+                .build()
+                .await
+                .unwrap();
+
+            let scheduler = Arc::new(MockScheduler::new());
+            let (real_executor_tx, real_executor_rx) = async_channel::unbounded();
+            let rand = Arc::new(DbRand::default());
+            let test_recorder = Arc::new(slatedb_common::metrics::DefaultMetricsRecorder::new());
+            let recorder = MetricsRecorderHelper::new(
+                test_recorder.clone() as Arc<dyn slatedb_common::metrics::MetricsRecorder>,
+                slatedb_common::metrics::MetricLevel::default(),
+            );
+            let compactor_stats = Arc::new(CompactionStats::new(&recorder));
+            let worker_options = Arc::new(CompactionWorkerOptions::default());
+            let real_executor = Arc::new(TokioCompactionExecutor::new(
+                TokioCompactionExecutorOptions {
+                    handle: Handle::current(),
+                    options: worker_options,
+                    worker_tx: real_executor_tx,
+                    table_store,
+                    rand: rand.clone(),
+                    stats: compactor_stats.clone(),
+                    clock: system_clock.clone(),
+                    manifest_store: manifest_store.clone(),
+                    merge_operator: None,
+                    #[cfg(feature = "compaction_filters")]
+                    compaction_filter_supplier: None,
+                },
+            ));
+            let handler = CompactorEventHandler::new(
+                manifest_store.clone(),
+                compactions_store.clone(),
+                compactor_options.clone(),
+                scheduler.clone(),
+                rand.clone(),
+                compactor_stats.clone(),
+                recorder,
+                system_clock.clone(),
+            )
+            .await
+            .unwrap();
+            let manifest = StoredManifest::load(manifest_store.clone(), system_clock)
+                .await
+                .unwrap();
             Self {
                 manifest,
                 manifest_store,
@@ -4784,6 +4930,7 @@ mod tests {
             scheduler,
             rand,
             compactor_stats,
+            recorder,
             system_clock,
         )
         .await
@@ -5736,5 +5883,134 @@ mod tests {
                 .status(),
             CompactionStatus::Failed,
         );
+    }
+
+    /// A Running compaction whose heartbeat is older than the timeout must be
+    /// reset to Submitted (worker cleared) by `reclaim_stale_workers`.
+    #[tokio::test]
+    async fn test_reclaim_stale_running_compaction() {
+        // given: clock starts at 0 ms
+        let system_clock = Arc::new(MockSystemClock::new());
+        let timeout = Duration::from_secs(30);
+        let options = Arc::new(CompactorOptions {
+            worker_heartbeat_timeout: timeout,
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            system_clock.clone() as Arc<dyn SystemClock>,
+            options,
+        )
+        .await;
+
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        // Seed a Running compaction in-memory with last_heartbeat_ms = 0 (epoch).
+        // Then persist it so that the compactions_store reflects the seeded state.
+        let compaction_id = Ulid::new();
+        let worker = WorkerSpec::new("worker-1".to_string(), 0);
+        let compaction = Compaction::new(compaction_id, CompactionSpec::new(vec![], 0))
+            .with_status(CompactionStatus::Running)
+            .with_worker(Some(worker));
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(compaction);
+        fixture
+            .handler
+            .state_writer
+            .write_compactions_safely()
+            .await
+            .expect("failed to persist seeded compaction");
+
+        // Advance clock well past the timeout (2× the timeout = 60 s).
+        system_clock.advance(Duration::from_secs(60)).await;
+
+        // when: call reclaim_stale_workers directly to avoid the scheduling
+        // side-effects of handle_ticker (which would try to start the reclaimed
+        // Submitted compaction with an empty spec and mark it Failed).
+        fixture
+            .handler
+            .reclaim_stale_workers()
+            .await
+            .expect("reclaim_stale_workers failed");
+
+        // then: the compaction is now Submitted with no worker.
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        let c = stored.get(&compaction_id).expect("compaction missing");
+        assert_eq!(
+            c.status(),
+            CompactionStatus::Submitted,
+            "should be reclaimed"
+        );
+        assert!(c.worker().is_none(), "worker should be cleared");
+    }
+
+    /// A Running compaction whose heartbeat is within the timeout must NOT be
+    /// reclaimed by `reclaim_stale_workers`.
+    #[tokio::test]
+    async fn test_does_not_reclaim_fresh_running_compaction() {
+        // given: clock starts at 0 ms; heartbeat is also at 0 ms.
+        let system_clock = Arc::new(MockSystemClock::new());
+        let timeout = Duration::from_secs(30);
+        let options = Arc::new(CompactorOptions {
+            worker_heartbeat_timeout: timeout,
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            system_clock.clone() as Arc<dyn SystemClock>,
+            options,
+        )
+        .await;
+
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        // Seed a Running compaction with heartbeat = "now" (0 ms).
+        let compaction_id = Ulid::new();
+        let now_ms = system_clock.now().timestamp_millis() as u64;
+        let worker = WorkerSpec::new("worker-2".to_string(), now_ms);
+        let compaction = Compaction::new(compaction_id, CompactionSpec::new(vec![], 0))
+            .with_status(CompactionStatus::Running)
+            .with_worker(Some(worker));
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(compaction);
+        fixture
+            .handler
+            .state_writer
+            .write_compactions_safely()
+            .await
+            .expect("failed to persist seeded compaction");
+
+        // Advance clock by only 5 s — well within the 30 s timeout.
+        system_clock.advance(Duration::from_secs(5)).await;
+
+        // when:
+        fixture
+            .handler
+            .reclaim_stale_workers()
+            .await
+            .expect("reclaim_stale_workers failed");
+
+        // then: the compaction is still Running (no reclaim write happened).
+        // Since nothing was written, re-read from the store and verify.
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        let c = stored.get(&compaction_id).expect("compaction missing");
+        assert_eq!(
+            c.status(),
+            CompactionStatus::Running,
+            "should NOT be reclaimed"
+        );
+        assert!(c.worker().is_some(), "worker should still be set");
     }
 }

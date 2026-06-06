@@ -1211,6 +1211,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             scheduler,
             self.rand.clone(),
             stats.clone(),
+            recorder.clone(),
             self.system_clock.clone(),
         )
         .await?;
