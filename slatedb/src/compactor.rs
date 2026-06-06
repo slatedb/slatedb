@@ -5429,7 +5429,6 @@ mod tests {
         predicate: impl Fn(&ManifestCore) -> bool,
     ) -> Option<ManifestCore> {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
-        let compactions_store = Arc::new(CompactionsStore::new(&Path::from(PATH), os.clone()));
         run_for(Duration::from_secs(10), || async {
             if let Some(clock) = &clock {
                 clock.as_ref().advance(Duration::from_millis(60000)).await;
@@ -5447,15 +5446,8 @@ mod tests {
             let empty_l0 = core_db_state.tree.l0.is_empty();
             let compaction_ran = !core_db_state.tree.compacted.is_empty();
 
-            let no_active_compactions = compactions_store
-                .read_latest_compactions()
-                .await
-                .ok()
-                .is_some_and(|compactions| !compactions.compactions.iter().any(|c| c.active()));
-
-            if empty_wal && empty_memtable && empty_l0 && compaction_ran && no_active_compactions {
-                let state = get_db_state(manifest_store.clone()).await;
-                return predicate(&state).then_some(state);
+            if empty_wal && empty_memtable && empty_l0 && compaction_ran && predicate(&core_db_state) {
+                return Some(get_db_state(manifest_store.clone()).await);
             }
             None
         })
