@@ -27,8 +27,10 @@ use slatedb_common::metrics::MetricsRecorder;
 use std::sync::Arc;
 
 let recorder: Arc<dyn MetricsRecorder> = /* your implementation */;
-let mut settings = Settings::default();
-settings.metric_level = MetricLevel::Debug;
+let settings = Settings {
+    metric_level: MetricLevel::Debug,
+    ..Settings::default()
+};
 
 let db = Db::builder("my_db", Arc::new(InMemory::new()))
     .with_settings(settings)
@@ -38,9 +40,14 @@ let db = Db::builder("my_db", Arc::new(InMemory::new()))
     .unwrap();
 ```
 
-`MetricLevel::Info` is the default. Set `Settings::metric_level` to
-`MetricLevel::Debug` to register debug-level metrics; metrics below the
-configured level are no-op handles.
+### Metric levels
+
+`MetricLevel` controls which metrics are registered. Metrics below the configured
+level are replaced with no-op handles when they are registered.
+
+`MetricLevel::Info` is the default and registers standard operational metrics.
+`MetricLevel::Debug` also registers debug-level metrics when SlateDB defines
+them. Configure the level with `Settings::metric_level`.
 
 ## The MetricsRecorder trait
 
