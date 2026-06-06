@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
@@ -236,7 +236,7 @@ impl<M: ExecutorMessage> TokioCompactionExecutor<M> {
                 worker_tx: opts.worker_tx,
                 table_store: opts.table_store,
                 rand: opts.rand,
-                tasks: Arc::new(Mutex::new(HashMap::new())),
+                tasks: Arc::new(Mutex::new(BTreeMap::new())),
                 stats,
                 clock: opts.clock,
                 is_stopped: AtomicBool::new(false),
@@ -272,7 +272,7 @@ pub(crate) struct TokioCompactionExecutorInner<M = CompactorMessage> {
     handle: tokio::runtime::Handle,
     worker_tx: async_channel::Sender<M>,
     table_store: Arc<TableStore>,
-    tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
+    tasks: Arc<Mutex<BTreeMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     clock: Arc<dyn SystemClock>,
@@ -582,10 +582,15 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         // lock and remove the task from the map.
         let task_handles = {
             let mut tasks = self.tasks.lock();
-            for task in tasks.values() {
+            // BTreeMap keeps abort/join order stable by destination. HashMap
+            // iteration order is randomized, which can feed the DST runtime a
+            // process-dependent shutdown order.
+            let mut task_handles = Vec::with_capacity(tasks.len());
+            while let Some((_, task)) = tasks.pop_first() {
                 task.task.abort();
+                task_handles.push(task.task);
             }
-            tasks.drain().map(|(_, task)| task.task).collect::<Vec<_>>()
+            task_handles
         };
 
         let wait_for_task_termination = async move {
