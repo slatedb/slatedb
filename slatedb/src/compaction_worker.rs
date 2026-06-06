@@ -11,7 +11,7 @@
 //! heartbeat emission and coordinator-side failure-detection / reclamation
 //! protocol are added in a follow-up.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -234,10 +234,10 @@ pub(crate) struct CompactionWorkerHandler {
     manifest_store: Arc<ManifestStore>,
     executor: Arc<dyn CompactionExecutor + Send + Sync>,
     clock: Arc<dyn SystemClock>,
-    /// Compactions currently being executed by this worker, keyed by compaction
-    /// ID with the destination sorted-run as the value. Used to gate capacity,
-    /// prevent destination conflicts, and reset claims on graceful shutdown.
-    active_jobs: HashMap<Ulid, u32>,
+    /// Compactions currently being executed by this worker (claimed but not
+    /// yet `Compacted`). Used to gate capacity and to know what to reset on
+    /// graceful shutdown.
+    active_jobs: HashSet<Ulid>,
     rand: Arc<DbRand>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
@@ -262,7 +262,7 @@ impl CompactionWorkerHandler {
             manifest_store,
             executor,
             clock,
-            active_jobs: HashMap::new(),
+            active_jobs: HashSet::new(),
             rand,
             stored: None,
         }
@@ -314,7 +314,6 @@ impl CompactionWorkerHandler {
             // specs, or sources missing from the manifest) are skipped here
             // rather than claimed and then released.
             let mut to_claim: Vec<(Compaction, StartCompactionJobArgs)> = Vec::new();
-            let mut batch_destinations: HashSet<u32> = HashSet::new();
             for c in dirty_compactions
                 .value
                 .iter_with_status(&[CompactionStatus::Scheduled])
@@ -324,17 +323,7 @@ impl CompactionWorkerHandler {
                     break;
                 }
                 match Self::build_job_args(c, db_state, &self.worker_id) {
-                    Ok(args) => {
-                        // Skip if this destination is already active or claimed
-                        // in this batch — the executor panics on duplicate destinations.
-                        if self.active_jobs.values().any(|&d| d == args.destination)
-                            || batch_destinations.contains(&args.destination)
-                        {
-                            continue;
-                        }
-                        batch_destinations.insert(args.destination);
-                        to_claim.push((c.clone(), args));
-                    }
+                    Ok(args) => to_claim.push((c.clone(), args)),
                     Err(e) => warn!(
                         "skipping unrunnable compaction [id={}, error={:?}]",
                         c.id(),
@@ -376,7 +365,7 @@ impl CompactionWorkerHandler {
                 self.worker_id,
                 compaction.id()
             );
-            self.active_jobs.insert(compaction.id(), args.destination);
+            self.active_jobs.insert(compaction.id());
             Self::dispatch_to_executor(&self.executor, args).await?;
         }
         Ok(())
@@ -628,7 +617,7 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         let _ = tokio::task::spawn_blocking(move || executor.stop()).await;
         #[cfg(dst)]
         let _ = tokio::spawn(async move { executor.stop() }).await;
-        let claimed: Vec<Ulid> = self.active_jobs.drain().map(|(id, _)| id).collect();
+        let claimed: Vec<Ulid> = self.active_jobs.drain().collect();
         for id in claimed {
             if let Err(e) = self.release_claim(id).await {
                 error!(
@@ -856,7 +845,7 @@ mod tests {
         assert_eq!(jobs[0].compaction_id, id);
 
         // And the worker tracks the job locally.
-        assert!(fx.handler.active_jobs.contains_key(&id));
+        assert!(fx.handler.active_jobs.contains(&id));
     }
 
     #[tokio::test]
@@ -920,7 +909,7 @@ mod tests {
         // worker_id is still attached (the coordinator clears it on commit).
         assert_eq!(c.worker().unwrap().worker_id, fx.worker_id);
         // Active set is drained on finish.
-        assert!(!fx.handler.active_jobs.contains_key(&id));
+        assert!(!fx.handler.active_jobs.contains(&id));
     }
 
     #[tokio::test]
@@ -940,7 +929,7 @@ mod tests {
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
-        assert!(!fx.handler.active_jobs.contains_key(&id));
+        assert!(!fx.handler.active_jobs.contains(&id));
     }
 
     #[tokio::test]
