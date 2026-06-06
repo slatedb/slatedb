@@ -361,7 +361,7 @@ impl Admin {
 
     /// Like [`Admin::run_compactor`] but accepts explicit [`crate::config::CompactorOptions`].
     ///
-    /// Useful for disabling the embedded worker (set `embedded_worker: false`) when running
+    /// Useful for disabling the embedded worker (set worker: None) when running
     /// standalone [`crate::compaction_worker::CompactionWorker`] processes separately.
     pub async fn run_compactor_with_options(
         &self,

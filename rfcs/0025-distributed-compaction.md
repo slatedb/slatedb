@@ -130,7 +130,7 @@ pub struct CompactorOptions {
     /// How long before a worker with no heartbeat is considered stale and its job reclaimed.
     pub worker_heartbeat_timeout_ms: u64,
 
-    /// Options for the in-process CompactionWorkerHandle spawned alongside the
+    /// Options for the in-process CompactionWorker spawned alongside the
     /// coordinator. `Some(..)` (the default) spawns an embedded worker; `None`
     /// runs the coordinator alone and expects workers as separate processes.
     pub worker: Option<CompactionWorkerOptions>,
@@ -149,7 +149,7 @@ worker_heartbeat_timeout_ms = 10000
 max_sst_size = 268435456
 ```
 
-`worker = Some(..)` (the default) spawns a `CompactionWorkerHandle` in the same process. `worker = None` expects workers to run as separate `CompactionWorkerHandle` processes.
+`worker = Some(..)` (the default) spawns a `CompactionWorker` in the same process. `worker = None` expects workers to run as separate `CompactionWorker` processes.
 
 #### Workers
 
@@ -521,7 +521,7 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 ### Compatibility
 
 - **Object storage**: Backward compatible. New fields default to unclaimed/0; no migration needed.
-- **Public API**: DB read/write API unchanged. `CompactionWorkerBuilder` and `CompactionWorkerHandle` are additive. **Breaking:** execution-only knobs (`max_sst_size`, `max_fetch_tasks`, `max_concurrent_compactions`) move from `CompactorOptions` to `CompactionWorkerOptions`. Users setting any of these on `CompactorOptions` must move them onto the embedded worker via `CompactorOptions::worker` (or onto the remote worker's `CompactionWorkerOptions`).
+- **Public API**: DB read/write API unchanged. `CompactionWorkerBuilder` and `CompactionWorker` are additive. **Breaking:** execution-only knobs (`max_sst_size`, `max_fetch_tasks`, `max_concurrent_compactions`) move from `CompactorOptions` to `CompactionWorkerOptions`. Users setting any of these on `CompactorOptions` must move them onto the embedded worker via `CompactorOptions::worker` (or onto the remote worker's `CompactionWorkerOptions`).
 - **Rolling upgrades**: Upgrade coordinator first, then start workers. Old standalone compactors safely ignore new fields.
 
 ## Testing

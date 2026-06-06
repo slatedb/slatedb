@@ -50,7 +50,10 @@ fn test_dst_bank_with_toxics(
     let audit_interval = Duration::from_millis(1000);
     let reader_options = build_reader_options(&rand);
     let fencer_restart_interval = Duration::from_secs(120);
-    let compactor_options = build_settings_compactor(&mut *rand.rng());
+    let mut compactor_options = build_settings_compactor(&mut *rand.rng());
+    if let Some(worker_options) = compactor_options.worker.as_mut() {
+        worker_options.compactions_poll_interval = Duration::from_millis(10);
+    }
     let merge_operator = Arc::new(BankMergeOperator::new(&bank_options)?);
 
     info!("dst bank options: {bank_options:?}");
@@ -166,10 +169,6 @@ fn test_dst_bank_with_toxics(
             CompactorActor::new(CompactorActorOptions {
                 restart_interval: Duration::from_millis(250),
                 compactor_options,
-                worker_options: CompactionWorkerOptions {
-                    compactions_poll_interval: Duration::from_millis(10),
-                    ..CompactionWorkerOptions::default()
-                },
             })?,
         )
         .actor("shutdown", ShutdownActor::new(shutdown_at_ms)?);

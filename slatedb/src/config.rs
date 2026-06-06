@@ -1091,7 +1091,7 @@ pub struct CompactorOptions {
 
     /// Options for the in-process compaction worker spawned alongside the
     /// coordinator. When `Some` (the default), an embedded
-    /// [`CompactionWorkerHandle`](crate::compaction_worker::CompactionWorkerHandle)
+    /// [`CompactionWorker`](crate::compaction_worker::CompactionWorker)
     /// executes compactions in the same process. Set to `None` when all workers
     /// run as separate processes.
     #[serde(default = "default_worker_options")]

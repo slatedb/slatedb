@@ -25,8 +25,6 @@ pub struct CompactorActorOptions {
     pub restart_interval: Duration,
     /// The options to use when constructing each standalone compactor.
     pub compactor_options: CompactorOptions,
-    /// The options to use for the embedded compaction worker.
-    pub worker_options: CompactionWorkerOptions,
 }
 
 pub struct CompactorActor {

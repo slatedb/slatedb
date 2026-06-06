@@ -211,11 +211,11 @@ fn run_seed_once(
             include_size_threshold: 4.0,
         }
         .into(),
+        worker: Some(CompactionWorkerOptions {
+            compactions_poll_interval: Duration::from_millis(10),
+            ..CompactionWorkerOptions::default()
+        }),
         ..CompactorOptions::default()
-    };
-    let worker_options = CompactionWorkerOptions {
-        compactions_poll_interval: Duration::from_millis(10),
-        ..CompactionWorkerOptions::default()
     };
     let mut harness = Harness::new(name, seed, move |ctx| async move {
         let failures = ctx.failure_controller();

@@ -131,9 +131,9 @@ use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
+use crate::config::CompactorOptions;
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
-use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
@@ -1033,16 +1033,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Sets the options to use for the compactor.
     pub fn with_options(mut self, options: CompactorOptions) -> Self {
         self.options = options;
-        self
-    }
-
-    /// Sets the options for the embedded compaction worker and enables it.
-    ///
-    /// Equivalent to setting [`CompactorOptions::worker`] to `Some(options)`.
-    /// To run without an embedded worker, set [`CompactorOptions::worker`] to
-    /// `None` via [`with_options`](Self::with_options).
-    pub fn with_worker_options(mut self, options: CompactionWorkerOptions) -> Self {
-        self.options.worker = Some(options);
         self
     }
 

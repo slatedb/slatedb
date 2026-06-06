@@ -367,8 +367,8 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
-        // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorkerHandle`]
-        // either spawned in this process (`embedded_worker = true`) or running standalone.
+        // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
+        // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let handler = CompactorEventHandler::new(
@@ -1475,10 +1475,6 @@ mod tests {
             .with_compactor_builder(
                 CompactorBuilder::new(path, os.clone())
                     .with_options(compactor_options())
-                    .with_worker_options(CompactionWorkerOptions {
-                        compactions_poll_interval: Duration::from_millis(100),
-                        ..CompactionWorkerOptions::default()
-                    })
                     .with_scheduler_supplier(Arc::new(SegmentTestSchedulerSupplier::new(
                         Bytes::from_static(b"aaa"),
                         2,
@@ -1663,10 +1659,6 @@ mod tests {
             .with_compactor_builder(
                 CompactorBuilder::new(path, os.clone())
                     .with_options(compactor_options())
-                    .with_worker_options(CompactionWorkerOptions {
-                        compactions_poll_interval: Duration::from_millis(100),
-                        ..CompactionWorkerOptions::default()
-                    })
                     .with_scheduler_supplier(Arc::new(SegmentDrainTestSchedulerSupplier::new(
                         Bytes::from_static(b"aaa"),
                     ))),
@@ -5497,6 +5489,10 @@ mod tests {
             poll_interval: Duration::from_millis(100),
             max_concurrent_compactions: 1,
             scheduler_options: Default::default(),
+            worker: Some(CompactionWorkerOptions {
+                compactions_poll_interval: Duration::from_millis(100),
+                ..CompactionWorkerOptions::default()
+            }),
             ..CompactorOptions::default()
         }
     }
@@ -5509,10 +5505,6 @@ mod tests {
         CompactorBuilder::new(PATH, os)
             .with_system_clock(system_clock)
             .with_options(compactor_options())
-            .with_worker_options(CompactionWorkerOptions {
-                compactions_poll_interval: Duration::from_millis(100),
-                ..CompactionWorkerOptions::default()
-            })
             .with_scheduler_supplier(scheduler_supplier)
     }
 

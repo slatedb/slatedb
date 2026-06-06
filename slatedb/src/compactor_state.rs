@@ -595,10 +595,11 @@ impl Compactions {
     }
 
     /// Returns an iterator over all compactions whose status is one of `statuses`.
-    pub(crate) fn iter_with_status<'a>(
-        &'a self,
-        statuses: &'a [CompactionStatus],
-    ) -> impl Iterator<Item = &'a Compaction> {
+    pub(crate) fn iter_with_status(
+        &self,
+        statuses: &[CompactionStatus],
+    ) -> impl Iterator<Item = &Compaction> {
+        let statuses = statuses.to_vec();
         self.core
             .recent_compactions
             .values()

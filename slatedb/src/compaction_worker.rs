@@ -1,6 +1,6 @@
 //! Distributed-compaction worker (RFC-0025).
 //!
-//! A [`CompactionWorkerHandle`] polls `.compactions` for `Scheduled` entries, claims
+//! A [`CompactionWorker`] polls `.compactions` for `Scheduled` entries, claims
 //! them via the optimistic CAS protocol described in RFC-0025, executes the
 //! compaction with the same code path the in-process executor uses, and writes
 //! `Compacted` (with the produced `output_ssts`) back to `.compactions`. The
@@ -77,13 +77,13 @@ pub(crate) enum WorkerMessage {
 /// Stateless executor of compaction jobs claimed from `.compactions`.
 ///
 /// Build one with [`CompactionWorkerBuilder`] and drive its event loop with
-/// [`CompactionWorkerHandle::run`]. Call [`CompactionWorkerHandle::stop`] to gracefully
+/// [`CompactionWorker::run`]. Call [`CompactionWorker::stop`] to gracefully
 /// release any in-flight claims.
-pub struct CompactionWorkerHandle {
+pub struct CompactionWorker {
     task_executor: Arc<MessageHandlerExecutor>,
 }
 
-impl CompactionWorkerHandle {
+impl CompactionWorker {
     /// Runs the worker until cancellation or fatal error. The worker polls
     /// `.compactions` every [`CompactionWorkerOptions::compactions_poll_interval`],
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
@@ -106,7 +106,7 @@ impl CompactionWorkerHandle {
     }
 }
 
-/// Builder for [`CompactionWorkerHandle`].
+/// Builder for [`CompactionWorker`].
 ///
 /// Mirrors `CompactorBuilder`: the user supplies a DB path and object store,
 /// optionally overrides options/clock/seed/merge operator, then calls
@@ -179,7 +179,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         self
     }
 
-    pub async fn build(self) -> Result<CompactionWorkerHandle, crate::Error> {
+    pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
         let path: Path = self.path.into();
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
@@ -219,7 +219,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
                 &Handle::current(),
             )
             .expect("failed to spawn compaction worker task");
-        Ok(CompactionWorkerHandle { task_executor })
+        Ok(CompactionWorker { task_executor })
     }
 }
 
