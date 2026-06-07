@@ -24,7 +24,7 @@ use ulid::Ulid;
 
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor_executor::{CompactionExecutor, StartCompactionJobArgs};
-use crate::compactor_state::{Compaction, CompactionStatus, SourceId, WorkerSpec};
+use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
@@ -262,21 +262,23 @@ impl CompactionWorkerHandler {
         }
 
         // Validate the spec's sources actually exist in the manifest. If they
-        // don't, the spec was racing with a manifest write — release the
+        // don't, the spec was racing with a manifest write; release the
         // claim and let the coordinator reschedule.
-        let expected_l0 = compaction
+        let expected_l0: Vec<Ulid> = compaction
             .spec()
             .sources()
             .iter()
-            .filter(|s| matches!(s, SourceId::SstView(_)))
-            .count();
-        let expected_srs = compaction
+            .filter_map(|s| s.maybe_unwrap_sst_view())
+            .collect();
+        let expected_srs: Vec<u32> = compaction
             .spec()
             .sources()
             .iter()
-            .filter(|s| matches!(s, SourceId::SortedRun(_)))
-            .count();
-        if sst_views.len() != expected_l0 || sorted_runs.len() != expected_srs {
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .collect();
+        let actual_l0: Vec<Ulid> = sst_views.iter().map(|v| v.id).collect();
+        let actual_srs: Vec<u32> = sorted_runs.iter().map(|sr| sr.id).collect();
+        if actual_l0 != expected_l0 || actual_srs != expected_srs {
             return Err(SlateDBError::InvalidCompaction);
         }
 
