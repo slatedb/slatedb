@@ -10176,10 +10176,11 @@ type CompactionStatus uint
 
 const (
 	CompactionStatusSubmitted CompactionStatus = 1
-	CompactionStatusRunning   CompactionStatus = 2
-	CompactionStatusCompleted CompactionStatus = 3
-	CompactionStatusFailed    CompactionStatus = 4
-	CompactionStatusCompacted CompactionStatus = 5
+	CompactionStatusScheduled CompactionStatus = 2
+	CompactionStatusRunning   CompactionStatus = 3
+	CompactionStatusCompleted CompactionStatus = 4
+	CompactionStatusFailed    CompactionStatus = 5
+	CompactionStatusCompacted CompactionStatus = 6
 )
 
 type FfiConverterCompactionStatus struct{}
