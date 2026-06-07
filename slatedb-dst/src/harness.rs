@@ -594,19 +594,11 @@ impl Harness {
     ///   an actor returned or joined with an error.
     pub fn run(self) -> Result<(), Error> {
         let runtime_seed = self.rand.rng().next_u64();
-        let clock_rand = Arc::clone(&self.rand);
-        let system_clock: Arc<dyn SystemClock> = self.system_clock.clone();
-        let clock_advance_ms = self.clock_advance_ms.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .rng_seed(RngSeed::from_bytes(&runtime_seed.to_le_bytes()))
             .build_local(Default::default())
             .expect("failed to build dst harness runtime");
-        runtime.block_on(async move {
-            let clock_driver = ClockDriver::spawn(system_clock, clock_rand, clock_advance_ms);
-            let result = self.run_inner().await;
-            clock_driver.shutdown().await;
-            result
-        })
+        runtime.block_on(async move { self.run_inner().await })
     }
 
     async fn run_inner(self) -> Result<(), Error> {
@@ -617,7 +609,7 @@ impl Harness {
             path,
             main_object_store,
             wal_object_store,
-            clock_advance_ms: _,
+            clock_advance_ms,
             merge_operator,
             segment_extractor,
             startup_factory,
@@ -632,6 +624,11 @@ impl Harness {
         let path_seed = rand.seed();
         let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/{path_seed:016x}")));
         let system_clock: Arc<dyn SystemClock> = system_clock;
+        let clock_driver = ClockDriver::spawn(
+            Arc::clone(&system_clock),
+            Arc::clone(&rand),
+            clock_advance_ms,
+        );
         let fp_registry = Arc::new(FailPointRegistry::new());
         let failure_controller = FailingObjectStoreController::new(Arc::clone(&rand));
         let failing_main_object_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
@@ -729,7 +726,6 @@ impl Harness {
                 }
             }
         }
-
         let failure_controller = shared.startup_ctx.failure_controller();
         failure_controller.clear_toxics();
         failure_controller.clear_http_failures();
@@ -739,6 +735,7 @@ impl Harness {
             Some(compactor) => compactor.stop().await,
             None => Ok(()),
         };
+        clock_driver.shutdown().await;
         info!("final random [value={}]", rand.rng().next_u64());
         db_result?;
         compactor_result
