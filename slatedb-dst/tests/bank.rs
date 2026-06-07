@@ -9,7 +9,6 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::{Rng, RngCore};
 use rstest::rstest;
-use slatedb::config::CompactionWorkerOptions;
 use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{

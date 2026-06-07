@@ -271,7 +271,6 @@ fn run_seed_once(
             CompactorActor::new(CompactorActorOptions {
                 restart_interval: Duration::from_millis(25),
                 compactor_options,
-                worker_options,
             })?,
         )
         .actor("shutdown", ShutdownActor::new(shutdown_at_ms)?);
