@@ -4,6 +4,7 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
 use crate::flatbuffer_types::FlatBufferCompactionsCodec;
 use chrono::Utc;
+use log::debug;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
@@ -218,7 +219,21 @@ impl CompactionsStore {
 
     /// Delete a compactions file from the object store.
     pub(crate) async fn delete_compactions(&self, id: u64) -> Result<(), SlateDBError> {
+        let latest_compactions = self.read_latest_compactions().await?;
+        if latest_compactions.id == id {
+            return Err(SlateDBError::InvalidDeletion);
+        }
+
+        debug!("deleting compactions [id={}]", id);
         Ok(self.inner.delete(MonotonicId::new(id)).await?)
+    }
+
+    /// Delete a compactions file without validating it against the latest compactions file.
+    ///
+    /// Callers must ensure the compactions file is not the latest file and is safe to delete.
+    pub(crate) async fn delete_compactions_unchecked(&self, id: u64) -> Result<(), SlateDBError> {
+        debug!("deleting compactions [id={}]", id);
+        Ok(self.inner.delete_unchecked(MonotonicId::new(id)).await?)
     }
 
     /// Read a compactions file from the object store. The last element in an unbounded
@@ -257,7 +272,6 @@ impl CompactionsStore {
         })?)
     }
 
-    #[cfg(test)]
     pub(crate) async fn read_latest_compactions(
         &self,
     ) -> Result<VersionedCompactions, SlateDBError> {
@@ -489,6 +503,17 @@ mod tests {
         let compactions = store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 1);
         assert_eq!(compactions[0].id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_latest_compactions_should_fail() {
+        let store = new_memory_compactions_store();
+        let mut sc = StoredCompactions::create(store.clone(), 0).await.unwrap();
+        sc.update(sc.prepare_dirty().unwrap()).await.unwrap();
+
+        let result = store.delete_compactions(2).await;
+
+        assert!(matches!(result, Err(SlateDBError::InvalidDeletion)));
     }
 
     #[tokio::test]

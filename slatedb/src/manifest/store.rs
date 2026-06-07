@@ -503,7 +503,7 @@ impl ManifestStore {
     ///
     /// Callers must ensure the manifest is not the latest manifest, is not referenced
     /// by an active checkpoint, and is safe to delete.
-    pub(crate) async fn delete_unchecked(&self, id: u64) -> Result<(), SlateDBError> {
+    pub(crate) async fn delete_manifest_unchecked(&self, id: u64) -> Result<(), SlateDBError> {
         debug!("deleting manifest [id={}]", id);
         Ok(self.inner.delete_unchecked(MonotonicId::new(id)).await?)
     }

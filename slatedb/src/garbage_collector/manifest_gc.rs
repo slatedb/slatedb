@@ -101,7 +101,7 @@ impl GcTask for ManifestGcTask {
             }
             if let Err(e) = self
                 .manifest_store
-                .delete_unchecked(manifest_metadata.id)
+                .delete_manifest_unchecked(manifest_metadata.id)
                 .await
             {
                 error!(

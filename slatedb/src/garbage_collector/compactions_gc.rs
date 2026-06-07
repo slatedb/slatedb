@@ -106,7 +106,7 @@ impl GcTask for CompactionsGcTask {
             }
             if let Err(e) = self
                 .compactions_store
-                .delete_compactions(compactions_metadata.id)
+                .delete_compactions_unchecked(compactions_metadata.id)
                 .await
             {
                 error!(
