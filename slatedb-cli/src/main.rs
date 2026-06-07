@@ -2,7 +2,6 @@ use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
-use slatedb::CompactionWorkerBuilder;
 use slatedb::compactor::{
     CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
 };
@@ -11,6 +10,7 @@ use slatedb::config::{
     GarbageCollectorOptions, Settings,
 };
 use slatedb::seq_tracker::FindOption;
+use slatedb::CompactionWorkerBuilder;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;

@@ -5446,7 +5446,12 @@ mod tests {
             let empty_l0 = core_db_state.tree.l0.is_empty();
             let compaction_ran = !core_db_state.tree.compacted.is_empty();
 
-            if empty_wal && empty_memtable && empty_l0 && compaction_ran && predicate(&core_db_state) {
+            if empty_wal
+                && empty_memtable
+                && empty_l0
+                && compaction_ran
+                && predicate(&core_db_state)
+            {
                 return Some(get_db_state(manifest_store.clone()).await);
             }
             None

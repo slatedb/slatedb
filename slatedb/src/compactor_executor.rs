@@ -580,10 +580,7 @@ impl TokioCompactionExecutorInner {
             }
         };
 
-        #[cfg(dst)]
         self.handle.spawn(wait_for_task_termination);
-        #[cfg(not(dst))]
-        self.handle.block_on(wait_for_task_termination);
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
     }
 }
