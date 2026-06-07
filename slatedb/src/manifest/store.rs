@@ -499,6 +499,15 @@ impl ManifestStore {
         Ok(self.inner.delete(MonotonicId::new(id)).await?)
     }
 
+    /// Delete a manifest without validating it against the latest manifest.
+    ///
+    /// Callers must ensure the manifest is not the latest manifest, is not referenced
+    /// by an active checkpoint, and is safe to delete.
+    pub(crate) async fn delete_unchecked(&self, id: u64) -> Result<(), SlateDBError> {
+        debug!("deleting manifest [id={}]", id);
+        Ok(self.inner.delete_unchecked(MonotonicId::new(id)).await?)
+    }
+
     /// Read a manifest from the object store. The last element in an unbounded
     /// range is the current manifest.
     /// # Arguments
