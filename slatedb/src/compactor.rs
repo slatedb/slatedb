@@ -723,32 +723,27 @@ impl CompactorEventHandler {
         let now_ms = self.system_clock.now().timestamp_millis() as u64;
         let timeout_ms = self.options.worker_heartbeat_timeout.as_millis() as u64;
 
-        let stale: Vec<Ulid> = self
+        // Capture the owning worker id alongside the compaction id so the log
+        // below doesn't have to re-look-up the entry (a Running compaction
+        // always has a worker, so the filter guarantees one is present).
+        let stale: Vec<(Ulid, String)> = self
             .state()
             .compactions_with_status(&[CompactionStatus::Running])
-            .filter(|c| {
+            .filter_map(|c| {
                 c.worker()
-                    .map(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
-                    .unwrap_or(false)
+                    .filter(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
+                    .map(|w| (c.id(), w.worker_id.clone()))
             })
-            .map(|c| c.id())
             .collect();
 
         if stale.is_empty() {
             return Ok(());
         }
 
-        for id in &stale {
+        for (id, worker_id) in &stale {
             info!(
                 "reclaiming stale compaction [worker_id={}, id={}]",
-                self.state()
-                    .compactions()
-                    .value
-                    .get(id)
-                    .and_then(|c| c.worker())
-                    .map(|w| w.worker_id.as_str())
-                    .unwrap_or("unknown"),
-                id
+                worker_id, id
             );
             self.state_mut().update_compaction(id, |c| {
                 c.set_status(CompactionStatus::Submitted);

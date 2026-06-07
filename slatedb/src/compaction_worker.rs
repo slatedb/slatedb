@@ -379,13 +379,19 @@ impl CompactionWorkerHandler {
     /// Writes a heartbeat for `compaction_id`, updating `last_heartbeat_ms`
     /// and (when provided) the `output_ssts` list. Only writes if this worker
     /// still owns the entry; silently returns otherwise.
+    ///
+    /// Returns `Ok(true)` iff a heartbeat was actually persisted. Callers use
+    /// this to avoid advancing their in-memory progress bookkeeping when the
+    /// write was skipped (entry gone, ownership lost, or `.compactions` not yet
+    /// loaded) — otherwise they would mark progress as heartbeated that was
+    /// never durably recorded.
     async fn write_heartbeat(
         &mut self,
         compaction_id: Ulid,
         output_ssts: Option<Vec<crate::db_state::SsTableHandle>>,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<bool, SlateDBError> {
         if !self.ensure_loaded().await? {
-            return Ok(());
+            return Ok(false);
         }
         loop {
             let stored = self.stored.as_mut().expect("ensure_loaded set stored");
@@ -395,14 +401,14 @@ impl CompactionWorkerHandler {
                     "heartbeat: compaction entry missing [id={}]; skipping",
                     compaction_id
                 );
-                return Ok(());
+                return Ok(false);
             };
             if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
                 debug!(
                     "heartbeat: no longer owner of compaction [id={}]; skipping",
                     compaction_id
                 );
-                return Ok(());
+                return Ok(false);
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
             let new_worker = WorkerSpec::new(self.worker_id.clone(), now_ms);
@@ -421,7 +427,7 @@ impl CompactionWorkerHandler {
                         "wrote heartbeat [worker_id={}, id={}, now_ms={}]",
                         self.worker_id, compaction_id, now_ms
                     );
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(e) if e.is_sequenced_write_conflict() => continue,
                 Err(e) => return Err(e),
@@ -433,6 +439,17 @@ impl CompactionWorkerHandler {
     /// - An **SST heartbeat** when `output_ssts` grew since the last report.
     /// - A **bytes heartbeat** when cumulative bytes since the last bytes-hb
     ///   exceeds `heartbeat_bytes` and `heartbeat_min_interval` has elapsed.
+    ///
+    /// `output_ssts` and `bytes_processed` are *cumulative* per job (the full
+    /// produced-SST list and the running byte total), not deltas — the SST
+    /// trigger relies on this by comparing `output_ssts.len()` against the
+    /// count last heartbeated.
+    ///
+    /// In-memory progress bookkeeping (`last_hb_sst_count`, `last_hb_bytes`,
+    /// and the worker-global `worker_last_bytes_hb_ms`) is only advanced after
+    /// `write_heartbeat` confirms a durable write, so a skipped write (entry
+    /// gone / ownership lost) does not mark un-persisted progress as
+    /// heartbeated.
     async fn handle_progress(
         &mut self,
         id: Ulid,
@@ -440,63 +457,64 @@ impl CompactionWorkerHandler {
         output_ssts: Vec<crate::db_state::SsTableHandle>,
     ) -> Result<(), SlateDBError> {
         // --- SST trigger -------------------------------------------------------
-        // Check and update state in a scoped block so the borrow ends before
-        // we call the async `write_heartbeat`.
-        let sst_trigger = {
-            let Some(state) = self.job_progress.get_mut(&id) else {
+        // Decide whether to write in a scoped borrow so it ends before the
+        // async `write_heartbeat`; state is updated afterwards only on success.
+        let new_sst_count = {
+            let Some(state) = self.job_progress.get(&id) else {
                 // No state for this job: stale progress message, ignore.
                 return Ok(());
             };
-            if output_ssts.len() > state.last_hb_sst_count {
-                let new_count = output_ssts.len();
-                state.last_hb_sst_count = new_count;
-                state.last_hb_bytes = bytes_processed;
-                Some(new_count)
-            } else {
-                None
-            }
+            (output_ssts.len() > state.last_hb_sst_count).then_some(output_ssts.len())
         };
 
-        if let Some(new_count) = sst_trigger {
+        if let Some(new_count) = new_sst_count {
             info!(
                 "SST heartbeat [worker_id={}, id={}, ssts={}]",
                 self.worker_id, id, new_count
             );
-            self.write_heartbeat(id, Some(output_ssts)).await?;
-            // Update the worker-level bytes heartbeat timestamp so the bytes
-            // trigger doesn't immediately re-fire after an SST heartbeat.
-            self.worker_last_bytes_hb_ms = self.clock.now().timestamp_millis() as u64;
+            if self.write_heartbeat(id, Some(output_ssts)).await? {
+                if let Some(state) = self.job_progress.get_mut(&id) {
+                    state.last_hb_sst_count = new_count;
+                    state.last_hb_bytes = bytes_processed;
+                }
+                // Update the worker-level bytes heartbeat timestamp so the bytes
+                // trigger doesn't immediately re-fire after an SST heartbeat.
+                self.worker_last_bytes_hb_ms = self.clock.now().timestamp_millis() as u64;
+            }
             return Ok(());
         }
 
         // --- Bytes trigger -----------------------------------------------------
-        let bytes_trigger = {
-            let Some(state) = self.job_progress.get_mut(&id) else {
+        // Note: `worker_last_bytes_hb_ms` is worker-global (shared across all
+        // jobs on this worker) while `last_hb_bytes` is per-job, so one job's
+        // bytes heartbeat can suppress another's for up to `heartbeat_min_interval`.
+        // That is intentional: the throttle bounds heartbeat write rate per
+        // worker, not per job.
+        let should_write = {
+            let Some(state) = self.job_progress.get(&id) else {
                 return Ok(());
             };
             let bytes_since_last_hb = bytes_processed.saturating_sub(state.last_hb_bytes);
             if bytes_since_last_hb >= self.options.heartbeat_bytes {
                 let now_ms = self.clock.now().timestamp_millis() as u64;
                 let min_interval_ms = self.options.heartbeat_min_interval.as_millis() as u64;
-                let elapsed = now_ms.saturating_sub(self.worker_last_bytes_hb_ms);
-                if elapsed >= min_interval_ms {
-                    state.last_hb_bytes = bytes_processed;
-                    true
-                } else {
-                    false
-                }
+                now_ms.saturating_sub(self.worker_last_bytes_hb_ms) >= min_interval_ms
             } else {
                 false
             }
         };
 
-        if bytes_trigger {
+        if should_write {
             info!(
                 "bytes heartbeat [worker_id={}, id={}, bytes={}]",
                 self.worker_id, id, bytes_processed
             );
-            self.write_heartbeat(id, None).await?;
-            self.worker_last_bytes_hb_ms = self.clock.now().timestamp_millis() as u64;
+            if self.write_heartbeat(id, None).await? {
+                if let Some(state) = self.job_progress.get_mut(&id) {
+                    state.last_hb_bytes = bytes_processed;
+                }
+                self.worker_last_bytes_hb_ms = self.clock.now().timestamp_millis() as u64;
+            }
         }
 
         Ok(())
