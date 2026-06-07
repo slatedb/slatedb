@@ -479,6 +479,7 @@ impl ManifestStore {
     }
 
     /// Delete a manifest from the object store.
+    #[allow(unused)]
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
         let latest_manifest = self.read_latest_manifest().await?;
         if latest_manifest.id == id {

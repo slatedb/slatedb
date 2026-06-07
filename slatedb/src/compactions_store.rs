@@ -218,6 +218,7 @@ impl CompactionsStore {
     }
 
     /// Delete a compactions file from the object store.
+    #[allow(unused)]
     pub(crate) async fn delete_compactions(&self, id: u64) -> Result<(), SlateDBError> {
         let latest_compactions = self.read_latest_compactions().await?;
         if latest_compactions.id == id {
@@ -272,6 +273,7 @@ impl CompactionsStore {
         })?)
     }
 
+    #[allow(unused)]
     pub(crate) async fn read_latest_compactions(
         &self,
     ) -> Result<VersionedCompactions, SlateDBError> {
