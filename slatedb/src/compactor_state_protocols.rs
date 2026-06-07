@@ -302,10 +302,12 @@ impl CompactorStateWriter {
                     return Ok(());
                 }
                 Err(err) if err.is_sequenced_write_conflict() => {
-                    // Retry with a refreshed view. Refresh will surface fencing if the epoch advanced.
-                    // If another process modified the compactions file legally (such as an external
-                    // compaction request triggered from the CLI), this will pick up those changes.
-                    self.compactions.refresh().await?;
+                    // Merge the latest remote state (e.g. a worker's Compacted write) into
+                    // the coordinator's view before retrying. Without this, retrying with a stale
+                    // desired_value could silently overwrite worker progress.
+                    self.load_compactions().await?;
+                    desired_value = self.state.compactions().value.clone();
+                    desired_value.retain_active_and_last_finished();
                 }
                 Err(err) => return Err(err),
             }
