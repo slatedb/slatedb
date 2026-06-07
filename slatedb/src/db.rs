@@ -2065,6 +2065,7 @@ mod tests {
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::config::DurabilityLevel::{Memory, Remote};
+    use crate::config::MetricLevel;
     use crate::config::{
         CheckpointOptions, CompactionWorkerOptions, CompactorOptions,
         GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
@@ -7065,6 +7066,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
+            metric_level: MetricLevel::default(),
             default_ttl: ttl,
             block_format: None,
         }
@@ -7698,6 +7700,7 @@ mod tests {
                 dry_run: false,
             }),
             detach_options: None,
+            metric_level: None,
         };
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())

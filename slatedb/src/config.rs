@@ -54,6 +54,7 @@
 //! l0_max_ssts_per_key = 8
 //! l0_flush_parallelism = 4
 //! max_unflushed_bytes = 536870912
+//! metric_level = "Info"
 //!
 //! [compactor_options]
 //! poll_interval = "5s"
@@ -105,6 +106,7 @@
 //!  "l0_max_ssts_per_key": 8,
 //!  "l0_flush_parallelism": 4,
 //!  "max_unflushed_bytes": 536870912,
+//!  "metric_level": "Info",
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_concurrent_compactions": 4,
@@ -159,6 +161,7 @@
 //! l0_max_ssts_per_key: 8
 //! l0_flush_parallelism: 1
 //! max_unflushed_bytes: 536870912
+//! metric_level: Info
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_concurrent_compactions: 4
@@ -200,6 +203,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
+
+pub use slatedb_common::metrics::MetricLevel;
 
 use crate::error::SlateDBError;
 
@@ -737,6 +742,13 @@ pub struct Settings {
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
 
+    /// Controls which metrics are active.
+    ///
+    /// Metrics below this threshold are replaced with no-op handles when they
+    /// are registered. Defaults to [`MetricLevel::Info`].
+    #[serde(default)]
+    pub metric_level: MetricLevel,
+
     /// The default time-to-live (TTL) for insertions (note that re-inserting a key
     /// with any value will update the TTL to use the default_ttl)
     ///
@@ -780,6 +792,7 @@ impl std::fmt::Debug for Settings {
                 &self.object_store_cache_options,
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
+            .field("metric_level", &self.metric_level)
             .field("default_ttl", &self.default_ttl);
         data.finish()
     }
@@ -976,6 +989,7 @@ impl Default for Settings {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
+            metric_level: MetricLevel::default(),
             default_ttl: None,
             #[cfg(test)]
             block_format: None,
@@ -1018,6 +1032,10 @@ pub struct DbReaderOptions {
     ///
     /// Defaults to false.
     pub skip_wal_replay: bool,
+
+    /// Optional metrics reporting level for standalone readers. Defaults to
+    /// [`MetricLevel::default`] when unset.
+    pub metric_level: Option<MetricLevel>,
 }
 
 impl Default for DbReaderOptions {
@@ -1028,6 +1046,7 @@ impl Default for DbReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
+            metric_level: None,
         }
     }
 }
@@ -1094,12 +1113,13 @@ pub struct CompactorOptions {
     /// [`CompactionWorker`](crate::compaction_worker::CompactionWorker)
     /// executes compactions in the same process. Set to `None` when all workers
     /// run as separate processes.
-    #[serde(default = "default_worker_options")]
+    #[serde(default)]
     pub worker: Option<CompactionWorkerOptions>,
-}
 
-fn default_worker_options() -> Option<CompactionWorkerOptions> {
-    Some(CompactionWorkerOptions::default())
+    /// Optional metrics reporting level for standalone compactors. When a
+    /// compactor is owned by a [`Settings`] configured DB, unset means inherit
+    /// [`Settings::metric_level`].
+    pub metric_level: Option<MetricLevel>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -1114,6 +1134,7 @@ impl Default for CompactorOptions {
             max_concurrent_compactions: 4,
             scheduler_options: HashMap::new(),
             worker: Some(CompactionWorkerOptions::default()),
+            metric_level: None,
         }
     }
 }
@@ -1172,6 +1193,10 @@ pub struct CompactionWorkerOptions {
     /// (`bytes_to_fetch = 2MiB`, `max_fetch_tasks = 4`) that is ~8MiB prefetched
     /// ahead of the cursor.
     pub bytes_to_fetch: usize,
+
+    /// Optional metrics reporting level for standalone compaction workers.
+    /// Defaults to [`MetricLevel::default`] when unset.
+    pub metric_level: Option<MetricLevel>,
 }
 
 /// Default options for the compaction worker.
@@ -1186,6 +1211,7 @@ impl Default for CompactionWorkerOptions {
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
             bytes_to_fetch: 2 * 1024 * 1024,
+            metric_level: None,
         }
     }
 }
@@ -1334,6 +1360,11 @@ pub struct GarbageCollectorOptions {
     ///
     /// None means detach is disabled.
     pub detach_options: Option<GarbageCollectorScheduleOptions>,
+
+    /// Optional metrics reporting level for standalone garbage collectors. When
+    /// a garbage collector is owned by a [`Settings`] configured DB, unset means
+    /// inherit [`Settings::metric_level`].
+    pub metric_level: Option<MetricLevel>,
 }
 
 impl GarbageCollectorOptions {
@@ -1433,6 +1464,7 @@ impl Default for GarbageCollectorOptions {
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
             detach_options: Some(GarbageCollectorScheduleOptions::default()),
+            metric_level: None,
         }
     }
 }
@@ -1559,6 +1591,44 @@ mod tests {
     }
 
     #[test]
+    fn test_db_options_load_metric_level_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SLATEDB_METRIC_LEVEL", "Debug");
+
+            let options =
+                Settings::from_env("SLATEDB_").expect("failed to load db options from environment");
+            assert_eq!(MetricLevel::Debug, options.metric_level);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_db_options_load_metric_level_case_insensitive() {
+        for (value, expected) in [
+            ("debug", MetricLevel::Debug),
+            ("DEBUG", MetricLevel::Debug),
+            ("Debug", MetricLevel::Debug),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("SLATEDB_METRIC_LEVEL", value);
+
+                let options = Settings::from_env("SLATEDB_")
+                    .expect("failed to load db options from environment");
+                assert_eq!(expected, options.metric_level);
+
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn test_db_options_default_metric_level() {
+        let options = Settings::default();
+        assert_eq!(MetricLevel::default(), options.metric_level);
+    }
+
+    #[test]
     fn test_db_options_load_from_json_file() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -1566,6 +1636,7 @@ mod tests {
                 r#"
 {
     "flush_interval": "1s",
+    "metric_level": "Debug",
     "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
     }
@@ -1577,6 +1648,7 @@ mod tests {
             let options = Settings::from_file("config.json")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
+            assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1610,6 +1682,7 @@ mod tests {
                 "config.toml",
                 r#"
 flush_interval = "1s"
+metric_level = "Debug"
 [object_store_cache_options]
 root_folder = "/tmp/slatedb-root"
 "#,
@@ -1619,6 +1692,7 @@ root_folder = "/tmp/slatedb-root"
             let options = Settings::from_file("config.toml")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
+            assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1634,6 +1708,7 @@ root_folder = "/tmp/slatedb-root"
                 "config.yaml",
                 r#"
 flush_interval: "1s"
+metric_level: Debug
 object_store_cache_options:
     root_folder: "/tmp/slatedb-root"
 "#,
@@ -1643,6 +1718,7 @@ object_store_cache_options:
             let options = Settings::from_file("config.yaml")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
+            assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder

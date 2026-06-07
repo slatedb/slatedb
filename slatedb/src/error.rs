@@ -65,6 +65,7 @@ pub(crate) enum SlateDBError {
     InvalidTransactionalObjectState,
 
     #[error("invalid deletion")]
+    #[allow(unused)]
     InvalidDeletion,
 
     #[error("invalid sst error")]

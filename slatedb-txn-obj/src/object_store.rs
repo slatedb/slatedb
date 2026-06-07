@@ -222,7 +222,7 @@ impl ObjectStoreBoundaryObject {
         boundary: MonotonicId,
     ) -> Result<(), TransactionalObjectError> {
         if id <= boundary {
-            warn!(
+            debug!(
                 "object version is behind boundary: id={:?}, boundary={:?}",
                 id.id(),
                 boundary.id()

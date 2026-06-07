@@ -109,6 +109,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
             bytes_to_fetch: rng.random_range(KIB_8..=(8 * MIB_1)),
             ..CompactionWorkerOptions::default()
         }),
+        metric_level: None,
     }
 }
 
@@ -139,6 +140,7 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
         detach_options: Some(GarbageCollectorScheduleOptions {
             interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
         }),
+        metric_level: None,
     }
 }
 
