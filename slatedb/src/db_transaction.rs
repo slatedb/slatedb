@@ -742,6 +742,7 @@ impl Drop for DbTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MetricLevel;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_store::memory::InMemory;
     use rstest::rstest;
@@ -2030,6 +2031,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
+            metric_level: MetricLevel::default(),
             default_ttl: None,
             block_format: None,
         }

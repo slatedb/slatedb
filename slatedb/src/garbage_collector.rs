@@ -1074,6 +1074,7 @@ mod tests {
             compacted_options: None,
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1138,6 +1139,7 @@ mod tests {
             compacted_options: None,
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         };
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
@@ -1201,6 +1203,7 @@ mod tests {
             compacted_options: None,
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1277,6 +1280,7 @@ mod tests {
             compacted_options: None,
             compactions_options: None,
             detach_options: None,
+            metric_level: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1728,6 +1732,7 @@ mod tests {
                 dry_run: false,
             }),
             detach_options: None,
+            metric_level: None,
         };
 
         let gc = GarbageCollector::new(
@@ -1801,6 +1806,7 @@ mod tests {
                 dry_run: false,
             }),
             detach_options: None,
+            metric_level: None,
         };
 
         let mut gc = GarbageCollector::new(
@@ -1869,6 +1875,7 @@ mod tests {
                 dry_run: false,
             }),
             detach_options: None,
+            metric_level: None,
         };
 
         let gc = GarbageCollector::new(
@@ -1916,6 +1923,7 @@ mod tests {
                 dry_run: false,
             }),
             detach_options: None,
+            metric_level: None,
         };
 
         let mut gc = GarbageCollector::new(
@@ -1971,6 +1979,7 @@ mod tests {
                 dry_run: false,
             }),
             detach_options: None,
+            metric_level: None,
         };
 
         let gc = GarbageCollector::new(
@@ -2311,6 +2320,7 @@ mod tests {
             compacted_options: Some(dry_run_options),
             compactions_options: Some(dry_run_options),
             detach_options: None,
+            metric_level: None,
         };
         let recorder = MetricsRecorderHelper::noop();
         let gc = GarbageCollector::new(

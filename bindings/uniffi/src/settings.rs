@@ -346,11 +346,16 @@ flush_interval = "1s"
     fn settings_from_env_reads_config() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("FFI_SETTINGS_FLUSH_INTERVAL", "1s");
+            jail.set_env("FFI_SETTINGS_METRIC_LEVEL", "Debug");
 
             let settings = Settings::from_env("FFI_SETTINGS_".to_owned()).unwrap();
             assert_eq!(
                 settings.inner().flush_interval,
                 Some(Duration::from_secs(1))
+            );
+            assert_eq!(
+                settings.inner().metric_level,
+                slatedb::config::MetricLevel::Debug
             );
 
             Ok(())
