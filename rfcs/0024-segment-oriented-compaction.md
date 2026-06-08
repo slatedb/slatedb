@@ -418,11 +418,12 @@ In today's manifest encoding, that means the scan either walks only the compatib
 
 ### Listing Segments
 
-Listing segments is useful if data is organized into buckets (e.g. time buckets) and each bucket maps to one segment.
-If a query engine knows about the existing segments, it is able to read entries relevant to a query from
-segments that actually exist. The query engine does not need to compute all possible segments for a query and probe
-those segments for existence. For data that was flushed to level L0+, existing segments can be read from the manifest.
-However, for segments that only exist in memory and in WALs, an API is required.
+Listing segments is useful if data is organized into buckets (e.g. time buckets, see [Appendix A](#appendix-a-opendata-timeseries-usage))
+and each bucket maps to one segment. If a query engine knows about the existing segments, it is able to read
+entries relevant to a query from segments that actually exist. The query engine does not need to compute all
+possible segments for a query and probe those segments for existence. For data that was flushed to level L0+,
+existing segments can be read from the manifest. However, for segments that only exist in memory and in WALs,
+an API is required.
 
 For listing existing segments, the type `DbStatus` returned by `DbMetadataOps::subscribe()` and
 `DbMetadataOps::status()` is extended by a method `list_segments()` (in `slatedb/src/db_status.rs`):
