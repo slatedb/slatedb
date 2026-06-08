@@ -60,6 +60,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use fail_parallel::{fail_point, FailPointRegistry};
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -329,6 +330,7 @@ pub struct Compactor {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
     merge_operator: Option<MergeOperatorType>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
@@ -346,6 +348,7 @@ impl Compactor {
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
+        fp_registry: Arc<FailPointRegistry>,
         closed_result: Arc<dyn ClosedResultWriter>,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
@@ -368,6 +371,7 @@ impl Compactor {
             rand,
             stats,
             system_clock,
+            fp_registry,
             merge_operator,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier,
@@ -409,6 +413,7 @@ impl Compactor {
             self.rand.clone(),
             self.stats.clone(),
             self.system_clock.clone(),
+            self.fp_registry.clone(),
         )
         .await?;
         self.task_executor
@@ -485,6 +490,7 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 #[async_trait]
@@ -522,9 +528,10 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 bytes_processed,
                 output_ssts,
             } => {
+                let output_sst_count = output_ssts.len();
                 let compaction = self.state().compactions().value.get(&id);
                 let update_output_ssts =
-                    compaction.is_some_and(|c| c.output_ssts().len() != output_ssts.len());
+                    compaction.is_some_and(|c| c.output_ssts().len() != output_sst_count);
                 self.state_mut().update_compaction(&id, |c| {
                     c.set_bytes_processed(bytes_processed);
                     if update_output_ssts {
@@ -534,6 +541,13 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 // To prevent excessive writes, only persist if output SSTs changed.
                 if update_output_ssts {
                     self.state_writer.write_compactions_safely().await?;
+                    if output_sst_count == 1 {
+                        fail_point!(
+                            self.fp_registry.clone(),
+                            "compactor-progress-after-first-output-sst",
+                            |_| { Err(SlateDBError::Fenced) }
+                        );
+                    }
                 }
             }
         }
@@ -562,6 +576,7 @@ impl CompactorEventHandler {
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -581,6 +596,7 @@ impl CompactorEventHandler {
             rand,
             stats,
             system_clock,
+            fp_registry,
         })
     }
 
@@ -4473,6 +4489,7 @@ mod tests {
                 rand.clone(),
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
+                Arc::new(FailPointRegistry::new()),
             )
             .await
             .unwrap();
@@ -5029,6 +5046,7 @@ mod tests {
             rand,
             compactor_stats,
             system_clock,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();

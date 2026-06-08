@@ -2060,8 +2060,8 @@ mod tests {
     use crate::config::MetricLevel;
     use crate::config::{
         CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
-        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, Ttl,
-        WriteOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings,
+        SstBlockSize, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -7016,6 +7016,25 @@ mod tests {
         panic!("manifest condition took longer than timeout")
     }
 
+    async fn wait_for_db_core_condition(
+        db: &Db,
+        cond: impl Fn(&ManifestCore) -> bool,
+        timeout: Duration,
+    ) -> ManifestCore {
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < timeout {
+            let core = {
+                let state = db.inner.state.read();
+                state.state().core().clone()
+            };
+            if cond(&core) {
+                return core;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("db core condition took longer than timeout")
+    }
+
     fn test_db_options(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
@@ -7171,6 +7190,140 @@ mod tests {
             );
             assert!(recent_min_seq > snapshot_seq);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_compaction_resume_loses_merge_operands_after_snapshot_retention_advances() {
+        let path =
+            "/tmp/test_compaction_resume_loses_merge_operands_after_snapshot_retention_advances";
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let compactor_options = CompactorOptions {
+            poll_interval: Duration::from_millis(10),
+            max_sst_size: 1,
+            ..Default::default()
+        };
+        let settings_without_compactor = test_db_options(0, 1024, None);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings_without_compactor.clone())
+            .with_sst_block_size(SstBlockSize::Other(1))
+            .with_fp_registry(fp_registry.clone())
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_options(compactor_options.clone())
+                    .with_scheduler_supplier(Arc::new(OnDemandCompactionSchedulerSupplier::new({
+                        let should_compact = should_compact.clone();
+                        Arc::new(move |_| should_compact.load(Ordering::SeqCst))
+                    }))),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        db.merge(b"k", b"1").await.unwrap();
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = db.inner.oracle.last_committed_seq();
+        db.flush().await.unwrap();
+
+        for operand in [b"2", b"3", b"4", b"5", b"6"] {
+            db.merge(b"k", operand).await.unwrap();
+            db.flush().await.unwrap();
+        }
+
+        let staged = wait_for_db_core_condition(
+            &db,
+            |core| core.last_l0_seq >= 6 && core.recent_snapshot_min_seq == snapshot_seq,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(
+            staged.tree.l0.len() > 1,
+            "the repro needs multiple L0s so compaction has work to resume"
+        );
+
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "compactor-progress-after-first-output-sst",
+            "return",
+        )
+        .unwrap();
+
+        let mut status_rx = db.subscribe();
+        should_compact.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if status_rx.borrow().close_reason.is_some() {
+                    break;
+                }
+                status_rx.changed().await.expect("db status channel closed");
+            }
+        })
+        .await
+        .expect("compactor did not hit the failpoint");
+
+        drop(snapshot);
+        db.close().await.unwrap();
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "compactor-progress-after-first-output-sst",
+            "off",
+        )
+        .unwrap();
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings_without_compactor.clone())
+            .with_sst_block_size(SstBlockSize::Other(1))
+            .with_fp_registry(fp_registry.clone())
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+        db.put(b"zz-advance-retention", b"x").await.unwrap();
+        db.flush().await.unwrap();
+        wait_for_db_core_condition(
+            &db,
+            |core| core.last_l0_seq >= 7 && core.recent_snapshot_min_seq > snapshot_seq,
+            Duration::from_secs(10),
+        )
+        .await;
+        db.close().await.unwrap();
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings_without_compactor)
+            .with_sst_block_size(SstBlockSize::Other(1))
+            .with_fp_registry(fp_registry)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_options(compactor_options)
+                    .with_scheduler_supplier(Arc::new(OnDemandCompactionSchedulerSupplier::new(
+                        Arc::new(|_| false),
+                    ))),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |core| !core.tree.compacted.is_empty(),
+            Duration::from_secs(10),
+        )
+        .await;
+        db.refresh_manifest().await.unwrap();
+
+        let actual = db.get(b"k").await.unwrap();
+        db.close().await.unwrap();
+
+        assert_eq!(actual, Some(Bytes::from_static(b"123456")));
     }
 
     #[tokio::test]
