@@ -381,10 +381,7 @@ async fn exec_run_worker(
             opts
         }
         Err(e) => {
-            tracing::warn!(
-                "failed to load settings, using defaults [error={:?}]",
-                e
-            );
+            tracing::warn!("failed to load settings, using defaults [error={:?}]", e);
             Default::default()
         }
     };

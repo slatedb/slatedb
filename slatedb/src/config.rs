@@ -1113,7 +1113,12 @@ pub struct CompactorOptions {
     /// [`CompactionWorker`](crate::compaction_worker::CompactionWorker)
     /// executes compactions in the same process. Set to `None` when all workers
     /// run as separate processes.
-    #[serde(default)]
+    ///
+    /// On deserialization an omitted `worker` key defaults to
+    /// `Some(CompactionWorkerOptions::default())` so existing configs keep
+    /// spawning the embedded worker. Set the key explicitly to `null` to
+    /// disable it.
+    #[serde(default = "default_compaction_worker_options")]
     pub worker: Option<CompactionWorkerOptions>,
 
     /// Optional metrics reporting level for standalone compactors. When a
@@ -1214,6 +1219,15 @@ impl Default for CompactionWorkerOptions {
             metric_level: None,
         }
     }
+}
+
+/// Default for [`CompactorOptions::worker`] when the key is omitted on
+/// deserialization. Mirrors [`CompactorOptions::default`] so existing configs
+/// without a `worker` key keep spawning the embedded worker. (A bare
+/// `#[serde(default)]` would use `Option::default()` == `None`, silently
+/// disabling it.)
+fn default_compaction_worker_options() -> Option<CompactionWorkerOptions> {
+    Some(CompactionWorkerOptions::default())
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
