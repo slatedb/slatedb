@@ -375,7 +375,7 @@ async fn exec_run_worker(
                 .and_then(|c| c.worker)
                 .unwrap_or_default();
             tracing::info!(
-                "loaded worker options from SlateDb.toml [options={:?}]",
+                "loaded worker options from settings [options={:?}]",
                 opts
             );
             opts
