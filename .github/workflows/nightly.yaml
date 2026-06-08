@@ -20,7 +20,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run microbenchmark
-        run: cargo bench --features bench-internal -- --output-format bencher | tee output.txt
+        shell: bash
+        run: cargo bench --features bench-internal --benches -- --output-format bencher | tee output.txt
 
       - name: Download nightly microbenchmark data
         uses: actions/cache/restore@v4
@@ -42,6 +43,7 @@ jobs:
           external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
           fail-on-alert: true
           summary-always: true
+          comment-on-alert: true
           max-items-in-chart: 30
 
       - name: Save nightly microbenchmark data
@@ -50,9 +52,20 @@ jobs:
           path: ./microbenchmarks-cache
           key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
 
-      - name: Fail on microbenchmark alert
+      - name: Report microbenchmark alert
         if: steps.update_microbenchmark_result.outcome == 'failure'
-        run: exit 1
+        shell: bash
+        run: |
+          message="Microbenchmark regression detected. Benchmark data was saved to the nightly cache; see the 'Update microbenchmark result' step and job summary for details."
+          echo "::error title=Microbenchmark regression::$message"
+          {
+            echo "## Microbenchmark regression"
+            echo ""
+            echo "$message"
+            echo ""
+            echo "The benchmark update step was allowed to continue so this run could save the new nightly baseline before failing."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
   benchmarks:
     runs-on: warp-ubuntu-latest-x64-16x
