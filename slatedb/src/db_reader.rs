@@ -426,6 +426,22 @@ impl DbReaderInner {
             let refreshed_checkpoint = stored_manifest
                 .refresh_checkpoint(checkpoint.id, self.options.checkpoint_lifetime)
                 .await?;
+
+            // Update our local checkpoint copy so we know the latest expiration time
+            // and can calculate future refresh deadlines correctly.
+            {
+                let mut write_guard = self.state.write();
+                let current_state = write_guard.as_ref();
+                // Defensively, only update checkpoint if the id and expiry still match.
+                if current_state.checkpoint.id == checkpoint.id
+                    && current_state.checkpoint.expire_time == checkpoint.expire_time
+                {
+                    let mut updated_state = current_state.clone();
+                    updated_state.checkpoint = refreshed_checkpoint.clone();
+                    *write_guard = Arc::new(updated_state);
+                }
+            }
+
             info!(
                 "refreshed checkpoint [checkpoint_id={}, expire_time={:?}]",
                 checkpoint.id, refreshed_checkpoint.expire_time
