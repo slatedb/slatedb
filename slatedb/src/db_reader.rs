@@ -1517,6 +1517,111 @@ mod tests {
         assert_eq!(0, updated_manifest.manifest.core.checkpoints.len());
     }
 
+    // Regression test for https://github.com/slatedb/slatedb/issues/1750.
+    // It constructs DbReaderInner without the background manifest poller,
+    // advances a mock clock past the first checkpoint refresh deadline, then
+    // verifies the next manual poll does not write another manifest before
+    // half of the refreshed checkpoint lifetime has elapsed.
+    #[tokio::test]
+    async fn should_not_refresh_reader_checkpoint_on_every_poll() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_checkpoint_refresh_cadence_{}",
+            Uuid::new_v4()
+        ));
+        let clock = Arc::new(MockSystemClock::new());
+        let mut test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        test_provider.system_clock = clock.clone();
+
+        let manifest_store = test_provider.manifest_store();
+        let table_store = test_provider.table_store();
+
+        // Seed the DB with its initial manifest. Opening a reader without a
+        // user-provided checkpoint will add a second manifest containing the
+        // self-established reader checkpoint.
+        let stored_manifest = StoredManifest::create_new_db(
+            Arc::clone(&manifest_store),
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let status_manager = DbStatusManager::new_with_manifest(
+            stored_manifest.db_state().last_l0_seq,
+            VersionedManifest::from_manifest(
+                stored_manifest.id(),
+                stored_manifest.manifest().clone(),
+            ),
+        );
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+
+        // Build DbReaderInner directly instead of DbReader so no spawned poller
+        // can race the manual calls to maybe_refresh_checkpoint below.
+        let inner = DbReaderInner::new(
+            Arc::clone(&manifest_store),
+            table_store,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(100),
+                checkpoint_lifetime: Duration::from_millis(1000),
+                ..DbReaderOptions::default()
+            },
+            None,
+            None,
+            status_manager,
+            clock.clone(),
+            test_provider.rand.clone(),
+            recorder,
+            stored_manifest,
+        )
+        .await
+        .unwrap();
+
+        // Manifest 1 is the initial DB manifest. Manifest 2 is written when
+        // DbReaderInner creates its checkpoint.
+        let initial_manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(
+            2,
+            initial_manifests.len(),
+            "expected initial db manifest plus reader checkpoint manifest"
+        );
+
+        // Move just past the first refresh deadline: the checkpoint was created
+        // at t=0 with a 1000ms lifetime, so checkpoint_lifetime / 2 is 500ms.
+        // This refresh is expected and should write exactly one new manifest.
+        clock.advance(Duration::from_millis(501)).await;
+        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
+            .await
+            .unwrap();
+        inner
+            .maybe_refresh_checkpoint(&mut stored_manifest)
+            .await
+            .unwrap();
+
+        let manifests_after_first_refresh = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(3, manifests_after_first_refresh.len());
+
+        // Simulate the next manifest poll 100ms later. Because the first
+        // refresh extended the checkpoint lifetime to t=1501ms, the next
+        // refresh deadline should be t=1001ms. A second manifest here shows
+        // the in-memory checkpoint expiry was not updated after the refresh.
+        clock.advance(Duration::from_millis(100)).await;
+        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
+            .await
+            .unwrap();
+        inner
+            .maybe_refresh_checkpoint(&mut stored_manifest)
+            .await
+            .unwrap();
+
+        // Correct behavior keeps the manifest count at 3.
+        let manifests_after_second_poll = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(
+            manifests_after_first_refresh.len(),
+            manifests_after_second_poll.len(),
+            "checkpoint refresh should not write another manifest until half of the refreshed lifetime has elapsed"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn should_replay_new_wals() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
