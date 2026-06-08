@@ -750,6 +750,7 @@ impl DbReader {
         let status_manager = DbStatusManager::new_with_manifest(
             manifest.db_state().last_l0_seq,
             VersionedManifest::from_manifest(manifest.id(), manifest.manifest().clone()),
+            false,
         );
         let task_executor =
             MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
@@ -1569,6 +1570,7 @@ mod tests {
                 stored_manifest.id(),
                 stored_manifest.manifest().clone(),
             ),
+            false,
         );
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 

@@ -19,7 +19,7 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::SsTableView;
+use crate::db_state::{collect_touched_segments, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
@@ -546,8 +546,9 @@ impl ManifestWriterHandler {
             Ok(modifier.state.manifest.clone())
         })?;
 
-        drop(guard);
+        let segments = collect_touched_segments(&guard.view());
         self.db.status_manager.report_manifest(manifest.into());
+        self.db.status_manager.report_memtable_segments(segments);
         Ok(())
     }
 
