@@ -398,7 +398,7 @@ Conceptually, the reader always walks the segment tree or trees whose intervals 
 - the top-level `core.tree` represents the singleton `prefix=""` segment for compatibility, or
 - `core.segments` represents the named non-empty-prefix segments.
 
-Routing is **structural** — derived from the segment prefixes already in the manifest, not from the configured extractor — so reads are correct as long as the manifest's segment list reflects what's persisted, regardless of how the reader's extractor is configured (or whether one is configured at all). Routing is automatic and requires no changes to `ReadOptions` or the query APIs.
+Routing is **structural** — derived from the segment prefixes already in the manifest, not from the configured extractor — so reads are correct as long as the manifest's segment list reflects what's persisted. Routing is automatic and requires no changes to `ReadOptions` or the query APIs.
 
 **Point lookups.** A `get(key)` is the degenerate case where the query range is `key..=key`. In the singleton empty-prefix case, the lookup consults `core.tree` exactly as today. Otherwise, by the antichain invariant on segment prefixes (see [Segment Extractor](#segment-extractor)), at most one non-empty segment's interval contains a given key — the segment whose prefix is itself a prefix of the key, found via binary search on `core.segments`. The lookup then consults exactly one tree and is otherwise identical to today's single-tree read path.
 
@@ -458,7 +458,7 @@ be notified about changes to those segments.
 
 #### Reader-side extractor
 
-`DbReaderBuilder` gains an optional `with_segment_extractor` method that
+`DbReaderBuilder` gains a `with_segment_extractor` method that
 mirrors the writer's:
 
 ```rust
@@ -489,7 +489,7 @@ with an extractor.
 
 #### Examples
 
-Assume a writer with the 3-byte fixed extractor.
+Assume a writer (or a reader) with the 3-byte fixed extractor.
 A segment `aaa` is persisted, the watch receiver returned by `subscribe()` is notified about a
 manifest change. Calls to `list_segments()` on the received `DbStatus` behave as follows:
 
@@ -505,20 +505,7 @@ Calls to `list_segments()` on the received `DbStatus` behave as follows:
 db_status.list_segments()?; // -> [b"aaa", b"bbb"]
 ```
 
-A reader opened with no extractor against the same segmented database:
-
-```rust
-db_status.list_segments()
-// -> Err(SegmentExtractorMismatch) [ErrorKind::Invalid]
-```
-
-A reader opened with the matching extractor:
-
-```rust
-db_status.list_segments()?; // -> [b"aaa", b"bbb"]
-```
-
-Writer or reader opened on an unsegmented database:
+Writer (or reader) opened on an unsegmented database:
 
 ```rust
 db_status.list_segments()?; // -> []
