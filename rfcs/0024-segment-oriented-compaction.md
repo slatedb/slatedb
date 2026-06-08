@@ -240,7 +240,7 @@ Two properties follow directly from the trait contract:
 
 Together these give the active segments a natural total order by prefix, with pairwise disjoint key intervals. The [Scans](#scans) design leverages this to iterate segment-by-segment in prefix order without any key-wise merging across segments. In the singleton empty-prefix case, the one segment owns the entire key space. In every case, every stored key belongs to exactly one segment.
 
-The extractor's `name()` is persisted in the manifest. On a writer open, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. The extractor must be configured at database creation time or never configured — introducing an extractor on an existing non-empty database, or removing a previously-configured extractor, causes the writer open to fail. See [Migration](#migration) for the correctness rationale. A read-only client (`DbReader`) does not need an extractor for correctness — read-side routing is structural (see [Read Path](#read-path)) — and may set `segment_extractor: None` to skip the name match entirely. When no extractor is configured, the database remains the singleton empty-prefix segment case.
+The extractor's `name()` is persisted in the manifest. On a writer open, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. The extractor must be configured at database creation time or never configured — introducing an extractor on an existing non-empty database, or removing a previously-configured extractor, causes the writer open to fail. See [Migration](#migration) for the correctness rationale. When no extractor is configured, the database remains the singleton empty-prefix segment case.
 
 **Validation model.** The system relies on two contracts:
 
@@ -406,13 +406,11 @@ Routing is **structural** — derived from the segment prefixes already in the m
 
 Within the consulted tree, the reader builds a merge iterator from that tree's `l0` and `compacted` lists using list-position precedence, exactly as today. For scans that span multiple segments, per-segment streams are chained — not merged key-wise — because segment intervals are pairwise disjoint; the details are described in [Scans](#scans).
 
-Because routing is structural, a reader does not need a configured extractor for correctness. A `DbReader` may set `segment_extractor: None` and still serve correct results, which makes reader deployment robust to extractor reconfiguration: changes that would refuse a writer-side open are still safe to read against.
-
 ### Scans
 
 A range scan `scan(lo..hi)` resolves to a chained walk over the segment intervals `[prefix, prefix++)` that overlap `[lo, hi)`, stepping from one segment to the next in prefix order. Within each consulted segment the existing merge iterator runs against that segment's `l0` and `compacted` lists using list-position precedence. Because segment intervals are pairwise disjoint (see [Segment Extractor](#segment-extractor)), this chain produces a single key-ordered stream with no per-key merging across segments.
 
-In today's manifest encoding, that means the scan either walks only the compatibility-encoded `prefix=""` tree, or walks the overlapping named segments found by binary search on `core.segments`. Routing is structural, so a `DbReader` configured with `segment_extractor: None` produces identical results to one that mirrors the writer's extractor.
+In today's manifest encoding, that means the scan either walks only the compatibility-encoded `prefix=""` tree, or walks the overlapping named segments found by binary search on `core.segments`.
 
 **Implications for existing APIs.** `scan`, `scan_prefix`, `scan_with_options`, and `scan_prefix_with_options` on `Db`, `DbReader`, `DbSnapshot`, and `DbTransaction` pick up segment-aware routing automatically — they all resolve to a range scan internally, and the routing lives beneath that. No API additions are required.
 
@@ -472,8 +470,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 }
 ```
 
-The reader uses the extractor for one purpose: when WAL-replayed entries
-land in an immutable memtable, the reader re-derives each entry's prefix
+The reader uses the extractor when WAL-replayed entries
+land in an immutable memtable. The reader re-derives each entry's prefix
 through the extractor and records the touched-segment set on the table,
 exactly as the writer's startup replay does.
 
@@ -486,34 +484,8 @@ rule matches the writer's:
 - every persisted segment prefix must still be recognized by the
   configured extractor.
 
-Unlike the writer, the reader is permitted to open a segmented database
-*without* an extractor. The reader can still serve reads (read routing
-uses the manifest's segment list, not the extractor).
-The validation is therefore guarded:
-
-```rust
-if let Some(extractor) = segment_extractor.as_deref() {
-    manifest
-        .db_state()
-        .validate_extractor_configuration(Some(extractor))?;
-}
-```
-
-#### Listing segments without an extractor
-
-A reader that has no extractor configured cannot truthfully list all segments:
-its WAL-replayed memtables carry no touched prefixes, so the returned
-list would silently omit segments that are not persisted in the manifest.
-The implementation therefore rejects listing segments for readers without an
-extractor with typed error `SegmentExtractorMismatch`. The same error is already
-used when a writer opens a segmented database without a prefix extractor.
-
-This variant maps to `ErrorKind::Invalid` via `Error::invalid(msg)`.
-
-`DbStatus` received from the writer (`Db`) never raises this error.
-The writer's open-time validation in `DbBuilder::build` already guarantees
-that a segmented database has its extractor configured; an unsegmented writer
-returns an empty list. `DbStatus::list_segments` is always `Ok`.
+Like the writer, the reader is required to open a segmented database
+with an extractor.
 
 #### Examples
 
