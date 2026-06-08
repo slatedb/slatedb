@@ -417,14 +417,10 @@ impl CompactionWorkerHandler {
 #[async_trait]
 impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
     fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<WorkerMessage>>)> {
-        // A zero-duration ticker fires again as soon as the previous
-        // PollCompactions handler returns, so the spacing between polls is set
-        // entirely by the randomized sleep at the top of that handler (which
-        // waits compactions_poll_interval +/- half). A fixed-interval ticker
-        // here would instead impose a hard `interval` floor and stack the
-        // randomized sleep on top of it, biasing the effective poll gap above
-        // compactions_poll_interval (RFC-0025).
-        vec![(Duration::ZERO, Box::new(|| WorkerMessage::PollCompactions))]
+        vec![(
+            self.options.compactions_poll_interval,
+            Box::new(|| WorkerMessage::PollCompactions),
+        )]
     }
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
@@ -437,24 +433,22 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         }
         match message {
             WorkerMessage::PollCompactions => {
-                // RFC-0025: wait a random duration centered on compactions_poll_interval
-                // (+/- half) before each poll so workers don't synchronize their
-                // `.compactions` reads. Centering keeps the mean gap at the interval;
-                // a one-sided jitter could only ever push polls later than the interval.
-                let interval_ms = self.options.compactions_poll_interval.as_millis() as u64;
-                let spread_ms = interval_ms / 2;
-                let sleep_ms = if spread_ms > 0 {
-                    self.rand
-                        .rng()
-                        .random_range((interval_ms - spread_ms)..=(interval_ms + spread_ms))
+                // RFC-0025: sleep for random(0, interval * 0.1) before each
+                // ticker-driven poll to prevent workers from synchronizing on
+                // `.compactions` reads
+                let max_jitter = (self.options.compactions_poll_interval.as_millis() / 10) as u64;
+                let jitter_ms = if max_jitter > 0 {
+                    self.rand.rng().random_range(0..=max_jitter)
                 } else {
-                    interval_ms
+                    0
                 };
-                self.clock.sleep(Duration::from_millis(sleep_ms)).await;
+                self.clock.sleep(Duration::from_millis(jitter_ms)).await;
                 self.poll_and_claim().await?;
             }
             WorkerMessage::CompactionJobFinished { id, result } => {
                 self.handle_finished(id, result).await?;
+                // Opportunistically claim more after freeing capacity.
+                self.poll_and_claim().await?;
             }
             // Heartbeat emission is added in the failure-detection follow-up;
             // for now progress messages are ignored. The executor still
