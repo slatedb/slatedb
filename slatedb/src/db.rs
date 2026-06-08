@@ -10618,6 +10618,7 @@ mod tests {
         db.close().await.unwrap();
 
         let reader = DbReaderBuilder::new(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
             .build()
             .await
             .unwrap();
