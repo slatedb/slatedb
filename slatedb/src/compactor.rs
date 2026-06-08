@@ -421,7 +421,14 @@ impl Compactor {
         self.task_executor
             .join_task(COMPACTOR_TASK_NAME)
             .await
-            .map_err(|e| e.into())
+            .map_err(crate::Error::from)?;
+        if self.options.worker.is_some() {
+            self.task_executor
+                .join_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
+                .await
+                .map_err(crate::Error::from)?;
+        }
+        Ok(())
     }
 
     /// Gracefully stops the compactor task and waits for it to finish.

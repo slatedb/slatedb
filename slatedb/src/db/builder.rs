@@ -1412,7 +1412,6 @@ pub(crate) fn build_worker_handler(
         manifest_store.clone(),
         executor,
         system_clock.clone(),
-        rand.clone(),
     );
     (handler, rx)
 }
