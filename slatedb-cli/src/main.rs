@@ -382,7 +382,7 @@ async fn exec_run_worker(
         }
         Err(e) => {
             tracing::warn!(
-                "failed to load SlateDb.toml, using defaults [error={:?}]",
+                "failed to load settings, using defaults [error={:?}]",
                 e
             );
             Default::default()
