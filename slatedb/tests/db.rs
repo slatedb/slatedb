@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use backon::{ExponentialBuilder, Retryable};
-use log::warn;
+use log::{info, warn};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use slatedb::admin;
@@ -14,6 +14,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use slatedb::{CompactorBuilder, Db};
+use slatedb_common::SystemMonitor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -153,6 +154,32 @@ async fn test_concurrent_writers_and_readers() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(256);
+    let max_memory_mb: usize = std::env::var("SLATEDB_TEST_MAX_MEMORY_USAGE_IN_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    if max_memory_mb > 0 {
+        let mut monitor = SystemMonitor::new(Some(tokio::runtime::Handle::current()));
+        monitor.start();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let memory_mb = monitor.parameters().bencher_memory_mb;
+                info!(
+                    "memory watchdog: current usage {} MiB, limit {} MiB",
+                    memory_mb, max_memory_mb
+                );
+                if memory_mb > max_memory_mb as u64 {
+                    eprintln!(
+                        "memory usage {} MiB exceeds limit of {} MiB",
+                        memory_mb, max_memory_mb
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
 
     // Pad keys to allow us to control how many blocks we take up
     // Since block size is not configurable

@@ -11,6 +11,7 @@ homepage.workspace = true
 chrono = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
+sysinfo = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [features]
