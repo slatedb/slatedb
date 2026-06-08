@@ -695,10 +695,10 @@ impl CompactorState {
         self.compactions.value.iter_active()
     }
 
-    pub(crate) fn compactions_with_status<'a>(
-        &'a self,
-        statuses: &'a [CompactionStatus],
-    ) -> impl Iterator<Item = &'a Compaction> {
+    pub(crate) fn compactions_with_status(
+        &self,
+        statuses: &[CompactionStatus],
+    ) -> impl Iterator<Item = &Compaction> {
         self.compactions.value.iter_with_status(statuses)
     }
 

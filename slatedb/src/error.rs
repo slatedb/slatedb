@@ -655,6 +655,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
 
+            // Internal errors
             #[cfg(feature = "compaction_filters")]
             SlateDBError::CompactionFilterError(_) => Error::internal(msg),
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),

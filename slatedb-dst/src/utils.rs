@@ -104,6 +104,11 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         }
         .into(),
         worker: Some(CompactionWorkerOptions {
+            max_concurrent_compactions: rng.random_range(1..=4),
+            compactions_poll_interval: rng
+                .random_range(Duration::from_millis(1)..=Duration::from_millis(60_000)),
+            heartbeat_min_interval: rng
+                .random_range(Duration::from_millis(1)..=Duration::from_millis(60_000)),
             max_sst_size: rng.random_range(KIB_8..GIB_2),
             max_fetch_tasks: rng.random_range(1..=8),
             bytes_to_fetch: rng.random_range(KIB_8..=(8 * MIB_1)),

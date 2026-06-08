@@ -27,10 +27,7 @@ use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
-use slatedb::config::{
-    CompactionWorkerOptions, CompactorOptions, DurabilityLevel,
-    SizeTieredCompactionSchedulerOptions,
-};
+use slatedb::config::DurabilityLevel;
 use slatedb::{Db, DbRand, PrefixExtractor};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use tempfile::TempDir;
@@ -40,7 +37,7 @@ use crate::actors::{
     CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
     WorkloadActorOptions, WorkloadMergeOperator,
 };
-use crate::utils::{build_settings, build_toxic};
+use crate::utils::{build_settings, build_settings_compactor, build_toxic};
 use crate::{DeterministicLocalFilesystem, Harness};
 
 type ScenarioError = Box<dyn std::error::Error + Send + Sync>;
@@ -203,20 +200,7 @@ fn run_seed_once(
         read_durability: DurabilityLevel::Remote,
         ..WorkloadActorOptions::default()
     };
-    let compactor_options = CompactorOptions {
-        poll_interval: Duration::from_millis(10),
-        scheduler_options: SizeTieredCompactionSchedulerOptions {
-            min_compaction_sources: 2,
-            max_compaction_sources: 999,
-            include_size_threshold: 4.0,
-        }
-        .into(),
-        worker: Some(CompactionWorkerOptions {
-            compactions_poll_interval: Duration::from_millis(10),
-            ..CompactionWorkerOptions::default()
-        }),
-        ..CompactorOptions::default()
-    };
+    let compactor_options = build_settings_compactor(&mut *rand.rng());
     let mut harness = Harness::new(name, seed, move |ctx| async move {
         let failures = ctx.failure_controller();
         for index in 0..10 {
