@@ -785,11 +785,9 @@ impl DbReader {
             return Err(SlateDBError::InvalidDBState);
         }
 
-        if let Some(extractor) = segment_extractor.as_deref() {
-            manifest
-                .db_state()
-                .validate_extractor_configuration(Some(extractor))?;
-        }
+        manifest
+            .db_state()
+            .validate_extractor_configuration(segment_extractor.as_deref())?;
 
         let inner = Arc::new(
             DbReaderInner::new(
@@ -1454,20 +1452,6 @@ mod tests {
             .map(|seg| seg.prefix)
             .collect();
         assert_eq!(prefixes, vec![Bytes::from_static(b"abc")]);
-
-        // when
-        let reader_no_extractor = DbReader::builder(path, object_store).build().await.unwrap();
-
-        // then
-        let status = reader_no_extractor.status();
-        let err = status.list_segments().unwrap_err();
-        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
-        let source = std::error::Error::source(&err)
-            .and_then(|s| s.downcast_ref::<crate::error::SlateDBError>());
-        assert!(matches!(
-            source,
-            Some(crate::error::SlateDBError::SegmentExtractorMismatch { .. })
-        ));
     }
 
     #[tokio::test]
@@ -1508,10 +1492,20 @@ mod tests {
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
 
         // when
-        let remote_only = DbReader::builder(path, object_store).build().await;
+        // a segmented database also rejects a reader opened without any extractor
+        let err = match DbReader::builder(path, object_store).build().await {
+            Ok(_) => panic!("expected missing-extractor error"),
+            Err(err) => err,
+        };
 
         // then
-        assert!(remote_only.is_ok());
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        let source = std::error::Error::source(&err)
+            .and_then(|s| s.downcast_ref::<crate::error::SlateDBError>());
+        assert!(matches!(
+            source,
+            Some(crate::error::SlateDBError::SegmentExtractorMismatch { .. })
+        ));
     }
 
     #[tokio::test]

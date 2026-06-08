@@ -58,10 +58,10 @@ impl DbStatus {
     ///
     /// Returns an error on a *segmented* database whose handle has no segment
     /// extractor configured — the memtable segments cannot be derived, so the
-    /// answer would be silently incomplete. This can happen for a
-    /// [`DbReader`](crate::DbReader) opened without an extractor; a
-    /// [`Db`](crate::Db) validates its extractor at open time, so this method
-    /// never errors for a writer.
+    /// answer would be silently incomplete. Both [`Db`](crate::Db) and
+    /// [`DbReader`](crate::DbReader) validate their extractor against the
+    /// manifest at open time, so in practice a handle on a segmented database
+    /// always has one; this remains a defensive guard.
     pub fn list_segments(&self) -> Result<Vec<SegmentPrefix>, crate::Error> {
         let persisted_extractor = self.current_manifest.core().segment_extractor_name.clone();
         if persisted_extractor.is_some() && !self.has_segment_extractor {
