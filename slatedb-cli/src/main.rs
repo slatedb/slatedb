@@ -374,10 +374,7 @@ async fn exec_run_worker(
                 .compactor_options
                 .and_then(|c| c.worker)
                 .unwrap_or_default();
-            tracing::info!(
-                "loaded worker options from settings [options={:?}]",
-                opts
-            );
+            tracing::info!("loaded worker options from settings [options={:?}]", opts);
             opts
         }
         Err(e) => {
