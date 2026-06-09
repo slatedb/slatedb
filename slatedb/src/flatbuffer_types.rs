@@ -1625,16 +1625,18 @@ mod tests {
         manifest.core.segment_extractor_name = Some("test".to_string());
         manifest.core.segments = (0..4)
             .map(|segment| {
-                let mut tree = LsmTreeState::default();
-                tree.l0 = (0..4)
-                    .map(|offset| new_sst_view(1_000 + segment * 16 + offset))
-                    .collect();
-                tree.compacted = vec![SortedRun {
-                    id: 100 + segment as u32,
-                    sst_views: (0..4)
-                        .map(|offset| new_sst_view(2_000 + segment * 16 + offset))
+                let tree = LsmTreeState {
+                    l0: (0..4)
+                        .map(|offset| new_sst_view(1_000 + segment * 16 + offset))
                         .collect(),
-                }];
+                    compacted: vec![SortedRun {
+                        id: 100 + segment as u32,
+                        sst_views: (0..4)
+                            .map(|offset| new_sst_view(2_000 + segment * 16 + offset))
+                            .collect(),
+                    }],
+                    ..Default::default()
+                };
                 Segment {
                     prefix: Bytes::from(format!("segment-{segment}")),
                     tree: Arc::new(tree),
