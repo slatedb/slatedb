@@ -760,8 +760,7 @@ impl CompactorState {
                     v.insert(compaction.clone());
                 }
                 Entry::Occupied(mut o) => {
-                    let adopt = (matches!(o.get().status(), CompactionStatus::Running)
-                        && matches!(compaction.status(), CompactionStatus::Compacted))
+                    let adopt = matches!(compaction.status(), CompactionStatus::Compacted)
                         || (matches!(o.get().status(), CompactionStatus::Scheduled)
                             && matches!(compaction.status(), CompactionStatus::Running))
                         || (matches!(o.get().status(), CompactionStatus::Running)
