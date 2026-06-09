@@ -131,7 +131,6 @@ use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
-use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
@@ -161,7 +160,6 @@ use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
-use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
@@ -1217,7 +1215,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         )
         .await?;
         let worker = options.worker.clone().map(|worker_options| {
-            build_worker_handler(
+            CompactionWorkerHandler::build_worker_handler(
                 manifest_store,
                 compactions_store,
                 table_store,
@@ -1335,7 +1333,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             closed_result,
             self.system_clock.clone(),
         ));
-        let (handler, rx) = build_worker_handler(
+        let (handler, rx) = CompactionWorkerHandler::build_worker_handler(
             manifest_store,
             compactions_store,
             table_store,
@@ -1358,62 +1356,6 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             .expect("failed to spawn compaction worker task");
         Ok(CompactionWorker::new(task_executor))
     }
-}
-
-/// Builds the worker's [`CompactionWorkerHandler`] and the receiver that
-/// the handler reads completion messages from. Shared between the
-/// standalone `run()` path and the embedded-worker path in `Compactor::run`.
-pub(crate) fn build_worker_handler(
-    manifest_store: Arc<ManifestStore>,
-    compactions_store: Arc<CompactionsStore>,
-    table_store: Arc<TableStore>,
-    options: Arc<CompactionWorkerOptions>,
-    worker_runtime: Handle,
-    rand: Arc<DbRand>,
-    stats: Arc<CompactionStats>,
-    system_clock: Arc<dyn SystemClock>,
-    merge_operator: Option<MergeOperatorType>,
-    #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
-        Arc<dyn CompactionFilterSupplier>,
-    >,
-) -> (
-    CompactionWorkerHandler,
-    async_channel::Receiver<WorkerMessage>,
-) {
-    let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
-    let executor = Arc::new(TokioCompactionExecutor::new(
-        TokioCompactionExecutorOptions {
-            handle: worker_runtime.clone(),
-            options: options.clone(),
-            worker_tx: tx,
-            table_store: table_store.clone(),
-            rand: rand.clone(),
-            stats: stats.clone(),
-            clock: system_clock.clone(),
-            manifest_store: manifest_store.clone(),
-            merge_operator: merge_operator.clone(),
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: compaction_filter_supplier.clone(),
-        },
-    ));
-
-    let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
-    info!(
-        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
-        worker_id,
-        options.max_concurrent_compactions,
-        options.compactions_poll_interval,
-    );
-
-    let handler = CompactionWorkerHandler::new(
-        worker_id,
-        options.clone(),
-        compactions_store.clone(),
-        manifest_store.clone(),
-        executor,
-        system_clock.clone(),
-    );
-    (handler, rx)
 }
 
 /// Builder for creating new DbReader instances.

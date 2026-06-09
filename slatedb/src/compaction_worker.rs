@@ -22,13 +22,23 @@ use tokio::runtime::Handle;
 use ulid::Ulid;
 
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
-use crate::compactor_executor::{CompactionExecutor, StartCompactionJobArgs};
+use crate::compactor::stats::CompactionStats;
+use crate::compactor_executor::{
+    CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
+    TokioCompactionExecutorOptions,
+};
 use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
+use crate::merge_operator::MergeOperatorType;
+use crate::tablestore::TableStore;
+use crate::utils::IdGenerator;
+#[cfg(feature = "compaction_filters")]
+use crate::CompactionFilterSupplier;
+use crate::DbRand;
 use slatedb_common::clock::SystemClock;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
@@ -133,6 +143,62 @@ impl CompactionWorkerHandler {
             active_jobs: HashSet::new(),
             stored: None,
         }
+    }
+
+    /// Builds the worker's [`CompactionWorkerHandler`] and the receiver that
+    /// the handler reads completion messages from. Shared between the
+    /// standalone `run()` path and the embedded-worker path in `Compactor::run`.
+    pub(crate) fn build_worker_handler(
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+        table_store: Arc<TableStore>,
+        options: Arc<CompactionWorkerOptions>,
+        worker_runtime: Handle,
+        rand: Arc<DbRand>,
+        stats: Arc<CompactionStats>,
+        system_clock: Arc<dyn SystemClock>,
+        merge_operator: Option<MergeOperatorType>,
+        #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
+            Arc<dyn CompactionFilterSupplier>,
+        >,
+    ) -> (
+        CompactionWorkerHandler,
+        async_channel::Receiver<WorkerMessage>,
+    ) {
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let executor = Arc::new(TokioCompactionExecutor::new(
+            TokioCompactionExecutorOptions {
+                handle: worker_runtime.clone(),
+                options: options.clone(),
+                worker_tx: tx,
+                table_store: table_store.clone(),
+                rand: rand.clone(),
+                stats: stats.clone(),
+                clock: system_clock.clone(),
+                manifest_store: manifest_store.clone(),
+                merge_operator: merge_operator.clone(),
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: compaction_filter_supplier.clone(),
+            },
+        ));
+
+        let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
+        info!(
+        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
+        worker_id,
+        options.max_concurrent_compactions,
+        options.compactions_poll_interval,
+    );
+
+        let handler = CompactionWorkerHandler::new(
+            worker_id,
+            options.clone(),
+            compactions_store.clone(),
+            manifest_store.clone(),
+            executor,
+            system_clock.clone(),
+        );
+        (handler, rx)
     }
 
     const EXPECT_LOADED: &str = "ensure_loaded should have set stored compactions";

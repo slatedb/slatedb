@@ -69,11 +69,11 @@ use ulid::Ulid;
 
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
+use crate::compaction_worker::CompactionWorkerHandler;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
-use crate::db::builder::build_worker_handler;
 use crate::db_state::{SortedRun, SsTableView};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -394,7 +394,7 @@ impl Compactor {
         // own cancellation token; Compactor::stop and run() are responsible for
         // shutting it down alongside the coordinator.
         if let Some(worker_options) = self.options.worker.clone() {
-            let (worker_handler, worker_rx) = build_worker_handler(
+            let (worker_handler, worker_rx) = CompactionWorkerHandler::build_worker_handler(
                 self.manifest_store.clone(),
                 self.compactions_store.clone(),
                 self.table_store.clone(),
