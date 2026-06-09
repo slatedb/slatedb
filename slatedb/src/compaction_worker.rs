@@ -11,7 +11,7 @@
 //! heartbeat emission and coordinator-side failure-detection / reclamation
 //! protocol are added in a follow-up.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -259,7 +259,7 @@ pub(crate) struct CompactionWorkerHandler {
     /// Compactions currently being executed by this worker (claimed but not
     /// yet `Compacted`). Used to gate capacity and to know what to reset on
     /// graceful shutdown.
-    active_jobs: HashSet<Ulid>,
+    active_jobs: BTreeSet<Ulid>,
     rand: Arc<DbRand>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
@@ -284,7 +284,7 @@ impl CompactionWorkerHandler {
             manifest_store,
             executor,
             clock,
-            active_jobs: HashSet::new(),
+            active_jobs: BTreeSet::new(),
             rand,
             stored: None,
         }
@@ -629,7 +629,7 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         let _ = tokio::task::spawn_blocking(move || executor.stop()).await;
         #[cfg(dst)]
         let _ = tokio::spawn(async move { executor.stop() }).await;
-        let claimed: Vec<Ulid> = self.active_jobs.drain().collect();
+        let claimed = std::mem::take(&mut self.active_jobs);
         for id in claimed {
             if let Err(e) = self.release_claim(id).await {
                 error!(
@@ -965,6 +965,18 @@ mod tests {
         assert_eq!(c.status(), CompactionStatus::Submitted);
         assert!(c.worker().is_none());
         assert!(fx.handler.active_jobs.is_empty());
+    }
+
+    #[test]
+    fn test_worker_cleanup_releases_active_claims_in_id_order() {
+        let id1 = Ulid::from_parts(1, 0);
+        let id2 = Ulid::from_parts(2, 0);
+        let id3 = Ulid::from_parts(3, 0);
+
+        let active_jobs = BTreeSet::from([id3, id1, id2]);
+        let release_order = active_jobs.into_iter().collect::<Vec<_>>();
+
+        assert_eq!(release_order, vec![id1, id2, id3]);
     }
 
     #[tokio::test]
