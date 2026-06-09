@@ -1193,8 +1193,15 @@ impl<'b> DbFlatBufferBuilder<'b> {
             }
         }
         let ssts = {
+            // HashMap iteration order is randomly seeded. Since FlatBuffers lay out
+            // nested variable-size SST metadata with alignment padding, different
+            // orders can produce different bytes and even different payload sizes
+            // for the same semantic manifest.
+            let mut unique_ssts = unique_ssts.into_iter().collect::<Vec<_>>();
+            unique_ssts.sort_by_key(|(id, _)| *id);
             let sst_offsets: Vec<WIPOffset<CompactedSsTableV2>> = unique_ssts
-                .values()
+                .iter()
+                .map(|(_, handle)| *handle)
                 .map(|handle| self.add_compacted_sst_v2(handle))
                 .collect();
             self.builder.create_vector(sst_offsets.as_ref())
@@ -1589,6 +1596,65 @@ mod tests {
 
         // then:
         assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_encode_manifest_v2_deterministically() {
+        fn new_sst_view(index: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(index, u128::from(index * 17));
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo {
+                    first_entry: Some(Bytes::from(format!("first-{index:03}"))),
+                    last_entry: Some(Bytes::from(format!("last-{index:03}"))),
+                    index_offset: index * 100,
+                    index_len: 17 + index,
+                    filter_offset: 2000 + index,
+                    filter_len: 11 + index,
+                    ..Default::default()
+                },
+            ))
+        }
+
+        let mut manifest = Manifest::initial(ManifestCore::new());
+        let root = Arc::make_mut(&mut manifest.core.tree);
+        root.l0 = (0..16).map(new_sst_view).collect();
+        root.compacted = (0..4)
+            .map(|run| SortedRun {
+                id: run as u32,
+                sst_views: (0..8)
+                    .map(|offset| new_sst_view(100 + run * 8 + offset))
+                    .collect(),
+            })
+            .collect();
+        manifest.core.segment_extractor_name = Some("test".to_string());
+        manifest.core.segments = (0..4)
+            .map(|segment| {
+                let mut tree = LsmTreeState::default();
+                tree.l0 = (0..4)
+                    .map(|offset| new_sst_view(1_000 + segment * 16 + offset))
+                    .collect();
+                tree.compacted = vec![SortedRun {
+                    id: 100 + segment as u32,
+                    sst_views: (0..4)
+                        .map(|offset| new_sst_view(2_000 + segment * 16 + offset))
+                        .collect(),
+                }];
+                Segment {
+                    prefix: Bytes::from(format!("segment-{segment}")),
+                    tree: Arc::new(tree),
+                }
+            })
+            .collect();
+
+        let expected = FlatBufferManifestCodec::create_from_manifest(&manifest);
+        for _ in 0..64 {
+            assert_eq!(
+                expected,
+                FlatBufferManifestCodec::create_from_manifest(&manifest)
+            );
+        }
     }
 
     #[tokio::test]
