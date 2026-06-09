@@ -77,7 +77,11 @@ pub(crate) async fn read_sst_for_keys(
     }
     let handle = &view.sst;
 
-    let (index, filters) = read_metadata(handle, table_store, options.cache_blocks).await?;
+    // Step 1: load the SST index and filters once for the whole batch.
+    let index = table_store.read_index(handle, options.cache_blocks).await?;
+    let filters = table_store
+        .read_filters(handle, options.cache_blocks)
+        .await?;
     if index.borrow().block_meta().is_empty() {
         return Ok(Vec::new());
     }
@@ -87,9 +91,14 @@ pub(crate) async fn read_sst_for_keys(
         return Ok(Vec::new());
     }
 
-    let blocks =
-        fetch_candidate_blocks(handle, &index, &candidates, options.cache_blocks, table_store)
-            .await?;
+    let blocks = fetch_candidate_blocks(
+        handle,
+        &index,
+        &candidates,
+        options.cache_blocks,
+        table_store,
+    )
+    .await?;
 
     scan_candidates(
         handle.format_version,
@@ -99,17 +108,6 @@ pub(crate) async fn read_sst_for_keys(
         db_stats,
     )
     .await
-}
-
-/// Step 1: load the SST index and filters once for the whole batch.
-async fn read_metadata(
-    handle: &SsTableHandle,
-    table_store: &Arc<TableStore>,
-    cache_blocks: bool,
-) -> Result<(Arc<SsTableIndexOwned>, Arc<[NamedFilter]>), SlateDBError> {
-    let index = table_store.read_index(handle, cache_blocks).await?;
-    let filters = table_store.read_filters(handle, cache_blocks).await?;
-    Ok((index, filters))
 }
 
 /// Step 2: prune keys by visible range and bloom filter, then map each survivor

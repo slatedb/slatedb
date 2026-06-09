@@ -13,7 +13,7 @@ use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
-use crate::reader::ScanContext;
+use crate::reader::{entries_to_key_values, entries_to_values, ScanContext};
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::{KeyValue, RowEntry};
 use crate::{DbReadOps, DbTransactionOps};
@@ -203,10 +203,7 @@ impl DbTransaction {
         options: &ReadOptions,
     ) -> Result<Vec<Option<Bytes>>, crate::Error> {
         let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries
-            .into_iter()
-            .map(|entry| entry.and_then(|entry| entry.value.as_bytes()))
-            .collect())
+        Ok(entries_to_values(entries))
     }
 
     /// Get multiple key-value pairs from the transaction in one batch.
@@ -226,21 +223,22 @@ impl DbTransaction {
         options: &ReadOptions,
     ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
         let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries.into_iter().map(|e| e.map(KeyValue::from)).collect())
+        Ok(entries_to_key_values(entries))
     }
 
-    async fn multi_get_entries_with_options<K: AsRef<[u8]>>(
+    async fn multi_get_entries_with_options<K: AsRef<[u8]> + Sync>(
         &self,
         keys: &[K],
         options: &ReadOptions,
     ) -> Result<Vec<Option<RowEntry>>, crate::Error> {
         self.db_inner.check_closed()?;
-        let key_bytes: Vec<Bytes> =
-            keys.iter().map(|k| Bytes::copy_from_slice(k.as_ref())).collect();
 
         // Track all batch keys for SSI conflict detection.
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
-            let read_keys: HashSet<Bytes> = key_bytes.iter().cloned().collect();
+            let read_keys: HashSet<Bytes> = keys
+                .iter()
+                .map(|k| Bytes::copy_from_slice(k.as_ref()))
+                .collect();
             self.txn_manager.track_read_keys(&self.txn_id, read_keys);
         }
 
@@ -251,7 +249,7 @@ impl DbTransaction {
         self.db_inner
             .reader
             .multi_get_with_options(
-                &key_bytes,
+                keys,
                 options,
                 &db_state,
                 Some(&write_batch),

@@ -247,11 +247,17 @@ async fn test_multi_get_ssi_tracks_all_batch_keys() {
     db.put(&key(2), b"b").await.unwrap();
 
     // txn1 reads a batch (which must register every key in the SSI read set).
-    let txn1 = db.begin(IsolationLevel::SerializableSnapshot).await.unwrap();
+    let txn1 = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
     let _ = txn1.multi_get(&[key(1), key(2)]).await.unwrap();
 
     // txn2 modifies key(2) — one of txn1's batch reads — and commits.
-    let txn2 = db.begin(IsolationLevel::SerializableSnapshot).await.unwrap();
+    let txn2 = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
     txn2.put(key(2), b"b2").unwrap();
     txn2.commit().await.unwrap();
 

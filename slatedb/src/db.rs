@@ -64,7 +64,7 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
-use crate::reader::{Reader, ScanContext};
+use crate::reader::{entries_to_key_values, entries_to_values, Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
@@ -237,37 +237,33 @@ impl DbInner {
             .await
     }
 
-    pub(crate) async fn multi_get_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn multi_get_with_options<K: AsRef<[u8]> + Sync>(
         &self,
         keys: &[K],
         options: &ReadOptions,
     ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
         let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries
-            .into_iter()
-            .map(|entry| entry.and_then(|entry| entry.value.as_bytes()))
-            .collect())
+        Ok(entries_to_values(entries))
     }
 
-    pub(crate) async fn multi_get_key_value_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn multi_get_key_value_with_options<K: AsRef<[u8]> + Sync>(
         &self,
         keys: &[K],
         options: &ReadOptions,
     ) -> Result<Vec<Option<KeyValue>>, SlateDBError> {
         let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries.into_iter().map(|e| e.map(KeyValue::from)).collect())
+        Ok(entries_to_key_values(entries))
     }
 
-    async fn multi_get_entries_with_options<K: AsRef<[u8]>>(
+    async fn multi_get_entries_with_options<K: AsRef<[u8]> + Sync>(
         &self,
         keys: &[K],
         options: &ReadOptions,
     ) -> Result<Vec<Option<RowEntry>>, SlateDBError> {
         self.check_closed()?;
-        let key_bytes: Vec<Bytes> = keys.iter().map(|k| Bytes::copy_from_slice(k.as_ref())).collect();
         let db_state = self.state.read().view();
         self.reader
-            .multi_get_with_options(&key_bytes, options, &db_state, None, None)
+            .multi_get_with_options(keys, options, &db_state, None, None)
             .await
     }
 

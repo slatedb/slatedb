@@ -521,7 +521,7 @@ impl SortedRun {
     ///
     /// This uses the binary-search candidate as the upper bound, then walks
     /// backward only across immediately overlapping views.
-    fn point_table_idx_covering_key(&self, key: &[u8]) -> Range<usize> {
+    pub(crate) fn point_table_idx_covering_key(&self, key: &[u8]) -> Range<usize> {
         let Some(max_idx) = self.find_last_sst_with_range_covering_key(key) else {
             return 0..0;
         };

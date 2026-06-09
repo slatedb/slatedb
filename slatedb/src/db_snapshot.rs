@@ -9,7 +9,7 @@ use crate::db_iter::DbIterator;
 use crate::types::{KeyValue, RowEntry};
 
 use crate::db::DbInner;
-use crate::reader::ScanContext;
+use crate::reader::{entries_to_key_values, entries_to_values, ScanContext};
 use crate::DbReadOps;
 
 pub struct DbSnapshot {
@@ -107,10 +107,7 @@ impl DbSnapshot {
         options: &ReadOptions,
     ) -> Result<Vec<Option<Bytes>>, crate::Error> {
         let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries
-            .into_iter()
-            .map(|entry| entry.and_then(|entry| entry.value.as_bytes()))
-            .collect())
+        Ok(entries_to_values(entries))
     }
 
     /// Get multiple key-value pairs from the snapshot in one batch.
@@ -130,21 +127,19 @@ impl DbSnapshot {
         options: &ReadOptions,
     ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
         let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries.into_iter().map(|e| e.map(KeyValue::from)).collect())
+        Ok(entries_to_key_values(entries))
     }
 
-    async fn multi_get_entries_with_options<K: AsRef<[u8]>>(
+    async fn multi_get_entries_with_options<K: AsRef<[u8]> + Sync>(
         &self,
         keys: &[K],
         options: &ReadOptions,
     ) -> Result<Vec<Option<RowEntry>>, crate::Error> {
         self.db_inner.check_closed()?;
-        let key_bytes: Vec<Bytes> =
-            keys.iter().map(|k| Bytes::copy_from_slice(k.as_ref())).collect();
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
-            .multi_get_with_options(&key_bytes, options, &db_state, None, Some(self.started_seq))
+            .multi_get_with_options(keys, options, &db_state, None, Some(self.started_seq))
             .await
             .map_err(crate::Error::from)
     }
