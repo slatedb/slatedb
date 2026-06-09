@@ -67,6 +67,7 @@ impl CompactionExecuteBench {
         sst_bytes: usize,
         key_bytes: usize,
         val_bytes: usize,
+        key_partitions: usize,
         compression_codec: Option<CompressionCodec>,
     ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
@@ -92,7 +93,8 @@ impl CompactionExecuteBench {
                     .expect("join failed")?;
             }
             let ts = table_store.clone();
-            let key_start_copy = key_start.clone();
+            let key_start_copy =
+                CompactionExecuteBench::partition_key_start(&key_start, i, key_partitions);
             let jh = tokio::spawn(CompactionExecuteBench::load_sst(
                 i as u32,
                 ts,
@@ -112,6 +114,35 @@ impl CompactionExecuteBench {
                 .expect("join failed")?;
         }
         Ok(())
+    }
+
+    /// Returns the key range start for an SST being loaded.
+    ///
+    /// With a single partition every SST shares the same (random) start, so
+    /// all loaded SSTs cover the same key range. With multiple partitions,
+    /// SSTs are assigned round-robin to disjoint key ranges identified by a
+    /// 2-byte partition prefix: SSTs within a partition overlap each other
+    /// while distinct partitions never overlap. This mirrors compacting
+    /// sorted runs whose SST boundaries partition the key space, which is the
+    /// shape the subcompaction planner (RFC-0028) needs to find usable split
+    /// points; fully-overlapping SSTs only offer boundary candidates at the
+    /// extremes of the keyspace, so such a compaction cannot be split evenly.
+    fn partition_key_start(
+        shared_key_start: &[u8],
+        sst_index: usize,
+        key_partitions: usize,
+    ) -> Vec<u8> {
+        if key_partitions <= 1 {
+            return shared_key_start.to_vec();
+        }
+        assert!(
+            shared_key_start.len() >= 2,
+            "partitioned load requires key_bytes >= 6 for the partition prefix"
+        );
+        let partition = (sst_index % key_partitions) as u16;
+        let mut key_start = vec![0u8; shared_key_start.len()];
+        key_start[..2].copy_from_slice(&partition.to_be_bytes());
+        key_start
     }
 
     async fn load_sst(
@@ -315,11 +346,14 @@ impl CompactionExecuteBench {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_bench(
         &self,
         num_ssts: usize,
         source_sr_ids: Option<Vec<u32>>,
         destination_sr_id: u32,
+        max_subcompactions: Option<usize>,
+        min_subcompaction_input_bytes: Option<usize>,
         compression_codec: Option<CompressionCodec>,
     ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
@@ -333,7 +367,13 @@ impl CompactionExecuteBench {
             None,
         ));
         let (tx, rx) = async_channel::unbounded();
-        let worker_options = CompactionWorkerOptions::default();
+        let mut worker_options = CompactionWorkerOptions::default();
+        if let Some(max_subcompactions) = max_subcompactions {
+            worker_options.max_subcompactions = max_subcompactions;
+        }
+        if let Some(min_subcompaction_input_bytes) = min_subcompaction_input_bytes {
+            worker_options.min_subcompaction_input_bytes = min_subcompaction_input_bytes;
+        }
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();

@@ -125,6 +125,7 @@ async fn exec_benchmark_compaction(
                     load_args.sst_bytes,
                     load_args.key_bytes,
                     load_args.val_bytes,
+                    load_args.key_partitions,
                     load_args.compression_codec,
                 )
                 .await
@@ -136,6 +137,8 @@ async fn exec_benchmark_compaction(
                     run_args.num_ssts,
                     run_args.compaction_sources,
                     run_args.compaction_destination,
+                    run_args.max_subcompactions,
+                    run_args.min_subcompaction_input_bytes,
                     run_args.compression_codec,
                 )
                 .await

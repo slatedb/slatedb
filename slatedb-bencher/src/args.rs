@@ -309,6 +309,18 @@ pub(crate) struct CompactionLoadArgs {
 
     #[arg(
         long,
+        help = "Number of disjoint key partitions to spread the loaded SSTs across. \
+                SSTs are assigned to partitions round-robin: SSTs within a partition \
+                cover the same key range while distinct partitions never overlap. The \
+                default of 1 makes every SST cover the same key range, which leaves \
+                subcompactions (RFC-0028) no usable split points; use multiple \
+                partitions to benchmark subcompactions.",
+        default_value_t = 1
+    )]
+    pub(crate) key_partitions: usize,
+
+    #[arg(
+        long,
         help = "Compression codec to use. If set, must `snappy`, `zlib`, `lz4`, or `zstd` (with the `--features` set)."
     )]
     pub(crate) compression_codec: Option<CompressionCodec>,
@@ -334,6 +346,21 @@ pub(crate) struct CompactionRunArgs {
 
     #[arg(long, help = "Destination sorted run ID.", default_value_t = 0)]
     pub(crate) compaction_destination: u32,
+
+    #[arg(
+        long,
+        help = "Maximum number of subcompactions to split the compaction into \
+                (RFC-0028). Values <= 1 disable subcompactions. Defaults to the \
+                compactor default."
+    )]
+    pub(crate) max_subcompactions: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Minimum estimated input bytes each subcompaction must cover \
+                (RFC-0028). Defaults to the compactor default."
+    )]
+    pub(crate) min_subcompaction_input_bytes: Option<usize>,
 
     #[arg(long, help = "Compression codec to use.")]
     pub(crate) compression_codec: Option<CompressionCodec>,
