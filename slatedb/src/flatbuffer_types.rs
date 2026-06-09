@@ -1176,8 +1176,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let core = &manifest.core;
 
         // Collect all unique SSTs from l0, compacted runs, and segments.
-        let mut unique_ssts: std::collections::HashMap<Ulid, &SsTableHandle> =
-            std::collections::HashMap::new();
+        let mut unique_ssts: std::collections::BTreeMap<Ulid, &SsTableHandle> =
+            std::collections::BTreeMap::new();
         for tree in core.trees() {
             for view in tree.l0.iter() {
                 if let SsTableId::Compacted(ulid) = view.sst.id {
@@ -1193,15 +1193,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
             }
         }
         let ssts = {
-            // HashMap iteration order is randomly seeded. Since FlatBuffers lay out
-            // nested variable-size SST metadata with alignment padding, different
-            // orders can produce different bytes and even different payload sizes
-            // for the same semantic manifest.
-            let mut unique_ssts = unique_ssts.into_iter().collect::<Vec<_>>();
-            unique_ssts.sort_by_key(|(id, _)| *id);
             let sst_offsets: Vec<WIPOffset<CompactedSsTableV2>> = unique_ssts
-                .iter()
-                .map(|(_, handle)| *handle)
+                .values()
+                .copied()
                 .map(|handle| self.add_compacted_sst_v2(handle))
                 .collect();
             self.builder.create_vector(sst_offsets.as_ref())
