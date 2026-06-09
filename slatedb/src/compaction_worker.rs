@@ -32,7 +32,7 @@ use crate::compactor_executor::{
     CompactionExecutor, ExecutorMessage, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
 };
-use crate::compactor_state::{Compaction, CompactionStatus, SourceId, WorkerSpec};
+use crate::compactor_state::{Compaction, CompactionStatus, SourceId, Subcompaction, WorkerSpec};
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -69,6 +69,9 @@ pub(crate) enum WorkerMessage {
         bytes_processed: u64,
         /// The output SSTs produced so far (including previous runs).
         output_ssts: Vec<crate::db_state::SsTableHandle>,
+        /// The subcompactions of this job and their per-range progress
+        /// (RFC-0028). Empty when the job runs as a single merge.
+        subcompactions: Vec<Subcompaction>,
     },
     /// Ticker-triggered message to poll `.compactions` for claimable jobs.
     PollCompactions,
@@ -83,11 +86,13 @@ impl ExecutorMessage for WorkerMessage {
         id: Ulid,
         bytes_processed: u64,
         output_ssts: Vec<crate::db_state::SsTableHandle>,
+        subcompactions: Vec<Subcompaction>,
     ) -> Self {
         WorkerMessage::CompactionJobProgress {
             id,
             bytes_processed,
             output_ssts,
+            subcompactions,
         }
     }
 }
@@ -446,6 +451,7 @@ impl CompactionWorkerHandler {
             compaction_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            subcompactions: compaction.subcompactions().clone(),
         })
     }
 
@@ -667,6 +673,8 @@ pub(crate) fn build_handler(
         max_sst_size: options.max_sst_size,
         max_fetch_tasks: options.max_fetch_tasks,
         bytes_to_fetch: options.bytes_to_fetch,
+        max_subcompactions: options.max_subcompactions,
+        min_subcompaction_input_bytes: options.min_subcompaction_input_bytes,
         ..CompactorOptions::default()
     });
     let executor = Arc::new(TokioCompactionExecutor::<WorkerMessage>::new(

@@ -91,7 +91,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
 pub use crate::compactor_state::{
-    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
+    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId, Subcompaction,
 };
 pub use crate::compactor_state_protocols::CompactorStateView;
 pub use crate::db::builder::CompactorBuilder;
@@ -285,6 +285,9 @@ pub(crate) enum CompactorMessage {
         bytes_processed: u64,
         /// The output SSTs produced so far (including previous runs).
         output_ssts: Vec<SsTableHandle>,
+        /// The subcompactions of this job and their per-range progress
+        /// (RFC-0028). Empty when the job runs as a single merge.
+        subcompactions: Vec<Subcompaction>,
     },
     /// Ticker-triggered message to log DB runs and in-flight job state.
     LogStats,
@@ -521,18 +524,26 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 id,
                 bytes_processed,
                 output_ssts,
+                subcompactions,
             } => {
                 let compaction = self.state().compactions().value.get(&id);
                 let update_output_ssts =
                     compaction.is_some_and(|c| c.output_ssts().len() != output_ssts.len());
+                let update_subcompactions = compaction.is_some_and(|c| {
+                    !subcompactions.is_empty() && c.subcompactions() != &subcompactions
+                });
                 self.state_mut().update_compaction(&id, |c| {
                     c.set_bytes_processed(bytes_processed);
                     if update_output_ssts {
                         c.set_output_ssts(output_ssts);
                     }
+                    if update_subcompactions {
+                        c.set_subcompactions(subcompactions);
+                    }
                 });
-                // To prevent excessive writes, only persist if output SSTs changed.
-                if update_output_ssts {
+                // To prevent excessive writes, only persist if output SSTs or
+                // subcompaction progress changed.
+                if update_output_ssts || update_subcompactions {
                     self.state_writer.write_compactions_safely().await?;
                 }
             }
@@ -1181,6 +1192,7 @@ impl CompactorEventHandler {
             compaction_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            subcompactions: compaction.subcompactions().clone(),
         };
 
         // TODO(sujeetsawala): Add job attempt to compaction
@@ -1258,7 +1270,9 @@ impl CompactorEventHandler {
 }
 
 pub mod stats {
-    use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper, UpDownCounterFn};
+    use slatedb_common::metrics::{
+        CounterFn, GaugeFn, HistogramFn, MetricsRecorderHelper, UpDownCounterFn,
+    };
     use std::sync::Arc;
 
     pub use crate::merge_operator::MERGE_OPERATOR_OPERANDS;
@@ -1289,6 +1303,20 @@ pub mod stats {
     pub const ENTRY_TYPE_LABEL: &str = "entry_type";
     pub const ENTRY_TYPE_VALUE: &str = "value";
     pub const ENTRY_TYPE_MERGE: &str = "merge";
+    pub const RUNNING_SUBCOMPACTIONS: &str = compactor_stat_name!("running_subcompactions");
+    pub const SUBCOMPACTIONS_PER_COMPACTION: &str =
+        compactor_stat_name!("subcompactions_per_compaction");
+    pub const SUBCOMPACTION_DURATION_SEC: &str = compactor_stat_name!("subcompaction_duration_sec");
+    pub const SUBCOMPACTIONS_RESUMED: &str = compactor_stat_name!("subcompactions_resumed");
+
+    /// Histogram boundaries for the number of subcompactions per compaction.
+    const SUBCOMPACTION_COUNT_BOUNDARIES: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    /// Histogram boundaries for per-subcompaction wall-clock duration, in
+    /// seconds. Compactions routinely run for minutes, so these extend well
+    /// past the request-latency boundaries.
+    const SUBCOMPACTION_DURATION_BOUNDARIES: &[f64] = &[
+        0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
+    ];
 
     pub(crate) struct CompactionStats {
         pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
@@ -1300,6 +1328,10 @@ pub mod stats {
         pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_value: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
+        pub(crate) running_subcompactions: Arc<dyn UpDownCounterFn>,
+        pub(crate) subcompactions_per_compaction: Arc<dyn HistogramFn>,
+        pub(crate) subcompaction_duration_sec: Arc<dyn HistogramFn>,
+        pub(crate) subcompactions_resumed: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1311,6 +1343,32 @@ pub mod stats {
                 bytes_compacted: recorder.counter(BYTES_COMPACTED).register(),
                 total_bytes_being_compacted: recorder.gauge(TOTAL_BYTES_BEING_COMPACTED).register(),
                 total_throughput: recorder.gauge(TOTAL_THROUGHPUT_BYTES_PER_SEC).register(),
+                running_subcompactions: recorder
+                    .up_down_counter(RUNNING_SUBCOMPACTIONS)
+                    .description("Subcompactions executing concurrently right now.")
+                    .register(),
+                subcompactions_per_compaction: recorder
+                    .histogram(
+                        SUBCOMPACTIONS_PER_COMPACTION,
+                        SUBCOMPACTION_COUNT_BOUNDARIES,
+                    )
+                    .description(
+                        "Number of subcompactions the planner produced per parent compaction.",
+                    )
+                    .register(),
+                subcompaction_duration_sec: recorder
+                    .histogram(
+                        SUBCOMPACTION_DURATION_SEC,
+                        SUBCOMPACTION_DURATION_BOUNDARIES,
+                    )
+                    .description("Per-range wall-clock time from start to output SSTs persisted.")
+                    .register(),
+                subcompactions_resumed: recorder
+                    .counter(SUBCOMPACTIONS_RESUMED)
+                    .description(
+                        "Subcompactions resumed from persisted state rather than started fresh.",
+                    )
+                    .register(),
                 merge_operator_compact_operands: recorder
                     .counter(MERGE_OPERATOR_OPERANDS)
                     .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_COMPACT_PATH)])
@@ -4778,6 +4836,7 @@ mod tests {
                 id: compaction_id,
                 bytes_processed: 123,
                 output_ssts: output_ssts.clone(),
+                subcompactions: vec![],
             })
             .await
             .expect("fatal error handling progress message");
@@ -4800,6 +4859,96 @@ mod tests {
             .find(|c| c.id() == compaction_id)
             .expect("missing compaction in state");
         assert_eq!(state_compaction.output_ssts(), &output_ssts);
+    }
+
+    #[tokio::test]
+    async fn test_progress_persists_subcompactions() {
+        use crate::bytes_range::BytesRange;
+        use std::ops::Bound;
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        fixture.handler.maybe_start_compactions().await.unwrap();
+
+        let sst_info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"a")),
+            ..SsTableInfo::default()
+        };
+        let output_sst = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            sst_info,
+        );
+        let subcompactions = vec![
+            Subcompaction::new(BytesRange::new(
+                Bound::Unbounded,
+                Bound::Excluded(Bytes::from_static(b"m")),
+            ))
+            .with_status(CompactionStatus::Running)
+            .with_output_ssts(vec![output_sst.clone()]),
+            Subcompaction::new(BytesRange::new(
+                Bound::Included(Bytes::from_static(b"m")),
+                Bound::Unbounded,
+            ))
+            .with_status(CompactionStatus::Running),
+        ];
+
+        fixture
+            .handler
+            .handle(CompactorMessage::CompactionJobProgress {
+                id: compaction_id,
+                bytes_processed: 123,
+                output_ssts: vec![],
+                subcompactions: subcompactions.clone(),
+            })
+            .await
+            .expect("fatal error handling progress message");
+
+        let stored_compactions = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        let stored = stored_compactions
+            .get(&compaction_id)
+            .expect("missing stored compaction");
+        assert_eq!(stored.subcompactions(), &subcompactions);
+
+        // A subsequent snapshot advancing per-range progress must also be
+        // persisted, extending the prior state.
+        let mut advanced = subcompactions.clone();
+        advanced[0].set_status(CompactionStatus::Completed);
+        fixture
+            .handler
+            .handle(CompactorMessage::CompactionJobProgress {
+                id: compaction_id,
+                bytes_processed: 456,
+                output_ssts: vec![],
+                subcompactions: advanced.clone(),
+            })
+            .await
+            .expect("fatal error handling progress message");
+
+        let stored_compactions = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        let stored = stored_compactions
+            .get(&compaction_id)
+            .expect("missing stored compaction");
+        assert_eq!(stored.subcompactions(), &advanced);
     }
 
     #[tokio::test]
