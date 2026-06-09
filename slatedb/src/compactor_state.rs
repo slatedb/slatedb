@@ -8,6 +8,7 @@ use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
+use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
 use crate::manifest::{Manifest, ManifestCore};
@@ -334,6 +335,81 @@ impl WorkerSpec {
     }
 }
 
+/// A compaction over a sub-range of the parent compaction's key space
+/// (RFC-0028).
+///
+/// Subcompactions are only valid within the context of a parent [`Compaction`]
+/// and let a single logical compaction execute its disjoint ranges in parallel
+/// while resuming at range granularity after a failure. A subcompaction's
+/// `status` only uses the `Submitted -> Running -> Completed` (or `Failed`)
+/// subset of [`CompactionStatus`]; the manifest commit happens once at the
+/// parent level, so there is no per-range `Compacted` state.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Subcompaction {
+    /// Key range covered by this subcompaction. The ranges of the
+    /// subcompactions within a parent compaction are non-overlapping and
+    /// together cover the full key space.
+    range: BytesRange,
+    /// Current status for this subcompaction.
+    status: CompactionStatus,
+    /// Output SSTs produced by this subcompaction so far.
+    output_ssts: Vec<SsTableHandle>,
+}
+
+impl Subcompaction {
+    pub(crate) fn new(range: BytesRange) -> Self {
+        Self {
+            range,
+            status: CompactionStatus::Submitted,
+            output_ssts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_status(mut self, status: CompactionStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
+        self.output_ssts = output_ssts;
+        self
+    }
+
+    /// Returns the key range covered by this subcompaction.
+    pub(crate) fn range(&self) -> &BytesRange {
+        &self.range
+    }
+
+    /// Returns the current status of this subcompaction.
+    pub fn status(&self) -> CompactionStatus {
+        self.status
+    }
+
+    /// Sets the current status of this subcompaction.
+    pub(crate) fn set_status(&mut self, status: CompactionStatus) {
+        self.status = status;
+    }
+
+    /// Returns the output SSTs produced by this subcompaction so far.
+    pub fn output_ssts(&self) -> &Vec<SsTableHandle> {
+        &self.output_ssts
+    }
+
+    /// Sets the output SSTs produced by this subcompaction.
+    pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
+        assert!(
+            output_ssts.starts_with(self.output_ssts.as_slice()),
+            "new subcompaction output SSTs must always extend previous output SSTs"
+        );
+        self.output_ssts = output_ssts;
+    }
+
+    /// Returns true once this subcompaction has written all of its output SSTs.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.status == CompactionStatus::Completed
+    }
+}
+
 /// Canonical, internal record of a compaction.
 ///
 /// A compaction is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
@@ -350,11 +426,17 @@ pub struct Compaction {
     ///
     /// This is tracked only in memory at the moment.
     status: CompactionStatus,
-    /// Output SSTs produced by this compaction, if any.
+    /// Output SSTs produced by this compaction, if any. Empty while the
+    /// compaction runs subcompactions; per-range output is tracked in
+    /// `subcompactions` instead (RFC-0028).
     output_ssts: Vec<SsTableHandle>,
     /// The worker that has claimed this compaction. `None` means the
     /// compaction is unclaimed (only valid when `status == Submitted`).
     worker: Option<WorkerSpec>,
+    /// Subcompactions partitioning this compaction into non-overlapping key
+    /// ranges (RFC-0028). Empty when the compaction runs as a single merge
+    /// over the full keyspace.
+    subcompactions: Vec<Subcompaction>,
 }
 
 impl Compaction {
@@ -366,6 +448,7 @@ impl Compaction {
             status: CompactionStatus::Submitted,
             output_ssts: Vec::new(),
             worker: None,
+            subcompactions: Vec::new(),
         }
     }
 
@@ -381,6 +464,11 @@ impl Compaction {
 
     pub(crate) fn with_worker(mut self, worker: Option<WorkerSpec>) -> Self {
         self.worker = worker;
+        self
+    }
+
+    pub(crate) fn with_subcompactions(mut self, subcompactions: Vec<Subcompaction>) -> Self {
+        self.subcompactions = subcompactions;
         self
     }
 
@@ -471,6 +559,35 @@ impl Compaction {
         &self.output_ssts
     }
 
+    /// Sets the subcompactions for this compaction. The plan (number of
+    /// subcompactions and their ranges) is immutable once set; updates may
+    /// only advance per-range status and extend per-range output SSTs.
+    pub(crate) fn set_subcompactions(&mut self, subcompactions: Vec<Subcompaction>) {
+        if !self.subcompactions.is_empty() {
+            assert_eq!(
+                self.subcompactions.len(),
+                subcompactions.len(),
+                "subcompaction plan must not change once set"
+            );
+            for (prev, next) in self.subcompactions.iter().zip(subcompactions.iter()) {
+                assert_eq!(
+                    prev.range, next.range,
+                    "subcompaction ranges are immutable once set"
+                );
+                assert!(
+                    next.output_ssts.starts_with(prev.output_ssts.as_slice()),
+                    "new subcompaction output SSTs must always extend previous output SSTs"
+                );
+            }
+        }
+        self.subcompactions = subcompactions;
+    }
+
+    /// Returns the subcompactions of this compaction, if any.
+    pub fn subcompactions(&self) -> &Vec<Subcompaction> {
+        &self.subcompactions
+    }
+
     /// Sets the current status of this compaction.
     pub(crate) fn set_status(&mut self, status: CompactionStatus) {
         self.status = status;
@@ -498,6 +615,19 @@ impl Display for Compaction {
         if self.bytes_processed > 0 {
             let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
             write!(f, " ({} processed)", human_bytes_processed)?;
+        }
+        if !self.subcompactions.is_empty() {
+            let complete = self
+                .subcompactions
+                .iter()
+                .filter(|s| s.is_complete())
+                .count();
+            write!(
+                f,
+                " [{}/{} subcompactions]",
+                complete,
+                self.subcompactions.len()
+            )?;
         }
         Ok(())
     }
@@ -1115,6 +1245,79 @@ mod tests {
     use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";
+
+    fn test_subcompaction_sst(first_key: &[u8]) -> SsTableHandle {
+        SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::copy_from_slice(first_key)),
+                ..SsTableInfo::default()
+            },
+        )
+    }
+
+    fn test_compaction_with_subcompactions(subcompactions: Vec<Subcompaction>) -> Compaction {
+        Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
+        )
+        .with_subcompactions(subcompactions)
+    }
+
+    #[test]
+    fn test_set_subcompactions_allows_extending_output_ssts() {
+        let range = BytesRange::unbounded();
+        let sst = test_subcompaction_sst(b"a");
+        let mut compaction =
+            test_compaction_with_subcompactions(vec![
+                Subcompaction::new(range.clone()).with_output_ssts(vec![sst.clone()])
+            ]);
+
+        compaction.set_subcompactions(vec![Subcompaction::new(range)
+            .with_status(CompactionStatus::Completed)
+            .with_output_ssts(vec![sst, test_subcompaction_sst(b"m")])]);
+
+        assert_eq!(
+            compaction.subcompactions()[0].status(),
+            CompactionStatus::Completed
+        );
+        assert_eq!(compaction.subcompactions()[0].output_ssts().len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "subcompaction plan must not change once set")]
+    fn test_set_subcompactions_rejects_plan_size_change() {
+        let mut compaction =
+            test_compaction_with_subcompactions(vec![Subcompaction::new(BytesRange::unbounded())]);
+        compaction.set_subcompactions(vec![
+            Subcompaction::new(BytesRange::from_slice(..b"m".as_slice())),
+            Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..)),
+        ]);
+    }
+
+    #[test]
+    #[should_panic(expected = "subcompaction ranges are immutable once set")]
+    fn test_set_subcompactions_rejects_range_change() {
+        let mut compaction = test_compaction_with_subcompactions(vec![Subcompaction::new(
+            BytesRange::from_slice(..b"m".as_slice()),
+        )]);
+        compaction.set_subcompactions(vec![Subcompaction::new(BytesRange::from_slice(
+            ..b"z".as_slice(),
+        ))]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must always extend previous output SSTs")]
+    fn test_set_subcompactions_rejects_shrinking_output_ssts() {
+        let range = BytesRange::unbounded();
+        let mut compaction =
+            test_compaction_with_subcompactions(vec![Subcompaction::new(range.clone())
+                .with_output_ssts(vec![test_subcompaction_sst(b"a")])]);
+        compaction.set_subcompactions(vec![
+            Subcompaction::new(range).with_output_ssts(vec![test_subcompaction_sst(b"b")])
+        ]);
+    }
 
     #[test]
     fn test_trim_keeps_latest_finished_and_active_compactions() {
