@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::mem;
+use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
@@ -10,11 +11,13 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::bytes_range::BytesRange;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter_iterator::CompactionFilterIterator;
 use crate::compaction_worker::WorkerMessage;
+use crate::compactor_state::{CompactionStatus, Subcompaction};
 use crate::config::CompactionWorkerOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
@@ -27,8 +30,10 @@ use crate::merge_operator::{
 };
 use crate::peeking_iterator::PeekingIterator;
 use crate::retention_iterator::RetentionIterator;
+use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::subcompaction::plan_subcompaction_ranges;
 use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
@@ -72,6 +77,10 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) is_dest_last_run: bool,
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
+    /// Subcompactions persisted for this compaction when resuming (RFC-0028).
+    /// Empty when the compaction has no persisted subcompaction plan; the
+    /// executor then plans one itself (or runs a single merge).
+    pub(crate) subcompactions: Vec<Subcompaction>,
 }
 
 impl std::fmt::Debug for StartCompactionJobArgs {
@@ -86,6 +95,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("compaction_clock_tick", &self.compaction_clock_tick)
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("retention_min_seq", &self.retention_min_seq)
+            .field("subcompactions", &self.subcompactions)
             .finish()
     }
 }
@@ -240,6 +250,42 @@ struct TokioCompactionTask {
     task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
+/// Balances the `running_subcompactions` gauge across every subcompaction
+/// task outcome. The guard is owned by the task future, so the decrement
+/// runs when the future is dropped — whether it ran to completion, panicked,
+/// or was aborted before (or while) being polled.
+struct RunningSubcompactionGuard {
+    stats: Arc<CompactionStats>,
+}
+
+impl RunningSubcompactionGuard {
+    fn new(stats: Arc<CompactionStats>) -> Self {
+        stats.running_subcompactions.increment(1);
+        Self { stats }
+    }
+}
+
+impl Drop for RunningSubcompactionGuard {
+    fn drop(&mut self) {
+        self.stats.running_subcompactions.increment(-1);
+    }
+}
+
+/// Progress and completion events sent from subcompaction tasks to their
+/// parent compaction job (RFC-0028). `index` identifies the subcompaction
+/// within the parent's plan.
+enum SubcompactionEvent {
+    Progress {
+        index: usize,
+        bytes_processed: u64,
+        output_ssts: Vec<SsTableHandle>,
+    },
+    Finished {
+        index: usize,
+        result: Result<Vec<SsTableHandle>, SlateDBError>,
+    },
+}
+
 pub(crate) struct TokioCompactionExecutorInner {
     options: Arc<CompactionWorkerOptions>,
     handle: tokio::runtime::Handle,
@@ -257,13 +303,22 @@ pub(crate) struct TokioCompactionExecutorInner {
 }
 
 impl TokioCompactionExecutorInner {
-    /// Builds input iterators for all sources (L0 and SR) and wraps them with optional
-    /// merge, retention, and compaction filter logic.
+    /// Builds input iterators for all sources (L0 and SR) restricted to `range` and
+    /// wraps them with optional merge, retention, and compaction filter logic.
+    ///
+    /// `output_ssts` are the output SSTs already written by a previous attempt of
+    /// this (sub)compaction; the returned iterator is positioned just past the last
+    /// entry they contain. `sequence_tracker` is the manifest's sequence tracker,
+    /// loaded once per job so concurrent subcompactions don't each re-read the
+    /// manifest.
     async fn load_iterators<'a>(
         &self,
         job_args: &'a StartCompactionJobArgs,
+        range: &'a BytesRange,
+        output_ssts: &[SsTableHandle],
+        sequence_tracker: Arc<SequenceTracker>,
     ) -> Result<ResumingIterator<Box<dyn TrackedRowEntryIterator + 'a>>, SlateDBError> {
-        let resume_cursor = match job_args.output_ssts.last() {
+        let resume_cursor = match output_ssts.last() {
             Some(output_sst) => {
                 last_written_key_and_seq(self.table_store.clone(), output_sst).await?
             }
@@ -286,16 +341,30 @@ impl TokioCompactionExecutorInner {
         // L0 (borrowed)
         let l0_iters_futures = build_concurrent(job_args.sst_views.iter(), max_parallel, |h| {
             let sst_iter_options = sst_iter_options.clone();
-            SstIterator::new_borrowed_initialized(.., h, self.table_store.clone(), sst_iter_options)
+            SstIterator::new_borrowed_initialized(
+                range.clone(),
+                h,
+                self.table_store.clone(),
+                sst_iter_options,
+            )
         });
 
         // SR (borrowed)
+        let slice_range: (Bound<&[u8]>, Bound<&[u8]>) = (
+            range.start_bound().map(|b| b.as_ref()),
+            range.end_bound().map(|b| b.as_ref()),
+        );
         let sr_iters_futures = build_concurrent(job_args.sorted_runs.iter(), max_parallel, |sr| {
             let sst_iter_options = sst_iter_options.clone();
             async move {
-                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
-                    .await
-                    .map(Some)
+                SortedRunIterator::new_borrowed(
+                    slice_range,
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await
+                .map(Some)
             }
         });
 
@@ -319,8 +388,6 @@ impl TokioCompactionExecutorInner {
                 Box::new(MergeOperatorRequiredIterator::new(merge_iter))
             };
 
-        let stored_manifest =
-            StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
         let mut retention_iter = RetentionIterator::new(
             merge_iter,
             None,
@@ -328,7 +395,7 @@ impl TokioCompactionExecutorInner {
             job_args.is_dest_last_run,
             job_args.compaction_clock_tick,
             self.clock.clone(),
-            Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
+            sequence_tracker,
             Some(self.stats.retention_metrics()),
         )
         .await?;
@@ -361,6 +428,7 @@ impl TokioCompactionExecutorInner {
         id: Ulid,
         bytes_processed: u64,
         output_ssts: &[SsTableHandle],
+        subcompactions: Vec<Subcompaction>,
     ) {
         // Allow send() because we are treating the executor like an external
         // component. They can do what they want. If the send fails (e.g., during
@@ -372,6 +440,7 @@ impl TokioCompactionExecutorInner {
                 id,
                 bytes_processed,
                 output_ssts: output_ssts.to_vec(),
+                subcompactions,
             })
         {
             debug!(
@@ -405,7 +474,8 @@ impl TokioCompactionExecutorInner {
     /// Executes a single compaction job and returns the resulting [`SortedRun`].
     ///
     /// ## Steps
-    /// - Streams and merges input keys across all sources
+    /// - Splits the job into subcompactions when enabled and worthwhile (RFC-0028)
+    /// - Streams and merges input keys across all sources (per range)
     /// - Applies merge and retention policies
     /// - Writes output SSTs up to `max_sst_size`, reporting periodic progress
     ///
@@ -413,20 +483,315 @@ impl TokioCompactionExecutorInner {
     /// - The destination [`SortedRun`] with all output SST handles.
     #[instrument(level = "debug", skip_all, fields(id = %args.id))]
     async fn execute_compaction_job(
-        &self,
+        self: &Arc<Self>,
         args: StartCompactionJobArgs,
     ) -> Result<SortedRun, SlateDBError> {
         debug!("executing compaction [job_args={:?}]", args);
-        let mut all_iter = self.load_iterators(&args).await?;
-        let mut output_ssts = args.output_ssts.clone();
+        // Load the manifest's sequence tracker once per job; every range of a
+        // split job shares it rather than re-reading the manifest.
+        let stored_manifest =
+            StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
+        let sequence_tracker = Arc::new(stored_manifest.db_state().sequence_tracker.clone());
+
+        if let Some(subcompactions) = self.plan_or_resume_subcompactions(&args) {
+            return self
+                .execute_subcompactions(args, subcompactions, sequence_tracker)
+                .await;
+        }
+
+        let initial_output_ssts = args.output_ssts.clone();
+        let progress = |bytes_processed: u64, output_ssts: &[SsTableHandle]| {
+            self.send_compaction_progress(args.id, bytes_processed, output_ssts, Vec::new());
+        };
+        let output_ssts = self
+            .run_subcompaction_merge(
+                &args,
+                &BytesRange::unbounded(),
+                initial_output_ssts,
+                sequence_tracker,
+                &progress,
+            )
+            .await?;
+
+        Ok(SortedRun {
+            id: args.destination,
+            sst_views: output_ssts
+                .into_iter()
+                .map(|sst| {
+                    let id = self.rand.rng().gen_ulid(self.clock.as_ref());
+                    SsTableView::new(id, sst)
+                })
+                .collect(),
+        })
+    }
+
+    /// Determines whether a job should run with subcompactions (RFC-0028).
+    ///
+    /// ## Returns
+    /// - `Some` with the persisted subcompactions when the job is resuming a
+    ///   subcompaction plan. The persisted plan is reused verbatim — never
+    ///   re-planned — so output SSTs recorded against its ranges stay valid.
+    /// - `Some` with a freshly planned set of subcompactions when the job is
+    ///   starting fresh, subcompactions are enabled, and the planner finds a
+    ///   worthwhile split.
+    /// - `None` when the job should run as a single merge over the full
+    ///   keyspace. This includes resuming a job whose previous attempt ran
+    ///   (and persisted output) without subcompactions.
+    fn plan_or_resume_subcompactions(
+        &self,
+        args: &StartCompactionJobArgs,
+    ) -> Option<Vec<Subcompaction>> {
+        if !args.subcompactions.is_empty() {
+            return Some(args.subcompactions.clone());
+        }
+        if self.options.max_subcompactions <= 1 || !args.output_ssts.is_empty() {
+            return None;
+        }
+        let ranges = plan_subcompaction_ranges(
+            &args.sst_views,
+            &args.sorted_runs,
+            self.options.max_subcompactions,
+            self.options.min_subcompaction_input_bytes as u64,
+        );
+        if ranges.len() <= 1 {
+            return None;
+        }
+        Some(ranges.into_iter().map(Subcompaction::new).collect())
+    }
+
+    /// Executes a compaction job that is split into subcompactions (RFC-0028),
+    /// running every incomplete range concurrently.
+    ///
+    /// The plan is reported (and therefore persisted by the orchestrator)
+    /// before any range output is recorded against it; per-range output SSTs
+    /// and statuses are then reported as they advance so an interrupted
+    /// compaction can resume at range granularity. On the first range failure
+    /// the remaining subcompactions are aborted and the job fails; progress
+    /// persisted by then remains resumable after a restart.
+    async fn execute_subcompactions(
+        self: &Arc<Self>,
+        args: StartCompactionJobArgs,
+        mut subcompactions: Vec<Subcompaction>,
+        sequence_tracker: Arc<SequenceTracker>,
+    ) -> Result<SortedRun, SlateDBError> {
+        debug!(
+            "executing compaction with subcompactions [id={}, subcompactions={}]",
+            args.id,
+            subcompactions.len()
+        );
+        // A non-empty `args.subcompactions` means this job resumes a persisted
+        // plan rather than starting one fresh.
+        let resumed_plan = !args.subcompactions.is_empty();
+        if !resumed_plan {
+            self.stats
+                .subcompactions_per_compaction
+                .record(subcompactions.len() as f64);
+        }
+
+        // Estimate bytes already processed by completed ranges (resume), so
+        // aggregate progress doesn't regress after a restart.
+        let mut bytes_processed_by_sub = vec![0u64; subcompactions.len()];
+        for (index, subcompaction) in subcompactions.iter().enumerate() {
+            if subcompaction.is_complete() {
+                bytes_processed_by_sub[index] = subcompaction
+                    .output_ssts()
+                    .iter()
+                    .map(|sst| sst.estimate_size())
+                    .sum();
+            }
+        }
+
+        // Report the plan immediately so it is persisted before any range
+        // output is recorded against it.
+        self.send_compaction_progress(
+            args.id,
+            bytes_processed_by_sub.iter().sum(),
+            &[],
+            subcompactions.clone(),
+        );
+
+        let args = Arc::new(args);
+        let (sub_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut sub_tasks = Vec::new();
+        for (index, subcompaction) in subcompactions.iter_mut().enumerate() {
+            if subcompaction.is_complete() {
+                continue;
+            }
+            if resumed_plan {
+                self.stats.subcompactions_resumed.increment(1);
+            }
+            subcompaction.set_status(CompactionStatus::Running);
+
+            let this = self.clone();
+            let args = args.clone();
+            let range = subcompaction.range().clone();
+            let initial_output_ssts = subcompaction.output_ssts().clone();
+            let sequence_tracker = sequence_tracker.clone();
+            let event_tx = sub_tx.clone();
+            let finished_tx = sub_tx.clone();
+            let stats = self.stats.clone();
+            let clock = self.clock.clone();
+            let started_at = self.clock.now();
+            // The guard is moved into the task future so the gauge is
+            // decremented even when the task is aborted (e.g. a sibling
+            // range failed) and the cleanup fn below never runs.
+            let running_guard = RunningSubcompactionGuard::new(self.stats.clone());
+            let task = spawn_bg_task(
+                format!("subcompaction:{}:{}", args.compaction_id, index),
+                &self.handle,
+                move |result: &Result<Vec<SsTableHandle>, SlateDBError>| {
+                    let elapsed = clock.now().signed_duration_since(started_at);
+                    stats
+                        .subcompaction_duration_sec
+                        .record(elapsed.num_milliseconds() as f64 / 1000.0);
+                    // Allow send() because this channel is internal to the
+                    // parent job: the receiver is dropped only after the
+                    // parent has aborted (or collected) every subcompaction
+                    // task, so a failed send needs no handling.
+                    #[allow(clippy::disallowed_methods)]
+                    let _ = finished_tx.send(SubcompactionEvent::Finished {
+                        index,
+                        result: result.clone(),
+                    });
+                },
+                async move {
+                    let _running_guard = running_guard;
+                    let progress = move |bytes_processed: u64, output_ssts: &[SsTableHandle]| {
+                        // Allow send() for the same reason as the cleanup fn
+                        // above: a dropped receiver means the parent job is
+                        // aborting this task anyway.
+                        #[allow(clippy::disallowed_methods)]
+                        let _ = event_tx.send(SubcompactionEvent::Progress {
+                            index,
+                            bytes_processed,
+                            output_ssts: output_ssts.to_vec(),
+                        });
+                    };
+                    this.run_subcompaction_merge(
+                        &args,
+                        &range,
+                        initial_output_ssts,
+                        sequence_tracker,
+                        &progress,
+                    )
+                    .await
+                },
+            );
+            sub_tasks.push(AbortOnDropHandle::new(task));
+        }
+        drop(sub_tx);
+
+        let mut pending = sub_tasks.len();
+        let mut first_error: Option<SlateDBError> = None;
+        while pending > 0 {
+            let Some(event) = sub_rx.recv().await else {
+                break;
+            };
+            match event {
+                SubcompactionEvent::Progress {
+                    index,
+                    bytes_processed,
+                    output_ssts,
+                } => {
+                    bytes_processed_by_sub[index] = bytes_processed;
+                    subcompactions[index].set_output_ssts(output_ssts);
+                    let total_bytes = bytes_processed_by_sub.iter().sum();
+                    self.send_compaction_progress(
+                        args.id,
+                        total_bytes,
+                        &[],
+                        subcompactions.clone(),
+                    );
+                }
+                SubcompactionEvent::Finished { index, result } => {
+                    pending -= 1;
+                    match result {
+                        Ok(output_ssts) => {
+                            subcompactions[index].set_output_ssts(output_ssts);
+                            subcompactions[index].set_status(CompactionStatus::Completed);
+                            let total_bytes = bytes_processed_by_sub.iter().sum();
+                            self.send_compaction_progress(
+                                args.id,
+                                total_bytes,
+                                &[],
+                                subcompactions.clone(),
+                            );
+                        }
+                        Err(e) => {
+                            subcompactions[index].set_status(CompactionStatus::Failed);
+                            first_error = Some(e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Abort any subcompactions still running after a failure, and wait
+        // for them to wind down so the job stops writing to the object store
+        // before it is reported failed. On success every task has already
+        // completed, so this returns immediately.
+        sub_tasks.iter().for_each(|task| task.abort());
+        let _ = join_all(sub_tasks).await;
+
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+        if subcompactions.iter().any(|sub| !sub.is_complete()) {
+            // The event channel closed before every subcompaction reported a
+            // result; treat the job as failed so it can be rescheduled.
+            return Err(SlateDBError::CompactionExecutorFailed);
+        }
+
+        // Subcompactions are in ascending range order and each range's output
+        // is internally sorted, so concatenating yields a sorted run.
+        Ok(SortedRun {
+            id: args.destination,
+            sst_views: subcompactions
+                .iter()
+                .flat_map(|sub| sub.output_ssts().iter())
+                .map(|sst| {
+                    let id = self.rand.rng().gen_ulid(self.clock.as_ref());
+                    SsTableView::new(id, sst.clone())
+                })
+                .collect(),
+        })
+    }
+
+    /// Runs the merge for one key range of a compaction job and returns the
+    /// output SSTs, including any `initial_output_ssts` written by a previous
+    /// attempt. This is the shared execution path for whole compactions (an
+    /// unbounded range) and subcompactions (RFC-0028).
+    async fn run_subcompaction_merge(
+        &self,
+        args: &StartCompactionJobArgs,
+        range: &BytesRange,
+        initial_output_ssts: Vec<SsTableHandle>,
+        sequence_tracker: Arc<SequenceTracker>,
+        progress: &(dyn Fn(u64, &[SsTableHandle]) + Send + Sync),
+    ) -> Result<Vec<SsTableHandle>, SlateDBError> {
+        let mut output_ssts = initial_output_ssts;
+        let mut all_iter = self
+            .load_iterators(args, range, &output_ssts, sequence_tracker)
+            .await?;
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
         ));
         let mut bytes_written = 0usize;
         let mut last_progress_report = self.clock.now();
-        // Estimate bytes processed before the resume point, if any.
+        // Estimate bytes processed within this range before the resume point,
+        // if any. For an unbounded range this is the estimate of everything
+        // before the resume key; for a subcompaction range the bytes before
+        // the range's start key are excluded since they belong to sibling
+        // ranges.
         let start_bytes_processed = all_iter.start().map_or(0, |(k, _s)| {
-            estimate_bytes_before_key(args.sorted_runs.as_slice(), k)
+            let before_key = estimate_bytes_before_key(args.sorted_runs.as_slice(), k);
+            let before_range = match range.start_bound() {
+                Bound::Included(s) | Bound::Excluded(s) => {
+                    estimate_bytes_before_key(args.sorted_runs.as_slice(), s)
+                }
+                Bound::Unbounded => 0,
+            };
+            before_key.saturating_sub(before_range)
         });
 
         // At most one SST close runs in the background at a time (depth-1
@@ -446,7 +811,7 @@ impl TokioCompactionExecutorInner {
             if let Some(pending) = pending_close.take_if(|p| p.is_finished()) {
                 self.collect_close(pending, &mut output_ssts).await?;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
-                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
+                progress(total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
             }
 
@@ -454,7 +819,7 @@ impl TokioCompactionExecutorInner {
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
-                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
+                progress(total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
             }
 
@@ -482,7 +847,7 @@ impl TokioCompactionExecutorInner {
                 )));
                 bytes_written = 0;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
-                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
+                progress(total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
             }
         }
@@ -499,16 +864,7 @@ impl TokioCompactionExecutorInner {
             output_ssts.push(sst);
         }
 
-        Ok(SortedRun {
-            id: args.destination,
-            sst_views: output_ssts
-                .into_iter()
-                .map(|sst| {
-                    let id = self.rand.rng().gen_ulid(self.clock.as_ref());
-                    SsTableView::new(id, sst)
-                })
-                .collect(),
-        })
+        Ok(output_ssts)
     }
 
     /// Starts a background task to run the compaction job.
@@ -1072,7 +1428,7 @@ mod tests {
                 let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
                 Arc::new(CompactionStats::new(&recorder))
             },
-            clock,
+            clock: clock.clone(),
             manifest_store,
             merge_operator,
             #[cfg(feature = "compaction_filters")]
@@ -1139,11 +1495,29 @@ mod tests {
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq,
+            subcompactions: vec![],
         };
 
         // Verify the resumed iterator yields all remaining rows, starting immediately
         // after the persisted prefix and continuing in sorted order.
-        let mut iter = executor.inner.load_iterators(&job_args).await.unwrap();
+        let full_range = BytesRange::unbounded();
+        let sequence_tracker = {
+            let stored_manifest =
+                StoredManifest::load(executor.inner.manifest_store.clone(), clock.clone())
+                    .await
+                    .unwrap();
+            Arc::new(stored_manifest.db_state().sequence_tracker.clone())
+        };
+        let mut iter = executor
+            .inner
+            .load_iterators(
+                &job_args,
+                &full_range,
+                &job_args.output_ssts,
+                sequence_tracker,
+            )
+            .await
+            .unwrap();
         let mut resumed_entries = Vec::new();
         while let Some(entry) = iter.next().await.unwrap() {
             resumed_entries.push(entry);
@@ -1307,6 +1681,7 @@ mod tests {
                         compaction_clock_tick: 0,
                         is_dest_last_run: false,
                         retention_min_seq,
+                        subcompactions: vec![],
                     })
                     .await
                     .unwrap();
@@ -1352,6 +1727,7 @@ mod tests {
                             compaction_clock_tick: 0,
                             is_dest_last_run: false,
                             retention_min_seq,
+                            subcompactions: vec![],
                         })
                         .await
                         .unwrap();
@@ -1375,6 +1751,384 @@ mod tests {
 
             });
         });
+    }
+
+    /// Reads back every entry from a sorted run's SSTs, in order.
+    async fn read_run_entries(table_store: &Arc<TableStore>, run: &SortedRun) -> Vec<RowEntry> {
+        let mut entries = Vec::new();
+        for sst in &run.sst_views {
+            let mut iter = SstIterator::new(
+                SstView::Borrowed(sst, BytesRange::from(..)),
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .unwrap();
+            iter.init().await.unwrap();
+            while let Some(entry) = iter.next().await.unwrap() {
+                entries.push(entry);
+            }
+        }
+        entries
+    }
+
+    /// End-to-end coverage for subcompactions (RFC-0028): a compaction split
+    /// into parallel key ranges must produce exactly the same merged entries
+    /// as a single-threaded merge, and resuming from any persisted
+    /// subcompaction snapshot must converge to the same result while reusing
+    /// the output of already-completed ranges.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_subcompactions_match_single_merge_and_resume() {
+        const SST_SIZE: usize = 512;
+
+        let handle = tokio::runtime::Handle::current();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root_path = Path::from("testdb-subcompactions");
+        let clock = Arc::new(DefaultSystemClock::new());
+        // A small block size produces many candidate split points in the
+        // input SSTs, so the planner reliably splits the job.
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat {
+                block_size: 256,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+
+        let build_executor = |options: CompactionWorkerOptions| {
+            let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+            let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+                handle: handle.clone(),
+                options: Arc::new(options),
+                worker_tx: tx,
+                table_store: table_store.clone(),
+                rand: Arc::new(DbRand::new(100u64)),
+                stats: {
+                    let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                    Arc::new(CompactionStats::new(&recorder))
+                },
+                clock: clock.clone(),
+                manifest_store: manifest_store.clone(),
+                merge_operator: None,
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: None,
+            });
+            (executor, rx)
+        };
+
+        // given: overlapping inputs across two L0s and two sorted runs, each
+        // spanning multiple SSTs.
+        let l0_a: Vec<RowEntry> = (0..400u64)
+            .step_by(2)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:05}").as_bytes(),
+                    format!("l0a-{i}").as_bytes(),
+                    10_000 + i,
+                )
+            })
+            .collect();
+        let l0_b: Vec<RowEntry> = (1..400u64)
+            .step_by(2)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:05}").as_bytes(),
+                    format!("l0b-{i}").as_bytes(),
+                    20_000 + i,
+                )
+            })
+            .collect();
+        let sr_a: Vec<RowEntry> = (0..400u64)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:05}").as_bytes(),
+                    format!("sra-{i}").as_bytes(),
+                    1 + i,
+                )
+            })
+            .collect();
+        let sr_b: Vec<RowEntry> = (0..400u64)
+            .step_by(5)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:05}").as_bytes(),
+                    format!("srb-{i}").as_bytes(),
+                    5_000 + i,
+                )
+            })
+            .collect();
+        let mut sst_views = Vec::new();
+        for entries in [&l0_a, &l0_b] {
+            let ssts = write_ssts(&table_store, entries, SST_SIZE).await;
+            sst_views.extend(ssts.into_iter().map(SsTableView::identity));
+        }
+        let sorted_runs =
+            build_sorted_runs(&table_store, &[vec![sr_a], vec![sr_b]], SST_SIZE).await;
+
+        let job_args = |subcompactions: Vec<Subcompaction>| StartCompactionJobArgs {
+            id: Ulid::new(),
+            compaction_id: Ulid::new(),
+            destination: 0,
+            sst_views: sst_views.clone(),
+            sorted_runs: sorted_runs.clone(),
+            output_ssts: vec![],
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            subcompactions,
+        };
+
+        // when: the job runs as a single merge.
+        let (single_executor, _single_rx) = build_executor(CompactionWorkerOptions {
+            max_sst_size: SST_SIZE,
+            max_subcompactions: 1,
+            ..CompactionWorkerOptions::default()
+        });
+        let expected_run = single_executor
+            .inner
+            .execute_compaction_job(job_args(vec![]))
+            .await
+            .unwrap();
+        let expected_entries = read_run_entries(&table_store, &expected_run).await;
+        assert!(!expected_entries.is_empty());
+
+        // when: the same job runs split into subcompactions.
+        let (sub_executor, sub_rx) = build_executor(CompactionWorkerOptions {
+            max_sst_size: SST_SIZE,
+            max_subcompactions: 4,
+            min_subcompaction_input_bytes: 1,
+            ..CompactionWorkerOptions::default()
+        });
+        let sub_run = sub_executor
+            .inner
+            .execute_compaction_job(job_args(vec![]))
+            .await
+            .unwrap();
+
+        // then: the merged output is identical to the single merge.
+        assert_eq!(
+            read_run_entries(&table_store, &sub_run).await,
+            expected_entries
+        );
+
+        // then: progress messages carried persistable subcompaction
+        // snapshots with a stable plan, ending fully complete.
+        let mut snapshots: Vec<Vec<Subcompaction>> = Vec::new();
+        while let Ok(msg) = sub_rx.try_recv() {
+            if let WorkerMessage::CompactionJobProgress { subcompactions, .. } = msg {
+                if !subcompactions.is_empty() {
+                    snapshots.push(subcompactions);
+                }
+            }
+        }
+        assert!(!snapshots.is_empty(), "expected subcompaction snapshots");
+        let plan_len = snapshots[0].len();
+        assert!(plan_len >= 2, "expected the job to split, got {plan_len}");
+        assert!(snapshots.iter().all(|s| s.len() == plan_len));
+        let final_snapshot = snapshots.last().unwrap();
+        assert!(final_snapshot.iter().all(|s| s.is_complete()));
+
+        // when/then: resuming from any persisted snapshot — the bare plan, a
+        // mid-flight state, and the fully-complete state — converges to the
+        // same merged output and reuses the output SSTs of completed ranges.
+        for index in [0, snapshots.len() / 2, snapshots.len() - 1] {
+            let snapshot = snapshots[index].clone();
+            let resumed_run = sub_executor
+                .inner
+                .execute_compaction_job(job_args(snapshot.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                read_run_entries(&table_store, &resumed_run).await,
+                expected_entries,
+                "resume from snapshot {index} diverged"
+            );
+            for subcompaction in snapshot.iter().filter(|s| s.is_complete()) {
+                for sst in subcompaction.output_ssts() {
+                    assert!(
+                        resumed_run.sst_views.iter().any(|v| v.sst.id == sst.id),
+                        "completed subcompaction output SST was not reused"
+                    );
+                }
+            }
+        }
+    }
+
+    /// When one subcompaction fails, the job must abort its sibling ranges
+    /// and report the failure (rather than hanging on them or committing
+    /// partial output). Uses a compaction filter that errors only on keys in
+    /// the upper part of the keyspace, so only the range(s) covering those
+    /// keys fail while lower ranges run normally.
+    #[cfg(feature = "compaction_filters")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_subcompaction_failure_fails_job() {
+        use crate::compaction_filter::{
+            CompactionFilter, CompactionFilterDecision, CompactionFilterError,
+            CompactionFilterSupplier, CompactionJobContext,
+        };
+
+        struct FailUpperRangeFilter;
+
+        #[async_trait::async_trait]
+        impl CompactionFilter for FailUpperRangeFilter {
+            async fn filter(
+                &mut self,
+                entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+                if entry.key.as_ref() >= b"key00300".as_slice() {
+                    Err(CompactionFilterError::FilterError(
+                        "injected failure".into(),
+                    ))
+                } else {
+                    Ok(CompactionFilterDecision::Keep)
+                }
+            }
+
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+                Ok(())
+            }
+        }
+
+        struct FailUpperRangeFilterSupplier;
+
+        #[async_trait::async_trait]
+        impl CompactionFilterSupplier for FailUpperRangeFilterSupplier {
+            async fn create_compaction_filter(
+                &self,
+                _context: &CompactionJobContext,
+            ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+                Ok(Box::new(FailUpperRangeFilter))
+            }
+        }
+
+        const SST_SIZE: usize = 512;
+        let handle = tokio::runtime::Handle::current();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root_path = Path::from("testdb-subcompaction-failure");
+        let clock = Arc::new(DefaultSystemClock::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat {
+                block_size: 256,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+
+        let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle,
+            options: Arc::new(CompactionWorkerOptions {
+                max_sst_size: SST_SIZE,
+                max_subcompactions: 4,
+                min_subcompaction_input_bytes: 1,
+                ..CompactionWorkerOptions::default()
+            }),
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: Arc::new(DbRand::new(100u64)),
+            stats: {
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
+            },
+            clock,
+            manifest_store,
+            merge_operator: None,
+            compaction_filter_supplier: Some(Arc::new(FailUpperRangeFilterSupplier)),
+        });
+
+        let sr: Vec<RowEntry> = (0..400u64)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:05}").as_bytes(),
+                    format!("v-{i}").as_bytes(),
+                    1 + i,
+                )
+            })
+            .collect();
+        let sorted_runs = build_sorted_runs(&table_store, &[vec![sr]], SST_SIZE).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            executor
+                .inner
+                .execute_compaction_job(StartCompactionJobArgs {
+                    id: Ulid::new(),
+                    compaction_id: Ulid::new(),
+                    destination: 0,
+                    sst_views: vec![],
+                    sorted_runs,
+                    output_ssts: vec![],
+                    compaction_clock_tick: 0,
+                    is_dest_last_run: false,
+                    retention_min_seq: Some(0),
+                    subcompactions: vec![],
+                }),
+        )
+        .await
+        .expect("job should fail promptly rather than hang on aborted siblings");
+
+        let err = result.expect_err("job with a failing subcompaction should fail");
+        assert!(
+            matches!(err, SlateDBError::CompactionFilterError(_)),
+            "expected CompactionFilterError, got: {err:?}"
+        );
+    }
+
+    /// Resuming a job whose previous attempt ran as a single merge (persisted
+    /// `output_ssts` but no subcompaction plan) must stay on the single-merge
+    /// path: splitting now would invalidate the existing resume point.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_should_not_plan_subcompactions_when_resuming_single_merge() {
+        let ctx = TestContextBuilder::new("testdb-no-replan").build().await;
+        let resume_output_sst = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            1,
+            crate::db_state::SsTableInfo::default(),
+        );
+        let args = StartCompactionJobArgs {
+            id: Ulid::new(),
+            compaction_id: Ulid::new(),
+            destination: 0,
+            sst_views: vec![],
+            sorted_runs: vec![],
+            output_ssts: vec![resume_output_sst],
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            subcompactions: vec![],
+        };
+
+        assert!(ctx
+            .executor
+            .inner
+            .plan_or_resume_subcompactions(&args)
+            .is_none());
+
+        // A persisted plan, by contrast, is always resumed verbatim.
+        let persisted = vec![
+            Subcompaction::new(BytesRange::from_slice(..b"m".as_slice())),
+            Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..)),
+        ];
+        let args = StartCompactionJobArgs {
+            output_ssts: vec![],
+            subcompactions: persisted.clone(),
+            ..args
+        };
+        assert_eq!(
+            ctx.executor.inner.plan_or_resume_subcompactions(&args),
+            Some(persisted)
+        );
     }
 
     /// A blocked SST `close()` (the object-store flush of a finished output SST)
@@ -1462,6 +2216,7 @@ mod tests {
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
+            subcompactions: vec![],
         });
 
         // when: the first output SST's flush is parked at the closed gate.
@@ -1635,6 +2390,7 @@ mod tests {
                 compaction_clock_tick: 0,
                 is_dest_last_run,
                 retention_min_seq,
+                subcompactions: vec![],
             };
             self.executor.start_compaction_job(compaction);
 

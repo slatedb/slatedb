@@ -88,7 +88,7 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::DbRand;
 
 pub use crate::compactor_state::{
-    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
+    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId, Subcompaction,
 };
 pub use crate::compactor_state_protocols::CompactorStateView;
 pub use crate::db::builder::CompactorBuilder;
@@ -1169,7 +1169,9 @@ impl CompactorEventHandler {
 }
 
 pub mod stats {
-    use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper, UpDownCounterFn};
+    use slatedb_common::metrics::{
+        CounterFn, GaugeFn, HistogramFn, MetricsRecorderHelper, UpDownCounterFn,
+    };
     use std::sync::Arc;
 
     pub use crate::merge_operator::MERGE_OPERATOR_OPERANDS;
@@ -1200,6 +1202,20 @@ pub mod stats {
     pub const ENTRY_TYPE_LABEL: &str = "entry_type";
     pub const ENTRY_TYPE_VALUE: &str = "value";
     pub const ENTRY_TYPE_MERGE: &str = "merge";
+    pub const RUNNING_SUBCOMPACTIONS: &str = compactor_stat_name!("running_subcompactions");
+    pub const SUBCOMPACTIONS_PER_COMPACTION: &str =
+        compactor_stat_name!("subcompactions_per_compaction");
+    pub const SUBCOMPACTION_DURATION_SEC: &str = compactor_stat_name!("subcompaction_duration_sec");
+    pub const SUBCOMPACTIONS_RESUMED: &str = compactor_stat_name!("subcompactions_resumed");
+
+    /// Histogram boundaries for the number of subcompactions per compaction.
+    const SUBCOMPACTION_COUNT_BOUNDARIES: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    /// Histogram boundaries for per-subcompaction wall-clock duration, in
+    /// seconds. Compactions routinely run for minutes, so these extend well
+    /// past the request-latency boundaries.
+    const SUBCOMPACTION_DURATION_BOUNDARIES: &[f64] = &[
+        0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
+    ];
 
     pub(crate) struct CompactionStats {
         pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
@@ -1211,6 +1227,10 @@ pub mod stats {
         pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_value: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
+        pub(crate) running_subcompactions: Arc<dyn UpDownCounterFn>,
+        pub(crate) subcompactions_per_compaction: Arc<dyn HistogramFn>,
+        pub(crate) subcompaction_duration_sec: Arc<dyn HistogramFn>,
+        pub(crate) subcompactions_resumed: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1222,6 +1242,32 @@ pub mod stats {
                 bytes_compacted: recorder.counter(BYTES_COMPACTED).register(),
                 total_bytes_being_compacted: recorder.gauge(TOTAL_BYTES_BEING_COMPACTED).register(),
                 total_throughput: recorder.gauge(TOTAL_THROUGHPUT_BYTES_PER_SEC).register(),
+                running_subcompactions: recorder
+                    .up_down_counter(RUNNING_SUBCOMPACTIONS)
+                    .description("Subcompactions executing concurrently right now.")
+                    .register(),
+                subcompactions_per_compaction: recorder
+                    .histogram(
+                        SUBCOMPACTIONS_PER_COMPACTION,
+                        SUBCOMPACTION_COUNT_BOUNDARIES,
+                    )
+                    .description(
+                        "Number of subcompactions the planner produced per parent compaction.",
+                    )
+                    .register(),
+                subcompaction_duration_sec: recorder
+                    .histogram(
+                        SUBCOMPACTION_DURATION_SEC,
+                        SUBCOMPACTION_DURATION_BOUNDARIES,
+                    )
+                    .description("Per-range wall-clock time from start to output SSTs persisted.")
+                    .register(),
+                subcompactions_resumed: recorder
+                    .counter(SUBCOMPACTIONS_RESUMED)
+                    .description(
+                        "Subcompactions resumed from persisted state rather than started fresh.",
+                    )
+                    .register(),
                 merge_operator_compact_operands: recorder
                     .counter(MERGE_OPERATOR_OPERANDS)
                     .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_COMPACT_PATH)])
@@ -4552,6 +4598,7 @@ mod tests {
                     compaction_clock_tick: db_state.last_l0_clock_tick,
                     retention_min_seq: Some(db_state.recent_snapshot_min_seq),
                     is_dest_last_run,
+                    subcompactions: compaction.subcompactions().clone(),
                 };
 
                 self.real_executor.start_compaction_job(args);

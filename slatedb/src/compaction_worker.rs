@@ -41,7 +41,7 @@ use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
 };
-use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
+use crate::compactor_state::{Compaction, CompactionStatus, Subcompaction, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
@@ -76,6 +76,9 @@ pub(crate) enum WorkerMessage {
         bytes_processed: u64,
         /// The output SSTs produced so far (including previous runs).
         output_ssts: Vec<crate::db_state::SsTableHandle>,
+        /// The subcompactions of this job and their per-range progress
+        /// (RFC-0028). Empty when the job runs as a single merge.
+        subcompactions: Vec<Subcompaction>,
     },
     /// Ticker-triggered message to poll `.compactions` for claimable jobs.
     PollCompactions,
@@ -148,6 +151,12 @@ struct JobProgressState {
     /// (either trigger). Used to throttle the bytes trigger to at most one
     /// write per `heartbeat_min_interval`, independently of sibling jobs.
     last_hb_ms: u64,
+    /// Subcompactions (RFC-0028) as of the last heartbeat write that persisted
+    /// them. Snapshots change only when a range's status or output SSTs change
+    /// (never per byte), so comparing against this lets the worker persist
+    /// per-range progress only when it actually advances — letting a reclaiming
+    /// worker resume completed ranges.
+    last_hb_subcompactions: Vec<Subcompaction>,
 }
 
 /// Internal `MessageHandler` for the worker's event loop.
@@ -370,6 +379,7 @@ impl CompactionWorkerHandler {
                             last_hb_sst_count: compaction.output_ssts().len(),
                             last_hb_bytes: 0,
                             last_hb_ms: self.clock.now().timestamp_millis() as u64,
+                            last_hb_subcompactions: compaction.subcompactions().clone(),
                         },
                     );
                     Self::dispatch_to_executor(&self.executor, args);
@@ -389,8 +399,9 @@ impl CompactionWorkerHandler {
     }
 
     /// Writes a heartbeat for `compaction_id`, updating `last_heartbeat_ms`
-    /// and (when provided) the `output_ssts` list. Only writes if this worker
-    /// still owns the entry.
+    /// and (when provided) the `output_ssts` list and the per-range
+    /// `subcompactions` snapshot (RFC-0028). Only writes if this worker still
+    /// owns the entry.
     ///
     /// Returns `Ok(Some(ms))` with the persisted heartbeat timestamp iff a
     /// heartbeat was actually written, or `Ok(None)` if the write was skipped
@@ -406,6 +417,7 @@ impl CompactionWorkerHandler {
         &mut self,
         compaction_id: Ulid,
         output_ssts: Option<Vec<crate::db_state::SsTableHandle>>,
+        subcompactions: Option<Vec<Subcompaction>>,
     ) -> Result<Option<u64>, SlateDBError> {
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
@@ -441,11 +453,16 @@ impl CompactionWorkerHandler {
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
             let new_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
-            let updated_compaction = if let Some(ssts) = output_ssts.clone() {
-                existing.with_worker(Some(new_spec)).with_output_ssts(ssts)
-            } else {
-                existing.with_worker(Some(new_spec))
-            };
+            let mut updated_compaction = existing.with_worker(Some(new_spec));
+            if let Some(ssts) = output_ssts.clone() {
+                updated_compaction = updated_compaction.with_output_ssts(ssts);
+            }
+            if let Some(subcompactions) = subcompactions.clone() {
+                // Use the checked setter so the persisted plan keeps the
+                // RFC-0028 invariants (immutable plan/ranges, only-extending
+                // per-range output), matching the original orchestrator path.
+                updated_compaction.set_subcompactions(subcompactions);
+            }
             dirty.value.insert(updated_compaction);
             match stored.update(dirty).await {
                 Ok(()) => {
@@ -465,21 +482,28 @@ impl CompactionWorkerHandler {
     /// - An **SST heartbeat** when `output_ssts` grew since the last report.
     /// - A **bytes heartbeat** when cumulative bytes since the last bytes-hb
     ///   exceeds `heartbeat_bytes` and `heartbeat_min_interval` has elapsed.
+    /// - A **subcompaction write** when the per-range subcompaction snapshot
+    ///   (RFC-0028) changed since the one last persisted, so a reclaiming
+    ///   worker can resume completed ranges. This bypasses the bytes throttle
+    ///   because snapshots change only on range status/output transitions, not
+    ///   per byte.
     ///
     /// `output_ssts` and `bytes_processed` are *cumulative* per job (the full
     /// produced-SST list and the running byte total), not deltas — the SST
     /// trigger relies on this by comparing `output_ssts.len()` against the
     /// count last heartbeated.
     ///
-    /// Per-job progress bookkeeping (`last_hb_sst_count`, `last_hb_bytes`, and
-    /// `last_hb_ms`) is only advanced after `write_heartbeat` confirms a durable
-    /// write, so a skipped write (entry gone / ownership lost) does not mark
-    /// un-persisted progress as heartbeated.
+    /// Per-job progress bookkeeping (`last_hb_sst_count`, `last_hb_bytes`,
+    /// `last_hb_ms`, and `last_hb_subcompactions`) is only advanced after
+    /// `write_heartbeat` confirms a durable write, so a skipped write (entry
+    /// gone / ownership lost) does not mark un-persisted progress as
+    /// heartbeated.
     async fn handle_progress(
         &mut self,
         id: Ulid,
         bytes_processed: u64,
         output_ssts: Vec<crate::db_state::SsTableHandle>,
+        subcompactions: Vec<Subcompaction>,
     ) -> Result<(), SlateDBError> {
         // Compute both triggers from a single borrow, then bail if this job is
         // unknown (stale progress message). The borrow ends before the async
@@ -491,7 +515,7 @@ impl CompactionWorkerHandler {
         // per-job, so a job that stops making byte progress stops heartbeating
         // and is reclaimed even while its siblings on this worker stay busy.
         let now_ms = self.clock.now().timestamp_millis() as u64;
-        let (new_sst_count, bytes_trigger) = {
+        let (new_sst_count, bytes_trigger, subcompactions_changed) = {
             let Some(state) = self.job_progress.get(&id) else {
                 return Ok(());
             };
@@ -501,19 +525,26 @@ impl CompactionWorkerHandler {
                 >= self.options.heartbeat_bytes
                 && now_ms.saturating_sub(state.last_hb_ms)
                     >= self.options.heartbeat_min_interval.as_millis() as u64;
-            (new_sst_count, bytes_trigger)
+            // Persist per-range progress (RFC-0028) whenever the snapshot
+            // advanced. Subcompaction snapshots change only on range
+            // status/output transitions, so this stays infrequent.
+            let subcompactions_changed =
+                !subcompactions.is_empty() && subcompactions != state.last_hb_subcompactions;
+            (new_sst_count, bytes_trigger, subcompactions_changed)
         };
 
-        if new_sst_count.is_none() && !bytes_trigger {
+        if new_sst_count.is_none() && !bytes_trigger && !subcompactions_changed {
             return Ok(());
         }
 
-        // Carry the SST list only when it grew; a bytes-only heartbeat just
-        // refreshes liveness (`last_heartbeat_ms`). On a confirmed write, record
-        // the timestamp that was actually persisted so in-memory throttling
-        // stays consistent with the durable entry.
+        // Carry the SST list only when it grew and the subcompaction snapshot
+        // only when it changed; a bytes-only heartbeat just refreshes liveness
+        // (`last_heartbeat_ms`). On a confirmed write, record the timestamp that
+        // was actually persisted so in-memory throttling stays consistent with
+        // the durable entry.
+        let new_subcompactions = subcompactions_changed.then(|| subcompactions.clone());
         if let Some(hb_ms) = self
-            .write_heartbeat(id, new_sst_count.map(|_| output_ssts))
+            .write_heartbeat(id, new_sst_count.map(|_| output_ssts), new_subcompactions)
             .await?
         {
             let state = self
@@ -523,6 +554,9 @@ impl CompactionWorkerHandler {
             if let Some(count) = new_sst_count {
                 state.last_hb_sst_count = count;
             }
+            if subcompactions_changed {
+                state.last_hb_subcompactions = subcompactions;
+            }
             state.last_hb_bytes = bytes_processed;
             state.last_hb_ms = hb_ms;
             match new_sst_count {
@@ -531,8 +565,8 @@ impl CompactionWorkerHandler {
                     self.worker_id, id, count
                 ),
                 None => info!(
-                    "bytes heartbeat [worker_id={}, id={}, bytes={}]",
-                    self.worker_id, id, bytes_processed
+                    "progress heartbeat [worker_id={}, id={}, bytes={}, subcompactions_changed={}]",
+                    self.worker_id, id, bytes_processed, subcompactions_changed
                 ),
             }
         }
@@ -598,6 +632,7 @@ impl CompactionWorkerHandler {
             compaction_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            subcompactions: compaction.subcompactions().clone(),
         })
     }
 
@@ -745,8 +780,9 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
                 id,
                 bytes_processed,
                 output_ssts,
+                subcompactions,
             } => {
-                self.handle_progress(id, bytes_processed, output_ssts)
+                self.handle_progress(id, bytes_processed, output_ssts, subcompactions)
                     .await?;
             }
         }
@@ -1146,7 +1182,7 @@ mod tests {
 
         // Send a progress message with 1 new output SST.
         fx.handler
-            .handle_progress(id, 1024, vec![output_handle.clone()])
+            .handle_progress(id, 1024, vec![output_handle.clone()], vec![])
             .await
             .unwrap();
 
@@ -1195,7 +1231,10 @@ mod tests {
 
         // Send progress with bytes > threshold but NO new SSTs (empty list).
         // This should trigger the bytes-based heartbeat path.
-        fx.handler.handle_progress(id, 1000, vec![]).await.unwrap();
+        fx.handler
+            .handle_progress(id, 1000, vec![], vec![])
+            .await
+            .unwrap();
 
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Running);
@@ -1207,5 +1246,80 @@ mod tests {
         );
         // output_ssts should be empty (bytes hb does not update them).
         assert!(c.output_ssts().is_empty());
+    }
+
+    /// When the executor reports per-range subcompaction progress (RFC-0028),
+    /// the worker must persist the snapshot to `.compactions` so a reclaiming
+    /// worker can resume completed ranges — even when neither the SST-count nor
+    /// the bytes trigger fired. A later snapshot that only advances a range's
+    /// status must also be persisted.
+    #[tokio::test]
+    async fn test_worker_persists_subcompaction_progress() {
+        use crate::bytes_range::BytesRange;
+        use std::ops::Bound;
+        use tokio::time::pause;
+        pause();
+
+        let mock_clock = Arc::new(MockSystemClock::new());
+        mock_clock.set(1000);
+
+        let options = CompactionWorkerOptions {
+            // Isolate the subcompaction-change trigger from the bytes trigger.
+            heartbeat_bytes: u64::MAX,
+            ..CompactionWorkerOptions::default()
+        };
+        let clock: Arc<dyn SystemClock> = mock_clock.clone();
+        let mut fx = WorkerFixture::new_with_clock("worker-subc", clock, options).await;
+        let id = Ulid::from_parts(3, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        mock_clock.advance(Duration::from_secs(5)).await;
+
+        let output_handle = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::from_parts(9000, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"a")),
+                ..SsTableInfo::default()
+            },
+        );
+        let subcompactions = vec![
+            Subcompaction::new(BytesRange::new(
+                Bound::Unbounded,
+                Bound::Excluded(Bytes::from_static(b"m")),
+            ))
+            .with_status(CompactionStatus::Running)
+            .with_output_ssts(vec![output_handle.clone()]),
+            Subcompaction::new(BytesRange::new(
+                Bound::Included(Bytes::from_static(b"m")),
+                Bound::Unbounded,
+            ))
+            .with_status(CompactionStatus::Running),
+        ];
+
+        // A progress message carrying subcompactions (with an empty aggregate
+        // output_ssts list) persists the per-range snapshot even though neither
+        // the SST-count nor the bytes trigger fired.
+        fx.handler
+            .handle_progress(id, 123, vec![], subcompactions.clone())
+            .await
+            .unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.subcompactions(), &subcompactions);
+
+        // A later snapshot that only advances a range's status must also be
+        // persisted (the plan is unchanged, so the checked setter accepts it).
+        let mut advanced = subcompactions.clone();
+        advanced[0].set_status(CompactionStatus::Completed);
+        fx.handler
+            .handle_progress(id, 456, vec![], advanced.clone())
+            .await
+            .unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.subcompactions(), &advanced);
     }
 }
