@@ -219,7 +219,6 @@ pub struct ScanOptions {
     /// Number of bytes to read ahead while scanning.
     pub read_ahead_bytes: u64,
     /// Whether fetched data blocks should be inserted into the block cache.
-    /// SST indexes, filters, and stats are cached independently of this setting.
     pub cache_data_blocks: bool,
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,

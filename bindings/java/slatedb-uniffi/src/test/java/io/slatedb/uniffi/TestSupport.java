@@ -321,12 +321,12 @@ final class TestSupport {
         return new ReadOptions(DurabilityLevel.MEMORY, false, true, null);
     }
 
-    static ScanOptions scanOptions(long readAheadBytes, boolean cacheBlocks, long maxFetchTasks) {
+    static ScanOptions scanOptions(long readAheadBytes, boolean cacheDataBlocks, long maxFetchTasks) {
         return new ScanOptions(
                 DurabilityLevel.MEMORY,
                 false,
                 readAheadBytes,
-                cacheBlocks,
+                cacheDataBlocks,
                 maxFetchTasks,
                 null,
                 null);

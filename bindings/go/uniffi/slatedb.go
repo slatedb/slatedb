@@ -9404,7 +9404,6 @@ type ScanOptions struct {
 	// Number of bytes to read ahead while scanning.
 	ReadAheadBytes uint64
 	// Whether fetched data blocks should be inserted into the block cache.
-	// SST indexes, filters, and stats are cached independently of this setting.
 	CacheDataBlocks bool
 	// Maximum number of concurrent fetch tasks used by the scan.
 	MaxFetchTasks uint64
