@@ -1220,6 +1220,25 @@ pub struct CompactionWorkerOptions {
     /// ahead of the cursor.
     pub bytes_to_fetch: usize,
 
+    /// The desired number of subcompactions to split a single compaction into
+    /// (RFC-0028). Each subcompaction covers a disjoint sub-range of the key
+    /// space and executes concurrently with its siblings, so a single large
+    /// compaction can use multiple cores. Any value `<= 1` disables
+    /// subcompactions. The default is 4.
+    ///
+    /// This works together with
+    /// [`CompactionWorkerOptions::min_subcompaction_input_bytes`], which bounds
+    /// how small the planned sub-ranges may get: a compaction is split into at
+    /// most `input_bytes / min_subcompaction_input_bytes` ranges, capped at
+    /// `max_subcompactions`.
+    pub max_subcompactions: usize,
+
+    /// The minimum estimated input bytes a subcompaction must cover
+    /// (RFC-0028). This prevents small compactions from being split into many
+    /// tiny jobs, which can fragment output SSTs. The default is 512MiB
+    /// (2 x the default `max_sst_size`).
+    pub min_subcompaction_input_bytes: usize,
+
     /// Optional metrics reporting level for standalone compaction workers.
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
@@ -1237,6 +1256,8 @@ impl Default for CompactionWorkerOptions {
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
             bytes_to_fetch: 2 * 1024 * 1024,
+            max_subcompactions: 4,
+            min_subcompaction_input_bytes: 2 * 256 * 1024 * 1024,
             metric_level: None,
         }
     }

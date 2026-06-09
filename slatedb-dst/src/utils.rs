@@ -120,6 +120,10 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
             max_sst_size: rng.random_range(KIB_8..GIB_2),
             max_fetch_tasks: rng.random_range(1..=8),
             bytes_to_fetch: rng.random_range(KIB_8..=(8 * MIB_1)),
+            // Small min_subcompaction_input_bytes values let DST exercise the
+            // subcompaction split path (RFC-0028) on its small workloads.
+            max_subcompactions: rng.random_range(1..=8),
+            min_subcompaction_input_bytes: rng.random_range(KIB_8..GIB_2),
             ..CompactionWorkerOptions::default()
         }),
         metric_level: None,
