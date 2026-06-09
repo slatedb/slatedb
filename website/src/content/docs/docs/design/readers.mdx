@@ -50,7 +50,7 @@ SlateDB refreshes the checkpoint expiration after half of the configured lifetim
 
 ## Read Semantics
 
-`get`, `get_key_value`, `scan`, and `scan_prefix` use the normal SST iterator stack. Options such as [`ReadOptions::cache_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ReadOptions.html#structfield.cache_blocks), [`ScanOptions::read_ahead_bytes`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.read_ahead_bytes), and [`ScanOptions::max_fetch_tasks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.max_fetch_tasks) still control caching and scan behavior.
+`get`, `get_key_value`, `scan`, and `scan_prefix` use the normal SST iterator stack. Options such as [`ReadOptions::cache_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ReadOptions.html#structfield.cache_blocks), [`ScanOptions::cache_data_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.cache_data_blocks), [`ScanOptions::read_ahead_bytes`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.read_ahead_bytes), and [`ScanOptions::max_fetch_tasks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.max_fetch_tasks) still control caching and scan behavior.
 
 Visibility is narrower than [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html). A reader does not share a writer's live mutable memtable, so read options cannot expose unflushed writer state. `DbReader` only returns committed data that is already durable in object storage, either through the pinned manifest or through WAL SSTs it replayed itself.
 

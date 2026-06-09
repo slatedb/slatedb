@@ -137,8 +137,8 @@ pub struct ScanOptions {
     pub read_level: ReadLevel,
     /// The number of bytes to read ahead
     pub read_ahead_bytes: usize,
-    /// Whether or not fetched blocks should be cached
-    pub cache_blocks: bool
+    /// Whether or not fetched data blocks should be cached
+    pub cache_data_blocks: bool
 }
 ```
 
@@ -218,9 +218,11 @@ performance using `ScanOptions::read_ahead_size`, which indicates the number of 
 to prefetch. Internally, this is used to set `SstIterator::blocks_to_fetch`. The 
 default `read_ahead_size` will be the size of a single block.
 
-Users can also influence caching behavior using `ScanOptions::cache_blocks`. Internally,
-this will be used to set `SstIterator::cache_blocks`. The default behavior will be
-to use `cache_blocks=true`. Note that while an iterator is actively scanning from a given
+Users can also influence data-block caching behavior using `ScanOptions::cache_data_blocks`.
+Internally, this is used to set `SstIterator::cache_data_blocks`. The default behavior is
+to use `cache_data_blocks=false` so large scans do not populate the foreground cache with
+sequential data blocks. SST metadata blocks such as indexes, filters, and stats are cached
+independently of this setting. Note that while an iterator is actively scanning from a given
 block, it will remain pinned in memory.
 
 ## Rejected Alternatives & Follow-Ups
@@ -256,4 +258,3 @@ the `DbIterator`.
 
 
 ## Updates
-

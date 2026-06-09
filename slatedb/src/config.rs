@@ -341,8 +341,9 @@ pub struct ScanOptions {
     /// block size when fetching from object storage. The default is 1, which
     /// rounds up to one block.
     pub read_ahead_bytes: usize,
-    /// Whether or not fetched blocks should be cached
-    pub cache_blocks: bool,
+    /// Whether or not fetched data blocks should be cached. SST indexes,
+    /// filters, and stats are cached independently of this setting.
+    pub cache_data_blocks: bool,
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
@@ -363,7 +364,7 @@ impl Default for ScanOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
-            cache_blocks: false,
+            cache_data_blocks: false,
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
             filter_context: None,
@@ -394,9 +395,9 @@ impl ScanOptions {
         }
     }
 
-    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+    pub fn with_cache_data_blocks(self, cache_data_blocks: bool) -> Self {
         Self {
-            cache_blocks,
+            cache_data_blocks,
             ..self
         }
     }
@@ -1778,7 +1779,7 @@ object_store_cache_options:
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
-        assert!(!options.cache_blocks);
+        assert!(!options.cache_data_blocks);
         assert_eq!(options.max_fetch_tasks, 1);
     }
 
@@ -1791,7 +1792,7 @@ object_store_cache_options:
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
-        assert!(!options.cache_blocks);
+        assert!(!options.cache_data_blocks);
     }
 
     #[test]

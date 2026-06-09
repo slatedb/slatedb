@@ -768,7 +768,7 @@ impl TableStore {
         handle: &SsTableHandle,
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
-        cache_blocks: bool,
+        cache_data_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
         // etc.) take a dedup-aware fast-path: concurrent callers for the same block
@@ -776,7 +776,7 @@ impl TableStore {
         // coalesced path below, which issues one object-store GET per contiguous
         // run of uncached blocks. Cache errors fall through to the direct load,
         // which produces the authoritative error if any.
-        if cache_blocks && blocks.len() == 1 {
+        if cache_data_blocks && blocks.len() == 1 {
             if let Some(ref cache) = self.cache {
                 let block_num = blocks.start;
                 let offset = index.borrow().block_meta().get(block_num).offset();
@@ -860,7 +860,7 @@ impl TableStore {
             let index_borrow = index.borrow();
             for (block_num, block_read) in range.zip(range_blocks?) {
                 let block = Arc::new(block_read);
-                if cache_blocks {
+                if cache_data_blocks {
                     let block_meta = index_borrow.block_meta().get(block_num);
                     let offset = block_meta.offset();
                     blocks_to_cache.push((handle.id, offset, block.clone()));

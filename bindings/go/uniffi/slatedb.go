@@ -9403,8 +9403,9 @@ type ScanOptions struct {
 	Dirty bool
 	// Number of bytes to read ahead while scanning.
 	ReadAheadBytes uint64
-	// Whether fetched blocks should be inserted into the block cache.
-	CacheBlocks bool
+	// Whether fetched data blocks should be inserted into the block cache.
+	// SST indexes, filters, and stats are cached independently of this setting.
+	CacheDataBlocks bool
 	// Maximum number of concurrent fetch tasks used by the scan.
 	MaxFetchTasks uint64
 	// The iteration order for the scan. Defaults to ascending when not set.
@@ -9418,7 +9419,7 @@ func (r *ScanOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
 	FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes)
-	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
+	FfiDestroyerBool{}.Destroy(r.CacheDataBlocks)
 	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
 	FfiDestroyerOptionalIterationOrder{}.Destroy(r.Order)
 	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
@@ -9456,7 +9457,7 @@ func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
 	FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes)
-	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
+	FfiConverterBoolINSTANCE.Write(writer, value.CacheDataBlocks)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
 	FfiConverterOptionalIterationOrderINSTANCE.Write(writer, value.Order)
 	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)

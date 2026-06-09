@@ -52,12 +52,14 @@ def read_options() -> ReadOptions:
     )
 
 
-def scan_options(read_ahead_bytes: int, cache_blocks: bool, max_fetch_tasks: int) -> ScanOptions:
+def scan_options(
+    read_ahead_bytes: int, cache_data_blocks: bool, max_fetch_tasks: int
+) -> ScanOptions:
     return ScanOptions(
         durability_filter=DurabilityLevel.MEMORY,
         dirty=False,
         read_ahead_bytes=read_ahead_bytes,
-        cache_blocks=cache_blocks,
+        cache_data_blocks=cache_data_blocks,
         max_fetch_tasks=max_fetch_tasks,
     )
 

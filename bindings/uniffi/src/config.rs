@@ -218,8 +218,9 @@ pub struct ScanOptions {
     pub dirty: bool,
     /// Number of bytes to read ahead while scanning.
     pub read_ahead_bytes: u64,
-    /// Whether fetched blocks should be inserted into the block cache.
-    pub cache_blocks: bool,
+    /// Whether fetched data blocks should be inserted into the block cache.
+    /// SST indexes, filters, and stats are cached independently of this setting.
+    pub cache_data_blocks: bool,
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,
     /// The iteration order for the scan. Defaults to ascending when not set.
@@ -237,7 +238,7 @@ impl Default for ScanOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
-            cache_blocks: false,
+            cache_data_blocks: false,
             max_fetch_tasks: 1,
             order: None,
             filter_context: None,
@@ -257,7 +258,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                     field: "read_ahead_bytes",
                 })
             })?,
-            cache_blocks: value.cache_blocks,
+            cache_data_blocks: value.cache_data_blocks,
             max_fetch_tasks: usize::try_from(value.max_fetch_tasks).map_err(|_| {
                 Error::from(SlateDbError::ValueTooLargeForUsize {
                     field: "max_fetch_tasks",

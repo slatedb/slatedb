@@ -510,7 +510,7 @@ impl DbInner {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
-            cache_blocks: false,
+            cache_data_blocks: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
@@ -1136,7 +1136,7 @@ impl Db {
     ///     db.put(b"y", b"v3").await?;
     ///
     ///     let options = ScanOptions {
-    ///         cache_blocks: false,
+    ///         cache_data_blocks: false,
     ///         ..ScanOptions::default()
     ///     };
     ///     let mut iter = db.scan_prefix_with_options(b"x", &options).await?;
@@ -1293,7 +1293,7 @@ impl Db {
     ///
     /// ## Examples
     ///
-    /// Use `cache_blocks: false` to scan recent data without polluting
+    /// Use `cache_data_blocks: false` to scan recent data without polluting
     /// the block cache, and stop after pulling enough entries from the
     /// freshest source. Combined with the recency walk's early-stop, this
     /// is a cheap way to ask "is there a recent entry under this prefix?"
@@ -1314,7 +1314,7 @@ impl Db {
     ///     db.put(b"event:002", b"b").await?;
     ///
     ///     let options = ScanOptions {
-    ///         cache_blocks: false,
+    ///         cache_data_blocks: false,
     ///         ..ScanOptions::default()
     ///     };
     ///     let mut iter = db
@@ -2467,7 +2467,7 @@ mod tests {
         kv_store.put(&[0xff, 0xfe], b"v3").await.unwrap();
 
         let scan_options = ScanOptions {
-            cache_blocks: false,
+            cache_data_blocks: false,
             ..ScanOptions::default()
         };
         let mut iter = kv_store
@@ -2558,11 +2558,7 @@ mod tests {
             .unwrap();
 
         db.put(b"px:a", b"old").await.unwrap();
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::MemTable,
-        })
-        .await
-        .unwrap();
+        db.flush().await.unwrap();
 
         db.put(b"px:a", b"new").await.unwrap();
 
@@ -3324,7 +3320,11 @@ mod tests {
             0,
         );
 
-        db.flush().await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
 
         let wal_bytes = lookup_metric(&metrics_recorder, crate::db_stats::WAL_FLUSH_BYTES).unwrap();
         let memtable_bytes =
@@ -3495,6 +3495,80 @@ mod tests {
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
         assert!(lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_scan_caches_metadata_when_data_block_caching_disabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open(
+            "/tmp/test_scan_caches_metadata_when_data_block_caching_disabled",
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        for i in 0..64 {
+            db.put(
+                format!("key{i:03}").as_bytes(),
+                format!("value{i:03}").as_bytes(),
+            )
+            .await
+            .unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let state = db.inner.state.read().view();
+        let sst = state
+            .state
+            .manifest
+            .value
+            .core
+            .tree
+            .l0
+            .front()
+            .expect("expected flushed l0")
+            .sst
+            .clone();
+        drop(state);
+
+        db.evict_cached_sst(sst.id).await.unwrap();
+        let cache = db
+            .inner
+            .table_store
+            .cache()
+            .expect("default db cache should be configured")
+            .clone();
+        let index_key = (sst.id, sst.info.index_offset).into();
+        assert!(cache.get_index(&index_key).await.unwrap().is_none());
+
+        let mut iter = db
+            .scan_with_options::<Vec<u8>, _>(
+                ..,
+                &ScanOptions {
+                    cache_data_blocks: false,
+                    ..ScanOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        while iter.next().await.unwrap().is_some() {}
+
+        let cached_index = cache
+            .get_index(&index_key)
+            .await
+            .unwrap()
+            .and_then(|entry| entry.sst_index())
+            .expect("scan should cache the SST index");
+        let first_block_offset = cached_index.borrow().block_meta().get(0).offset();
+        assert!(cache
+            .get_block(&(sst.id, first_block_offset).into())
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
