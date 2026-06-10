@@ -226,27 +226,26 @@ impl CompactionWorkerHandler {
     }
 
     /// Scans `.compactions` for `Scheduled` entries without a worker, claims up
-    /// to remaining capacity via CAS, and dispatches each to the executor.
+    /// to remaining capacity via CAS, then validates each claim against a
+    /// manifest read *after* the claim and dispatches it to the executor.
+    /// Claims that fail validation are released back to `Scheduled`.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
         let capacity = self.capacity();
         if capacity == 0 {
             return Ok(());
         }
 
-        let manifest = self.manifest_store.read_latest_manifest().await?;
-        let db_state = manifest.core();
-
         // CAS loop: read latest, identify candidates, attempt write.
+        // Candidates are filtered on their spec alone here; validating the
+        // spec's sources against the manifest happens after the claim
+        // succeeds, since only a manifest read after the claim is guaranteed
+        // to be consistent with the claimed compaction.
         let claimed = loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let mut dirty_compactions = stored.prepare_dirty()?;
 
-            // Build the job args while selecting candidates so we only ever
-            // claim compactions we can actually run. Invalid specs (drain
-            // specs, or sources missing from the manifest) are skipped here
-            // rather than claimed and then released.
-            let mut to_claim: Vec<(Compaction, StartCompactionJobArgs)> = Vec::new();
+            let mut to_claim: Vec<Compaction> = Vec::new();
             for c in dirty_compactions
                 .value
                 .iter_with_status(&[CompactionStatus::Scheduled])
@@ -255,13 +254,13 @@ impl CompactionWorkerHandler {
                 if to_claim.len() >= capacity {
                     break;
                 }
-                match Self::build_job_args(c, db_state, &self.worker_id) {
-                    Ok(args) => to_claim.push((c.clone(), args)),
-                    Err(e) => warn!(
-                        "skipping unrunnable compaction [id={}, error={:?}]",
-                        c.id(),
-                        e
-                    ),
+                // Drain specs are coordinator-local, and a tiered spec without
+                // a destination can never be executed; neither can become
+                // valid later, so skip them rather than claim and release.
+                if !c.spec().is_drain() && c.spec().destination().is_some() {
+                    to_claim.push(c.clone());
+                } else {
+                    warn!("skipping unrunnable compaction spec [id={}]", c.id());
                 }
             }
             if to_claim.is_empty() {
@@ -275,7 +274,7 @@ impl CompactionWorkerHandler {
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
 
-            for (c, _) in &to_claim {
+            for c in &to_claim {
                 dirty_compactions.value.insert(
                     c.clone()
                         .with_status(CompactionStatus::Running)
@@ -292,14 +291,37 @@ impl CompactionWorkerHandler {
             }
         };
 
-        for (compaction, args) in claimed {
-            info!(
-                "claimed compaction [worker_id={}, id={}]",
-                self.worker_id,
-                compaction.id()
-            );
-            self.active_jobs.insert(compaction.id());
-            Self::dispatch_to_executor(&self.executor, args);
+        // Build job args against a manifest read *after* the claim CAS. The
+        // coordinator writes the manifest before `.compactions` (see
+        // `CompactorStateWriter::write_state_safely`), so this manifest is at
+        // least as recent as the compactions state the claim landed on. A
+        // manifest read before the claim could pair a stale manifest with a
+        // newer spec whose source ids were recycled in the meantime (e.g. a
+        // sorted run rebuilt with the same id), which the id-equality
+        // validation in `build_job_args` cannot detect.
+        let manifest = self.manifest_store.read_latest_manifest().await?;
+
+        for compaction in claimed {
+            match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
+                Ok(args) => {
+                    info!(
+                        "claimed compaction [worker_id={}, id={}]",
+                        self.worker_id,
+                        compaction.id()
+                    );
+                    self.active_jobs.insert(compaction.id());
+                    Self::dispatch_to_executor(&self.executor, args);
+                }
+                Err(e) => {
+                    warn!(
+                        "claimed compaction is invalid against the post-claim manifest; releasing claim [worker_id={}, id={}, error={:?}]",
+                        self.worker_id,
+                        compaction.id(),
+                        e
+                    );
+                    self.release_claim(compaction.id()).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -799,8 +821,8 @@ mod tests {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
         // Source view ID that does not exist in the manifest — build_job_args
-        // should reject this so the worker never claims it, leaving it
-        // Scheduled for another worker to retry.
+        // should reject this after the claim, releasing it back to Scheduled
+        // for another worker to retry.
         let ghost = Ulid::from_parts(u64::MAX, 0);
         fx.seed_scheduled_compaction(id, vec![SourceId::SstView(ghost)])
             .await;
