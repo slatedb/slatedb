@@ -9893,7 +9893,7 @@ mod tests {
             .await
             .unwrap();
         let mut rx = db.subscribe();
-        assert!(rx.borrow_and_update().list_segments().unwrap().is_empty());
+        assert!(rx.borrow_and_update().list_segments().is_empty());
         let write_opts = WriteOptions {
             await_durable: false,
             ..Default::default()
@@ -9907,7 +9907,6 @@ mod tests {
         // then
         rx.wait_for(|s| {
             s.list_segments()
-                .unwrap()
                 .iter()
                 .any(|seg| seg.prefix.as_ref() == b"abc")
         })
@@ -9922,7 +9921,6 @@ mod tests {
         // then
         rx.wait_for(|s| {
             s.list_segments()
-                .unwrap()
                 .into_iter()
                 .map(|seg| seg.prefix)
                 .collect::<Vec<_>>()
@@ -9964,7 +9962,6 @@ mod tests {
         // then
         rx.wait_for(|s| {
             s.list_segments()
-                .unwrap()
                 .iter()
                 .any(|seg| seg.prefix.as_ref() == b"abc")
         })
@@ -9981,7 +9978,6 @@ mod tests {
         // then
         rx.wait_for(|s| {
             s.list_segments()
-                .unwrap()
                 .into_iter()
                 .map(|seg| seg.prefix)
                 .collect::<Vec<_>>()
@@ -10000,7 +9996,7 @@ mod tests {
         db.inner.status_manager.report_manifest(manifest.into());
 
         // then
-        assert!(db.status().list_segments().unwrap().is_empty());
+        assert!(db.status().list_segments().is_empty());
     }
 
     #[derive(Clone, Copy, Debug)]

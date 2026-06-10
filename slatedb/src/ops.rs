@@ -541,13 +541,9 @@ pub trait DbMetadataOps {
     /// ```ignore
     /// let want = b"prefix".to_vec();
     /// let mut rx = db.subscribe();
-    /// rx.wait_for(|s| {
-    ///     s.list_segments()
-    ///         .map(|segs| segs.iter().any(|seg| seg.prefix == want))
-    ///         .unwrap_or(false)
-    /// })
-    /// .await
-    /// .expect("db dropped");
+    /// rx.wait_for(|s| s.list_segments().iter().any(|seg| seg.prefix == want))
+    ///     .await
+    ///     .expect("db dropped");
     /// ```
     ///
     /// # Deadlock risk

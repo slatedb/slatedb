@@ -49,7 +49,7 @@ impl DbStatus {
     /// flushed.
     ///
     /// The result is sorted ascending by prefix and deduplicated.
-    pub fn list_segments(&self) -> Result<Vec<SegmentPrefix>, crate::Error> {
+    pub fn list_segments(&self) -> Vec<SegmentPrefix> {
         let mut set: BTreeSet<Bytes> = self
             .current_manifest
             .core()
@@ -58,10 +58,9 @@ impl DbStatus {
             .map(|segment| segment.prefix().clone())
             .collect();
         set.extend(self.memtable_segments.iter().map(|s| s.prefix.clone()));
-        Ok(set
-            .into_iter()
+        set.into_iter()
             .map(|prefix| SegmentPrefix { prefix })
-            .collect())
+            .collect()
     }
 }
 
@@ -277,7 +276,7 @@ mod tests {
         let status = mgr.status();
 
         // then
-        assert!(status.list_segments().unwrap().is_empty());
+        assert!(status.list_segments().is_empty());
     }
 
     #[test]
@@ -290,7 +289,7 @@ mod tests {
 
         // then
         assert_eq!(
-            status.list_segments().unwrap(),
+            status.list_segments(),
             vec![segment_prefix(b"a"), segment_prefix(b"b")]
         );
     }
@@ -305,7 +304,7 @@ mod tests {
         ]));
 
         // when
-        let segments = mgr.status().list_segments().unwrap();
+        let segments = mgr.status().list_segments();
 
         // then
         assert_eq!(
@@ -328,7 +327,7 @@ mod tests {
         ]));
 
         // when
-        let segments = mgr.status().list_segments().unwrap();
+        let segments = mgr.status().list_segments();
 
         // then
         assert_eq!(
