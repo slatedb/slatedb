@@ -441,6 +441,7 @@ impl CompactionWorkerHandler {
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
+        self.active_jobs.remove(&compaction_id);
         let worker_id = self.worker_id.as_str();
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
@@ -538,7 +539,7 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // workers can pick them up immediately rather than waiting for the
         // heartbeat-timeout reclamation path.
         self.executor.stop();
-        let claimed = self.active_jobs.clone().into_iter();
+        let claimed = std::mem::take(&mut self.active_jobs);
         for id in claimed {
             if let Err(e) = self.release_claim(id).await {
                 error!(
