@@ -433,7 +433,7 @@ pub struct SegmentPrefix {
 }
 
 impl DbStatus {
-    pub fn list_segments(&self) -> Result<Vec<SegmentPrefix>, crate::Error>;    // new
+    pub fn list_segments(&self) -> Vec<SegmentPrefix>;    // new
 }
 ```
 
@@ -494,7 +494,7 @@ A segment `aaa` is persisted, the watch receiver returned by `subscribe()` is no
 manifest change. Calls to `list_segments()` on the received `DbStatus` behave as follows:
 
 ```rust
-db_status.list_segments()?; // -> [b"aaa"]
+db_status.list_segments(); // -> [b"aaa"]
 ```
 
 A segment `bbb` is created in the active memtable, the watch receiver returned by
@@ -502,13 +502,13 @@ A segment `bbb` is created in the active memtable, the watch receiver returned b
 Calls to `list_segments()` on the received `DbStatus` behave as follows:
 
 ```rust
-db_status.list_segments()?; // -> [b"aaa", b"bbb"]
+db_status.list_segments(); // -> [b"aaa", b"bbb"]
 ```
 
 Writer (or reader) opened on an unsegmented database:
 
 ```rust
-db_status.list_segments()?; // -> []
+db_status.list_segments(); // -> []
 ```
 
 ### Compaction
