@@ -128,7 +128,10 @@ pub struct CompactorOptions {
     // ... existing coordinator-only fields (aside from max_sst_size, max_fetch_tasks) unchanged ...
 
     /// How long before a worker with no heartbeat is considered stale and its job reclaimed.
-    pub worker_heartbeat_timeout_ms: u64,
+    pub worker_heartbeat_timeout: Duration,
+
+    /// Interval at which the coordinator commits compactions marked `Compacted` to the manifest.
+    pub commit_compacted_interval: Duration,
 
     /// Options for the in-process CompactionWorker spawned alongside the
     /// coordinator. `Some(..)` (the default) spawns an embedded worker; `None`
@@ -143,7 +146,8 @@ Via settings:
 
 ```toml
 [compactor_options]
-worker_heartbeat_timeout_ms = 10000
+worker_heartbeat_timeout = "10s"
+commit_compacted_interval = "1s"
 
 [compactor_options.worker]
 max_sst_size = 268435456
@@ -185,7 +189,7 @@ pub struct CompactionWorkerOptions {
 
 - `heartbeat_bytes` is used to tie heartbeats to compaction progress and gives the coordinator a liveness guarantee. A worker that falls behind this rate will be reclaimed and its job handed off, regardless of whether its event loop is still alive.
 
-- `heartbeat_min_interval` suppresses heartbeats triggered by `heartbeat_bytes` when processing is fast and should be set well below the coordinator's `worker_heartbeat_timeout_ms`.
+- `heartbeat_min_interval` suppresses heartbeats triggered by `heartbeat_bytes` when processing is fast and should be set well below the coordinator's `worker_heartbeat_timeout`.
 
 New `CompactionWorkerBuilder` entrypoint for `CompactionWorker` processes:
 
@@ -250,7 +254,7 @@ Polls do not emit heartbeats. Liveness is driven entirely by compaction progress
 **Failure Detection Protocol** (coordinator):
 
 1. On each coordinator poll tick, read latest `.compactions`.
-2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
+2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
 3. If any compactions were reclaimed in step 2, write updated state via `write_compactions_safely()`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator`.
 4. On `AlreadyExists`: re-read latest and retry from step 1.
 
@@ -321,7 +325,7 @@ Only the coordinator validates compactions and commits manifest updates (preserv
 
 On coordinator restart, the recovery logic is:
 
-1. Leave `Running` jobs alone. If the owning worker survived the coordinator restart it continues executing and emitting heartbeats; if it died, the failure detection protocol reclaims it once the heartbeat exceeds `worker_heartbeat_timeout_ms` (see step 2 of the failure detection protocol). *(Interim: until heartbeat reclamation lands, restart resets `Running` → `Submitted` instead.)*
+1. Leave `Running` jobs alone. If the owning worker survived the coordinator restart it continues executing and emitting heartbeats; if it died, the failure detection protocol reclaims it once the heartbeat exceeds `worker_heartbeat_timeout` (see step 2 of the failure detection protocol). *(Interim: until heartbeat reclamation lands, restart resets `Running` → `Submitted` instead.)*
 2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the job is marked `Failed` in `.compactions`. This is safe: the manifest was already updated, the output SSTs are already referenced and protected from GC, and the scheduler has no dependency on whether the entry reads `Completed` or `Failed`.
 3. Retain active (`Submitted`, `Scheduled`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
 
@@ -335,7 +339,7 @@ In all cases the coordinator uses `RemoteCompactionExecutor`. `compactor_options
 let db = Db::builder("db", object_store)
     .with_settings(Settings {
         compactor_options: Some(CompactorOptions {
-            worker_heartbeat_timeout_ms: 30_000,
+            worker_heartbeat_timeout: Duration::from_secs(30),
             ..Default::default() // worker defaults to Some(CompactionWorkerOptions::default())
         }),
         ..Default::default()
@@ -352,7 +356,7 @@ let db = Db::builder("db", object_store)
     .with_settings(Settings {
         compactor_options: Some(CompactorOptions {
             worker: None,
-            worker_heartbeat_timeout_ms: 30_000,
+            worker_heartbeat_timeout: Duration::from_secs(30),
             ..Default::default()
         }),
         ..Default::default()
@@ -365,9 +369,9 @@ let worker = CompactionWorkerBuilder::new("db", object_store)
     .with_options(
       CompactionWorkerOptions {
         max_concurrent_compactions: 2,
-        compactions_poll_interval_ms: 1000,
+        compactions_poll_interval: Duration::from_secs(1),
         heartbeat_bytes: 100_000,
-        heartbeat_min_interval_ms: 5000,
+        heartbeat_min_interval: Duration::from_secs(5),
       }
     )
     .build()
@@ -387,7 +391,7 @@ let db = Db::builder("db", object_store)
 // Standalone coordinator process
 let compactor = CompactorBuilder::new("db", object_store)
     .with_options(CompactorOptions {
-        worker_heartbeat_timeout_ms: 30_000,
+        worker_heartbeat_timeout:Duration::from_secs(30),
         ..Default::default() // worker defaults to Some(CompactionWorkerOptions::default())
     })
     .build();
@@ -407,7 +411,7 @@ let db = Db::builder("db", object_store)
 let compactor = CompactorBuilder::new("db", object_store)
     .with_options(CompactorOptions {
         worker: None,
-        worker_heartbeat_timeout_ms: 30_000,
+        worker_heartbeat_timeout: Duration::from_secs(30),
         ..Default::default()
     })
     .build();
@@ -418,9 +422,9 @@ let worker = CompactionWorkerBuilder::new("db", object_store)
     .with_options(
       CompactionWorkerOptions {
         max_concurrent_compactions: 2,
-        compactions_poll_interval_ms: 1000,
+        compactions_poll_interval: Duration::from_secs(1),
         heartbeat_bytes: 100_000,
-        heartbeat_min_interval_ms: 5000,
+        heartbeat_min_interval_ms: Duration::from_secs(5),
       }
     )
     .build()
@@ -487,7 +491,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-- **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to `compactions_poll_interval_ms`. Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `compactions_poll_interval_ms`.
+- **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to `compactions_poll_interval`. Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `compactions_poll_interval`.
 - **Throughput**: Scales roughly linearly with worker count, bounded by per-worker object store bandwidth.
 - **Object-store requests**: ~1 GET per poll interval + ~1 PUT per claim + ~1 PUT per output SST. At N=10 workers polling every 5s: ~120 GETs/min overhead.
 - **Space/write/read amplification**: Unchanged.
@@ -585,11 +589,11 @@ Some SlateDB users run thousands of DBs. A single worker process today is bound 
 
 ## Open Questions
 
-1. ~~What is the right default for `compactions_poll_interval_ms`? Should it be adaptive (e.g. exponential backoff when no work is available)?~~
-**Resolved:** Exponential backoff does not make sense for `compactions_poll_interval_ms` because GETs to object storage are cheap and it is critical that L0 compactions are started as soon as possible. A reasonable default is one second (e.g. `compactions_poll_interval_ms=1000`).
+1. ~~What is the right default for `compactions_poll_interval`? Should it be adaptive (e.g. exponential backoff when no work is available)?~~
+**Resolved:** Exponential backoff does not make sense for `compactions_poll_interval` because GETs to object storage are cheap and it is critical that L0 compactions are started as soon as possible. A reasonable default is one second (e.g. `compactions_poll_interval="1s"`).
 
 2. ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~
-**Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `compactions_poll_interval_ms`, spreading poll timing across workers without any additional configuration.
+**Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `compactions_poll_interval`, spreading poll timing across workers without any additional configuration.
 
 3. ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~
 **Resolved:** Workers should have the same metrics infrastructure introduced by the metrics RFC and users can wire in reporting as they'd like. The worker tags the metrics with the worker id.

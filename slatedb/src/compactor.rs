@@ -511,7 +511,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 Box::new(|| CompactorMessage::LogStats),
             ),
             (
-                Duration::from_secs(1),
+                self.options.commit_compacted_interval,
                 Box::new(|| CompactorMessage::CommitCompacted),
             ),
         ]

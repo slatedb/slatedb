@@ -1125,6 +1125,12 @@ pub struct CompactorOptions {
     /// compactor is owned by a [`Settings`] configured DB, unset means inherit
     /// [`Settings::metric_level`].
     pub metric_level: Option<MetricLevel>,
+
+    /// The interval at which the compaction coordinator commits compactions
+    /// marked `Compacted` to the manifest
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub commit_compacted_interval: Duration,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -1140,6 +1146,7 @@ impl Default for CompactorOptions {
             scheduler_options: HashMap::new(),
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
+            commit_compacted_interval: Duration::from_secs(1),
         }
     }
 }
@@ -1156,6 +1163,8 @@ impl std::fmt::Debug for CompactorOptions {
             )
             .field("scheduler_options", &self.scheduler_options)
             .field("worker", &self.worker)
+            .field("metric_level", &self.metric_level)
+            .field("commit_compacted_interval", &self.commit_compacted_interval)
             .finish()
     }
 }
