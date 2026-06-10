@@ -380,11 +380,11 @@ mod tests {
 
         // then
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
-        let source = std::error::Error::source(&err).and_then(|s| s.downcast_ref::<SlateDBError>());
-        assert!(matches!(
-            source,
-            Some(SlateDBError::SegmentExtractorMismatch { .. })
-        ));
+        assert!(
+            err.to_string()
+                .contains("segment extractor configuration mismatch"),
+            "unexpected error message: {err}"
+        );
     }
 
     #[test]

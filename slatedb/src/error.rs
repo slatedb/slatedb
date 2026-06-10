@@ -610,15 +610,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidCompaction => Error::invalid(msg),
             SlateDBError::InvalidSegmentPrefix { .. } => Error::invalid(msg),
             SlateDBError::RecencyScanPrefixSpansMultipleSegments => Error::invalid(msg),
-            SlateDBError::SegmentExtractorMismatch {
-                persisted,
-                configured,
-            } => {
-                Error::invalid(msg).with_source(Box::new(SlateDBError::SegmentExtractorMismatch {
-                    persisted,
-                    configured,
-                }))
-            }
+            SlateDBError::SegmentExtractorMismatch { .. } => Error::invalid(msg),
             SlateDBError::SegmentPrefixNotRecognized { .. } => Error::invalid(msg),
             SlateDBError::EmptySegmentPrefix { .. } => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
