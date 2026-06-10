@@ -738,7 +738,7 @@ impl CompactorState {
         // `Scheduled`, so a Vacant entry in any of those states is anomalous and
         // logged.
         //
-        // For known compactions (Occupied), accept two remote transitions:
+        // For known compactions (Occupied), accept these remote transitions:
         //   - `Compacted`: the worker's signal that execution finished; the
         //     coordinator must commit the output SSTs to the manifest.
         //   - `Scheduled → Running`: a worker has claimed the job; adopt the
@@ -746,6 +746,12 @@ impl CompactorState {
         //     claim. Without this, write_compactions_safely() would overwrite
         //     the claim with a stale Scheduled/no-worker copy, causing the
         //     worker to discard its result and potentially re-run the job.
+        //   - `Running → Scheduled`: a worker released its claim (execution
+        //     failed, post-claim validation rejected the job, or graceful
+        //     shutdown). Adopt the release so the job can be re-claimed;
+        //     otherwise the coordinator's stale Running/claimed copy would be
+        //     written back and no worker would ever pick the job up again.
+        //   - TODO `Running -> Running`: should accept heartbeat updates when heartbeats land
         // All other remote updates are ignored.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
