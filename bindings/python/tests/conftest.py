@@ -48,7 +48,7 @@ def read_options() -> ReadOptions:
     return ReadOptions(
         durability_filter=DurabilityLevel.MEMORY,
         dirty=False,
-        cache_blocks=True,
+        cache_data_blocks=True,
     )
 
 

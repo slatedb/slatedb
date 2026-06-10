@@ -126,8 +126,8 @@ pub struct ReadOptions {
     pub durability_filter: DurabilityLevel,
     /// Whether uncommitted dirty data may be returned.
     pub dirty: bool,
-    /// Whether fetched blocks should be inserted into the block cache.
-    pub cache_blocks: bool,
+    /// Whether fetched data blocks should be inserted into the block cache.
+    pub cache_data_blocks: bool,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters.
     #[uniffi(default = None)]
@@ -139,7 +139,7 @@ impl Default for ReadOptions {
         Self {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
-            cache_blocks: true,
+            cache_data_blocks: true,
             filter_context: None,
         }
     }
@@ -150,7 +150,7 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
         slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
-            cache_blocks: value.cache_blocks,
+            cache_data_blocks: value.cache_data_blocks,
             filter_context: value.filter_context.map(Into::into),
         }
     }

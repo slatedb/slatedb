@@ -214,7 +214,7 @@ impl Reader {
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: options.cache_blocks,
+            cache_data_blocks: options.cache_data_blocks,
             eager_spawn: true,
             filter_context: options.filter_context.clone(),
             ..SstIteratorOptions::default()

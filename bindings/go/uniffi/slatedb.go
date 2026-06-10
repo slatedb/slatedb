@@ -9219,8 +9219,8 @@ type ReadOptions struct {
 	DurabilityFilter DurabilityLevel
 	// Whether uncommitted dirty data may be returned.
 	Dirty bool
-	// Whether fetched blocks should be inserted into the block cache.
-	CacheBlocks bool
+	// Whether fetched data blocks should be inserted into the block cache.
+	CacheDataBlocks bool
 	// Optional context forwarded to custom filter policies; ignored by
 	// built-in filters.
 	FilterContext *FilterContext
@@ -9229,7 +9229,7 @@ type ReadOptions struct {
 func (r *ReadOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
-	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
+	FfiDestroyerBool{}.Destroy(r.CacheDataBlocks)
 	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
 }
 
@@ -9261,7 +9261,7 @@ func (c FfiConverterReadOptions) LowerExternal(value ReadOptions) ExternalCRustB
 func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
-	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
+	FfiConverterBoolINSTANCE.Write(writer, value.CacheDataBlocks)
 	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)
 }
 

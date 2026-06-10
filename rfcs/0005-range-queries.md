@@ -221,9 +221,10 @@ default `read_ahead_size` will be the size of a single block.
 Users can also influence data block caching behavior using `ScanOptions::cache_data_blocks`.
 Internally, this will be used to set `SstIterator::cache_data_blocks`. The default behavior
 will be to use `cache_data_blocks=false`, so scans do not populate the cache with data
-blocks from large sequential reads unless explicitly requested. SST metadata such as
-indexes, filters, and stats should be cached independently when read. Note that while an
-iterator is actively scanning from a given block, it will remain pinned in memory.
+blocks from large sequential reads unless explicitly requested. Point reads expose the same
+data-block-only control as `ReadOptions::cache_data_blocks`, defaulting to true. SST metadata
+such as indexes, filters, and stats should be cached independently when read. Note that while
+an iterator is actively scanning from a given block, it will remain pinned in memory.
 
 ## Rejected Alternatives & Follow-Ups
 
@@ -258,4 +259,3 @@ the `DbIterator`.
 
 
 ## Updates
-

@@ -46,7 +46,7 @@ export function readOptions() {
   return {
     durability_filter: "Memory",
     dirty: false,
-    cache_blocks: true,
+    cache_data_blocks: true,
   };
 }
 

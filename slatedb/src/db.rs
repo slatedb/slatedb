@@ -2948,7 +2948,7 @@ mod tests {
                                     &ReadOptions {
                                         durability_filter: Memory,
                                         dirty: false,
-                                        cache_blocks: true,
+                                        cache_data_blocks: true,
                                         filter_context: None,
                                     }
                                 )

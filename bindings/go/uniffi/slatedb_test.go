@@ -496,7 +496,7 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	readOptions := slatedb.ReadOptions{
 		DurabilityFilter: slatedb.DurabilityLevelMemory,
 		Dirty:            false,
-		CacheBlocks:      true,
+		CacheDataBlocks:  true,
 	}
 
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
@@ -1101,7 +1101,7 @@ func TestDbReaderPointReads(t *testing.T) {
 	value, err = readerHandle.reader.GetWithOptions([]byte("alpha"), slatedb.ReadOptions{
 		DurabilityFilter: slatedb.DurabilityLevelMemory,
 		Dirty:            false,
-		CacheBlocks:      true,
+		CacheDataBlocks:  true,
 	})
 	if err != nil {
 		t.Fatalf("DbReader.GetWithOptions(alpha): %v", err)
