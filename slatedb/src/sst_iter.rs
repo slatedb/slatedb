@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bloom_filter_iterator_caches_metadata_when_data_block_caching_disabled() {
+    async fn test_bloom_filter_iterator_caches_filter_regardless_of_cache_data_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1364,27 +1364,100 @@ mod tests {
             Some(cache),
         ));
 
-        let no_cache_options = SstIteratorOptions {
-            cache_data_blocks: false,
-            ..Default::default()
-        };
-        let mut iter = SstIterator::for_key_with_stats_initialized(
-            &handle,
-            b"key1",
-            reader.clone(),
-            no_cache_options,
-            None,
-        )
-        .await
-        .expect("iterator construction should succeed")
-        .expect("expected iterator for present key");
-        let _ = iter.next().await.unwrap();
+        let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
 
-        assert!(meta_cache
-            .get_filter(&(handle.sst.id, handle.sst.info.filter_offset).into())
+        for cache_data_blocks in [false, true] {
+            meta_cache.remove(&filter_key).await;
+
+            let options = SstIteratorOptions {
+                cache_data_blocks,
+                ..Default::default()
+            };
+            let mut iter = SstIterator::for_key_with_stats_initialized(
+                &handle,
+                b"key1",
+                reader.clone(),
+                options,
+                None,
+            )
             .await
-            .unwrap()
-            .is_some());
+            .expect("iterator construction should succeed")
+            .expect("expected iterator for present key");
+            let _ = iter.next().await.unwrap();
+
+            assert!(meta_cache.get_filter(&filter_key).await.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sst_iterator_caches_index_regardless_of_cache_data_blocks() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            format.clone(),
+            root_path.clone(),
+            None,
+        );
+        let mut builder = writer.table_builder();
+        builder
+            .add_value(b"key1", b"value1", Some(1), None)
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", Some(2), None)
+            .await
+            .unwrap();
+        let sst = writer
+            .write_sst(
+                &SsTableId::Compacted(ulid::Ulid::new()),
+                &builder.build().await.unwrap(),
+                false,
+            )
+            .await
+            .unwrap();
+        let handle = SsTableView::identity(sst);
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            Some(cache),
+        ));
+
+        let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
+
+        for cache_data_blocks in [false, true] {
+            meta_cache.remove(&index_key).await;
+
+            let options = SstIteratorOptions {
+                cache_data_blocks,
+                ..Default::default()
+            };
+            let mut iter = SstIterator::for_key_with_stats_initialized(
+                &handle,
+                b"key1",
+                reader.clone(),
+                options,
+                None,
+            )
+            .await
+            .expect("iterator construction should succeed")
+            .expect("expected iterator for present key");
+            let _ = iter.next().await.unwrap();
+
+            assert!(meta_cache.get_index(&index_key).await.unwrap().is_some());
+        }
     }
 
     fn bloom_filter_enabled_table_store(filter_bits_per_key: u32) -> Arc<TableStore> {
