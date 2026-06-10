@@ -328,18 +328,23 @@ impl ImmutableMemtable {
     /// remains the same.
     pub(crate) fn filter_after_seq(&self, seq: u64) -> Self {
         let new_table = WritableKVTable::new();
+        let original_segments = self.table.touched_segments();
+        let mut surviving_segments = std::collections::BTreeSet::new();
         let mut table_iter = self.table.iter();
         while let Some(entry) = table_iter.next_sync() {
             if entry.seq > seq {
+                if surviving_segments.len() < original_segments.len() {
+                    for prefix in &original_segments {
+                        if entry.key.starts_with(prefix.as_ref()) {
+                            surviving_segments.insert(prefix.clone());
+                            break;
+                        }
+                    }
+                }
                 new_table.put(entry);
             }
         }
-        // Preserve the touched-segment set on the filtered table:
-        // filtering by seq can remove rows but never changes which
-        // segment prefixes the imm's surviving keys could route to,
-        // and the build path requires `KVTable` non-empty ⇒
-        // `touched_segments` populated.
-        new_table.record_touched_segments(self.table.touched_segments());
+        new_table.record_touched_segments(surviving_segments);
         Self::new(new_table, self.recent_flushed_wal_id)
     }
 }
@@ -950,6 +955,86 @@ mod tests {
         assert!(!table
             .ensure_valid_segment(&Bytes::from_static(b"zzz"))
             .unwrap());
+    }
+
+    fn surviving_keys(imm: &ImmutableMemtable) -> Vec<Bytes> {
+        let mut iter = imm.table().iter();
+        let mut keys = Vec::new();
+        while let Some(entry) = iter.next_sync() {
+            keys.push(entry.key);
+        }
+        keys
+    }
+
+    #[test]
+    fn should_drop_prefix_with_no_surviving_rows() {
+        // given
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"a1", b"v", 1));
+        table.put(RowEntry::new_value(b"a2", b"v", 2));
+        table.put(RowEntry::new_value(b"b1", b"v", 3));
+        table.put(RowEntry::new_value(b"b2", b"v", 4));
+        table.record_touched_segments(touched(&[b"a", b"b"]));
+        let imm = ImmutableMemtable::new(table, 0);
+
+        // when
+        let filtered = imm.filter_after_seq(2);
+
+        // then
+        assert_eq!(filtered.table().touched_segments(), touched(&[b"b"]));
+        assert_eq!(
+            surviving_keys(&filtered),
+            vec![Bytes::from_static(b"b1"), Bytes::from_static(b"b2")]
+        );
+    }
+
+    #[test]
+    fn should_keep_prefixes_with_surviving_rows() {
+        // given
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"a1", b"v", 1));
+        table.put(RowEntry::new_value(b"b1", b"v", 2));
+        table.record_touched_segments(touched(&[b"a", b"b"]));
+        let imm = ImmutableMemtable::new(table, 0);
+
+        // when
+        let filtered = imm.filter_after_seq(0);
+
+        // then
+        assert_eq!(filtered.table().touched_segments(), touched(&[b"a", b"b"]));
+    }
+
+    #[test]
+    fn should_empty_touched_segments_when_no_rows_survive() {
+        // given
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"a1", b"v", 1));
+        table.put(RowEntry::new_value(b"b1", b"v", 2));
+        table.record_touched_segments(touched(&[b"a", b"b"]));
+        let imm = ImmutableMemtable::new(table, 0);
+
+        // when
+        let filtered = imm.filter_after_seq(10);
+
+        // then
+        assert!(filtered.table().touched_segments().is_empty());
+        assert!(surviving_keys(&filtered).is_empty());
+    }
+
+    #[test]
+    fn should_leave_touched_segments_empty_for_non_segmented() {
+        // given
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"a1", b"v", 1));
+        table.put(RowEntry::new_value(b"b1", b"v", 2));
+        let imm = ImmutableMemtable::new(table, 0);
+
+        // when
+        let filtered = imm.filter_after_seq(1);
+
+        // then
+        assert!(filtered.table().touched_segments().is_empty());
+        assert_eq!(surviving_keys(&filtered), vec![Bytes::from_static(b"b1")]);
     }
 
     #[tokio::test]
