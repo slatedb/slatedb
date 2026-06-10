@@ -223,8 +223,9 @@ Internally, this will be used to set `SstIterator::cache_data_blocks`. The defau
 will be to use `cache_data_blocks=false`, so scans do not populate the cache with data
 blocks from large sequential reads unless explicitly requested. Point reads expose the same
 data-block-only control as `ReadOptions::cache_data_blocks`, defaulting to true. SST metadata
-such as indexes, filters, and stats should be cached independently when read. Note that while
-an iterator is actively scanning from a given block, it will remain pinned in memory.
+such as indexes, filters, and stats is always cached when read independently of scan and read
+options. Note that while an iterator is actively scanning from a given block, it will remain
+pinned in memory.
 
 ## Rejected Alternatives & Follow-Ups
 
