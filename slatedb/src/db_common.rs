@@ -1,10 +1,31 @@
+use bytes::Bytes;
 use parking_lot::RwLockWriteGuard;
 
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::oracle::Oracle;
+use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::wal_replay::ReplayedMemtable;
+
+/// Extract the segment prefix (RFC-0024) from `key` under `extractor`.
+///
+/// Returns the prefix bytes — a cheap refcount slice of `key`. An
+/// absent or zero-length prefix is a hard error
+/// ([`SlateDBError::EmptySegmentPrefix`]): every key in a segmented DB
+/// must map to a non-empty segment. This is the single point where a
+/// key's segment prefix is derived; the write path, WAL replay, and
+/// checkpoint filtering all route through it so they agree on both the
+/// extraction and the empty-prefix error.
+pub(crate) fn extract_segment_prefix(
+    extractor: &dyn PrefixExtractor,
+    key: &Bytes,
+) -> Result<Bytes, SlateDBError> {
+    match extractor.prefix_len(&PrefixTarget::Point(key.clone())) {
+        Some(0) | None => Err(SlateDBError::EmptySegmentPrefix { key: key.clone() }),
+        Some(n) => Ok(key.slice(0..n)),
+    }
+}
 
 impl DbInner {
     pub(crate) fn maybe_freeze_current_memtable(&self) -> Result<(), SlateDBError> {

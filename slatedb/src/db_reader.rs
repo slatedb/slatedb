@@ -3,6 +3,7 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_cache_manager::{self, CacheTarget};
+use crate::db_common::extract_segment_prefix;
 use crate::db_state::{collect_touched_segments, SsTableId};
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
@@ -381,7 +382,10 @@ impl DbReaderInner {
                 // have sequence numbers < manifest.core.last_l0_seq, while others have sequence
                 // numbers > manifest.core.last_l0_seq. Retain only those that are more recent
                 // than the manifest's last L0 sequence number.
-                let filtered_table = table.filter_after_seq(manifest.core.last_l0_seq);
+                let filtered_table = table.filter_after_seq(
+                    manifest.core.last_l0_seq,
+                    self.segment_extractor.as_deref(),
+                )?;
                 // Push to the back because we are iterating prior from newest to oldest, and we
                 // want the imm memtables in checkpoint state to be ordered the same way.
                 imm_memtable.push_back(Arc::new(filtered_table));
@@ -583,14 +587,7 @@ impl DbReaderInner {
         let mut touched_segments: BTreeSet<Bytes> = BTreeSet::new();
         let mut iter = table.table().iter();
         while let Some(entry) = iter.next_sync() {
-            match extractor.prefix_len(&crate::PrefixTarget::Point(entry.key.clone())) {
-                Some(0) | None => {
-                    return Err(SlateDBError::EmptySegmentPrefix { key: entry.key });
-                }
-                Some(n) => {
-                    touched_segments.insert(entry.key.slice(0..n));
-                }
-            }
+            touched_segments.insert(extract_segment_prefix(extractor, &entry.key)?);
         }
         table.record_touched_segments(touched_segments);
         Ok(())
