@@ -539,7 +539,7 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // workers can pick them up immediately rather than waiting for the
         // heartbeat-timeout reclamation path.
         self.executor.stop();
-        let claimed = std::mem::take(&mut self.active_jobs);
+        let claimed = self.active_jobs.clone().into_iter();
         for id in claimed {
             if let Err(e) = self.release_claim(id).await {
                 error!(
