@@ -19,17 +19,19 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{collect_touched_segments, SsTableView};
+use crate::db_state::{collect_touched_segments, DbState, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
+use crate::VersionedManifest;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use parking_lot::RwLockWriteGuard;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -546,10 +548,40 @@ impl ManifestWriterHandler {
             Ok(modifier.state.manifest.clone())
         })?;
 
-        let segments = collect_touched_segments(&guard.view());
-        self.db.status_manager.report_manifest(manifest.into());
-        self.db.status_manager.report_memtable_segments(segments);
+        self.report_to_status_manager(&guard, manifest.into());
         Ok(())
+    }
+
+    /// Reports manifest and memtable updates to the status manager to notify subscriptions
+    /// (i.e., `Db::subscribe()`) about the changes.
+    ///
+    /// Reporting requires some constraints.
+    ///
+    /// 1. `report_manifest()` must happen before `report_memtable_segments()` to ensure that
+    ///    flushed segment prefixes are reported either in the manifest or the memtable segments
+    ///    to the status manager. The change reported by `report_memtable_segments()` is the
+    ///    memtable segments minus the flushed segments and the change reported by
+    ///    `report_manifest()` are the flushed segments. If we called `report_memtable_segments()`
+    ///    before `report_manifest()` there are chances that `DbStatus::list_segments()` only sees the
+    ///    change reported by `report_memtable_segments()` but not yet the change reported by
+    ///    `report_manifest()` -> flushed segments are not returned.
+    ///
+    /// 2. `report_memtable_segments()` needs to be synchronized with the write path. Otherwise, the
+    ///    following might happen:\
+    ///    T1: `collect_touched_segments()` collects touched segments from the memtables.\
+    ///    T2: A new segment is added to the active memtable and reported to the status manager
+    ///    on the write path.\
+    ///    T3: The segments collected in T1 are reported to the status manager and overwrite the
+    ///    change from T2 -> new segment in the active memtable would not be part of
+    ///    the result of `DbStatus::list_segments()` until the active memtable is flushed.
+    fn report_to_status_manager(
+        &self,
+        guarded_db_state: &RwLockWriteGuard<DbState>,
+        manifest: VersionedManifest,
+    ) {
+        let segments = collect_touched_segments(&guarded_db_state.view());
+        self.db.status_manager.report_manifest(manifest);
+        self.db.status_manager.report_memtable_segments(segments);
     }
 
     async fn write_manifest_update_safely(
