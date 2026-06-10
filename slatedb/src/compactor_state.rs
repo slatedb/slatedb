@@ -226,9 +226,9 @@ impl Display for CompactionSpec {
 /// State transitions:
 /// ```text
 /// Submitted --> Scheduled <-> Running --> Compacted --> Completed
-///     |             |             |           |
-///     |             |             v           |
-///     +-------------+----------> Failed <-----+
+///     |                          |           |
+///     |                          v           |
+///     +-----------------------> Failed <-----+
 /// ```
 ///
 /// `Completed` and `Failed` are terminal states. `Compacted` is the

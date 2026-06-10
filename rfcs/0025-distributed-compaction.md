@@ -302,9 +302,9 @@ This RFC introduces the `Scheduled` state so that the coordinator can signal tha
 
 ```text
 Submitted --> Scheduled <-> Running --> Compacted --> Completed
-    |             |             |           |
-    |             |             v           |
-    +-------------+----------> Failed <-----+
+    |                          |           |
+    |                          v           |
+    +-----------------------> Failed <-----+
 ```
 
 The coordinator is solely responsible for transitions from `Submitted → Scheduled`, and transitions the state only after validating the compaction against the current manifest and updating its local state to be aware of the newly scheduled jobs. Workers exclusively claim `Scheduled` entries. They never act on `Submitted` which keeps the coordinator the single gatekeeper for validation and ensures the coordinator has the entry in local state before any worker can transition it onward.
