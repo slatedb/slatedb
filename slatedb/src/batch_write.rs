@@ -39,13 +39,13 @@ use std::collections::BTreeSet;
 use bytes::Bytes;
 
 use crate::config::WriteOptions;
+use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
 use slatedb_common::clock::SystemClock;
-use uuid::Uuid;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
@@ -64,7 +64,7 @@ pub(crate) struct WriteBatchMessage {
     /// Holds the committing transaction once it is enqueued, ownership
     /// transfers from the caller to the writer. `None` for
     /// non-transactional writes. Fix for #1732.
-    pub(crate) txn: Option<crate::db_transaction::DbTransaction>,
+    pub(crate) txn: Option<DbTransaction>,
 }
 
 impl std::fmt::Debug for WriteBatchMessage {
@@ -100,8 +100,10 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
             done,
             txn,
         } = message;
-        let txn_id = txn.as_ref().map(|t| t.id());
-        let result = self.db_inner.write_batch(batch, &options, txn_id).await;
+        let result = self
+            .db_inner
+            .write_batch(batch, &options, txn.as_ref())
+            .await;
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
@@ -138,7 +140,7 @@ impl DbInner {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-        txn_id: Option<Uuid>,
+        txn: Option<&DbTransaction>,
     ) -> WriteBatchResult {
         let _options = options;
         #[cfg(not(dst))]
@@ -165,8 +167,8 @@ impl DbInner {
 
         // Check for transaction conflicts before proceeding with the write batch
         // if this batch is part of a transaction.
-        if let Some(txn_id) = txn_id.as_ref() {
-            if self.txn_manager.check_has_conflict(txn_id) {
+        if let Some(txn) = txn {
+            if self.txn_manager.check_has_conflict(&txn.id()) {
                 return Err(SlateDBError::TransactionConflict);
             }
         }
@@ -222,11 +224,11 @@ impl DbInner {
             |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
         );
 
-        // track the recent committed txn for conflict check. if txn_id is not supplied,
+        // track the recent committed txn for conflict check. if a txn is not supplied,
         // we still consider this as an transaction commit.
-        if let Some(txn_id) = &txn_id {
+        if let Some(txn) = txn {
             self.txn_manager
-                .track_recent_committed_txn(txn_id, commit_seq);
+                .track_recent_committed_txn(&txn.id(), commit_seq);
         } else {
             let write_keys = batch.keys();
             self.txn_manager

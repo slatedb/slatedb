@@ -303,7 +303,7 @@ impl DbInner {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-        txn: Option<crate::db_transaction::DbTransaction>,
+        txn: Option<DbTransaction>,
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
         self.db_stats.write_ops.increment(batch.op_count() as u64);
@@ -2093,7 +2093,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
-    use futures::{future, future::join_all, StreamExt};
+    use futures::{future, future::join_all, FutureExt, StreamExt};
     use object_store::memory::InMemory;
     use object_store::{ObjectStore, ObjectStoreExt};
     use proptest::test_runner::{TestRng, TestRunner};
@@ -8077,19 +8077,16 @@ mod tests {
         let txn1_commit = tokio::spawn(async move { txn1.commit().await });
 
         // Wait until the writer has started processing txn1's batch.
-        // oracle.last_seq() advances at the very start of write_batch.
-        let reached = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if db.inner.oracle.last_seq() > initial_last_seq {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        // oracle.last_seq() advances at the very start of write_batch. No
+        // further synchronization is needed: the failpoint guarantees the
+        // writer cannot advance past pre-commit before we cancel below.
+        let reached = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.oracle.last_seq() <= initial_last_seq {
+                tokio::task::yield_now().await;
             }
         })
         .await;
         assert!(reached.is_ok(), "writer did not start processing txn1");
-        // Give the writer a moment to reach the actual pause point.
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Cancel txn1's commit future. The DbTransaction was moved into the
         // writer's queue message at commit time, so cancelling the future does
@@ -8117,10 +8114,10 @@ mod tests {
         // because txn1 is still in active_txns.
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
 
-        // Wait for the writer to finish processing txn1's batch.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Commit txn2. Both txn1 and txn2 wrote key "x" from the same snapshot.
+        // Commit txn2. Its batch is enqueued behind txn1's, so the writer
+        // finishes tracking txn1's committed state before it runs conflict
+        // detection for txn2.
+        // Both txn1 and txn2 wrote key "x" from the same snapshot.
         // A correct implementation detects a write-write conflict here.
         let result = txn2.commit().await;
         assert!(
@@ -8151,66 +8148,89 @@ mod tests {
         .await
         .unwrap();
 
-        let initial_seq = db.inner.oracle.last_seq();
-
-        // Start txn_a and txn_b at the same snapshot.
+        // Start txn_a and txn_b at the same snapshot. Both write the same key,
+        // so txn_b will hit a WW conflict once txn_a's commit is tracked.
         let txn_a = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let txn_b = db.begin(IsolationLevel::Snapshot).await.unwrap();
-
-        // Both write the same key — txn_b will conflict with txn_a.
         txn_a.put(b"y", b"txn_a_value").unwrap();
         txn_b.put(b"y", b"txn_b_value").unwrap();
 
-        // Pause the writer AFTER txn_a's commit is tracked (post-commit).
-        // This ensures txn_a's state is in recent_committed_txns, so when
-        // the writer later processes txn_b it will detect a WW conflict.
+        // Commit txn_a fully so its committed state is tracked. From here on,
+        // txn_b is the only active transaction.
+        txn_a.commit().await.expect("txn_a commit should succeed");
+        let seq_after_a = db.inner.oracle.last_seq();
+
+        // Park the writer on a filler write: pause at post-commit and wait for
+        // the filler's processing to start (oracle.last_seq() advances at the
+        // very start of write_batch). With the writer held, txn_b's commit
+        // below cannot complete before we cancel it.
         fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "pause").unwrap();
-
-        // Commit txn_a — writer processes it, tracks it, pauses at post-commit.
-        let txn_a_commit = tokio::spawn(async move { txn_a.commit().await });
-
-        // Wait for the writer to start processing txn_a.
-        let reached = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if db.inner.oracle.last_seq() > initial_seq {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let filler_db = db.clone();
+        let filler = tokio::spawn(async move { filler_db.put(b"z", b"filler_value").await });
+        let reached = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.oracle.last_seq() <= seq_after_a {
+                tokio::task::yield_now().await;
             }
         })
         .await;
-        assert!(reached.is_ok(), "writer did not start processing txn_a");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            reached.is_ok(),
+            "writer did not start processing the filler"
+        );
+        let seq_after_filler = db.inner.oracle.last_seq();
 
-        // Now the writer is paused mid-txn_a. Spawn txn_b's commit — the batch
-        // is enqueued behind the paused txn_a.
-        let txn_b_commit = tokio::spawn(async move { txn_b.commit().await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Start committing txn_b, then cancel the commit. The first poll of the
+        // commit future enqueues the batch — moving the DbTransaction into the
+        // queued message — and then parks waiting on the (paused) writer, so
+        // now_or_never() drops the future exactly like a cancelled in-flight
+        // commit.
+        assert!(
+            txn_b.commit().now_or_never().is_none(),
+            "commit should be pending while the writer is paused"
+        );
 
-        // Cancel txn_b's commit. The enqueue succeeded, so the writer owns txn_b
-        // (it was moved into the queued message); cancelling the future does not
-        // drop it caller-side — the writer cleans it up when it processes it.
-        txn_b_commit.abort();
-        let _ = txn_b_commit.await;
-
-        // txn_b should still be in active_txns.
+        // txn_b should still be in active_txns: ownership moved to the writer
+        // at enqueue, so cancelling the future must not run drop_txn.
         assert!(
             db.inner.txn_manager.min_active_seq().is_some(),
             "txn_b should still be in active_txns (writer owns the in-flight txn)"
         );
 
-        // Un-pause the writer. It finishes txn_a, then processes txn_b.
-        // txn_b hits a WW conflict; the writer drops the queued message, whose
-        // owned DbTransaction runs drop_txn to clean it up.
+        // Un-pause the writer. It finishes the filler, then processes txn_b's
+        // batch, which is rejected with a WW conflict; dropping the rejected
+        // message drops the owned DbTransaction, which runs drop_txn.
         fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "off").unwrap();
-        let _ = txn_a_commit.await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        filler
+            .await
+            .expect("failed to join filler task")
+            .expect("filler write should succeed");
 
-        // After the writer processes (and rejects) txn_b, dropping the queued
-        // message ran drop_txn, removing txn_b from active_txns.
+        // The writer picks up txn_b's batch (last_seq advances at the start of
+        // write_batch, before conflict detection rejects it)...
+        let processed = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.oracle.last_seq() <= seq_after_filler {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(processed.is_ok(), "writer did not start processing txn_b");
+
+        // ...and cleans it up from active_txns.
+        let cleaned = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.txn_manager.min_active_seq().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
         assert!(
-            db.inner.txn_manager.min_active_seq().is_none(),
+            cleaned.is_ok(),
             "txn_b should have been cleaned up from active_txns by the writer"
+        );
+
+        // txn_b was rejected, so its write must not be visible.
+        assert_eq!(
+            db.get(b"y").await.unwrap(),
+            Some(Bytes::from_static(b"txn_a_value"))
         );
 
         db.close().await.unwrap();
