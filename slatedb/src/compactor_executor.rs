@@ -14,8 +14,8 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::compaction_filter::CompactionFilterSupplier;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter_iterator::CompactionFilterIterator;
-use crate::compactor::CompactorMessage;
-use crate::config::CompactorOptions;
+use crate::compaction_worker::WorkerMessage;
+use crate::config::CompactionWorkerOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
@@ -175,36 +175,13 @@ pub(crate) trait CompactionExecutor {
 
     /// Stops the executor and cancels any in-flight tasks, waiting for them to finish.
     fn stop(&self);
-
-    /// Returns true if the executor has been stopped (but not necessarily finished).
-    fn is_stopped(&self) -> bool;
-}
-
-/// Implemented by message types that the executor sends on job completion and progress.
-pub(crate) trait ExecutorMessage: Send + 'static {
-    fn job_finished(id: Ulid, result: Result<SortedRun, SlateDBError>) -> Self;
-    fn job_progress(id: Ulid, bytes_processed: u64, output_ssts: Vec<SsTableHandle>) -> Self;
-}
-
-impl ExecutorMessage for CompactorMessage {
-    fn job_finished(id: Ulid, result: Result<SortedRun, SlateDBError>) -> Self {
-        CompactorMessage::CompactionJobFinished { id, result }
-    }
-
-    fn job_progress(id: Ulid, bytes_processed: u64, output_ssts: Vec<SsTableHandle>) -> Self {
-        CompactorMessage::CompactionJobProgress {
-            id,
-            bytes_processed,
-            output_ssts,
-        }
-    }
 }
 
 /// Options for creating a [`TokioCompactionExecutor`].
-pub(crate) struct TokioCompactionExecutorOptions<M = CompactorMessage> {
+pub(crate) struct TokioCompactionExecutorOptions {
     pub handle: tokio::runtime::Handle,
-    pub options: Arc<CompactorOptions>,
-    pub worker_tx: async_channel::Sender<M>,
+    pub options: Arc<CompactionWorkerOptions>,
+    pub worker_tx: async_channel::Sender<WorkerMessage>,
     pub table_store: Arc<TableStore>,
     pub rand: Arc<DbRand>,
     pub stats: Arc<CompactionStats>,
@@ -215,12 +192,12 @@ pub(crate) struct TokioCompactionExecutorOptions<M = CompactorMessage> {
     pub compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
-pub(crate) struct TokioCompactionExecutor<M = CompactorMessage> {
-    inner: Arc<TokioCompactionExecutorInner<M>>,
+pub(crate) struct TokioCompactionExecutor {
+    inner: Arc<TokioCompactionExecutorInner>,
 }
 
-impl<M: ExecutorMessage> TokioCompactionExecutor<M> {
-    pub(crate) fn new(opts: TokioCompactionExecutorOptions<M>) -> Self {
+impl TokioCompactionExecutor {
+    pub(crate) fn new(opts: TokioCompactionExecutorOptions) -> Self {
         let stats = opts.stats;
         let merge_operator = opts.merge_operator.map(|merge_operator| {
             instrument_merge_operator(
@@ -249,7 +226,7 @@ impl<M: ExecutorMessage> TokioCompactionExecutor<M> {
     }
 }
 
-impl<M: ExecutorMessage> CompactionExecutor for TokioCompactionExecutor<M> {
+impl CompactionExecutor for TokioCompactionExecutor {
     fn start_compaction_job(&self, compaction: StartCompactionJobArgs) {
         self.inner.start_compaction_job(compaction);
     }
@@ -257,20 +234,16 @@ impl<M: ExecutorMessage> CompactionExecutor for TokioCompactionExecutor<M> {
     fn stop(&self) {
         self.inner.stop()
     }
-
-    fn is_stopped(&self) -> bool {
-        self.inner.is_stopped()
-    }
 }
 
 struct TokioCompactionTask {
     task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
-pub(crate) struct TokioCompactionExecutorInner<M = CompactorMessage> {
-    options: Arc<CompactorOptions>,
+pub(crate) struct TokioCompactionExecutorInner {
+    options: Arc<CompactionWorkerOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: async_channel::Sender<M>,
+    worker_tx: async_channel::Sender<WorkerMessage>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<BTreeMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
@@ -283,7 +256,7 @@ pub(crate) struct TokioCompactionExecutorInner<M = CompactorMessage> {
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
-impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
+impl TokioCompactionExecutorInner {
     /// Builds input iterators for all sources (L0 and SR) and wraps them with optional
     /// merge, retention, and compaction filter logic.
     async fn load_iterators<'a>(
@@ -392,9 +365,13 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         // component. They can do what they want. If the send fails (e.g., during
         // DB shutdown), we log it and continue with the compaction work.
         #[allow(clippy::disallowed_methods)]
-        if let Err(e) =
-            self.worker_tx
-                .try_send(M::job_progress(id, bytes_processed, output_ssts.to_vec()))
+        if let Err(e) = self
+            .worker_tx
+            .try_send(WorkerMessage::CompactionJobProgress {
+                id,
+                bytes_processed,
+                output_ssts: output_ssts.to_vec(),
+            })
         {
             debug!(
                 "failed to send compaction progress (likely DB shutdown) [error={:?}]",
@@ -562,7 +539,10 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
                 // component. They can do what they want. If the send fails (e.g., during
                 // DB shutdown), we log it and continue with cleanup.
                 #[allow(clippy::disallowed_methods)]
-                if let Err(e) = this_cleanup.worker_tx.try_send(M::job_finished(id, result)) {
+                if let Err(e) = this_cleanup
+                    .worker_tx
+                    .try_send(WorkerMessage::CompactionJobFinished { id, result })
+                {
                     debug!(
                         "failed to send compaction finished msg (likely DB shutdown) [error={:?}]",
                         e
@@ -605,16 +585,8 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
             }
         };
 
-        #[cfg(dst)]
         self.handle.spawn(wait_for_task_termination);
-        #[cfg(not(dst))]
-        self.handle.block_on(wait_for_task_termination);
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
-    }
-
-    /// Returns true if the executor has been stopped (but not necessarily finished).
-    fn is_stopped(&self) -> bool {
-        self.is_stopped.load(atomic::Ordering::SeqCst)
     }
 }
 
@@ -1066,8 +1038,8 @@ mod tests {
         #[case] expected_rows: Vec<RowEntry>,
     ) {
         let handle = tokio::runtime::Handle::current();
-        let options = Arc::new(CompactorOptions::default());
-        let (tx, _rx) = async_channel::unbounded::<CompactorMessage>();
+        let options = Arc::new(CompactionWorkerOptions::default());
+        let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let root_path = Path::from("testdb-load-iterators");
         let clock = Arc::new(DefaultSystemClock::new());
@@ -1270,12 +1242,12 @@ mod tests {
                 };
 
                 let handle = tokio::runtime::Handle::current();
-                let options = CompactorOptions {
+                let options = CompactionWorkerOptions {
                     max_sst_size: MAX_SST_SIZE,
                     ..Default::default()
                 };
                 let options = Arc::new(options);
-                let (tx, _rx) = async_channel::unbounded::<CompactorMessage>();
+                let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
                 let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
                 let root_path = Path::from("testdb-exec-resume");
                 let clock = Arc::new(DefaultSystemClock::new());
@@ -1416,11 +1388,11 @@ mod tests {
         // max_sst_size so each finished block rolls into a new output SST
         // (guaranteeing several SST boundaries, and thus background closes).
         let handle = tokio::runtime::Handle::current();
-        let options = Arc::new(CompactorOptions {
+        let options = Arc::new(CompactionWorkerOptions {
             max_sst_size: 1,
-            ..CompactorOptions::default()
+            ..CompactionWorkerOptions::default()
         });
-        let (tx, rx) = async_channel::unbounded::<CompactorMessage>();
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(GatedObjectStore::new(inner));
         let object_store: Arc<dyn ObjectStore> = gated.clone();
@@ -1505,8 +1477,8 @@ mod tests {
         let progressed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match rx.recv().await.unwrap() {
-                    CompactorMessage::CompactionJobProgress { .. } => break,
-                    CompactorMessage::CompactionJobFinished { .. } => {
+                    WorkerMessage::CompactionJobProgress { .. } => break,
+                    WorkerMessage::CompactionJobFinished { .. } => {
                         panic!("job finished while its SST flush was blocked")
                     }
                     _ => {}
@@ -1527,7 +1499,7 @@ mod tests {
         gated.put_opts_gate.release();
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let CompactorMessage::CompactionJobFinished { result, .. } =
+                if let WorkerMessage::CompactionJobFinished { result, .. } =
                     rx.recv().await.unwrap()
                 {
                     return result;
@@ -1567,7 +1539,7 @@ mod tests {
     struct TestContext {
         executor: TokioCompactionExecutor,
         table_store: Arc<TableStore>,
-        rx: async_channel::Receiver<CompactorMessage>,
+        rx: async_channel::Receiver<WorkerMessage>,
     }
 
     /// Builder for creating test context with configurable options.
@@ -1604,7 +1576,7 @@ mod tests {
 
         async fn build(self) -> TestContext {
             let handle = tokio::runtime::Handle::current();
-            let options = Arc::new(CompactorOptions::default());
+            let options = Arc::new(CompactionWorkerOptions::default());
             let (tx, rx) = async_channel::unbounded();
             let os = Arc::new(InMemory::new());
             let clock = Arc::new(DefaultSystemClock::new());
@@ -1668,7 +1640,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async move {
                 loop {
                     let msg = self.rx.recv().await.unwrap();
-                    if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
+                    if let WorkerMessage::CompactionJobFinished { id: _, result } = msg {
                         return result;
                     }
                 }

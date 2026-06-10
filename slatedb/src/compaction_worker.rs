@@ -1,6 +1,6 @@
 //! Distributed-compaction worker (RFC-0025).
 //!
-//! A [`CompactionWorker`] polls `.compactions` for `Submitted` entries, claims
+//! A [`CompactionWorker`] polls `.compactions` for `Scheduled` entries, claims
 //! them via the optimistic CAS protocol described in RFC-0025, executes the
 //! compaction with the same code path the in-process executor uses, and writes
 //! `Compacted` (with the produced `output_ssts`) back to `.compactions`. The
@@ -18,35 +18,28 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
-use object_store::path::Path;
-use object_store::ObjectStore;
-use rand::Rng;
 use tokio::runtime::Handle;
 use ulid::Ulid;
 
-#[cfg(feature = "compaction_filters")]
-use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
-    CompactionExecutor, ExecutorMessage, StartCompactionJobArgs, TokioCompactionExecutor,
+    CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
 };
-use crate::compactor_state::{Compaction, CompactionStatus, SourceId, WorkerSpec};
-use crate::config::{CompactionWorkerOptions, CompactorOptions};
-use crate::db_status::ClosedResultWriter;
+use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
+use crate::config::CompactionWorkerOptions;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
-use crate::format::sst::SsTableFormat;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
 use crate::merge_operator::MergeOperatorType;
-use crate::object_stores::ObjectStores;
-use crate::rand::DbRand;
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, WatchableOnceCell};
-use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-use slatedb_common::metrics::{MetricsRecorder, MetricsRecorderHelper, NoopMetricsRecorder};
+use crate::utils::IdGenerator;
+#[cfg(feature = "compaction_filters")]
+use crate::CompactionFilterSupplier;
+use crate::DbRand;
+use slatedb_common::clock::SystemClock;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
@@ -74,24 +67,6 @@ pub(crate) enum WorkerMessage {
     PollCompactions,
 }
 
-impl ExecutorMessage for WorkerMessage {
-    fn job_finished(id: Ulid, result: Result<crate::db_state::SortedRun, SlateDBError>) -> Self {
-        WorkerMessage::CompactionJobFinished { id, result }
-    }
-
-    fn job_progress(
-        id: Ulid,
-        bytes_processed: u64,
-        output_ssts: Vec<crate::db_state::SsTableHandle>,
-    ) -> Self {
-        WorkerMessage::CompactionJobProgress {
-            id,
-            bytes_processed,
-            output_ssts,
-        }
-    }
-}
-
 /// Stateless executor of compaction jobs claimed from `.compactions`.
 ///
 /// Build one with [`CompactionWorkerBuilder`] and drive its event loop with
@@ -102,6 +77,10 @@ pub struct CompactionWorker {
 }
 
 impl CompactionWorker {
+    pub(crate) fn new(task_executor: Arc<MessageHandlerExecutor>) -> Self {
+        Self { task_executor }
+    }
+
     /// Runs the worker until cancellation or fatal error. The worker polls
     /// `.compactions` every [`CompactionWorkerOptions::compactions_poll_interval`],
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
@@ -115,133 +94,12 @@ impl CompactionWorker {
     }
 
     /// Gracefully stops the worker, resetting any compactions it claimed back
-    /// to `Submitted` so other workers can pick them up immediately.
+    /// to `Scheduled` so other workers can pick them up immediately.
     pub async fn stop(&self) -> Result<(), crate::Error> {
         self.task_executor
             .shutdown_task(COMPACTION_WORKER_TASK_NAME)
             .await
             .map_err(|e| e.into())
-    }
-}
-
-/// Builder for [`CompactionWorker`].
-///
-/// Mirrors `CompactorBuilder`: the user supplies a DB path and object store,
-/// optionally overrides options/clock/seed/merge operator, then calls
-/// [`CompactionWorkerBuilder::build`].
-pub struct CompactionWorkerBuilder<P: Into<Path>> {
-    path: P,
-    main_object_store: Arc<dyn ObjectStore>,
-    worker_runtime: Option<Handle>,
-    options: CompactionWorkerOptions,
-    rand: Arc<DbRand>,
-    metrics_recorder: Arc<dyn MetricsRecorder>,
-    system_clock: Arc<dyn SystemClock>,
-    merge_operator: Option<MergeOperatorType>,
-    #[cfg(feature = "compaction_filters")]
-    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
-}
-
-impl<P: Into<Path>> CompactionWorkerBuilder<P> {
-    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
-        Self {
-            path,
-            main_object_store,
-            worker_runtime: None,
-            options: CompactionWorkerOptions::default(),
-            rand: Arc::new(DbRand::default()),
-            metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
-            system_clock: Arc::new(DefaultSystemClock::default()),
-            merge_operator: None,
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: None,
-        }
-    }
-
-    pub fn with_options(mut self, options: CompactionWorkerOptions) -> Self {
-        self.options = options;
-        self
-    }
-
-    pub fn with_runtime(mut self, runtime: Handle) -> Self {
-        self.worker_runtime = Some(runtime);
-        self
-    }
-
-    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
-        self.system_clock = system_clock;
-        self
-    }
-
-    pub fn with_seed(mut self, seed: u64) -> Self {
-        self.rand = Arc::new(DbRand::new(seed));
-        self
-    }
-
-    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.metrics_recorder = recorder;
-        self
-    }
-
-    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
-        self.merge_operator = Some(merge_operator);
-        self
-    }
-
-    #[cfg(feature = "compaction_filters")]
-    pub fn with_compaction_filter_supplier(
-        mut self,
-        supplier: Arc<dyn CompactionFilterSupplier>,
-    ) -> Self {
-        self.compaction_filter_supplier = Some(supplier);
-        self
-    }
-
-    pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
-        let path: Path = self.path.into();
-        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
-        let compactions_store =
-            Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.main_object_store, None),
-            SsTableFormat::default(),
-            path,
-            None,
-        ));
-        let recorder = MetricsRecorderHelper::new(
-            self.metrics_recorder,
-            self.options.metric_level.unwrap_or_default(),
-        );
-        let stats = Arc::new(CompactionStats::new(&recorder));
-        let worker_runtime = self.worker_runtime.unwrap_or_else(Handle::current);
-        let options = Arc::new(self.options);
-        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-        let task_executor = Arc::new(MessageHandlerExecutor::new(
-            closed_result,
-            self.system_clock.clone(),
-        ));
-        let (handler, rx) = build_handler(
-            manifest_store,
-            compactions_store,
-            table_store,
-            options,
-            worker_runtime,
-            self.rand,
-            stats,
-            self.system_clock,
-            self.merge_operator,
-            #[cfg(feature = "compaction_filters")]
-            self.compaction_filter_supplier,
-        );
-        task_executor
-            .add_handler(
-                COMPACTION_WORKER_TASK_NAME.to_string(),
-                Box::new(handler),
-                rx,
-                &Handle::current(),
-            )
-            .expect("failed to spawn compaction worker task");
-        Ok(CompactionWorker { task_executor })
     }
 }
 
@@ -260,7 +118,6 @@ pub(crate) struct CompactionWorkerHandler {
     /// yet `Compacted`). Used to gate capacity and to know what to reset on
     /// graceful shutdown.
     active_jobs: BTreeSet<Ulid>,
-    rand: Arc<DbRand>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
     /// absence on early ticks.
@@ -275,7 +132,6 @@ impl CompactionWorkerHandler {
         manifest_store: Arc<ManifestStore>,
         executor: Arc<dyn CompactionExecutor + Send + Sync>,
         clock: Arc<dyn SystemClock>,
-        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             worker_id,
@@ -285,9 +141,64 @@ impl CompactionWorkerHandler {
             executor,
             clock,
             active_jobs: BTreeSet::new(),
-            rand,
             stored: None,
         }
+    }
+
+    /// Builds the worker's [`CompactionWorkerHandler`] and the receiver that
+    /// the handler reads completion messages from. Shared between the
+    /// standalone `run()` path and the embedded-worker path in `Compactor::run`.
+    pub(crate) fn build_worker_handler(
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+        table_store: Arc<TableStore>,
+        options: Arc<CompactionWorkerOptions>,
+        worker_runtime: Handle,
+        rand: Arc<DbRand>,
+        stats: Arc<CompactionStats>,
+        system_clock: Arc<dyn SystemClock>,
+        merge_operator: Option<MergeOperatorType>,
+        #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
+            Arc<dyn CompactionFilterSupplier>,
+        >,
+    ) -> (
+        CompactionWorkerHandler,
+        async_channel::Receiver<WorkerMessage>,
+    ) {
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let executor = Arc::new(TokioCompactionExecutor::new(
+            TokioCompactionExecutorOptions {
+                handle: worker_runtime.clone(),
+                options: options.clone(),
+                worker_tx: tx,
+                table_store: table_store.clone(),
+                rand: rand.clone(),
+                stats: stats.clone(),
+                clock: system_clock.clone(),
+                manifest_store: manifest_store.clone(),
+                merge_operator: merge_operator.clone(),
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: compaction_filter_supplier.clone(),
+            },
+        ));
+
+        let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
+        info!(
+        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
+        worker_id,
+        options.max_concurrent_compactions,
+        options.compactions_poll_interval,
+    );
+
+        let handler = CompactionWorkerHandler::new(
+            worker_id,
+            options.clone(),
+            compactions_store.clone(),
+            manifest_store.clone(),
+            executor,
+            system_clock.clone(),
+        );
+        (handler, rx)
     }
 
     const EXPECT_LOADED: &str = "ensure_loaded should have set stored compactions";
@@ -314,53 +225,56 @@ impl CompactionWorkerHandler {
             .saturating_sub(self.active_jobs.len())
     }
 
-    /// Scans `.compactions` for `Submitted` entries without a worker, claims up
-    /// to remaining capacity via CAS, and dispatches each to the executor.
+    /// Scans `.compactions` for `Scheduled` entries without a worker, claims up
+    /// to remaining capacity via CAS, then validates each claim against a
+    /// manifest read *after* the claim and dispatches it to the executor.
+    /// Claims that fail validation are released back to `Scheduled`.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
         let capacity = self.capacity();
         if capacity == 0 {
             return Ok(());
         }
 
-        let manifest = self.manifest_store.read_latest_manifest().await?;
-        let db_state = manifest.core();
-
         // CAS loop: read latest, identify candidates, attempt write.
+        // Candidates are filtered on their spec alone here; validating the
+        // spec's sources against the manifest happens after the claim
+        // succeeds, since only a manifest read after the claim is guaranteed
+        // to be consistent with the claimed compaction.
         let claimed = loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let mut dirty_compactions = stored.prepare_dirty()?;
 
-            // Build the job args while selecting candidates so we only ever
-            // claim compactions we can actually run. Invalid specs (drain
-            // specs, or sources missing from the manifest) are skipped here
-            // rather than claimed and then released.
-            let mut to_claim: Vec<(Compaction, StartCompactionJobArgs)> = Vec::new();
+            let mut to_claim: Vec<Compaction> = Vec::new();
             for c in dirty_compactions
                 .value
-                .iter_with_status(CompactionStatus::Submitted)
+                .iter_with_status(&[CompactionStatus::Scheduled])
                 .filter(|c| c.worker().is_none())
             {
                 if to_claim.len() >= capacity {
                     break;
                 }
-                match Self::build_job_args(c, db_state, &self.worker_id) {
-                    Ok(args) => to_claim.push((c.clone(), args)),
-                    Err(e) => warn!(
-                        "skipping unrunnable compaction [id={}, error={:?}]",
-                        c.id(),
-                        e
-                    ),
+                // Drain specs are coordinator-local, and a tiered spec without
+                // a destination can never be executed; neither can become
+                // valid later, so skip them rather than claim and release.
+                if !c.spec().is_drain() && c.spec().destination().is_some() {
+                    to_claim.push(c.clone());
+                } else {
+                    warn!("skipping unrunnable compaction spec [id={}]", c.id());
                 }
             }
             if to_claim.is_empty() {
+                debug!(
+                    "No claimable compactions; skipping .compactions CAS write and executor dispatch [worker_id={}]",
+                    self.worker_id
+                );
                 return Ok(());
             }
 
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
 
-            for (c, _) in &to_claim {
+            for c in &to_claim {
                 dirty_compactions.value.insert(
                     c.clone()
                         .with_status(CompactionStatus::Running)
@@ -377,14 +291,37 @@ impl CompactionWorkerHandler {
             }
         };
 
-        for (compaction, args) in claimed {
-            info!(
-                "claimed compaction [worker_id={}, id={}]",
-                self.worker_id,
-                compaction.id()
-            );
-            self.active_jobs.insert(compaction.id());
-            Self::dispatch_to_executor(&self.executor, args).await?;
+        // Build job args against a manifest read *after* the claim CAS. The
+        // coordinator writes the manifest before `.compactions` (see
+        // `CompactorStateWriter::write_state_safely`), so this manifest is at
+        // least as recent as the compactions state the claim landed on. A
+        // manifest read before the claim could pair a stale manifest with a
+        // newer spec whose source ids were recycled in the meantime (e.g. a
+        // sorted run rebuilt with the same id), which the id-equality
+        // validation in `build_job_args` cannot detect.
+        let manifest = self.manifest_store.read_latest_manifest().await?;
+
+        for compaction in claimed {
+            match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
+                Ok(args) => {
+                    info!(
+                        "claimed compaction [worker_id={}, id={}]",
+                        self.worker_id,
+                        compaction.id()
+                    );
+                    self.active_jobs.insert(compaction.id());
+                    Self::dispatch_to_executor(&self.executor, args);
+                }
+                Err(e) => {
+                    warn!(
+                        "claimed compaction is invalid against the post-claim manifest; releasing claim [worker_id={}, id={}, error={:?}]",
+                        self.worker_id,
+                        compaction.id(),
+                        e
+                    );
+                    self.release_claim(compaction.id()).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -408,21 +345,23 @@ impl CompactionWorkerHandler {
         }
 
         // Validate the spec's sources actually exist in the manifest. If they
-        // don't, the spec was racing with a manifest write — release the
+        // don't, the spec was racing with a manifest write; release the
         // claim and let the coordinator reschedule.
-        let expected_l0 = compaction
+        let expected_l0: Vec<Ulid> = compaction
             .spec()
             .sources()
             .iter()
-            .filter(|s| matches!(s, SourceId::SstView(_)))
-            .count();
-        let expected_srs = compaction
+            .filter_map(|s| s.maybe_unwrap_sst_view())
+            .collect();
+        let expected_srs: Vec<u32> = compaction
             .spec()
             .sources()
             .iter()
-            .filter(|s| matches!(s, SourceId::SortedRun(_)))
-            .count();
-        if sst_views.len() != expected_l0 || sorted_runs.len() != expected_srs {
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .collect();
+        let actual_l0: Vec<Ulid> = sst_views.iter().map(|v| v.id).collect();
+        let actual_srs: Vec<u32> = sorted_runs.iter().map(|sr| sr.id).collect();
+        if actual_l0 != expected_l0 || actual_srs != expected_srs {
             return Err(SlateDBError::InvalidCompaction);
         }
 
@@ -449,25 +388,11 @@ impl CompactionWorkerHandler {
         })
     }
 
-    async fn dispatch_to_executor(
+    fn dispatch_to_executor(
         executor: &Arc<dyn CompactionExecutor + Send + Sync>,
         args: StartCompactionJobArgs,
-    ) -> Result<(), SlateDBError> {
-        let executor = executor.clone();
-        #[cfg(not(dst))]
-        #[allow(clippy::disallowed_methods)]
-        let result = tokio::task::spawn_blocking(move || {
-            executor.start_compaction_job(args);
-        })
-        .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed);
-        #[cfg(dst)]
-        let result = tokio::spawn(async move {
-            executor.start_compaction_job(args);
-        })
-        .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed);
-        result
+    ) {
+        executor.start_compaction_job(args);
     }
 
     /// Writes `Compacted` (with the produced `output_ssts`) for a successfully
@@ -492,8 +417,10 @@ impl CompactionWorkerHandler {
             };
             if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
                 info!(
-                    "lost ownership before completion; dropping [id={}]",
-                    compaction_id
+                    "lost ownership before completion; dropping [id={}, status={:?}, owner={:?}]",
+                    compaction_id,
+                    existing.status(),
+                    existing.worker().map(|w| &w.worker_id),
                 );
                 return Ok(());
             }
@@ -511,9 +438,10 @@ impl CompactionWorkerHandler {
         }
     }
 
-    /// Returns a claim to `Submitted` so it can be re-attempted by any worker
+    /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
+        self.active_jobs.remove(&compaction_id);
         let worker_id = self.worker_id.as_str();
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
@@ -538,7 +466,7 @@ impl CompactionWorkerHandler {
                 return Ok(());
             }
             let updated = existing
-                .with_status(CompactionStatus::Submitted)
+                .with_status(CompactionStatus::Scheduled)
                 .with_worker(None);
             dirty.value.insert(updated);
             match stored.update(dirty).await {
@@ -581,26 +509,18 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
         if !self.ensure_loaded().await? {
+            warn!(
+                ".compactions does not exist yet; retrying on the next poll [worker_id={}]",
+                self.worker_id
+            );
             return Ok(());
         }
         match message {
             WorkerMessage::PollCompactions => {
-                // RFC-0025: sleep for random(0, interval * 0.1) before each
-                // ticker-driven poll to prevent workers from synchronizing on
-                // `.compactions` reads
-                let max_jitter = (self.options.compactions_poll_interval.as_millis() / 10) as u64;
-                let jitter_ms = if max_jitter > 0 {
-                    self.rand.rng().random_range(0..=max_jitter)
-                } else {
-                    0
-                };
-                self.clock.sleep(Duration::from_millis(jitter_ms)).await;
                 self.poll_and_claim().await?;
             }
             WorkerMessage::CompactionJobFinished { id, result } => {
                 self.handle_finished(id, result).await?;
-                // Opportunistically claim more after freeing capacity.
-                self.poll_and_claim().await?;
             }
             // Heartbeat emission is added in the failure-detection follow-up;
             // for now progress messages are ignored. The executor still
@@ -618,18 +538,8 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // Stop accepting new work, then release any active claims so other
         // workers can pick them up immediately rather than waiting for the
         // heartbeat-timeout reclamation path.
-        //
-        // `TokioCompactionExecutor::stop` internally uses `handle.block_on`,
-        // which panics when called from within an async runtime. Mirror the
-        // coordinator's `stop_executor` pattern (see compactor.rs) and run it
-        // off-runtime.
-        let executor = self.executor.clone();
-        #[cfg(not(dst))]
-        #[allow(clippy::disallowed_methods)]
-        let _ = tokio::task::spawn_blocking(move || executor.stop()).await;
-        #[cfg(dst)]
-        let _ = tokio::spawn(async move { executor.stop() }).await;
-        let claimed = std::mem::take(&mut self.active_jobs);
+        self.executor.stop();
+        let claimed = self.active_jobs.clone().into_iter();
         for id in claimed {
             if let Err(e) = self.release_claim(id).await {
                 error!(
@@ -640,64 +550,6 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         }
         Ok(())
     }
-}
-
-/// Builds the worker's [`CompactionWorkerHandler`] and the receiver that
-/// the handler reads completion messages from. Shared between the
-/// standalone `run()` path and the embedded-worker path in `Compactor::run`.
-pub(crate) fn build_handler(
-    manifest_store: Arc<ManifestStore>,
-    compactions_store: Arc<CompactionsStore>,
-    table_store: Arc<TableStore>,
-    options: Arc<CompactionWorkerOptions>,
-    worker_runtime: Handle,
-    rand: Arc<DbRand>,
-    stats: Arc<CompactionStats>,
-    system_clock: Arc<dyn SystemClock>,
-    merge_operator: Option<MergeOperatorType>,
-    #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
-        Arc<dyn CompactionFilterSupplier>,
-    >,
-) -> (
-    CompactionWorkerHandler,
-    async_channel::Receiver<WorkerMessage>,
-) {
-    let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
-    let executor_compactor_options = Arc::new(CompactorOptions {
-        max_sst_size: options.max_sst_size,
-        max_fetch_tasks: options.max_fetch_tasks,
-        bytes_to_fetch: options.bytes_to_fetch,
-        ..CompactorOptions::default()
-    });
-    let executor = Arc::new(TokioCompactionExecutor::<WorkerMessage>::new(
-        TokioCompactionExecutorOptions {
-            handle: worker_runtime.clone(),
-            options: executor_compactor_options,
-            worker_tx: tx,
-            table_store: table_store.clone(),
-            rand: rand.clone(),
-            stats: stats.clone(),
-            clock: system_clock.clone(),
-            manifest_store: manifest_store.clone(),
-            merge_operator: merge_operator.clone(),
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: compaction_filter_supplier.clone(),
-        },
-    ));
-
-    let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
-    info!("starting compaction worker [worker_id={}]", worker_id);
-
-    let handler = CompactionWorkerHandler::new(
-        worker_id,
-        options.clone(),
-        compactions_store.clone(),
-        manifest_store.clone(),
-        executor,
-        system_clock.clone(),
-        rand.clone(),
-    );
-    (handler, rx)
 }
 
 #[cfg(test)]
@@ -711,6 +563,8 @@ mod tests {
     use bytes::Bytes;
     use futures::stream::StreamExt;
     use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
     use parking_lot::Mutex;
     use slatedb_common::clock::DefaultSystemClock;
 
@@ -739,9 +593,6 @@ mod tests {
             self.jobs.lock().push(args);
         }
         fn stop(&self) {}
-        fn is_stopped(&self) -> bool {
-            false
-        }
     }
 
     struct WorkerFixture {
@@ -796,7 +647,6 @@ mod tests {
                 manifest_store.clone(),
                 executor.clone(),
                 clock,
-                Arc::new(DbRand::default()),
             );
             // `handle()` lazily loads `.compactions` on the first message; the
             // tests below drive the child fns (poll_and_claim, handle_finished,
@@ -815,11 +665,11 @@ mod tests {
             }
         }
 
-        /// Writes a single Submitted compaction directly to `.compactions`,
+        /// Writes a single Scheduled compaction directly to `.compactions`,
         /// simulating one a coordinator would emit.
-        async fn seed_submitted_compaction(&self, id: Ulid, sources: Vec<SourceId>) {
+        async fn seed_scheduled_compaction(&self, id: Ulid, sources: Vec<SourceId>) {
             let spec = CompactionSpec::new(sources, 0);
-            let compaction = Compaction::new(id, spec); // defaults to Submitted, no worker
+            let compaction = Compaction::new(id, spec).with_status(CompactionStatus::Scheduled);
             let mut stored = StoredCompactions::try_load(self.compactions_store.clone())
                 .await
                 .unwrap()
@@ -840,10 +690,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_worker_claims_submitted_compaction() {
+    async fn test_worker_claims_scheduled_compaction() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
 
         fx.handler.poll_and_claim().await.unwrap();
@@ -895,7 +745,7 @@ mod tests {
     async fn test_worker_writes_compacted_on_finish() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
 
@@ -932,7 +782,7 @@ mod tests {
     async fn test_worker_releases_claim_on_execution_failure() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
 
@@ -943,7 +793,7 @@ mod tests {
 
         // On error the worker releases the claim so another worker can retry.
         let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Submitted);
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         assert!(!fx.handler.active_jobs.contains(&id));
     }
@@ -952,7 +802,7 @@ mod tests {
     async fn test_worker_cleanup_releases_active_claims() {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
         assert_eq!(fx.handler.active_jobs.len(), 1);
@@ -962,7 +812,7 @@ mod tests {
         fx.handler.cleanup(empty, Ok(())).await.unwrap();
 
         let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Submitted);
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         assert!(fx.handler.active_jobs.is_empty());
     }
@@ -984,16 +834,16 @@ mod tests {
         let mut fx = WorkerFixture::new("worker-A").await;
         let id = Ulid::from_parts(1, 0);
         // Source view ID that does not exist in the manifest — build_job_args
-        // should reject this so the worker never claims it, leaving it
-        // Submitted for the coordinator to reschedule.
+        // should reject this after the claim, releasing it back to Scheduled
+        // for another worker to retry.
         let ghost = Ulid::from_parts(u64::MAX, 0);
-        fx.seed_submitted_compaction(id, vec![SourceId::SstView(ghost)])
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(ghost)])
             .await;
 
         fx.handler.poll_and_claim().await.unwrap();
 
         let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Submitted);
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         // No active job retained.
         assert!(fx.handler.active_jobs.is_empty());

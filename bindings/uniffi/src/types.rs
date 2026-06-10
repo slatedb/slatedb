@@ -359,6 +359,7 @@ impl From<&CoreExternalDb> for ExternalDb {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum CompactionStatus {
     Submitted,
+    Scheduled,
     Running,
     Completed,
     Failed,
@@ -369,6 +370,7 @@ impl From<CoreCompactionStatus> for CompactionStatus {
     fn from(value: CoreCompactionStatus) -> Self {
         match value {
             CoreCompactionStatus::Submitted => Self::Submitted,
+            CoreCompactionStatus::Scheduled => Self::Scheduled,
             CoreCompactionStatus::Running => Self::Running,
             CoreCompactionStatus::Completed => Self::Completed,
             CoreCompactionStatus::Failed => Self::Failed,

@@ -352,11 +352,28 @@ impl Admin {
         &self,
         cancellation_token: CancellationToken,
     ) -> Result<(), crate::Error> {
+        self.run_compactor_with_options(
+            cancellation_token,
+            crate::config::CompactorOptions::default(),
+        )
+        .await
+    }
+
+    /// Like [`Admin::run_compactor`] but accepts explicit [`crate::config::CompactorOptions`].
+    ///
+    /// Useful for disabling the embedded worker (set worker: None) when running
+    /// standalone [`crate::compaction_worker::CompactionWorker`] processes separately.
+    pub async fn run_compactor_with_options(
+        &self,
+        cancellation_token: CancellationToken,
+        options: crate::config::CompactorOptions,
+    ) -> Result<(), crate::Error> {
         #[allow(unused_mut)]
         let mut builder = crate::CompactorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
+        .with_options(options)
         .with_system_clock(self.system_clock.clone())
         .with_seed(self.rand.rng().next_u64());
 

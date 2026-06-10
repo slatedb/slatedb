@@ -125,26 +125,35 @@ Separates the **Compaction Coordinator** (scheduler + manifest committer) from o
 
 ```rust
 pub struct CompactorOptions {
-    // ... existing fields unchanged ...
+    // ... existing coordinator-only fields (aside from max_sst_size, max_fetch_tasks) unchanged ...
 
     /// How long before a worker with no heartbeat is considered stale and its job reclaimed.
-    pub worker_heartbeat_timeout_ms: u64,
+    pub worker_heartbeat_timeout: Duration,
 
-    /// Whether to spawn an in-process CompactionWorker alongside the coordinator.
-    /// Defaults to true. Set to false when all workers run as separate processes.
-    pub embedded_worker: bool,
+    /// Interval at which the coordinator commits compactions marked `Compacted` to the manifest.
+    pub commit_compacted_interval: Duration,
+
+    /// Options for the in-process CompactionWorker spawned alongside the
+    /// coordinator. `Some(..)` (the default) spawns an embedded worker; `None`
+    /// runs the coordinator alone and expects workers as separate processes.
+    pub worker: Option<CompactionWorkerOptions>,
 }
 ```
+
+Execution-only knobs (`max_sst_size`, `max_fetch_tasks`) live on `CompactionWorkerOptions`, not `CompactorOptions`. The coordinator never executes compactions itself, so it has no use for them. An embedded worker is configured through `CompactorOptions::worker`.
 
 Via settings:
 
 ```toml
 [compactor_options]
-worker_heartbeat_timeout_ms = 10000
-embedded_worker = true
+worker_heartbeat_timeout = "10s"
+commit_compacted_interval = "1s"
+
+[compactor_options.worker]
+max_sst_size = 268435456
 ```
 
-The coordinator always uses `RemoteCompactionExecutor`. `embedded_worker = true` (the default) spawns a `CompactionWorker` in the same process. `embedded_worker = false` expects workers to run as separate `CompactionWorker` processes.
+`worker = Some(..)` (the default) spawns a `CompactionWorker` in the same process. `worker = None` expects workers to run as separate `CompactionWorker` processes.
 
 #### Workers
 
@@ -163,8 +172,16 @@ pub struct CompactionWorkerOptions {
 
   // Minimum wall-clock time between heartbeat writes.
   pub heartbeat_min_interval: Duration,
+
+  // Max size of an output SST produced by a compaction.
+  pub max_sst_size: usize,
+
+  // Max number of source SSTs fetched concurrently during a compaction.
+  pub max_fetch_tasks: usize,
 }
 ```
+
+`max_sst_size` and `max_fetch_tasks` are execution-only knobs that previously lived on `CompactorOptions`; they now belong to the worker, which is the only component that executes compactions.
 
 - `max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
@@ -172,7 +189,7 @@ pub struct CompactionWorkerOptions {
 
 - `heartbeat_bytes` is used to tie heartbeats to compaction progress and gives the coordinator a liveness guarantee. A worker that falls behind this rate will be reclaimed and its job handed off, regardless of whether its event loop is still alive.
 
-- `heartbeat_min_interval` suppresses heartbeats triggered by `heartbeat_bytes` when processing is fast and should be set well below the coordinator's `worker_heartbeat_timeout_ms`.
+- `heartbeat_min_interval` suppresses heartbeats triggered by `heartbeat_bytes` when processing is fast and should be set well below the coordinator's `worker_heartbeat_timeout`.
 
 New `CompactionWorkerBuilder` entrypoint for `CompactionWorker` processes:
 
@@ -237,7 +254,7 @@ Polls do not emit heartbeats. Liveness is driven entirely by compaction progress
 **Failure Detection Protocol** (coordinator):
 
 1. On each coordinator poll tick, read latest `.compactions`.
-2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
+2. For each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout`: set `status = Submitted`, clear `worker_id`, retain `output_ssts` and `id`.
 3. If any compactions were reclaimed in step 2, write updated state via `write_compactions_safely()`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator`.
 4. On `AlreadyExists`: re-read latest and retry from step 1.
 
@@ -283,19 +300,34 @@ Submitted <-> Running --> Compacted --> Completed
 
 The coordinator is solely responsible for transitions from `Compacted → Completed` (or `Compacted → Failed`), and transitions the state only after attempting the manifest write. This preserves the single-writer invariant and gives recovery a clean, unambiguous signal for `Compacted` entries: they always need a manifest write retry.
 
+**The `Scheduled` state**
+
+This RFC introduces the `Scheduled` state so that the coordinator can signal that a compaction is ready to be claimed by a worker.
+
+```text
+Submitted --> Scheduled <-> Running --> Compacted --> Completed
+    |                          |           |
+    |                          v           |
+    +-----------------------> Failed <-----+
+```
+
+The coordinator is solely responsible for transitions from `Submitted → Scheduled`, and transitions the state only after validating the compaction against the current manifest and updating its local state to be aware of the newly scheduled jobs. Workers exclusively claim `Scheduled` entries. They never act on `Submitted` which keeps the coordinator the single gatekeeper for validation and ensures the coordinator has the entry in local state before any worker can transition it onward.
+
 **New Protocol (distributed compaction)**
 
-Only the coordinator commits manifest updates (preserves single-writer invariant):
+Only the coordinator validates compactions and commits manifest updates (preserves single-writer invariant):
 
-1. Observe a `Compacted` entry in `.compactions` (written by the worker on job completion).
-2. Update `.manifest` via `write_manifest_safely()`.
-3. Update `.compactions` via `write_compactions_safely()`, transitioning `Compacted` → `Completed`.
+1. Observe a `Submitted` entry in `.compactions`.
+2. Validate the compaction, if it succeeds, update local state with the new compaction and transition it to `Scheduled`. If validation fails the compaction is transitioned to `Failed`.
+3. Observe a `Compacted` entry in `.compactions` (written by the worker on job completion).
+4. Update `.manifest` via `write_manifest_safely()`.
+5. Update `.compactions` via `write_compactions_safely()`, transitioning `Compacted` → `Completed`.
 
 On coordinator restart, the recovery logic is:
 
-1. Leave `Running` jobs alone. If the owning worker survived the coordinator restart it continues executing and emitting heartbeats; if it died, the failure detection protocol reclaims it once `worker_heartbeat_timeout_ms` elapses past `coordinator_start_time_ms` (see step 2 of the failure detection protocol).
+1. Leave `Running` jobs alone. If the owning worker survived the coordinator restart it continues executing and emitting heartbeats; if it died, the failure detection protocol reclaims it once the heartbeat exceeds `worker_heartbeat_timeout` (see step 2 of the failure detection protocol). *(Interim: until heartbeat reclamation lands, restart resets `Running` → `Submitted` instead.)*
 2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the job is marked `Failed` in `.compactions`. This is safe: the manifest was already updated, the output SSTs are already referenced and protected from GC, and the scheduler has no dependency on whether the entry reads `Completed` or `Failed`.
-3. Retain active (`Submitted`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
+3. Retain active (`Submitted`, `Scheduled`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
 
 ### Deployment Shapes
 
@@ -307,8 +339,8 @@ In all cases the coordinator uses `RemoteCompactionExecutor`. `compactor_options
 let db = Db::builder("db", object_store)
     .with_settings(Settings {
         compactor_options: Some(CompactorOptions {
-            worker_heartbeat_timeout_ms: 30_000,
-            ..Default::default() // embedded_worker defaults to true
+            worker_heartbeat_timeout: Duration::from_secs(30),
+            ..Default::default() // worker defaults to Some(CompactionWorkerOptions::default())
         }),
         ..Default::default()
     })
@@ -319,12 +351,12 @@ let db = Db::builder("db", object_store)
 2. **Coordinator + remote workers:** coordinator runs in the DB process; workers are separate processes.
 
 ```rust
-// Disable the embedded compaction worker by setting embedded_worker to false.
+// Disable the embedded compaction worker by setting worker to None.
 let db = Db::builder("db", object_store)
     .with_settings(Settings {
         compactor_options: Some(CompactorOptions {
-            embedded_worker: false,
-            worker_heartbeat_timeout_ms: 30_000,
+            worker: None,
+            worker_heartbeat_timeout: Duration::from_secs(30),
             ..Default::default()
         }),
         ..Default::default()
@@ -337,9 +369,9 @@ let worker = CompactionWorkerBuilder::new("db", object_store)
     .with_options(
       CompactionWorkerOptions {
         max_concurrent_compactions: 2,
-        compactions_poll_interval_ms: 1000,
+        compactions_poll_interval: Duration::from_secs(1),
         heartbeat_bytes: 100_000,
-        heartbeat_min_interval_ms: 5000,
+        heartbeat_min_interval: Duration::from_secs(5),
       }
     )
     .build()
@@ -359,8 +391,8 @@ let db = Db::builder("db", object_store)
 // Standalone coordinator process
 let compactor = CompactorBuilder::new("db", object_store)
     .with_options(CompactorOptions {
-        worker_heartbeat_timeout_ms: 30_000,
-        ..Default::default() // embedded_worker defaults to true
+        worker_heartbeat_timeout:Duration::from_secs(30),
+        ..Default::default() // worker defaults to Some(CompactionWorkerOptions::default())
     })
     .build();
 compactor.run().await?;
@@ -378,8 +410,8 @@ let db = Db::builder("db", object_store)
 // Standalone coordinator process
 let compactor = CompactorBuilder::new("db", object_store)
     .with_options(CompactorOptions {
-        embedded_worker: false,
-        worker_heartbeat_timeout_ms: 30_000,
+        worker: None,
+        worker_heartbeat_timeout: Duration::from_secs(30),
         ..Default::default()
     })
     .build();
@@ -390,9 +422,9 @@ let worker = CompactionWorkerBuilder::new("db", object_store)
     .with_options(
       CompactionWorkerOptions {
         max_concurrent_compactions: 2,
-        compactions_poll_interval_ms: 1000,
+        compactions_poll_interval: Duration::from_secs(1),
         heartbeat_bytes: 100_000,
-        heartbeat_min_interval_ms: 5000,
+        heartbeat_min_interval_ms: Duration::from_secs(5),
       }
     )
     .build()
@@ -459,7 +491,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-- **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to `compactions_poll_interval_ms`. Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `compactions_poll_interval_ms`.
+- **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to `compactions_poll_interval`. Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `compactions_poll_interval`.
 - **Throughput**: Scales roughly linearly with worker count, bounded by per-worker object store bandwidth.
 - **Object-store requests**: ~1 GET per poll interval + ~1 PUT per claim + ~1 PUT per output SST. At N=10 workers polling every 5s: ~120 GETs/min overhead.
 - **Space/write/read amplification**: Unchanged.
@@ -493,7 +525,7 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 ### Compatibility
 
 - **Object storage**: Backward compatible. New fields default to unclaimed/0; no migration needed.
-- **Public API**: DB read/write API unchanged. `CompactionWorkerBuilder` and `CompactionWorker` are additive. **Breaking:** `max_concurrent_compactions` moves from `CompactorOptions` to `CompactionWorkerOptions`; users setting it on `CompactorOptions` must move it to the `CompactionWorkerOptions` of the embedded or remote worker.
+- **Public API**: DB read/write API unchanged. `CompactionWorkerBuilder` and `CompactionWorker` are additive. **Breaking:** execution-only knobs (`max_sst_size`, `max_fetch_tasks`, `max_concurrent_compactions`) move from `CompactorOptions` to `CompactionWorkerOptions`. Users setting any of these on `CompactorOptions` must move them onto the embedded worker via `CompactorOptions::worker` (or onto the remote worker's `CompactionWorkerOptions`).
 - **Rolling upgrades**: Upgrade coordinator first, then start workers. Old standalone compactors safely ignore new fields.
 
 ## Testing
@@ -511,7 +543,7 @@ Worker lifecycle events (claimed, reclaimed, heartbeat timeout) are logged at IN
 Phases:
 1. **Schema extension:** add `WorkerSpec` containing `worker_id` and `last_heartbeat_ms` to `Compaction` in `compactor.fbs`.
 2. **Manifest Commit Protocol:** coordinator merges compactions with `Compacted` status from remote workers, transitions them to either `Failed` or `Completed`, and commits their output to the manifest.
-3. **Worker implementation:** implement `CompactionWorkerBuilder`, `CompactionWorker`, and `RemoteCompactionExecutor`; coordinator always uses `RemoteCompactionExecutor`. Move `max_concurrent_compactions` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
+3. **Worker implementation:** implement `CompactionWorkerBuilder` and `CompactionWorker`; coordinator always uses `CompactionWorker`. Move `max_concurrent_compactions`, `max_sst_size`, `max_fetch_tasks` from `CompactorOptions` to `CompactionWorkerOptions` (breaking change; see Compatibility).
 4. **Failure detection:** heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
 
 ### Docs Updates
@@ -557,11 +589,11 @@ Some SlateDB users run thousands of DBs. A single worker process today is bound 
 
 ## Open Questions
 
-1. ~~What is the right default for `compactions_poll_interval_ms`? Should it be adaptive (e.g. exponential backoff when no work is available)?~~
-**Resolved:** Exponential backoff does not make sense for `compactions_poll_interval_ms` because GETs to object storage are cheap and it is critical that L0 compactions are started as soon as possible. A reasonable default is one second (e.g. `compactions_poll_interval_ms=1000`).
+1. ~~What is the right default for `compactions_poll_interval`? Should it be adaptive (e.g. exponential backoff when no work is available)?~~
+**Resolved:** Exponential backoff does not make sense for `compactions_poll_interval` because GETs to object storage are cheap and it is critical that L0 compactions are started as soon as possible. A reasonable default is one second (e.g. `compactions_poll_interval="1s"`).
 
 2. ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~
-**Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `compactions_poll_interval_ms`, spreading poll timing across workers without any additional configuration.
+**Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `compactions_poll_interval`, spreading poll timing across workers without any additional configuration.
 
 3. ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~
 **Resolved:** Workers should have the same metrics infrastructure introduced by the metrics RFC and users can wire in reporting as they'd like. The worker tags the metrics with the worker id.

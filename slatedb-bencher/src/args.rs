@@ -177,6 +177,13 @@ pub(crate) struct BenchmarkDbArgs {
         default_value_t = 95
     )]
     pub(crate) get_hit_percentage: u32,
+
+    #[arg(
+        long,
+        help = "Disable the embedded compactor. Use when running a standalone coordinator and workers.",
+        default_value_t = false
+    )]
+    pub(crate) no_compactor: bool,
 }
 
 /// Trait for types that can supply key generators

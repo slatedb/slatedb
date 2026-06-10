@@ -148,8 +148,25 @@ pub(crate) enum CliCommands {
         min_age: Duration,
     },
 
-    /// Runs the compactor until interrupted (Ctrl-C).
-    RunCompactor,
+    /// Runs the compactor coordinator until interrupted (Ctrl-C).
+    ///
+    /// By default an embedded worker is also spawned in the same process. Pass
+    /// `--no-embedded-worker` when you want to run workers as separate
+    /// `run-worker` processes instead.
+    RunCompactor {
+        /// Disable the in-process compaction worker. The Compactor can run an embedded worker
+        /// alongside distributed workers or disable the embedded worker and use only distributed workers.
+        #[arg(long, default_value_t = false)]
+        no_embedded_worker: bool,
+    },
+
+    /// Runs a standalone compaction worker until interrupted (Ctrl-C).
+    ///
+    /// The worker polls `.compactions` for `Scheduled` entries, claims them
+    /// via the optimistic CAS protocol, executes the compaction, and writes
+    /// `Compacted` back. Multiple workers can run concurrently against the
+    /// same database — each will claim a disjoint set of jobs.
+    RunWorker,
 
     /// Converts a sequence number to its corresponding timestamp using the latest manifest's sequence tracker.
     SeqToTs {

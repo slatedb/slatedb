@@ -79,7 +79,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args: BenchmarkDbArgs) {
-    let (config, memory_cache) = args.db_args.config().unwrap();
+    let (mut config, memory_cache) = args.db_args.config().unwrap();
+    if args.no_compactor {
+        config.compactor_options = None;
+    }
     let write_options = WriteOptions {
         await_durable: args.await_durable,
         ..Default::default()

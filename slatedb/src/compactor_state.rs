@@ -225,20 +225,32 @@ impl Display for CompactionSpec {
 ///
 /// State transitions:
 /// ```text
-/// Submitted <-> Running --> Compacted --> Completed
-///     |             |           |
-///     |             v           |
-///     +----------> Failed <-----+
+/// Submitted --> Scheduled <-> Running --> Compacted --> Completed
+///     |                          |           |
+///     |                          v           |
+///     +-----------------------> Failed <-----+
 /// ```
 ///
 /// `Completed` and `Failed` are terminal states. `Compacted` is the
 /// distributed-compaction intermediate state where the worker has written its
 /// final output SSTs but the coordinator has not yet committed the result to
-/// the manifest. See RFC-0025.
+/// the manifest. `Scheduled` is the coordinator's "ready for a worker to claim"
+/// state: only the coordinator promotes `Submitted → Scheduled`, and only after
+/// the spec has been validated against the current manifest. Workers exclusively
+/// claim `Scheduled` entries — they never act on `Submitted` — which keeps the
+/// coordinator the single gatekeeper for validation and ensures the coordinator
+/// has the entry in local state before any worker can transition it onward.
+/// See RFC-0025.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CompactionStatus {
-    /// The compaction has been submitted but not yet started.
+    /// The compaction has been submitted but the coordinator has not yet
+    /// validated it. May originate from the internal scheduler, an admin
+    /// submission, or a reload of `.compactions`.
     Submitted,
+    /// The coordinator has validated the spec against the current manifest
+    /// and promoted it; the job is ready to be claimed by a worker. Only the
+    /// coordinator writes this state.
+    Scheduled,
     /// The compaction is currently running.
     Running,
     /// The worker finished execution and wrote its output SSTs; the
@@ -254,7 +266,10 @@ impl CompactionStatus {
     fn active(self) -> bool {
         matches!(
             self,
-            CompactionStatus::Submitted | CompactionStatus::Running | CompactionStatus::Compacted
+            CompactionStatus::Submitted
+                | CompactionStatus::Scheduled
+                | CompactionStatus::Running
+                | CompactionStatus::Compacted
         )
     }
 
@@ -391,6 +406,9 @@ impl Compaction {
     }
 
     /// Sets bytes processed so far for this compaction.
+    // Consumed once the worker wires up progress/heartbeat emission in the
+    // failure-detection follow-up.
+    #[allow(dead_code)]
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
     }
@@ -406,6 +424,9 @@ impl Compaction {
     }
 
     /// Sets the output SSTs produced by this compaction.
+    // Consumed once the worker wires up progress/heartbeat emission in the
+    // failure-detection follow-up.
+    #[allow(dead_code)]
     pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
         assert!(
             output_ssts.starts_with(self.output_ssts.as_slice()),
@@ -422,6 +443,11 @@ impl Compaction {
     /// Sets the current status of this compaction.
     pub(crate) fn set_status(&mut self, status: CompactionStatus) {
         self.status = status;
+    }
+
+    /// Sets the current worker of this compaction.
+    pub(crate) fn set_worker(&mut self, worker: Option<WorkerSpec>) {
+        self.worker = worker;
     }
 
     /// Returns the worker that has claimed this compaction, if any.
@@ -573,15 +599,16 @@ impl Compactions {
         self.core.recent_compactions.values().filter(|c| c.active())
     }
 
-    /// Returns an iterator over all compactions with the given status.
+    /// Returns an iterator over all compactions whose status is one of `statuses`.
     pub(crate) fn iter_with_status(
         &self,
-        status: CompactionStatus,
+        statuses: &[CompactionStatus],
     ) -> impl Iterator<Item = &Compaction> {
+        let statuses = statuses.to_vec();
         self.core
             .recent_compactions
             .values()
-            .filter(move |c| c.status() == status)
+            .filter(move |c| statuses.contains(&c.status()))
     }
 
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
@@ -670,9 +697,9 @@ impl CompactorState {
 
     pub(crate) fn compactions_with_status(
         &self,
-        status: CompactionStatus,
+        statuses: &[CompactionStatus],
     ) -> impl Iterator<Item = &Compaction> {
-        self.compactions.value.iter_with_status(status)
+        self.compactions.value.iter_with_status(statuses)
     }
 
     /// Returns the dirty compactions tracked by this state.
@@ -703,10 +730,29 @@ impl CompactorState {
             merged.insert(compaction.id(), compaction.clone());
         }
 
-        // For compactions not in local state (Vacant), only accept `Submitted` since
-        // execution hasn't started so it's safe to adopt. For known compactions (Occupied),
-        // only accept `Compacted`, the worker's signal that execution finished and the
-        // coordinator should commit the manifest.
+        // For compactions not in local state (Vacant), only accept `Submitted`. This
+        // is the only state the coordinator hasn't authored yet (external submissions,
+        // admin tools, reloaded `.compactions`). All later states (`Scheduled`,
+        // `Running`, `Compacted`, `Completed`, `Failed`) are downstream of the
+        // coordinator having seen the entry as `Submitted` and promoted it to
+        // `Scheduled`, so a Vacant entry in any of those states is anomalous and
+        // logged.
+        //
+        // For known compactions (Occupied), accept these remote transitions:
+        //   - `Compacted`: the worker's signal that execution finished; the
+        //     coordinator must commit the output SSTs to the manifest.
+        //   - `Scheduled → Running`: a worker has claimed the job; adopt the
+        //     Running entry so the coordinator's local copy carries the worker
+        //     claim. Without this, write_compactions_safely() would overwrite
+        //     the claim with a stale Scheduled/no-worker copy, causing the
+        //     worker to discard its result and potentially re-run the job.
+        //   - `Running → Scheduled`: a worker released its claim (execution
+        //     failed, post-claim validation rejected the job, or graceful
+        //     shutdown). Adopt the release so the job can be re-claimed;
+        //     otherwise the coordinator's stale Running/claimed copy would be
+        //     written back and no worker would ever pick the job up again.
+        //   - TODO `Running -> Running`: should accept heartbeat updates when heartbeats land
+        // All other remote updates are ignored.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
                 Entry::Vacant(v) => {
@@ -720,12 +766,19 @@ impl CompactorState {
                     v.insert(compaction.clone());
                 }
                 Entry::Occupied(mut o) => {
-                    if matches!(compaction.status(), CompactionStatus::Compacted) {
+                    let adopt = matches!(compaction.status(), CompactionStatus::Compacted)
+                        || (matches!(o.get().status(), CompactionStatus::Scheduled)
+                            && matches!(compaction.status(), CompactionStatus::Running))
+                        || (matches!(o.get().status(), CompactionStatus::Running)
+                            && matches!(compaction.status(), CompactionStatus::Scheduled));
+                    if adopt {
                         o.insert(compaction.clone());
                     } else {
                         debug!(
-                            "ignoring remote compaction update with non-Compacted status [compaction={:?}]",
-                            compaction,
+                            "ignoring remote compaction update [id={}, local_status={:?}, remote_status={:?}]",
+                            compaction.id(),
+                            o.get().status(),
+                            compaction.status(),
                         );
                     }
                 }

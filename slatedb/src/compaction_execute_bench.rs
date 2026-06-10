@@ -15,14 +15,14 @@ use tokio::task::JoinHandle;
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
+use crate::compaction_worker::WorkerMessage;
 use crate::compactor::stats::CompactionStats;
-use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
 };
 use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-use crate::config::{CompactorOptions, CompressionCodec};
+use crate::config::{CompactionWorkerOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
@@ -331,7 +331,7 @@ impl CompactionExecuteBench {
             None,
         ));
         let (tx, rx) = async_channel::unbounded();
-        let compactor_options = CompactorOptions::default();
+        let worker_options = CompactionWorkerOptions::default();
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();
@@ -340,7 +340,7 @@ impl CompactionExecuteBench {
 
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle: Handle::current(),
-            options: Arc::new(compactor_options),
+            options: Arc::new(worker_options),
             worker_tx: tx,
             table_store: table_store.clone(),
             rand: self.rand.clone(),
@@ -396,7 +396,7 @@ impl CompactionExecuteBench {
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction_job(job));
         while let Ok(msg) = rx.recv().await {
-            if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
+            if let WorkerMessage::CompactionJobFinished { id: _, result } = msg {
                 match result {
                     Ok(_) => {
                         let elapsed_ms = self

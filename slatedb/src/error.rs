@@ -103,9 +103,6 @@ pub(crate) enum SlateDBError {
     #[error("segment extractor produced an empty prefix for key {key:?}")]
     EmptySegmentPrefix { key: Bytes },
 
-    #[error("compaction executor failed")]
-    CompactionExecutorFailed,
-
     #[error(
         "invalid clock tick, must be monotonic. last_tick=`{last_tick}`, next_tick=`{next_tick}`"
     )]
@@ -659,7 +656,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
 
             // Internal errors
-            SlateDBError::CompactionExecutorFailed => Error::internal(msg),
             #[cfg(feature = "compaction_filters")]
             SlateDBError::CompactionFilterError(_) => Error::internal(msg),
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),

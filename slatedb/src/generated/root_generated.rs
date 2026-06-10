@@ -463,15 +463,16 @@ pub struct CompactionSpecUnionTableOffset {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_COMPACTION_STATUS: i8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_COMPACTION_STATUS: i8 = 4;
+pub const ENUM_MAX_COMPACTION_STATUS: i8 = 5;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 5] = [
+pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 6] = [
   CompactionStatus::Submitted,
   CompactionStatus::Running,
   CompactionStatus::Completed,
   CompactionStatus::Failed,
   CompactionStatus::Compacted,
+  CompactionStatus::Scheduled,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -490,15 +491,20 @@ impl CompactionStatus {
   /// The worker finished execution and wrote its final output SSTs; the
   /// compaction coordinator has not yet committed the result to the manifest.
   pub const Compacted: Self = Self(4);
+  /// The coordinator has validated the spec against the current manifest and
+  /// promoted the entry; the job is ready to be claimed by a worker. Only the
+  /// coordinator writes this state.
+  pub const Scheduled: Self = Self(5);
 
   pub const ENUM_MIN: i8 = 0;
-  pub const ENUM_MAX: i8 = 4;
+  pub const ENUM_MAX: i8 = 5;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::Submitted,
     Self::Running,
     Self::Completed,
     Self::Failed,
     Self::Compacted,
+    Self::Scheduled,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -508,6 +514,7 @@ impl CompactionStatus {
       Self::Completed => Some("Completed"),
       Self::Failed => Some("Failed"),
       Self::Compacted => Some("Compacted"),
+      Self::Scheduled => Some("Scheduled"),
       _ => None,
     }
   }

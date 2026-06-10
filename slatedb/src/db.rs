@@ -767,6 +767,14 @@ impl Db {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
 
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
+            .await
+        {
+            warn!("failed to shutdown compaction worker task [error={:?}]", e);
+        }
+
         if let Err(e) = self.task_executor.shutdown_task(GC_TASK_NAME).await {
             warn!("failed to shutdown garbage collector task [error={:?}]", e);
         }
@@ -2059,9 +2067,9 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;
     use crate::config::{
-        CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
-        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, Ttl,
-        WriteOptions,
+        CheckpointOptions, CompactionWorkerOptions, CompactorOptions,
+        GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
+        PutOptions, ScanOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -4078,9 +4086,12 @@ mod tests {
                     // applying backpressure indefinitely.
                     Some(CompactorOptions {
                         poll_interval: Duration::from_millis(100),
-                        max_sst_size: 256,
                         max_concurrent_compactions: 1,
                         manifest_update_timeout: Duration::from_secs(300),
+                        worker: Some(CompactionWorkerOptions {
+                            max_sst_size: 256,
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     }),
                 ))
@@ -6196,9 +6207,13 @@ mod tests {
             127,
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
-                max_sst_size: 256,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
+                worker: Some(CompactionWorkerOptions {
+                    max_sst_size: 256,
+                    compactions_poll_interval: Duration::from_millis(100),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
         ))
@@ -6213,8 +6228,12 @@ mod tests {
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
                 manifest_update_timeout: Duration::from_secs(300),
-                max_sst_size: 256,
                 max_concurrent_compactions: 1,
+                worker: Some(CompactionWorkerOptions {
+                    max_sst_size: 256,
+                    compactions_poll_interval: Duration::from_millis(100),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
         ))
@@ -8527,9 +8546,12 @@ mod tests {
             128,
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(20),
-                max_sst_size: 128,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
+                worker: Some(CompactionWorkerOptions {
+                    max_sst_size: 128,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
         );
@@ -8679,9 +8701,12 @@ mod tests {
             128,
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(20),
-                max_sst_size: 128,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
+                worker: Some(CompactionWorkerOptions {
+                    max_sst_size: 128,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
         );
