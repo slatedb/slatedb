@@ -83,11 +83,37 @@ table Compaction {
     // Current lifecycle status for this compaction
     status: CompactionStatus;
 
-    // Output SSTs already produced by this compaction.
+    // Output SSTs already produced by this compaction. Empty while the
+    // compaction is running subcompactions; per-range output is tracked in
+    // `subcompactions` instead (RFC-0028).
     output_ssts: [CompactedSsTable];
 
     // Spec of the worker that has claimed this compaction. null = unclaimed
     worker: WorkerSpec;
+
+    // Subcompactions partitioning this compaction into non-overlapping key
+    // ranges (RFC-0028). Appended after pre-existing fields so vtable offsets
+    // for earlier fields remain stable across schema evolution. Absent or
+    // empty means the compaction runs as a single merge over the full
+    // keyspace.
+    subcompactions: [Subcompaction];
+}
+
+// A compaction over a sub-range of the parent compaction's key space
+// (RFC-0028). Subcompactions are only valid within the context of a parent
+// `Compaction` and let a single logical compaction execute its disjoint
+// ranges in parallel while resuming at range granularity after a failure.
+table Subcompaction {
+    // Key range covered by this subcompaction. Ranges of the subcompactions
+    // within a parent compaction are non-overlapping and together cover the
+    // full key space.
+    range: BytesRange (required);
+
+    // Current lifecycle status for this subcompaction.
+    status: CompactionStatus;
+
+    // Output SSTs already produced by this subcompaction.
+    output_ssts: [CompactedSsTable];
 }
 
 table CompactionsV1 {
