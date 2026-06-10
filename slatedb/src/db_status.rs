@@ -39,10 +39,6 @@ pub struct DbStatus {
     /// segment extractor is configured. Read it via
     /// [`DbStatus::list_segments`], which merges in the segments in the manifest.
     memtable_segments: Vec<SegmentPrefix>,
-    /// Whether this handle has a segment extractor configured. Determines
-    /// whether [`list_segments`](DbStatus::list_segments) can derive the
-    /// segments in the memtables.
-    has_segment_extractor: bool,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
 }
@@ -53,24 +49,7 @@ impl DbStatus {
     /// flushed.
     ///
     /// The result is sorted ascending by prefix and deduplicated.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on a *segmented* database whose handle has no segment
-    /// extractor configured — the memtable segments cannot be derived, so the
-    /// answer would be silently incomplete. Both [`Db`](crate::Db) and
-    /// [`DbReader`](crate::DbReader) validate their extractor against the
-    /// manifest at open time, so in practice a handle on a segmented database
-    /// always has one; this remains a defensive guard.
     pub fn list_segments(&self) -> Result<Vec<SegmentPrefix>, crate::Error> {
-        let persisted_extractor = self.current_manifest.core().segment_extractor_name.clone();
-        if persisted_extractor.is_some() && !self.has_segment_extractor {
-            return Err(SlateDBError::SegmentExtractorMismatch {
-                persisted: persisted_extractor,
-                configured: None,
-            }
-            .into());
-        }
         let mut set: BTreeSet<Bytes> = self
             .current_manifest
             .core()
@@ -110,20 +89,17 @@ impl DbStatusManager {
                 id: 1,
                 manifest: Manifest::initial(ManifestCore::new()),
             },
-            false,
         )
     }
 
     pub(crate) fn new_with_manifest(
         initial_durable_seq: u64,
         initial_manifest: VersionedManifest,
-        has_segment_extractor: bool,
     ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
             current_manifest: initial_manifest,
             memtable_segments: Vec::new(),
-            has_segment_extractor,
             close_reason: None,
         });
         Self {
@@ -295,7 +271,7 @@ mod tests {
     #[test]
     fn should_initialize_with_no_segments_from_empty_manifest() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(1), false);
+        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(1));
 
         // when
         let status = mgr.status();
@@ -307,8 +283,7 @@ mod tests {
     #[test]
     fn should_initialize_with_segments_from_manifest() {
         // given
-        let mgr =
-            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]), true);
+        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]));
 
         // when
         let status = mgr.status();
@@ -323,8 +298,7 @@ mod tests {
     #[test]
     fn should_union_and_dedup_segments() {
         // given
-        let mgr =
-            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]), true);
+        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]));
         mgr.report_memtable_segments(BTreeSet::from([
             Bytes::from_static(b"b"),
             Bytes::from_static(b"c"),
@@ -347,8 +321,7 @@ mod tests {
     #[test]
     fn should_return_sorted_segments() {
         // given
-        let mgr =
-            DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"d", b"b"]), true);
+        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"d", b"b"]));
         mgr.report_memtable_segments(BTreeSet::from([
             Bytes::from_static(b"c"),
             Bytes::from_static(b"a"),
@@ -366,24 +339,6 @@ mod tests {
                 segment_prefix(b"c"),
                 segment_prefix(b"d")
             ]
-        );
-    }
-
-    #[test]
-    fn should_error_without_extractor() {
-        // given
-        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a"]), false);
-        let status = mgr.status();
-
-        // when
-        let err = status.list_segments().unwrap_err();
-
-        // then
-        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
-        assert!(
-            err.to_string()
-                .contains("segment extractor configuration mismatch"),
-            "unexpected error message: {err}"
         );
     }
 
@@ -476,7 +431,7 @@ mod tests {
     fn should_not_notify_on_same_manifest() {
         // given
         let initial = versioned_manifest(1);
-        let mgr = DbStatusManager::new_with_manifest(0, initial.clone(), false);
+        let mgr = DbStatusManager::new_with_manifest(0, initial.clone());
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 
@@ -490,7 +445,7 @@ mod tests {
     #[test]
     fn should_not_notify_on_older_manifest() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(5), false);
+        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(5));
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 

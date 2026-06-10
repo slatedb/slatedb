@@ -577,7 +577,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         let status_manager = DbStatusManager::new_with_manifest(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),
-            self.segment_extractor.is_some(),
         );
 
         // Setup communication channels wired to the shared closed state.
