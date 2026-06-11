@@ -479,7 +479,7 @@ impl DbReaderInner {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
             cache_blocks: true,
-            cache_metadata: true,
+            cache_metadata: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
