@@ -54,7 +54,7 @@
 //! represents a description (Spec), a durable decision (Compaction), or a running
 //! attempt (JobSpec).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,7 +85,6 @@ use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
-use slatedb_common::metrics::{GaugeFn, MetricsRecorderHelper};
 use slatedb_common::DbRand;
 
 pub use crate::compactor_state::{
@@ -313,7 +312,6 @@ pub struct Compactor {
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
-    recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
     merge_operator: Option<MergeOperatorType>,
     #[cfg(feature = "compaction_filters")]
@@ -353,7 +351,6 @@ impl Compactor {
             compactor_runtime,
             rand,
             stats,
-            recorder: recorder.clone(),
             system_clock,
             merge_operator,
             #[cfg(feature = "compaction_filters")]
@@ -386,7 +383,6 @@ impl Compactor {
             scheduler,
             self.rand.clone(),
             self.stats.clone(),
-            self.recorder.clone(),
             self.system_clock.clone(),
         )
         .await?;
@@ -509,13 +505,6 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
-    /// Recorder kept for lazily registering per-worker heartbeat gauges.
-    recorder: MetricsRecorderHelper,
-    /// IDs of `Running` compactions observed on the previous tick; used to
-    /// detect new claims and increment `jobs_claimed`.
-    prev_running_jobs: HashSet<Ulid>,
-    /// Lazily-created per-worker heartbeat gauges keyed by `worker_id`.
-    worker_heartbeat_gauges: HashMap<String, Arc<dyn GaugeFn>>,
 }
 
 #[async_trait]
@@ -566,7 +555,6 @@ impl CompactorEventHandler {
         scheduler: Arc<dyn CompactionScheduler + Send + Sync>,
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
-        recorder: MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
@@ -585,10 +573,7 @@ impl CompactorEventHandler {
             scheduler,
             rand,
             stats,
-            recorder,
             system_clock,
-            prev_running_jobs: HashSet::new(),
-            worker_heartbeat_gauges: HashMap::new(),
         })
     }
 
@@ -1226,8 +1211,6 @@ pub mod stats {
         pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_value: Arc<dyn CounterFn>,
         pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
-        pub(crate) jobs_claimed: Arc<dyn CounterFn>,
-        pub(crate) jobs_reclaimed: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1254,8 +1237,6 @@ pub mod stats {
                     .labels(&[(ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE)])
                     .description(EXPIRED_ENTRIES_PURGED_DESCRIPTION)
                     .register(),
-                jobs_claimed: recorder.counter(JOBS_CLAIMED).register(),
-                jobs_reclaimed: recorder.counter(JOBS_RECLAIMED).register(),
             }
         }
 
@@ -4402,7 +4383,6 @@ mod tests {
                 scheduler.clone(),
                 rand.clone(),
                 compactor_stats.clone(),
-                recorder,
                 Arc::new(DefaultSystemClock::new()),
             )
             .await
@@ -4473,7 +4453,6 @@ mod tests {
                 scheduler.clone(),
                 rand.clone(),
                 compactor_stats.clone(),
-                recorder,
                 system_clock.clone(),
             )
             .await
@@ -4935,7 +4914,6 @@ mod tests {
             scheduler,
             rand,
             compactor_stats,
-            recorder,
             system_clock,
         )
         .await
