@@ -19,6 +19,14 @@ use ulid::Ulid;
 
 use crate::error::{CloseReason, SlateDbError};
 
+pub(crate) fn map_bound(b: Bound<Vec<u8>>) -> Bound<Bytes> {
+    match b {
+        Bound::Included(v) => Bound::Included(Bytes::from(v)),
+        Bound::Excluded(v) => Bound::Excluded(Bytes::from(v)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
 type KeyBound = Bound<Vec<u8>>;
 type KeyBounds = (KeyBound, KeyBound);
 /// A half-open or closed byte-key range used by scan APIs.
@@ -504,17 +512,7 @@ impl CacheTarget {
             CacheTarget::Stats => CoreCacheTarget::Stats,
             CacheTarget::Data { range } => {
                 let (start, end) = range.into_bounds_unchecked();
-                let start = match start {
-                    Bound::Included(v) => Bound::Included(Bytes::from(v)),
-                    Bound::Excluded(v) => Bound::Excluded(Bytes::from(v)),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                let end = match end {
-                    Bound::Included(v) => Bound::Included(Bytes::from(v)),
-                    Bound::Excluded(v) => Bound::Excluded(Bytes::from(v)),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                CoreCacheTarget::Data((start, end))
+                CoreCacheTarget::Data((map_bound(start), map_bound(end)))
             }
         }
     }

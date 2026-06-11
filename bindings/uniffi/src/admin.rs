@@ -1,8 +1,10 @@
 use std::ops::Bound;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
+use crate::clone_builder::{CloneBuilder, CloneSourceSpec};
 use crate::error::{Error, SlateDbError};
 use crate::types::{
     Checkpoint, Compaction, CompactorStateView, VersionedCompactions, VersionedManifest,
@@ -115,5 +117,18 @@ impl Admin {
             .get_sequence_for_timestamp(timestamp, round_up)
             .await
             .map_err(Into::into)
+    }
+
+    /// Returns a [`CloneBuilder`] for cloning this database using `source` as the first source.
+    ///
+    /// Unlike [`crate::builder::AdminBuilder`], this method preserves any `projection_range`
+    /// already set on `source`, which is required when combining multiple sources via
+    /// [`CloneBuilder::with_source`] to ensure each source covers a non-overlapping key range.
+    pub fn create_clone_builder_from_source(
+        &self,
+        source: Arc<CloneSourceSpec>,
+    ) -> Arc<CloneBuilder> {
+        let spec = source.clone_inner();
+        CloneBuilder::from_inner(self.inner.create_clone_builder_from_source(spec))
     }
 }

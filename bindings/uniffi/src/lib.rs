@@ -1,5 +1,6 @@
 mod admin;
 mod builder;
+mod clone_builder;
 mod config;
 mod db;
 mod db_cache;
@@ -20,6 +21,7 @@ mod write_batch;
 
 pub use admin::Admin;
 pub use builder::{AdminBuilder, DbBuilder, DbReaderBuilder};
+pub use clone_builder::{CloneBuilder, CloneSourceSpec};
 pub use config::{
     DurabilityLevel, FlushOptions, FlushType, IsolationLevel, IterationOrder, MergeOptions,
     PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
