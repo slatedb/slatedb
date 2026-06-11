@@ -186,7 +186,6 @@ async def test_admin_clone() -> None:
         async with open_db(store, path=path) as db:
             await db.put(f"k{i}".encode("utf-8"), f"v{i}".encode("utf-8"))
             await db.flush()
-            await db.shutdown()
         sources.append(CloneSourceSpec(path=path, checkpoint=None, projection_range=None))
 
 
