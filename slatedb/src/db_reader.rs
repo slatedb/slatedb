@@ -1017,11 +1017,8 @@ impl DbReader {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = BytesRange::from((start, end));
-        // Consult prefix bloom filters when a prefix is inferable from the
-        // range bounds; see `Db::scan_with_options`.
-        let prefix = range.infer_prefix();
         self.inner
-            .scan_with_options(range, options, prefix)
+            .scan_with_options(range, options, None)
             .await
             .map_err(Into::into)
     }

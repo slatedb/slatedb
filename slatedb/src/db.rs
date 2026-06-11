@@ -243,12 +243,6 @@ impl DbInner {
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
-        // Range scans consult prefix bloom filters when a prefix can be
-        // inferred from the bounds — the same machinery as `scan_prefix`,
-        // with the prefix derived instead of caller-supplied. Inference is
-        // conservative (every key in the range starts with it), so it can
-        // only skip SSTs that contain no matching keys.
-        let prefix = range.infer_prefix();
         self.reader
             .scan_with_options(
                 range,
@@ -257,7 +251,7 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    prefix,
+                    prefix: None,
                 },
             )
             .await

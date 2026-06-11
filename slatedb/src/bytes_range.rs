@@ -117,56 +117,6 @@ impl BytesRange {
         None
     }
 
-    /// Infer the longest prefix that every key in this range is guaranteed to
-    /// start with, i.e. the longest `p` with `from_prefix(p)` a superset of
-    /// `self`. Returns `None` when no nonempty such prefix exists (in
-    /// particular when either bound is unbounded).
-    ///
-    /// This is what lets plain range scans consult prefix bloom filters: any
-    /// key the scan could return starts with the inferred prefix, so probing
-    /// the filters with it can never cause a false-negative SST skip. Two
-    /// cases compose the answer:
-    ///
-    /// - The longest common prefix of the two bounds. Any key between the
-    ///   bounds must agree with both on those bytes.
-    /// - One step further when the exclusive end bound is exactly the
-    ///   "increment" of a longer prefix of the start bound (e.g.
-    ///   `b"user1:42".."user2"` infers `user1`, not just `user`): the range
-    ///   then sits inside that prefix's half-open keyspace even though the
-    ///   bounds' common prefix is shorter. This is the natural shape of
-    ///   "scan from a cursor to the end of a logical prefix".
-    ///
-    /// The inferred prefix is a conservative lower bound on specificity, not
-    /// necessarily the longest theoretically valid one; configured prefix
-    /// extractors truncate it to their canonical length anyway.
-    pub(crate) fn infer_prefix(&self) -> Option<Bytes> {
-        let start = match self.start_bound() {
-            Included(b) | Excluded(b) => b,
-            Unbounded => return None,
-        };
-        let end = match self.end_bound() {
-            Included(b) | Excluded(b) => b,
-            Unbounded => return None,
-        };
-        let lcp = start
-            .iter()
-            .zip(end.iter())
-            .take_while(|(a, b)| a == b)
-            .count();
-        // Exclusive-end extension: the longest k > lcp for which the end
-        // bound is precisely the upper fence of `start[..k]`'s keyspace.
-        // (k > lcp + 1 occurs when start[lcp+1..k] is a run of 0xff bytes,
-        // which the fence increment collapses.)
-        if matches!(self.end_bound(), Bound::Excluded(_)) {
-            for k in ((lcp + 1)..=start.len()).rev() {
-                if Self::increment_prefix(&start[..k]).as_deref() == Some(end.as_ref()) {
-                    return Some(Bytes::copy_from_slice(&start[..k]));
-                }
-            }
-        }
-        (lcp > 0).then(|| Bytes::copy_from_slice(&start[..lcp]))
-    }
-
     #[cfg(test)]
     pub(crate) fn from_ref<K, T>(range: T) -> Self
     where
@@ -242,80 +192,6 @@ pub(crate) mod tests {
     fn test_arbitrary_empty_range() {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
-        });
-    }
-
-    #[test]
-    fn test_infer_prefix_returns_common_prefix_of_bounds() {
-        let range = BytesRange::from_slice(&b"user1:0005"[..]..&b"user1:0042"[..]);
-        assert_eq!(range.infer_prefix(), Some(Bytes::from("user1:00")));
-    }
-
-    #[test]
-    fn test_infer_prefix_extends_to_excluded_increment_fence() {
-        // Scan-from-cursor-to-end-of-prefix: the bounds' common prefix is
-        // only "user", but the exclusive end is exactly the upper fence of
-        // "user1"'s keyspace, so every key in the range starts with "user1".
-        let range = BytesRange::new(
-            Bound::Included(Bytes::from("user1:0042")),
-            Bound::Excluded(Bytes::from("user2")),
-        );
-        assert_eq!(range.infer_prefix(), Some(Bytes::from("user1")));
-    }
-
-    #[test]
-    fn test_infer_prefix_extends_across_ff_run() {
-        // increment_prefix(b"ab\xff") collapses the 0xff tail: the fence of
-        // "ab\xff" is "ac", so the extension must look past the lcp+1 byte.
-        let range = BytesRange::new(
-            Bound::Included(Bytes::from(&b"ab\xff\x07"[..])),
-            Bound::Excluded(Bytes::from("ac")),
-        );
-        assert_eq!(range.infer_prefix(), Some(Bytes::from(&b"ab\xff"[..])));
-    }
-
-    #[test]
-    fn test_infer_prefix_does_not_extend_for_included_end() {
-        // With an inclusive end the fence key itself is in the range and
-        // does not start with the longer prefix; only the lcp is safe.
-        let range = BytesRange::new(
-            Bound::Included(Bytes::from("user1:0042")),
-            Bound::Included(Bytes::from("user2")),
-        );
-        assert_eq!(range.infer_prefix(), Some(Bytes::from("user")));
-    }
-
-    #[test]
-    fn test_infer_prefix_point_range_returns_full_key() {
-        let range = BytesRange::from_slice(&b"abc"[..]..=&b"abc"[..]);
-        assert_eq!(range.infer_prefix(), Some(Bytes::from("abc")));
-    }
-
-    #[test]
-    fn test_infer_prefix_none_when_unbounded_or_disjoint() {
-        assert_eq!(BytesRange::unbounded().infer_prefix(), None);
-        let from = BytesRange::new(Bound::Included(Bytes::from("abc")), Unbounded);
-        assert_eq!(from.infer_prefix(), None);
-        let to = BytesRange::new(Unbounded, Bound::Excluded(Bytes::from("abc")));
-        assert_eq!(to.infer_prefix(), None);
-        let disjoint = BytesRange::from_slice(&b"apple"[..]..&b"banana"[..]);
-        assert_eq!(disjoint.infer_prefix(), None);
-    }
-
-    #[test]
-    fn test_infer_prefix_is_superset_of_range() {
-        // Safety property: every key sampled from a random range must start
-        // with the inferred prefix — a violation would cause false-negative
-        // SST skips on filter probes.
-        proptest!(|(range in arbitrary::nonempty_range(10), mut rng in arbitrary::rng())| {
-            if let Some(prefix) = range.infer_prefix() {
-                let key = sample::bytes_in_range(&mut rng, &range);
-                prop_assert!(
-                    key.starts_with(prefix.as_ref()),
-                    "key {:?} in {:?} does not start with inferred {:?}",
-                    key, range, prefix,
-                );
-            }
         });
     }
 

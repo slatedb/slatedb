@@ -227,10 +227,7 @@ impl DbTransaction {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = BytesRange::from((start, end));
-        // Consult prefix bloom filters when a prefix is inferable from the
-        // range bounds; see `Db::scan_with_options`.
-        let prefix = range.infer_prefix();
-        self.scan_inner(range, options, prefix).await
+        self.scan_inner(range, options, None).await
     }
 
     /// Scan all keys that share the provided prefix using the default scan options.
