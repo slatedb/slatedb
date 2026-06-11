@@ -60,19 +60,13 @@ impl KeyRange {
         }
     }
 
-    pub(crate) fn to_range_bounds(&self) -> (Bound<Bytes>, Bound<Bytes>) {
-        (
-            match &self.start {
-                Some(start) if self.start_inclusive => Bound::Included(Bytes::from(start.clone())),
-                Some(start) => Bound::Excluded(Bytes::from(start.clone())),
-                None => Bound::Unbounded,
-            },
-            match &self.end {
-                Some(end) if self.end_inclusive => Bound::Included(Bytes::from(end.clone())),
-                Some(end) => Bound::Excluded(Bytes::from(end.clone())),
-                None => Bound::Unbounded,
-            },
-        )
+    pub(crate) fn into_range_bounds(self) -> Result<(Bound<Bytes>, Bound<Bytes>), SlateDbError> {
+        self.into_bounds().map(|key_bounds| {
+            (
+                key_bounds.start_bound().map(|v| Bytes::from(v.clone())),
+                key_bounds.end_bound().map(|v| Bytes::from(v.clone())),
+            )
+        })
     }
 
     pub(crate) fn into_bounds(self) -> Result<KeyBounds, SlateDbError> {
@@ -729,7 +723,8 @@ impl TryInto<slatedb::CloneSourceSpec> for CloneSourceSpec {
                 .transpose()?,
             projection_range: self
                 .projection_range
-                .map(|key_range| key_range.to_range_bounds()),
+                .map(|key_range| key_range.into_range_bounds())
+                .transpose()?,
         })
     }
 }
