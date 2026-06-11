@@ -17,7 +17,9 @@ use slatedb::ValueDeletable;
 use slatedb::{Checkpoint as CoreCheckpoint, VersionedCompactions as CoreVersionedCompactions};
 use ulid::Ulid;
 
-use crate::error::{CloseReason, SlateDbError};
+use uuid::Uuid;
+
+use crate::error::{CloseReason, Error, SlateDbError};
 
 type KeyBound = Bound<Vec<u8>>;
 type KeyBounds = (KeyBound, KeyBound);
@@ -56,6 +58,15 @@ impl KeyRange {
             end,
             end_inclusive,
         }
+    }
+
+    pub(crate) fn into_range_bounds(self) -> Result<(Bound<Bytes>, Bound<Bytes>), SlateDbError> {
+        self.into_bounds().map(|key_bounds| {
+            (
+                key_bounds.start_bound().map(|v| Bytes::from(v.clone())),
+                key_bounds.end_bound().map(|v| Bytes::from(v.clone())),
+            )
+        })
     }
 
     pub(crate) fn into_bounds(self) -> Result<KeyBounds, SlateDbError> {
@@ -684,5 +695,36 @@ fn filter_format_from_debug(value: &impl std::fmt::Debug) -> FilterFormat {
         "Legacy" => FilterFormat::Legacy,
         "Composite" => FilterFormat::Composite,
         other => unreachable!("unexpected FilterFormat variant: {other}"),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CloneSourceSpec {
+    /// Path to the source database.
+    pub path: String,
+    /// Optional checkpoint UUID string; when `None` the latest state is used.
+    pub checkpoint: Option<String>,
+    /// Optional key range to restrict the visible keys from this source.
+    pub projection_range: Option<KeyRange>,
+}
+
+impl TryInto<slatedb::CloneSourceSpec> for CloneSourceSpec {
+    type Error = Error;
+
+    fn try_into(self) -> Result<slatedb::CloneSourceSpec, Self::Error> {
+        Ok(slatedb::CloneSourceSpec {
+            path: self.path.into(),
+            checkpoint: self
+                .checkpoint
+                .map(|checkpoint| {
+                    Uuid::parse_str(&checkpoint)
+                        .map_err(|source| SlateDbError::InvalidCheckpointId { source })
+                })
+                .transpose()?,
+            projection_range: self
+                .projection_range
+                .map(|key_range| key_range.into_range_bounds())
+                .transpose()?,
+        })
     }
 }

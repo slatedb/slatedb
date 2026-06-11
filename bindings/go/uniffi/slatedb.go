@@ -392,6 +392,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder()
+		})
+		if checksum != 30675 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp()
 		})
 		if checksum != 39670 {
@@ -496,6 +505,69 @@ func uniffiCheckChecksums() {
 		if checksum != 18899 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_clonebuilder_build()
+		})
+		if checksum != 62465 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_clonebuilder_build: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_clone_path()
+		})
+		if checksum != 35576 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_clone_path: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_object_store()
+		})
+		if checksum != 52714 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_object_store: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_projection_range()
+		})
+		if checksum != 60945 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_projection_range: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_seed()
+		})
+		if checksum != 12852 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_seed: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_source()
+		})
+		if checksum != 12666 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_source: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_wal_object_store()
+		})
+		if checksum != 46735 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_clonebuilder_with_wal_object_store: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2030,6 +2102,7 @@ func (ffiObject *FfiObject) freeRustArcPtr() {
 
 // Administrative read/query handle for SlateDB.
 type AdminInterface interface {
+	CreateCloneBuilder(parentPath string, parentCheckpoint *string) (*CloneBuilder, error)
 	// Looks up a sequence number for the provided Unix UTC timestamp seconds.
 	GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (*uint64, error)
 	// Looks up a timestamp for the provided sequence number.
@@ -2053,6 +2126,21 @@ type AdminInterface interface {
 // Administrative read/query handle for SlateDB.
 type Admin struct {
 	ffiObject FfiObject
+}
+
+func (_self *Admin) CreateCloneBuilder(parentPath string, parentCheckpoint *string) (*CloneBuilder, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_admin_create_clone_builder(
+			_pointer, FfiConverterStringINSTANCE.Lower(parentPath), FfiConverterOptionalStringINSTANCE.Lower(parentCheckpoint), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *CloneBuilder
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterCloneBuilderINSTANCE.Lift(_uniffiRV), nil
+	}
 }
 
 // Looks up a sequence number for the provided Unix UTC timestamp seconds.
@@ -2552,6 +2640,173 @@ func LowerToExternalAdminBuilder(value *AdminBuilder) uint64 {
 type FfiDestroyerAdminBuilder struct{}
 
 func (_ FfiDestroyerAdminBuilder) Destroy(value *AdminBuilder) {
+	value.Destroy()
+}
+
+type CloneBuilderInterface interface {
+	// Runs the clone operation and consumes this builder.
+	Build() error
+	WithClonePath(clonePath string) error
+	WithObjectStore(objectStore *ObjectStore) error
+	WithProjectionRange(projectionRange *KeyRange) error
+	WithSeed(seed uint64) error
+	WithSource(source CloneSourceSpec) error
+	WithWalObjectStore(walObjectStore *ObjectStore) error
+}
+type CloneBuilder struct {
+	ffiObject FfiObject
+}
+
+// Runs the clone operation and consumes this builder.
+func (_self *CloneBuilder) Build() error {
+	_pointer := _self.ffiObject.incrementPointer("*CloneBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_clonebuilder_build(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+func (_self *CloneBuilder) WithClonePath(clonePath string) error {
+	_pointer := _self.ffiObject.incrementPointer("*CloneBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_clonebuilder_with_clone_path(
+			_pointer, FfiConverterStringINSTANCE.Lower(clonePath), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+func (_self *CloneBuilder) WithObjectStore(objectStore *ObjectStore) error {
+	_pointer := _self.ffiObject.incrementPointer("*CloneBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_clonebuilder_with_object_store(
+			_pointer, FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+func (_self *CloneBuilder) WithProjectionRange(projectionRange *KeyRange) error {
+	_pointer := _self.ffiObject.incrementPointer("*CloneBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_clonebuilder_with_projection_range(
+			_pointer, FfiConverterOptionalKeyRangeINSTANCE.Lower(projectionRange), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+func (_self *CloneBuilder) WithSeed(seed uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*CloneBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_clonebuilder_with_seed(
+			_pointer, FfiConverterUint64INSTANCE.Lower(seed), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+func (_self *CloneBuilder) WithSource(source CloneSourceSpec) error {
+	_pointer := _self.ffiObject.incrementPointer("*CloneBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_clonebuilder_with_source(
+			_pointer, FfiConverterCloneSourceSpecINSTANCE.Lower(source), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+func (_self *CloneBuilder) WithWalObjectStore(walObjectStore *ObjectStore) error {
+	_pointer := _self.ffiObject.incrementPointer("*CloneBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_clonebuilder_with_wal_object_store(
+			_pointer, FfiConverterObjectStoreINSTANCE.Lower(walObjectStore), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+func (object *CloneBuilder) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterCloneBuilder struct{}
+
+var FfiConverterCloneBuilderINSTANCE = FfiConverterCloneBuilder{}
+
+func (c FfiConverterCloneBuilder) Lift(handle C.uint64_t) *CloneBuilder {
+	result := &CloneBuilder{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_clonebuilder(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_clonebuilder(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*CloneBuilder).Destroy)
+	return result
+}
+
+func (c FfiConverterCloneBuilder) Read(reader io.Reader) *CloneBuilder {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterCloneBuilder) Lower(value *CloneBuilder) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*CloneBuilder")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterCloneBuilder) Write(writer io.Writer, value *CloneBuilder) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalCloneBuilder(handle uint64) *CloneBuilder {
+	return FfiConverterCloneBuilderINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalCloneBuilder(value *CloneBuilder) uint64 {
+	return uint64(FfiConverterCloneBuilderINSTANCE.Lower(value))
+}
+
+type FfiDestroyerCloneBuilder struct{}
+
+func (_ FfiDestroyerCloneBuilder) Destroy(value *CloneBuilder) {
 	value.Destroy()
 }
 
@@ -8360,6 +8615,57 @@ func (_ FfiDestroyerCheckpoint) Destroy(value Checkpoint) {
 	value.Destroy()
 }
 
+type CloneSourceSpec struct {
+	// Path to the source database.
+	Path string
+	// Optional checkpoint UUID string; when `None` the latest state is used.
+	Checkpoint *string
+	// Optional key range to restrict the visible keys from this source.
+	ProjectionRange *KeyRange
+}
+
+func (r *CloneSourceSpec) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Path)
+	FfiDestroyerOptionalString{}.Destroy(r.Checkpoint)
+	FfiDestroyerOptionalKeyRange{}.Destroy(r.ProjectionRange)
+}
+
+type FfiConverterCloneSourceSpec struct{}
+
+var FfiConverterCloneSourceSpecINSTANCE = FfiConverterCloneSourceSpec{}
+
+func (c FfiConverterCloneSourceSpec) Lift(rb RustBufferI) CloneSourceSpec {
+	return LiftFromRustBuffer[CloneSourceSpec](c, rb)
+}
+
+func (c FfiConverterCloneSourceSpec) Read(reader io.Reader) CloneSourceSpec {
+	return CloneSourceSpec{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalKeyRangeINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCloneSourceSpec) Lower(value CloneSourceSpec) C.RustBuffer {
+	return LowerIntoRustBuffer[CloneSourceSpec](c, value)
+}
+
+func (c FfiConverterCloneSourceSpec) LowerExternal(value CloneSourceSpec) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CloneSourceSpec](c, value))
+}
+
+func (c FfiConverterCloneSourceSpec) Write(writer io.Writer, value CloneSourceSpec) {
+	FfiConverterStringINSTANCE.Write(writer, value.Path)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Checkpoint)
+	FfiConverterOptionalKeyRangeINSTANCE.Write(writer, value.ProjectionRange)
+}
+
+type FfiDestroyerCloneSourceSpec struct{}
+
+func (_ FfiDestroyerCloneSourceSpec) Destroy(value CloneSourceSpec) {
+	value.Destroy()
+}
+
 // Canonical compaction record.
 type Compaction struct {
 	// Compaction ULID string.
@@ -9219,7 +9525,8 @@ type ReadOptions struct {
 	DurabilityFilter DurabilityLevel
 	// Whether uncommitted dirty data may be returned.
 	Dirty bool
-	// Whether fetched blocks should be inserted into the block cache.
+	// Whether fetched data blocks should be inserted into the block cache.
+	// SST metadata is cached independently.
 	CacheBlocks bool
 	// Optional context forwarded to custom filter policies; ignored by
 	// built-in filters.
@@ -9403,7 +9710,8 @@ type ScanOptions struct {
 	Dirty bool
 	// Number of bytes to read ahead while scanning.
 	ReadAheadBytes uint64
-	// Whether fetched blocks should be inserted into the block cache.
+	// Whether fetched data blocks should be inserted into the block cache.
+	// SST metadata is cached independently.
 	CacheBlocks bool
 	// Maximum number of concurrent fetch tasks used by the scan.
 	MaxFetchTasks uint64

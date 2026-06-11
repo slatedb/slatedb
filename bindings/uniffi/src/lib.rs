@@ -20,7 +20,7 @@ mod wal_reader;
 mod write_batch;
 
 pub use admin::Admin;
-pub use builder::{AdminBuilder, DbBuilder, DbReaderBuilder};
+pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
 pub use config::{
     DurabilityLevel, FlushOptions, FlushType, IsolationLevel, IterationOrder, MergeOptions,
     PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
@@ -43,10 +43,10 @@ pub use metrics::{
 pub use object_store::ObjectStore;
 pub use settings::Settings;
 pub use types::{
-    CacheTarget, Checkpoint, Compaction, CompactionSpec, CompactionStatus, CompactorStateView,
-    CompressionCodec, DbStatus, ExternalDb, FilterFormat, KeyRange, KeyValue, RowEntry,
-    RowEntryKind, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
-    VersionedCompactions, VersionedManifest, WriteHandle,
+    CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,
+    CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat, KeyRange, KeyValue,
+    RowEntry, RowEntryKind, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo,
+    SsTableView, SstType, VersionedCompactions, VersionedManifest, WriteHandle,
 };
 pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
 pub use write_batch::WriteBatch;

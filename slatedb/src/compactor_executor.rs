@@ -275,6 +275,7 @@ impl TokioCompactionExecutorInner {
                 .table_store
                 .bytes_to_blocks(self.options.bytes_to_fetch),
             cache_blocks: false, // don't clobber the cache
+            cache_metadata: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,

@@ -511,6 +511,7 @@ impl DbInner {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
             cache_blocks: false,
+            cache_metadata: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
