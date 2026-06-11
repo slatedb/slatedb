@@ -44,7 +44,7 @@ pub use compaction_worker::CompactionWorker;
 pub use compactor::CompactorBuilder;
 pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
-pub use db::builder::CompactionWorkerBuilder;
+pub use db::builder::{CloneSourceSpec, CompactionWorkerBuilder};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_cache_manager::CacheTarget;
