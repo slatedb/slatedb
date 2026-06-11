@@ -1,4 +1,3 @@
-use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::admin::Admin;
@@ -15,7 +14,6 @@ use crate::settings::Settings;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
-use slatedb::bytes::Bytes;
 use uuid::Uuid;
 
 /// Builder for opening a writable [`crate::Db`].
@@ -293,13 +291,11 @@ impl AdminBuilder {
 
 #[derive(uniffi::Object)]
 pub struct CloneBuilder {
-    builder: Mutex<Option<slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>>>,
+    builder: Mutex<Option<slatedb::admin::CloneBuilder>>,
 }
 
 impl CloneBuilder {
-    pub(crate) fn new(
-        inner: slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>,
-    ) -> Arc<Self> {
+    pub(crate) fn new(inner: slatedb::admin::CloneBuilder) -> Arc<Self> {
         Arc::new(Self {
             builder: Mutex::new(Some(inner)),
         })
@@ -307,9 +303,7 @@ impl CloneBuilder {
 
     fn update_builder(
         &self,
-        update: impl FnOnce(
-            slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>,
-        ) -> slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>,
+        update: impl FnOnce(slatedb::admin::CloneBuilder) -> slatedb::admin::CloneBuilder,
     ) -> Result<(), Error> {
         let mut guard = self.builder.lock();
         let builder = guard.take().ok_or(SlateDbError::BuilderConsumed)?;
@@ -317,9 +311,7 @@ impl CloneBuilder {
         Ok(())
     }
 
-    fn take_builder(
-        &self,
-    ) -> Result<slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>, SlateDbError> {
+    fn take_builder(&self) -> Result<slatedb::admin::CloneBuilder, SlateDbError> {
         let mut guard = self.builder.lock();
         guard.take().ok_or(SlateDbError::BuilderConsumed)
     }
