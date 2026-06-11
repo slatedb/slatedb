@@ -171,6 +171,34 @@ test("admin checkpoint listing tracks reader lifecycle", async (t) => {
   });
 });
 
+test("admin clone merges sources into destination", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+
+  const sources = [];
+  for (let i = 0; i < 3; i++) {
+    const path = uniquePath(`admin-clone-original-${i}`);
+    const db = await openDb(store, { path, cleanup });
+    await db.put(bytes(`k${i}`), bytes(`v${i}`));
+    await db.flush();
+    await db.shutdown();
+    sources.push({ path, checkpoint: undefined, projection_range: undefined });
+  }
+
+  const clonePath = uniquePath("admin-clone-clone");
+  const admin = openAdmin(store, { path: clonePath, cleanup });
+  const cloneBuilder = cleanup.track(admin.create_clone_builder(sources[0].path, undefined), { shutdown: false });
+  for (const source of sources.slice(1)) {
+    cloneBuilder.with_source(source);
+  }
+  await cloneBuilder.build();
+
+  const db = await openDb(store, { path: clonePath, cleanup });
+  for (let i = 0; i < 3; i++) {
+    assert.deepEqual(await db.get(bytes(`k${i}`)), bytes(`v${i}`));
+  }
+});
+
 test("admin sequence lookups use persisted tracker", async (t) => {
   const cleanup = createCleanup(t);
   const path = uniquePath("admin-seq-tracker");

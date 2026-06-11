@@ -1780,6 +1780,83 @@ func TestAdminQueries(t *testing.T) {
 	}
 }
 
+func TestAdminClone(t *testing.T) {
+	store := newMemoryStore(t)
+
+	sources := make([]slatedb.CloneSourceSpec, 3)
+	for i := range sources {
+		path := fmt.Sprintf("admin-clone-original-%d", i)
+		builder := slatedb.NewDbBuilder(path, store)
+		db, err := builder.Build()
+		builder.Destroy()
+		if err != nil {
+			t.Fatalf("Build() source %d: %v", i, err)
+		}
+		if _, err := db.Put([]byte(fmt.Sprintf("k%d", i)), []byte(fmt.Sprintf("v%d", i))); err != nil {
+			t.Fatalf("Put() source %d: %v", i, err)
+		}
+		if err := db.Flush(); err != nil {
+			t.Fatalf("Flush() source %d: %v", i, err)
+		}
+		if err := db.Shutdown(); err != nil {
+			t.Fatalf("Shutdown() source %d: %v", i, err)
+		}
+		db.Destroy()
+		sources[i] = slatedb.CloneSourceSpec{Path: path}
+	}
+
+	clonePath := "admin-clone-clone"
+	builder := slatedb.NewAdminBuilder(clonePath, store)
+	admin, err := builder.Build()
+	builder.Destroy()
+	if err != nil {
+		t.Fatalf("AdminBuilder.Build(): %v", err)
+	}
+	defer admin.Destroy()
+
+	cloneBuilder, err := admin.CreateCloneBuilder(sources[0].Path, nil)
+	if err != nil {
+		t.Fatalf("CreateCloneBuilder(): %v", err)
+	}
+	defer cloneBuilder.Destroy()
+
+	for _, source := range sources[1:] {
+		if err := cloneBuilder.WithSource(source); err != nil {
+			t.Fatalf("WithSource(): %v", err)
+		}
+	}
+	if err := cloneBuilder.Build(); err != nil {
+		t.Fatalf("CloneBuilder.Build(): %v", err)
+	}
+
+	cloneBuilder2 := slatedb.NewDbBuilder(clonePath, store)
+	cloneDb, err := cloneBuilder2.Build()
+	cloneBuilder2.Destroy()
+	if err != nil {
+		t.Fatalf("Build() clone: %v", err)
+	}
+	defer func() {
+		if err := cloneDb.Shutdown(); err != nil {
+			t.Errorf("clone Shutdown(): %v", err)
+		}
+		cloneDb.Destroy()
+	}()
+
+	for i := range sources {
+		got, err := cloneDb.Get([]byte(fmt.Sprintf("k%d", i)))
+		if err != nil {
+			t.Fatalf("Get(k%d): %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Get(k%d): got nil", i)
+		}
+		want := []byte(fmt.Sprintf("v%d", i))
+		if !bytes.Equal(*got, want) {
+			t.Fatalf("Get(k%d): got %q, want %q", i, *got, want)
+		}
+	}
+}
+
 func TestWalReaderEmptyStore(t *testing.T) {
 	store := newMemoryStore(t)
 	reader := openTestWalReader(t, store)

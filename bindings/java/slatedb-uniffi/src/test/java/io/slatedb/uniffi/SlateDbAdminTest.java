@@ -1,5 +1,6 @@
 package io.slatedb.uniffi;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -7,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
@@ -43,6 +45,42 @@ class SlateDbAdminTest {
             Error.Invalid secondBuild =
                     TestSupport.expectFailure(Error.Invalid.class, () -> adminBuilder.build());
             assertTrue(secondBuild.getMessage().contains("builder has already been consumed"));
+        }
+    }
+
+    @Test
+    void adminCloneMergesSourcesIntoDestination() throws Exception {
+        try (ObjectStore store = TestSupport.newMemoryStore()) {
+            List<CloneSourceSpec> sources = new ArrayList<>();
+
+            for (int i = 0; i < 3; i++) {
+                String sourcePath = TestSupport.uniquePath("admin-clone-original-" + i);
+                try (TestSupport.ManagedDb handle = TestSupport.openDb(sourcePath, store, null)) {
+                    Db db = handle.db();
+                    TestSupport.await(db.put(TestSupport.bytes("k" + i), TestSupport.bytes("v" + i)));
+                    TestSupport.await(db.flush());
+                }
+                sources.add(new CloneSourceSpec(sourcePath, null, null));
+            }
+
+            String clonePath = TestSupport.uniquePath("admin-clone-clone");
+            try (AdminBuilder adminBuilder = new AdminBuilder(clonePath, store);
+                    Admin admin = adminBuilder.build();
+                    CloneBuilder cloneBuilder = admin.createCloneBuilder(sources.get(0).path(), null)) {
+                for (CloneSourceSpec source : sources.subList(1, sources.size())) {
+                    cloneBuilder.withSource(source);
+                }
+                TestSupport.await(cloneBuilder.build());
+            }
+
+            try (TestSupport.ManagedDb handle = TestSupport.openDb(clonePath, store, null)) {
+                Db db = handle.db();
+                for (int i = 0; i < 3; i++) {
+                    assertArrayEquals(
+                            TestSupport.bytes("v" + i),
+                            TestSupport.await(db.get(TestSupport.bytes("k" + i))));
+                }
+            }
         }
     }
 
