@@ -66,7 +66,7 @@ class SlateDbAdminTest {
             String clonePath = TestSupport.uniquePath("admin-clone-clone");
             try (AdminBuilder adminBuilder = new AdminBuilder(clonePath, store);
                     Admin admin = adminBuilder.build();
-                    CloneBuilder cloneBuilder = admin.createCloneBuilder(sources.get(0).path(), null)) {
+                    CloneBuilder cloneBuilder = admin.createCloneBuilderFromSource(sources.get(0))) {
                 for (CloneSourceSpec source : sources.subList(1, sources.size())) {
                     cloneBuilder.withSource(source);
                 }

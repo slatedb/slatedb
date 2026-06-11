@@ -191,7 +191,7 @@ async def test_admin_clone() -> None:
 
     clone_path = unique_path("admin-clone-clone")
     admin = AdminBuilder(clone_path, store).build()
-    clone_builder = admin.create_clone_builder(sources[0].path, None)
+    clone_builder = admin.create_clone_builder_from_source(sources[0])
     for source in sources[1:]:
         clone_builder.with_source(source)
     await clone_builder.build()

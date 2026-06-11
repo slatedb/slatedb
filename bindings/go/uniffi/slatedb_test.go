@@ -1814,9 +1814,9 @@ func TestAdminClone(t *testing.T) {
 	}
 	defer admin.Destroy()
 
-	cloneBuilder, err := admin.CreateCloneBuilder(sources[0].Path, nil)
+	cloneBuilder, err := admin.CreateCloneBuilderFromSource(sources[0])
 	if err != nil {
-		t.Fatalf("CreateCloneBuilder(): %v", err)
+		t.Fatalf("CreateCloneBuilderFromSource(): %v", err)
 	}
 	defer cloneBuilder.Destroy()
 
