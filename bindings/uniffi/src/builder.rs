@@ -329,13 +329,11 @@ impl CloneBuilder {
 impl CloneBuilder {
     pub fn with_clone_path(&self, clone_path: String) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_clone_path(clone_path.into()))
-            .map_err(Into::into)
     }
 
     pub fn with_source(&self, source: CloneSourceSpec) -> Result<(), Error> {
         let slatedb_source = source.try_into()?;
         self.update_builder(|builder| builder.with_source(slatedb_source))
-            .map_err(Into::into)
     }
 
     pub fn with_object_store(&self, object_store: Arc<ObjectStore>) -> Result<(), Error> {
@@ -344,7 +342,6 @@ impl CloneBuilder {
 
     pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
-            .map_err(Into::into)
     }
 
     pub fn with_projection_range(&self, projection_range: Option<KeyRange>) -> Result<(), Error> {
@@ -353,12 +350,10 @@ impl CloneBuilder {
                 projection_range.map(|key_range| key_range.to_range_bounds()),
             )
         })
-        .map_err(Into::into)
     }
 
     pub fn with_seed(&self, seed: u64) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_seed(seed))
-            .map_err(Into::into)
     }
 }
 
