@@ -337,11 +337,10 @@ impl CloneBuilder {
     }
 
     pub fn with_projection_range(&self, projection_range: Option<KeyRange>) -> Result<(), Error> {
-        self.update_builder(|builder| {
-            builder.with_projection_range(
-                projection_range.map(|key_range| key_range.to_range_bounds()),
-            )
-        })
+        let projection_range_bounds = projection_range
+            .map(|key_range| key_range.into_range_bounds())
+            .transpose()?;
+        self.update_builder(|builder| builder.with_projection_range(projection_range_bounds))
     }
 
     pub fn with_seed(&self, seed: u64) -> Result<(), Error> {
