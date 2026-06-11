@@ -151,6 +151,36 @@ impl DbStatusManager {
         });
     }
 
+    /// Atomically replace both the current manifest and the published memtable
+    /// segment set (RFC-0024) in a single status update. Combines the guards of
+    /// [`Self::report_manifest`] and [`Self::report_memtable_segments`] so
+    /// subscribers never observe a torn state — e.g. the manifest already grown
+    /// with the just-flushed prefixes while the memtable set has not yet shrunk
+    /// to drop them (or the reverse). Notifies subscribers once if either field
+    /// changes.
+    pub(crate) fn report_manifest_and_memtable_segments(
+        &self,
+        versioned: VersionedManifest,
+        prefixes: BTreeSet<Bytes>,
+    ) {
+        let segments: Vec<SegmentPrefix> = prefixes
+            .into_iter()
+            .map(|prefix| SegmentPrefix { prefix })
+            .collect();
+        self.tx.send_if_modified(|s| {
+            let mut changed = false;
+            if versioned.id >= s.current_manifest.id && s.current_manifest != versioned {
+                s.current_manifest = versioned;
+                changed = true;
+            }
+            if s.memtable_segments != segments {
+                s.memtable_segments = segments;
+                changed = true;
+            }
+            changed
+        });
+    }
+
     /// Add newly touched memtable segment prefixes (RFC-0024) to the published
     /// set. This is the write-path counterpart to
     /// [`Self::report_memtable_segments`]: a write can only *grow* the set, so
@@ -450,6 +480,58 @@ mod tests {
 
         // when
         mgr.report_manifest(versioned_manifest(3));
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn should_update_manifest_and_segments_atomically() {
+        // given: manifest has no segments yet, and "a"/"b" are touched in the
+        // memtables.
+        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[]));
+        mgr.report_memtable_segments(BTreeSet::from([
+            Bytes::from_static(b"a"),
+            Bytes::from_static(b"b"),
+        ]));
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when: a flush moves "a" into the manifest and leaves only "b" in the
+        // memtables, reported as a single transition.
+        mgr.report_manifest_and_memtable_segments(
+            manifest_with_segments(2, &[b"a"]),
+            BTreeSet::from([Bytes::from_static(b"b")]),
+        );
+
+        // then: exactly one notification, and the observed state reflects both
+        // halves — "a" never disappears from list_segments.
+        assert!(rx.has_changed().unwrap());
+        let status = rx.borrow_and_update();
+        assert_eq!(status.current_manifest.id, 2);
+        assert_eq!(status.memtable_segments, vec![segment_prefix(b"b")]);
+        assert_eq!(
+            status.list_segments(),
+            vec![segment_prefix(b"a"), segment_prefix(b"b")]
+        );
+        drop(status);
+        // the single send_if_modified leaves no further pending change.
+        assert!(!rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn should_not_notify_when_manifest_and_segments_unchanged() {
+        // given
+        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a"]));
+        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"b")]));
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when: re-report the same manifest id and the same memtable segments.
+        mgr.report_manifest_and_memtable_segments(
+            manifest_with_segments(1, &[b"a"]),
+            BTreeSet::from([Bytes::from_static(b"b")]),
+        );
 
         // then
         assert!(!rx.has_changed().unwrap());

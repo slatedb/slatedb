@@ -555,33 +555,25 @@ impl ManifestWriterHandler {
     /// Reports manifest and memtable updates to the status manager to notify subscriptions
     /// (i.e., `Db::subscribe()`) about the changes.
     ///
-    /// Reporting requires some constraints.
-    ///
-    /// 1. `report_manifest()` must happen before `report_memtable_segments()` to ensure that
-    ///    flushed segment prefixes are reported either in the manifest or the memtable segments
-    ///    to the status manager. The change reported by `report_memtable_segments()` is the
-    ///    memtable segments minus the flushed segments and the change reported by
-    ///    `report_manifest()` are the flushed segments. If we called `report_memtable_segments()`
-    ///    before `report_manifest()` there are chances that `DbStatus::list_segments()` only sees the
-    ///    change reported by `report_memtable_segments()` but not yet the change reported by
-    ///    `report_manifest()` -> flushed segments are not returned.
-    ///
-    /// 2. `report_memtable_segments()` needs to be synchronized with the write path. Otherwise, the
-    ///    following might happen:\
-    ///    T1: `collect_touched_segments()` collects touched segments from the memtables.\
-    ///    T2: A new segment is added to the active memtable and reported to the status manager
-    ///    on the write path.\
-    ///    T3: The segments collected in T1 are reported to the status manager and overwrite the
-    ///    change from T2 -> new segment in the active memtable would not be part of
-    ///    the result of `DbStatus::list_segments()` until the active memtable is flushed.
+    /// `report_manifest_and_memtable_segments()` needs to be synchronized with the write path.
+    ///  Otherwise, the following might happen:
+    ///  ```ascii
+    ///  T1: collect_touched_segments() collects touched segments from the memtables.
+    ///  T2: A new segment is added to the active memtable and reported to the status manager
+    ///  on the write path.
+    ///  T3: The segments collected in T1 are reported to the status manager and overwrite the
+    ///  change from T2 -> new segment in the active memtable would not be part of
+    ///  the result of DbStatus::list_segments() until the active memtable is flushed.
+    ///  ```
     fn report_to_status_manager(
         &self,
         guarded_db_state: &RwLockWriteGuard<DbState>,
         manifest: VersionedManifest,
     ) {
         let segments = collect_touched_segments(&guarded_db_state.view());
-        self.db.status_manager.report_manifest(manifest);
-        self.db.status_manager.report_memtable_segments(segments);
+        self.db
+            .status_manager
+            .report_manifest_and_memtable_segments(manifest, segments);
     }
 
     async fn write_manifest_update_safely(
