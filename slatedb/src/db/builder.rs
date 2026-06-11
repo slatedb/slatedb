@@ -1800,7 +1800,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     }
 
     /// Build and execute the clone operation.
-    pub async fn build(self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn build(self) -> Result<(), crate::Error> {
         crate::clone::create_clone(
             self.sources,
             self.clone_path,
@@ -1813,8 +1813,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
             self.segment_filter,
             self.segment_projection,
         )
-        .await?;
-        Ok(())
+        .await
+        .map_err(crate::Error::from)
     }
 }
 

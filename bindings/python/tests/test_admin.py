@@ -5,7 +5,7 @@ import time
 import pytest
 
 from conftest import new_memory_store, open_db, open_reader, unique_path, wait_until
-from slatedb.uniffi import AdminBuilder, DbBuilder, Error, FlushOptions, FlushType
+from slatedb.uniffi import AdminBuilder, DbBuilder, Error, FlushOptions, FlushType, CloneSourceSpec
 
 MAX_I64 = 9_223_372_036_854_775_807
 MAX_U64 = 18_446_744_073_709_551_615
@@ -174,3 +174,28 @@ async def test_admin_sequence_lookups_use_persisted_tracker() -> None:
         with pytest.raises(Error.Invalid) as invalid_timestamp:
             await admin.get_sequence_for_timestamp(MAX_I64, False)
         assert "invalid timestamp seconds" in invalid_timestamp.value.message
+
+
+@pytest.mark.asyncio
+async def test_admin_clone() -> None:
+    sources = []
+    store = new_memory_store()
+
+    for i in range(3):
+        path = unique_path(f"admin-clone-original-{i}")
+        async with open_db(store, path=path) as db:
+            await db.put(f"k{i}".encode("utf-8"), f"v{i}".encode("utf-8"))
+            await db.flush()
+        sources.append(CloneSourceSpec(path=path, checkpoint=None, projection_range=None))
+
+
+    clone_path = unique_path("admin-clone-clone")
+    admin = AdminBuilder(clone_path, store).build()
+    clone_builder = admin.create_clone_builder(sources[0].path, None)
+    for source in sources[1:]:
+        clone_builder.with_source(source)
+    await clone_builder.build()
+
+    async with open_db(store, path=clone_path) as db:
+        for i in range(3):
+            assert await db.get(f"k{i}".encode("utf-8")) == f"v{i}".encode("utf-8")

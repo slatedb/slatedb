@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::admin::Admin;
@@ -11,8 +12,10 @@ use crate::merge_operator::{adapt_merge_operator, MergeOperator};
 use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
 use crate::settings::Settings;
+use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
+use slatedb::bytes::Bytes;
 use uuid::Uuid;
 
 /// Builder for opening a writable [`crate::Db`].
@@ -285,5 +288,85 @@ impl AdminBuilder {
         let builder = self.take_builder()?;
         let admin = builder.build();
         Ok(Arc::new(Admin { inner: admin }))
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct CloneBuilder {
+    builder: Mutex<Option<slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>>>,
+}
+
+impl CloneBuilder {
+    pub(crate) fn new(
+        inner: slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            builder: Mutex::new(Some(inner)),
+        })
+    }
+
+    fn update_builder(
+        &self,
+        update: impl FnOnce(
+            slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>,
+        ) -> slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>,
+    ) -> Result<(), Error> {
+        let mut guard = self.builder.lock();
+        let builder = guard.take().ok_or(SlateDbError::BuilderConsumed)?;
+        *guard = Some(update(builder));
+        Ok(())
+    }
+
+    fn take_builder(
+        &self,
+    ) -> Result<slatedb::admin::CloneBuilder<(Bound<Bytes>, Bound<Bytes>)>, SlateDbError> {
+        let mut guard = self.builder.lock();
+        guard.take().ok_or(SlateDbError::BuilderConsumed)
+    }
+}
+
+#[uniffi::export]
+impl CloneBuilder {
+    pub fn with_clone_path(&self, clone_path: String) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_clone_path(clone_path.into()))
+            .map_err(Into::into)
+    }
+
+    pub fn with_source(&self, source: CloneSourceSpec) -> Result<(), Error> {
+        let slatedb_source = source.try_into()?;
+        self.update_builder(|builder| builder.with_source(slatedb_source))
+            .map_err(Into::into)
+    }
+
+    pub fn with_object_store(&self, object_store: Arc<ObjectStore>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_object_store(object_store.inner.clone()))
+    }
+
+    pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
+            .map_err(Into::into)
+    }
+
+    pub fn with_projection_range(&self, projection_range: Option<KeyRange>) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_projection_range(
+                projection_range.map(|key_range| key_range.to_range_bounds()),
+            )
+        })
+        .map_err(Into::into)
+    }
+
+    pub fn with_seed(&self, seed: u64) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_seed(seed))
+            .map_err(Into::into)
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl CloneBuilder {
+    /// Runs the clone operation and consumes this builder.
+    pub async fn build(&self) -> Result<(), Error> {
+        let builder = self.take_builder()?;
+        builder.build().await.map_err(Into::into)
     }
 }

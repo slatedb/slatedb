@@ -1,8 +1,11 @@
 use std::ops::Bound;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ulid::Ulid;
+use uuid::Uuid;
 
+use crate::builder::CloneBuilder;
 use crate::error::{Error, SlateDbError};
 use crate::types::{
     Checkpoint, Compaction, CompactorStateView, VersionedCompactions, VersionedManifest,
@@ -115,5 +118,19 @@ impl Admin {
             .get_sequence_for_timestamp(timestamp, round_up)
             .await
             .map_err(Into::into)
+    }
+
+    pub fn create_clone_builder(
+        &self,
+        parent_path: String,
+        parent_checkpoint: Option<String>,
+    ) -> Result<Arc<CloneBuilder>, Error> {
+        let checkpoint = parent_checkpoint
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|source| SlateDbError::InvalidCheckpointId { source })?;
+        let builder = self.inner.create_clone_builder(parent_path, checkpoint);
+        Ok(CloneBuilder::new(builder))
     }
 }
