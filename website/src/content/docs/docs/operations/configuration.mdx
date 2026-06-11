@@ -45,7 +45,7 @@ async fn main() -> Result<(), Error> {
     let _value = db
         .get_with_options(
             b"key",
-            &ReadOptions::default().with_cache_data_blocks(false),
+            &ReadOptions::default().with_cache_blocks(false),
         )
         .await?;
 

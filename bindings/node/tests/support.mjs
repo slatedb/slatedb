@@ -46,16 +46,16 @@ export function readOptions() {
   return {
     durability_filter: "Memory",
     dirty: false,
-    cache_data_blocks: true,
+    cache_blocks: true,
   };
 }
 
-export function scanOptions(readAheadBytes, cacheDataBlocks, maxFetchTasks) {
+export function scanOptions(readAheadBytes, cacheBlocks, maxFetchTasks) {
   return {
     durability_filter: "Memory",
     dirty: false,
     read_ahead_bytes: readAheadBytes,
-    cache_data_blocks: cacheDataBlocks,
+    cache_blocks: cacheBlocks,
     max_fetch_tasks: maxFetchTasks,
   };
 }

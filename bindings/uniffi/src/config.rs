@@ -127,7 +127,8 @@ pub struct ReadOptions {
     /// Whether uncommitted dirty data may be returned.
     pub dirty: bool,
     /// Whether fetched data blocks should be inserted into the block cache.
-    pub cache_data_blocks: bool,
+    /// SST metadata is cached independently.
+    pub cache_blocks: bool,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters.
     #[uniffi(default = None)]
@@ -139,7 +140,7 @@ impl Default for ReadOptions {
         Self {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
-            cache_data_blocks: true,
+            cache_blocks: true,
             filter_context: None,
         }
     }
@@ -150,7 +151,7 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
         slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
-            cache_data_blocks: value.cache_data_blocks,
+            cache_blocks: value.cache_blocks,
             filter_context: value.filter_context.map(Into::into),
         }
     }
@@ -219,7 +220,8 @@ pub struct ScanOptions {
     /// Number of bytes to read ahead while scanning.
     pub read_ahead_bytes: u64,
     /// Whether fetched data blocks should be inserted into the block cache.
-    pub cache_data_blocks: bool,
+    /// SST metadata is cached independently.
+    pub cache_blocks: bool,
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,
     /// The iteration order for the scan. Defaults to ascending when not set.
@@ -237,7 +239,7 @@ impl Default for ScanOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
-            cache_data_blocks: false,
+            cache_blocks: false,
             max_fetch_tasks: 1,
             order: None,
             filter_context: None,
@@ -257,7 +259,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                     field: "read_ahead_bytes",
                 })
             })?,
-            cache_data_blocks: value.cache_data_blocks,
+            cache_blocks: value.cache_blocks,
             max_fetch_tasks: usize::try_from(value.max_fetch_tasks).map_err(|_| {
                 Error::from(SlateDbError::ValueTooLargeForUsize {
                     field: "max_fetch_tasks",

@@ -478,7 +478,7 @@ impl DbReaderInner {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
-            cache_data_blocks: true,
+            cache_blocks: true,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,

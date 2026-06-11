@@ -121,7 +121,7 @@ fn scan_options() -> ScanOptions {
     ScanOptions {
         // Don't cache data blocks during the bench: we want every iteration
         // to pay the throttled GET cost for whichever SSTs the scan touches.
-        cache_data_blocks: false,
+        cache_blocks: false,
         durability_filter: DurabilityLevel::Remote,
         ..ScanOptions::default()
     }
@@ -129,7 +129,7 @@ fn scan_options() -> ScanOptions {
 
 fn recency_scan_options() -> ScanOptions {
     ScanOptions {
-        cache_data_blocks: false,
+        cache_blocks: false,
         durability_filter: DurabilityLevel::Remote,
         ..ScanOptions::default()
     }
@@ -178,7 +178,7 @@ async fn warmup_meta_cache(db: &Db) {
     // Scans cache filter and index blocks independently of data-block caching,
     // so this warms metadata without warming data blocks.
     let warmup_opts = ScanOptions {
-        cache_data_blocks: false,
+        cache_blocks: false,
         durability_filter: DurabilityLevel::Remote,
         ..ScanOptions::default()
     };

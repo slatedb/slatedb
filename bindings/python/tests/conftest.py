@@ -48,18 +48,18 @@ def read_options() -> ReadOptions:
     return ReadOptions(
         durability_filter=DurabilityLevel.MEMORY,
         dirty=False,
-        cache_data_blocks=True,
+        cache_blocks=True,
     )
 
 
 def scan_options(
-    read_ahead_bytes: int, cache_data_blocks: bool, max_fetch_tasks: int
+    read_ahead_bytes: int, cache_blocks: bool, max_fetch_tasks: int
 ) -> ScanOptions:
     return ScanOptions(
         durability_filter=DurabilityLevel.MEMORY,
         dirty=False,
         read_ahead_bytes=read_ahead_bytes,
-        cache_data_blocks=cache_data_blocks,
+        cache_blocks=cache_blocks,
         max_fetch_tasks=max_fetch_tasks,
     )
 

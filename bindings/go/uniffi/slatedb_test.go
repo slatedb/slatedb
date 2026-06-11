@@ -496,7 +496,7 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	readOptions := slatedb.ReadOptions{
 		DurabilityFilter: slatedb.DurabilityLevelMemory,
 		Dirty:            false,
-		CacheDataBlocks:  true,
+		CacheBlocks:      true,
 	}
 
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
@@ -680,7 +680,7 @@ func TestDbScanVariants(t *testing.T) {
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   64,
-			CacheDataBlocks:  true,
+			CacheBlocks:      true,
 			MaxFetchTasks:    2,
 		},
 	)
@@ -703,7 +703,7 @@ func TestDbScanVariants(t *testing.T) {
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   32,
-			CacheDataBlocks:  false,
+			CacheBlocks:      false,
 			MaxFetchTasks:    1,
 		},
 	)
@@ -1101,7 +1101,7 @@ func TestDbReaderPointReads(t *testing.T) {
 	value, err = readerHandle.reader.GetWithOptions([]byte("alpha"), slatedb.ReadOptions{
 		DurabilityFilter: slatedb.DurabilityLevelMemory,
 		Dirty:            false,
-		CacheDataBlocks:  true,
+		CacheBlocks:      true,
 	})
 	if err != nil {
 		t.Fatalf("DbReader.GetWithOptions(alpha): %v", err)
@@ -1182,7 +1182,7 @@ func TestDbReaderScanVariants(t *testing.T) {
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   64,
-			CacheDataBlocks:  true,
+			CacheBlocks:      true,
 			MaxFetchTasks:    2,
 		},
 	)
@@ -1205,7 +1205,7 @@ func TestDbReaderScanVariants(t *testing.T) {
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   32,
-			CacheDataBlocks:  false,
+			CacheBlocks:      false,
 			MaxFetchTasks:    1,
 		},
 	)

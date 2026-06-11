@@ -9220,7 +9220,7 @@ type ReadOptions struct {
 	// Whether uncommitted dirty data may be returned.
 	Dirty bool
 	// Whether fetched data blocks should be inserted into the block cache.
-	CacheDataBlocks bool
+	CacheBlocks bool
 	// Optional context forwarded to custom filter policies; ignored by
 	// built-in filters.
 	FilterContext *FilterContext
@@ -9229,7 +9229,7 @@ type ReadOptions struct {
 func (r *ReadOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
-	FfiDestroyerBool{}.Destroy(r.CacheDataBlocks)
+	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
 	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
 }
 
@@ -9261,7 +9261,7 @@ func (c FfiConverterReadOptions) LowerExternal(value ReadOptions) ExternalCRustB
 func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
-	FfiConverterBoolINSTANCE.Write(writer, value.CacheDataBlocks)
+	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
 	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)
 }
 
@@ -9404,7 +9404,7 @@ type ScanOptions struct {
 	// Number of bytes to read ahead while scanning.
 	ReadAheadBytes uint64
 	// Whether fetched data blocks should be inserted into the block cache.
-	CacheDataBlocks bool
+	CacheBlocks bool
 	// Maximum number of concurrent fetch tasks used by the scan.
 	MaxFetchTasks uint64
 	// The iteration order for the scan. Defaults to ascending when not set.
@@ -9418,7 +9418,7 @@ func (r *ScanOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
 	FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes)
-	FfiDestroyerBool{}.Destroy(r.CacheDataBlocks)
+	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
 	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
 	FfiDestroyerOptionalIterationOrder{}.Destroy(r.Order)
 	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
@@ -9456,7 +9456,7 @@ func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
 	FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes)
-	FfiConverterBoolINSTANCE.Write(writer, value.CacheDataBlocks)
+	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
 	FfiConverterOptionalIterationOrderINSTANCE.Write(writer, value.Order)
 	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)

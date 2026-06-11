@@ -33,7 +33,7 @@ enum FetchTask {
 pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
     pub(crate) blocks_to_fetch: usize,
-    pub(crate) cache_data_blocks: bool,
+    pub(crate) cache_blocks: bool,
     pub(crate) eager_spawn: bool,
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
@@ -45,7 +45,7 @@ impl Default for SstIteratorOptions {
         SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 1,
-            cache_data_blocks: true,
+            cache_blocks: true,
             eager_spawn: false,
             order: IterationOrder::Ascending,
             prefix: None,
@@ -386,7 +386,7 @@ impl<'a> InternalSstIterator<'a> {
                     let blocks_start = self.next_block_idx_to_fetch;
                     let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
                     let index = index.clone();
-                    let cache_data_blocks = self.options.cache_data_blocks;
+                    let cache_blocks = self.options.cache_blocks;
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(tokio::spawn(async move {
                             table_store
@@ -394,7 +394,7 @@ impl<'a> InternalSstIterator<'a> {
                                     &table,
                                     index,
                                     blocks_start..blocks_end,
-                                    cache_data_blocks,
+                                    cache_blocks,
                                 )
                                 .await
                         })));
@@ -415,7 +415,7 @@ impl<'a> InternalSstIterator<'a> {
                     let blocks_end = self.next_block_idx_to_fetch;
                     let blocks_start = blocks_end - blocks_to_fetch;
                     let index = index.clone();
-                    let cache_data_blocks = self.options.cache_data_blocks;
+                    let cache_blocks = self.options.cache_blocks;
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(tokio::spawn(async move {
                             table_store
@@ -423,7 +423,7 @@ impl<'a> InternalSstIterator<'a> {
                                     &table,
                                     index,
                                     blocks_start..blocks_end,
-                                    cache_data_blocks,
+                                    cache_blocks,
                                 )
                                 .await
                         })));
@@ -1110,7 +1110,7 @@ mod tests {
         assert_eq!(index.borrow().block_meta().len(), 1);
 
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: true,
+            cache_blocks: true,
             order,
             ..SstIteratorOptions::default()
         };
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bloom_filter_iterator_caches_filter_regardless_of_cache_data_blocks() {
+    async fn test_bloom_filter_iterator_caches_filter_regardless_of_cache_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1366,11 +1366,11 @@ mod tests {
 
         let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
 
-        for cache_data_blocks in [false, true] {
+        for cache_blocks in [false, true] {
             meta_cache.remove(&filter_key).await;
 
             let options = SstIteratorOptions {
-                cache_data_blocks,
+                cache_blocks,
                 ..Default::default()
             };
             let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -1390,7 +1390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sst_iterator_caches_index_regardless_of_cache_data_blocks() {
+    async fn test_sst_iterator_caches_index_regardless_of_cache_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1437,11 +1437,11 @@ mod tests {
 
         let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
 
-        for cache_data_blocks in [false, true] {
+        for cache_blocks in [false, true] {
             meta_cache.remove(&index_key).await;
 
             let options = SstIteratorOptions {
-                cache_data_blocks,
+                cache_blocks,
                 ..Default::default()
             };
             let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -1535,7 +1535,7 @@ mod tests {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
             blocks_to_fetch: 3,
-            cache_data_blocks: true,
+            cache_blocks: true,
             order,
             ..SstIteratorOptions::default()
         };
@@ -1810,7 +1810,7 @@ mod tests {
             SstIteratorOptions {
                 max_fetch_tasks: 32,
                 blocks_to_fetch: 256,
-                cache_data_blocks: true,
+                cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
@@ -1828,7 +1828,7 @@ mod tests {
             SstIteratorOptions {
                 max_fetch_tasks: 1,
                 blocks_to_fetch: 1,
-                cache_data_blocks: true,
+                cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
@@ -1879,7 +1879,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "moka")]
-    async fn test_sst_iter_cache_data_blocks() {
+    async fn test_sst_iter_cache_blocks() {
         use crate::db_cache::moka::MokaCache;
         use crate::db_cache::DbCache;
         use crate::db_cache::SplitCache;
@@ -1928,7 +1928,7 @@ mod tests {
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: true,
+            cache_blocks: true,
             ..SstIteratorOptions::default()
         };
         let mut iter = SstIterator::new_owned_initialized(
@@ -1957,11 +1957,11 @@ mod tests {
             .unwrap_or(None)
             .is_some());
 
-        // remove block from cache and verify that it is not cached when iterating with cache_data_blocks=false
+        // remove block from cache and verify that it is not cached when iterating with cache_blocks=false
         block_cache.remove(&(id, 0).into()).await;
         let sst_handle = table_store.open_sst(&id).await.unwrap();
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: false,
+            cache_blocks: false,
             ..SstIteratorOptions::default()
         };
         let mut iter = SstIterator::new_owned_initialized(
@@ -2032,7 +2032,7 @@ mod tests {
 
         // when: iterating over the SST
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: true,
+            cache_blocks: true,
             ..SstIteratorOptions::default()
         };
         let mut iter = SstIterator::new_owned_initialized(
@@ -2142,7 +2142,7 @@ mod tests {
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: true,
+            cache_blocks: true,
             ..SstIteratorOptions::default()
         };
         let mut iter = SstIterator::new_owned_initialized(
@@ -2401,7 +2401,7 @@ mod tests {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
             blocks_to_fetch: 3,
-            cache_data_blocks: true,
+            cache_blocks: true,
             eager_spawn: false,
             order,
             prefix: None,
@@ -2528,7 +2528,7 @@ mod tests {
 
         // Full iteration in descending order
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: true,
+            cache_blocks: true,
             order: IterationOrder::Descending,
             ..SstIteratorOptions::default()
         };
@@ -2687,7 +2687,7 @@ mod tests {
             SstIteratorOptions {
                 max_fetch_tasks: 1,
                 blocks_to_fetch: 1,
-                cache_data_blocks: true,
+                cache_blocks: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,

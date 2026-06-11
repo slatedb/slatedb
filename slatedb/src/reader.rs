@@ -214,7 +214,7 @@ impl Reader {
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
         let sst_iter_options = SstIteratorOptions {
-            cache_data_blocks: options.cache_data_blocks,
+            cache_blocks: options.cache_blocks,
             eager_spawn: true,
             filter_context: options.filter_context.clone(),
             ..SstIteratorOptions::default()
@@ -285,7 +285,7 @@ impl Reader {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: options.max_fetch_tasks,
             blocks_to_fetch: read_ahead_blocks,
-            cache_data_blocks: options.cache_data_blocks,
+            cache_blocks: options.cache_blocks,
             eager_spawn: true,
             order: options.order,
             prefix: ctx.prefix,
@@ -347,7 +347,7 @@ impl Reader {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: options.max_fetch_tasks,
             blocks_to_fetch: read_ahead_blocks,
-            cache_data_blocks: options.cache_data_blocks,
+            cache_blocks: options.cache_blocks,
             // Recency scans are designed for early-stop. Eager spawning would
             // proactively fetch blocks for sources the caller may never reach,
             // defeating the early-stop savings.
@@ -1321,11 +1321,11 @@ mod tests {
         // Test that the builder pattern works correctly for max_fetch_tasks
         let options = ScanOptions::default()
             .with_max_fetch_tasks(4)
-            .with_cache_data_blocks(true)
+            .with_cache_blocks(true)
             .with_read_ahead_bytes(1024);
 
         assert_eq!(options.max_fetch_tasks, 4);
-        assert!(options.cache_data_blocks);
+        assert!(options.cache_blocks);
         assert_eq!(options.read_ahead_bytes, 1024);
     }
 

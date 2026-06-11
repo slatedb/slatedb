@@ -280,8 +280,9 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
-    /// Whether fetched data blocks should be cached.
-    pub cache_data_blocks: bool,
+    /// Whether fetched data blocks should be cached. SST indexes, filters,
+    /// and stats are cached independently of this setting.
+    pub cache_blocks: bool,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     pub filter_context: Option<FilterContext>,
@@ -292,7 +293,7 @@ impl Default for ReadOptions {
         Self {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
-            cache_data_blocks: true,
+            cache_blocks: true,
             filter_context: None,
         }
     }
@@ -314,9 +315,9 @@ impl ReadOptions {
         }
     }
 
-    pub fn with_cache_data_blocks(self, cache_data_blocks: bool) -> Self {
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
         Self {
-            cache_data_blocks,
+            cache_blocks,
             ..self
         }
     }
@@ -343,7 +344,7 @@ pub struct ScanOptions {
     pub read_ahead_bytes: usize,
     /// Whether or not fetched data blocks should be cached. SST indexes,
     /// filters, and stats are cached independently of this setting.
-    pub cache_data_blocks: bool,
+    pub cache_blocks: bool,
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
@@ -364,7 +365,7 @@ impl Default for ScanOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
-            cache_data_blocks: false,
+            cache_blocks: false,
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
             filter_context: None,
@@ -395,9 +396,9 @@ impl ScanOptions {
         }
     }
 
-    pub fn with_cache_data_blocks(self, cache_data_blocks: bool) -> Self {
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
         Self {
-            cache_data_blocks,
+            cache_blocks,
             ..self
         }
     }
@@ -1773,13 +1774,13 @@ object_store_cache_options:
         let options = ReadOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
-        assert!(options.cache_data_blocks);
+        assert!(options.cache_blocks);
 
         let options = ScanOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
-        assert!(!options.cache_data_blocks);
+        assert!(!options.cache_blocks);
         assert_eq!(options.max_fetch_tasks, 1);
     }
 
@@ -1792,7 +1793,7 @@ object_store_cache_options:
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
-        assert!(!options.cache_data_blocks);
+        assert!(!options.cache_blocks);
     }
 
     #[test]

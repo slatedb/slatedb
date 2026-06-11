@@ -510,7 +510,7 @@ impl DbInner {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
-            cache_data_blocks: false,
+            cache_blocks: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
@@ -1136,7 +1136,7 @@ impl Db {
     ///     db.put(b"y", b"v3").await?;
     ///
     ///     let options = ScanOptions {
-    ///         cache_data_blocks: false,
+    ///         cache_blocks: false,
     ///         ..ScanOptions::default()
     ///     };
     ///     let mut iter = db.scan_prefix_with_options(b"x", &options).await?;
@@ -1293,7 +1293,7 @@ impl Db {
     ///
     /// ## Examples
     ///
-    /// Use `cache_data_blocks: false` to scan recent data without polluting
+    /// Use `cache_blocks: false` to scan recent data without polluting
     /// the block cache, and stop after pulling enough entries from the
     /// freshest source. Combined with the recency walk's early-stop, this
     /// is a cheap way to ask "is there a recent entry under this prefix?"
@@ -1314,7 +1314,7 @@ impl Db {
     ///     db.put(b"event:002", b"b").await?;
     ///
     ///     let options = ScanOptions {
-    ///         cache_data_blocks: false,
+    ///         cache_blocks: false,
     ///         ..ScanOptions::default()
     ///     };
     ///     let mut iter = db
@@ -2467,7 +2467,7 @@ mod tests {
         kv_store.put(&[0xff, 0xfe], b"v3").await.unwrap();
 
         let scan_options = ScanOptions {
-            cache_data_blocks: false,
+            cache_blocks: false,
             ..ScanOptions::default()
         };
         let mut iter = kv_store
@@ -2948,7 +2948,7 @@ mod tests {
                                     &ReadOptions {
                                         durability_filter: Memory,
                                         dirty: false,
-                                        cache_data_blocks: true,
+                                        cache_blocks: true,
                                         filter_context: None,
                                     }
                                 )
