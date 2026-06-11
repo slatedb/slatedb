@@ -126,7 +126,8 @@ pub struct ReadOptions {
     pub durability_filter: DurabilityLevel,
     /// Whether uncommitted dirty data may be returned.
     pub dirty: bool,
-    /// Whether fetched blocks should be inserted into the block cache.
+    /// Whether fetched data blocks should be inserted into the block cache.
+    /// SST metadata is cached independently.
     pub cache_blocks: bool,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters.
@@ -218,7 +219,8 @@ pub struct ScanOptions {
     pub dirty: bool,
     /// Number of bytes to read ahead while scanning.
     pub read_ahead_bytes: u64,
-    /// Whether fetched blocks should be inserted into the block cache.
+    /// Whether fetched data blocks should be inserted into the block cache.
+    /// SST metadata is cached independently.
     pub cache_blocks: bool,
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,

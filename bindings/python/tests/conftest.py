@@ -52,7 +52,9 @@ def read_options() -> ReadOptions:
     )
 
 
-def scan_options(read_ahead_bytes: int, cache_blocks: bool, max_fetch_tasks: int) -> ScanOptions:
+def scan_options(
+    read_ahead_bytes: int, cache_blocks: bool, max_fetch_tasks: int
+) -> ScanOptions:
     return ScanOptions(
         durability_filter=DurabilityLevel.MEMORY,
         dirty=False,
