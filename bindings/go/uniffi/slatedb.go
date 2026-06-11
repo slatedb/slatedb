@@ -9220,6 +9220,7 @@ type ReadOptions struct {
 	// Whether uncommitted dirty data may be returned.
 	Dirty bool
 	// Whether fetched data blocks should be inserted into the block cache.
+	// SST metadata is cached independently.
 	CacheBlocks bool
 	// Optional context forwarded to custom filter policies; ignored by
 	// built-in filters.
@@ -9404,6 +9405,7 @@ type ScanOptions struct {
 	// Number of bytes to read ahead while scanning.
 	ReadAheadBytes uint64
 	// Whether fetched data blocks should be inserted into the block cache.
+	// SST metadata is cached independently.
 	CacheBlocks bool
 	// Maximum number of concurrent fetch tasks used by the scan.
 	MaxFetchTasks uint64
