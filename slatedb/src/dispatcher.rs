@@ -129,15 +129,78 @@ use parking_lot::Mutex;
 use tokio::{runtime::Handle, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
 
+use rand::{Rng, SeedableRng};
+
 use crate::{
     db_status::ClosedResultWriter,
     error::SlateDBError,
+    rand::RngAlg,
     utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
 use slatedb_common::clock::{SystemClock, SystemClockTicker};
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
 pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
+
+/// Random jitter applied to each tick of a [MessageHandler]'s tickers.
+///
+/// Independent processes that tick on the same interval — for example,
+/// compaction workers polling `.compactions` every `compactions_poll_interval`
+/// — tend to synchronize their work, concentrating object-store requests at the
+/// same instants. Randomizing each tick's wait spreads that load out without
+/// any additional configuration.
+///
+/// The jitter is *centered* on the base interval: instead of waiting exactly
+/// `interval`, each jittered tick waits a fresh uniform random duration in
+/// `[interval * (1 - spread), interval * (1 + spread)]`. Because the range is
+/// centered on `interval`, the mean wait — and therefore the average tick rate
+/// — is still `interval`. A one-sided "interval + jitter" scheme would instead
+/// bias every gap later than `interval`.
+///
+/// Crucially, a jittered tick draws its *entire* wait at random rather than
+/// adding a delay on top of a fixed-interval floor; stacking jitter on a fixed
+/// floor would push the mean gap above `interval` (RFC-0025).
+///
+/// The wait is performed inside the ticker future (one branch of the
+/// dispatcher's `select!`), so it never blocks message processing: incoming
+/// messages and other tickers are still serviced while a jittered tick is
+/// pending.
+///
+/// Defaults to [`TickerJitter::NONE`] (disabled).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TickerJitter {
+    /// Half-width of the jitter range, as a fraction of the interval. Each tick
+    /// waits a uniform random duration in
+    /// `[interval * (1 - spread), interval * (1 + spread)]`. For example,
+    /// `0.5` spreads waits over `[interval/2, 3 * interval/2]` (the interval
+    /// plus or minus half). A value of `0.0` disables jitter; values above
+    /// `1.0` simply clamp the lower bound at zero.
+    spread: f64,
+    /// Seed for the jitter RNG, threaded from the handler's
+    /// [crate::rand::DbRand] so jitter stays deterministic under simulation
+    /// testing.
+    seed: u64,
+}
+
+impl TickerJitter {
+    /// No jitter; ticks fire exactly on their interval.
+    pub(crate) const NONE: TickerJitter = TickerJitter {
+        spread: 0.0,
+        seed: 0,
+    };
+
+    /// Jitter each tick over `[interval * (1 - spread), interval * (1 + spread)]`,
+    /// driven by `seed`. For example, `spread = 0.5` waits the interval plus or
+    /// minus half.
+    pub(crate) fn new(spread: f64, seed: u64) -> TickerJitter {
+        TickerJitter { spread, seed }
+    }
+
+    /// Whether jitter is enabled (a positive spread was configured).
+    fn is_enabled(&self) -> bool {
+        self.spread > 0.0
+    }
+}
 
 /// An async event source that produces messages for the dispatcher.
 /// Each call to [`notify`](Notifier::notify) waits for the next event and
@@ -241,11 +304,22 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// A [Result] containing `Ok(())` on clean shutdown, or an error if the handler
     /// fails for any reason.
     async fn run(&mut self) -> Result<(), SlateDBError> {
+        let jitter = self.handler.ticker_jitter();
         let mut tickers = self
             .handler
             .tickers()
             .into_iter()
-            .map(|(dur, factory)| MessageDispatcherTicker::new(self.clock.ticker(dur), factory))
+            .enumerate()
+            .map(|(index, (dur, factory))| {
+                MessageDispatcherTicker::new(
+                    self.clock.ticker(dur),
+                    factory,
+                    self.clock.clone(),
+                    dur,
+                    jitter,
+                    index,
+                )
+            })
             .collect::<Vec<_>>();
         let mut ticker_futures: FuturesUnordered<_> =
             tickers.iter_mut().map(|t| t.tick()).collect();
@@ -363,6 +437,21 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
 struct MessageDispatcherTicker<'a, T: Send> {
     inner: SystemClockTicker<'a>,
     message_factory: Box<MessageFactory<T>>,
+    /// Clock used to sleep for the randomized wait when jitter is enabled.
+    clock: Arc<dyn SystemClock>,
+    /// Per-ticker jitter state. `None` when jitter is disabled, in which case
+    /// ticks fire on the fixed-interval `inner` ticker. When `Some`, ticks
+    /// ignore `inner` and instead sleep a fresh random duration drawn uniformly
+    /// from the inclusive `[min, max]` bounds.
+    jitter: Option<JitterState>,
+}
+
+/// Per-ticker jitter state: an RNG and the inclusive bounds of the randomized
+/// per-tick wait, centered on the base interval.
+struct JitterState {
+    rng: RngAlg,
+    min: Duration,
+    max: Duration,
 }
 
 impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
@@ -370,29 +459,82 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     ///
     /// ## Arguments
     ///
-    /// * `inner`: The [SystemClockTicker] to use.
+    /// * `inner`: The [SystemClockTicker] used when jitter is disabled.
     /// * `message_factory`: A factory for generating messages.
+    /// * `clock`: The [SystemClock] used to sleep for the randomized wait when
+    ///   jitter is enabled.
+    /// * `interval`: The base tick interval, which the jitter range is centered
+    ///   on.
+    /// * `jitter`: The [TickerJitter] controlling the randomized wait.
+    /// * `index`: This ticker's position among the handler's tickers. Used to
+    ///   give each ticker an independent jitter sequence when several share the
+    ///   same [TickerJitter] seed.
     ///
     /// ## Returns
     ///
     /// The new [MessageDispatcherTicker].
-    fn new(inner: SystemClockTicker<'a>, message_factory: Box<MessageFactory<T>>) -> Self {
+    fn new(
+        inner: SystemClockTicker<'a>,
+        message_factory: Box<MessageFactory<T>>,
+        clock: Arc<dyn SystemClock>,
+        interval: Duration,
+        jitter: TickerJitter,
+        index: usize,
+    ) -> Self {
+        let jitter = if jitter.is_enabled() {
+            // Center the wait on `interval`: draw uniformly from
+            // [interval*(1-spread), interval*(1+spread)]. The lower bound is
+            // clamped at zero so spreads above 1.0 don't underflow.
+            let min = interval.mul_f64((1.0 - jitter.spread).max(0.0));
+            let max = interval.mul_f64(1.0 + jitter.spread);
+            let seed = jitter.seed.wrapping_add(index as u64);
+            Some(JitterState {
+                rng: RngAlg::seed_from_u64(seed),
+                min,
+                max,
+            })
+        } else {
+            None
+        };
         Self {
             inner,
             message_factory,
+            clock,
+            jitter,
         }
+    }
+
+    /// Draws the next randomized wait, advancing the ticker's RNG. Returns
+    /// `None` when jitter is disabled, in which case the caller falls back to
+    /// the fixed-interval `inner` ticker.
+    fn next_jittered_wait(&mut self) -> Option<Duration> {
+        self.jitter.as_mut().map(|state| {
+            let min = state.min.as_nanos() as u64;
+            let max = state.max.as_nanos() as u64;
+            Duration::from_nanos(state.rng.random_range(min..=max))
+        })
     }
 
     /// Returns a [Future] that resolves when the ticker ticks, and returns the message
     /// generated by the message factory.
+    ///
+    /// When jitter is enabled, the future sleeps a single randomized wait drawn
+    /// from the centered jitter range; otherwise it waits on the fixed-interval
+    /// `inner` ticker. Either way the wait lives inside this future, so the
+    /// dispatcher loop keeps servicing messages and other tickers while it is
+    /// pending.
     ///
     /// ## Returns
     ///
     /// A [Future] that resolves when the ticker ticks.
     fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
         let message = (self.message_factory)();
+        let jittered_wait = self.next_jittered_wait();
         Box::pin(async move {
-            self.inner.tick().await;
+            match jittered_wait {
+                Some(wait) => self.clock.sleep(wait).await,
+                None => self.inner.tick().await,
+            }
             (message, self)
         })
     }
@@ -420,6 +562,15 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// [MessageDispatcher], and a message factory to generate a new message on each tick.
     fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<T>>)> {
         vec![]
+    }
+
+    /// Jitter applied to every ticker returned by [`tickers`](Self::tickers).
+    /// Defaults to [`TickerJitter::NONE`] (disabled). Handlers whose tickers
+    /// would otherwise synchronize across independent processes (for example,
+    /// the compaction worker polling `.compactions`) can override this to
+    /// spread their tick timing.
+    fn ticker_jitter(&self) -> TickerJitter {
+        TickerJitter::NONE
     }
 
     /// Returns async event sources that produce messages for the dispatcher.
@@ -806,9 +957,9 @@ impl MessageHandlerExecutor {
 
 #[cfg(all(test, feature = "test-util"))]
 mod test {
-    use super::{MessageDispatcher, MessageHandler};
+    use super::{MessageDispatcher, MessageDispatcherTicker, MessageHandler};
     use crate::db_status::ClosedResultWriter;
-    use crate::dispatcher::{MessageFactory, MessageHandlerExecutor};
+    use crate::dispatcher::{MessageFactory, MessageHandlerExecutor, TickerJitter};
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
@@ -842,6 +993,7 @@ mod test {
         tickers: Vec<(Duration, u8)>,
         clock: Arc<dyn SystemClock>,
         clock_schedule: VecDeque<Duration>,
+        jitter: TickerJitter,
     }
 
     impl TestHandler {
@@ -856,6 +1008,7 @@ mod test {
                 tickers: vec![],
                 clock,
                 clock_schedule: VecDeque::new(),
+                jitter: TickerJitter::NONE,
             }
         }
 
@@ -870,6 +1023,11 @@ mod test {
             self.clock_schedule.push_back(Duration::from_millis(ts));
             self
         }
+
+        fn with_jitter(mut self, jitter: TickerJitter) -> Self {
+            self.jitter = jitter;
+            self
+        }
     }
 
     #[async_trait::async_trait]
@@ -881,6 +1039,10 @@ mod test {
                 tickers.push((*interval, Box::new(move || TestMessage::Tick(id))));
             }
             tickers
+        }
+
+        fn ticker_jitter(&self) -> TickerJitter {
+            self.jitter
         }
 
         async fn handle(&mut self, message: TestMessage) -> Result<(), SlateDBError> {
@@ -912,6 +1074,129 @@ mod test {
         })
         .await
         .expect("timeout waiting for message count");
+    }
+
+    // The centered jitter draws each wait uniformly from
+    // [interval*(1-spread), interval*(1+spread)], so waits stay within those
+    // bounds and actually vary from tick to tick.
+    #[test]
+    fn test_ticker_jitter_is_centered_and_bounded() {
+        let clock = Arc::new(MockSystemClock::new());
+        let interval = Duration::from_millis(1000);
+        let mut ticker: MessageDispatcherTicker<'_, TestMessage> = MessageDispatcherTicker::new(
+            clock.ticker(interval),
+            Box::new(|| TestMessage::Tick(1)),
+            clock.clone(),
+            interval,
+            TickerJitter::new(0.5, 42),
+            0,
+        );
+
+        let mut seen = HashSet::new();
+        for _ in 0..1000 {
+            let wait = ticker
+                .next_jittered_wait()
+                .expect("jitter is enabled, so a randomized wait is drawn");
+            assert!(
+                (Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&wait),
+                "wait {wait:?} is outside the centered [interval/2, 3*interval/2] range"
+            );
+            seen.insert(wait.as_nanos());
+        }
+        assert!(seen.len() > 1, "jittered waits should vary across ticks");
+    }
+
+    // A ticker with no jitter draws no randomized wait and falls back to the
+    // fixed-interval inner ticker.
+    #[test]
+    fn test_ticker_without_jitter_has_no_randomized_wait() {
+        let clock = Arc::new(MockSystemClock::new());
+        let interval = Duration::from_millis(1000);
+        let mut ticker: MessageDispatcherTicker<'_, TestMessage> = MessageDispatcherTicker::new(
+            clock.ticker(interval),
+            Box::new(|| TestMessage::Tick(1)),
+            clock.clone(),
+            interval,
+            TickerJitter::NONE,
+            0,
+        );
+        assert!(ticker.next_jittered_wait().is_none());
+    }
+
+    // A jittered tick sleeps its randomized wait inside the ticker future, so it
+    // must not block the dispatcher loop: channel messages keep flowing while the
+    // tick is parked, and the tick itself only fires once the (mock) clock
+    // advances past the wait. This is the property that motivated moving jitter
+    // out of the handler (where the sleep blocked the channel) and into the
+    // ticker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatcher_ticker_jitter_does_not_block_messages() {
+        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
+        let (tx, rx) = async_channel::unbounded();
+        let clock = Arc::new(MockSystemClock::new());
+        // With spread 0.5 on a 100ms interval, each tick waits a random duration
+        // in [50ms, 150ms]. The clock starts at t=0, so the first tick parks on
+        // its wait and can only fire once the clock advances.
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
+            .add_ticker(Duration::from_millis(100), 1)
+            .with_jitter(TickerJitter::new(0.5, 1));
+        let cancellation_token = CancellationToken::new();
+        let fp = Arc::new(FailPointRegistry::default());
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(handler),
+            rx,
+            clock.clone(),
+            cancellation_token.clone(),
+        )
+        .with_fp_registry(fp.clone());
+
+        // Hold the loop while we queue messages so they're ready when it starts.
+        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "pause").unwrap();
+        let join = tokio::spawn(async move { dispatcher.run().await });
+        tx.try_send(TestMessage::Channel(7)).unwrap();
+        tx.try_send(TestMessage::Channel(8)).unwrap();
+        tx.try_send(TestMessage::Channel(9)).unwrap();
+        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "off").unwrap();
+
+        // All three channel messages are processed even though the first tick is
+        // parked on its randomized wait the entire time (the clock never
+        // advanced, so the jittered tick cannot fire). This is the non-blocking
+        // property.
+        wait_for_message_count(log.clone(), 3).await;
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec![
+                (Phase::Pre, TestMessage::Channel(7)),
+                (Phase::Pre, TestMessage::Channel(8)),
+                (Phase::Pre, TestMessage::Channel(9)),
+            ],
+            "no tick should fire until the clock advances past the jittered wait"
+        );
+
+        // Releasing the clock lets the jittered tick fire. The mock clock fixes
+        // the wait's deadline (relative to the current time) when the ticker is
+        // first polled, which races with this advance, so step the clock forward
+        // repeatedly until the tick lands rather than advancing exactly once.
+        timeout(Duration::from_secs(30), async {
+            while log.lock().unwrap().len() < 4 {
+                clock.advance(Duration::from_secs(1)).await;
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("jittered tick did not fire after advancing the clock");
+        assert_eq!(
+            log.lock().unwrap()[3],
+            (Phase::Pre, TestMessage::Tick(1)),
+            "the jittered tick should fire once the clock passes the jitter delay"
+        );
+
+        cancellation_token.cancel();
+        let result = timeout(Duration::from_secs(30), join)
+            .await
+            .expect("dispatcher did not stop in time")
+            .expect("join failed");
+        assert!(matches!(result, Ok(())));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
