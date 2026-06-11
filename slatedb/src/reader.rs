@@ -446,7 +446,7 @@ mod tests {
 
     fn wb_point_iter(write_batch: &Option<WriteBatch>, key: &[u8]) -> Option<WriteBatchIterator> {
         write_batch.as_ref().map(|wb| {
-            WriteBatchIterator::new(
+            WriteBatchIterator::new_sorted(
                 wb,
                 BytesRange::from_slice(key..=key),
                 IterationOrder::Ascending,
@@ -454,6 +454,7 @@ mod tests {
                 None,
                 None,
             )
+            .unwrap()
         })
     }
 
@@ -462,9 +463,9 @@ mod tests {
         range: &BytesRange,
         order: IterationOrder,
     ) -> Option<WriteBatchIterator> {
-        write_batch
-            .as_ref()
-            .map(|wb| WriteBatchIterator::new(wb, range.clone(), order, u64::MAX, None, None))
+        write_batch.as_ref().map(|wb| {
+            WriteBatchIterator::new_sorted(wb, range.clone(), order, u64::MAX, None, None).unwrap()
+        })
     }
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::db_status::DbStatusManager;
