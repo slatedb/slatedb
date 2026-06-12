@@ -906,13 +906,23 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
+        Self::new_owned_initialized_with_stats(range, table, table_store, options, None).await
+    }
+
+    pub(crate) async fn new_owned_initialized_with_stats<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableView,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
         // Construct the inner iterator without initializing it. The filter
         // is evaluated first so that an SST whose filter rules out the query
         // never pays for an index or data block read.
         let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
         match internal {
             Some(inner) => {
-                let mut iterator = Self::from_internal(inner, None);
+                let mut iterator = Self::from_internal(inner, db_stats);
                 match &mut iterator.delegate {
                     SstIteratorDelegate::Filter(filter_iter) => {
                         filter_iter.init().await?;

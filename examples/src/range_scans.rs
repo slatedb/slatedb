@@ -51,7 +51,7 @@ async fn main() -> Result<(), Error> {
     assert_eq!(iter.next().await?, None);
 
     // Scan over prefix
-    let mut prefixed = db.scan_prefix(b"test_key1").await?;
+    let mut prefixed = db.scan_prefix(b"test_key1", ..).await?;
     let expected_keys: [&[u8]; 2] = [b"test_key1", b"test_key10"];
     for expected_key in expected_keys {
         let kv = prefixed.next().await?.unwrap();

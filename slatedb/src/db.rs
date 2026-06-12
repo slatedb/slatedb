@@ -236,10 +236,14 @@ impl DbInner {
             .await
     }
 
+    /// Shared scan path for plain range scans and prefix scans. When
+    /// `prefix` is set, every key in `range` starts with it and prefix
+    /// bloom filters are consulted to skip non-matching SSTs.
     pub(crate) async fn scan_with_options(
         &self,
         range: BytesRange,
         options: &ScanOptions,
+        prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
@@ -251,29 +255,7 @@ impl DbInner {
                     db_state: &db_state,
                     write_batch_iter: None,
                     max_seq: None,
-                    prefix: None,
-                },
-            )
-            .await
-    }
-
-    pub(crate) async fn scan_prefix_with_options(
-        &self,
-        prefix: Bytes,
-        options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError> {
-        self.check_closed()?;
-        let range = BytesRange::from_prefix(prefix.as_ref());
-        let db_state = self.state.read().view();
-        self.reader
-            .scan_with_options(
-                range,
-                options,
-                ScanContext {
-                    db_state: &db_state,
-                    write_batch_iter: None,
-                    max_seq: None,
-                    prefix: Some(prefix),
+                    prefix,
                 },
             )
             .await
@@ -1071,15 +1053,24 @@ impl Db {
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
         self.inner
-            .scan_with_options(BytesRange::from(range), options)
+            .scan_with_options(BytesRange::from(range), options, None)
             .await
             .map_err(Into::into)
     }
 
-    /// Scan all keys that share the provided prefix using the default scan options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// using the default scan options.
+    ///
+    /// The subrange bounds are key *suffixes* interpreted relative to the
+    /// prefix: a bound `s` selects the full key `prefix ++ s`. Pass `..` to
+    /// scan the prefix's entire keyspace. When a prefix extractor is
+    /// configured, prefix bloom filters are consulted to skip SSTs that
+    /// contain no matching keys.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
@@ -1099,7 +1090,7 @@ impl Db {
     ///     db.put(b"aba", b"v1").await?;
     ///     db.put(b"b", b"v2").await?;
     ///
-    ///     let mut iter = db.scan_prefix(b"ab").await?;
+    ///     let mut iter = db.scan_prefix(b"ab", ..).await?;
     ///     let kv = iter.next().await?.unwrap();
     ///     assert_eq!(kv.key.as_ref(), b"ab");
     ///     assert_eq!(kv.value.as_ref(), b"v0");
@@ -1107,21 +1098,36 @@ impl Db {
     ///     assert_eq!(kv.key.as_ref(), b"aba");
     ///     assert_eq!(kv.value.as_ref(), b"v1");
     ///     assert_eq!(None, iter.next().await?);
+    ///
+    ///     // Restrict the scan to suffixes from b"a" onward.
+    ///     let mut iter = db.scan_prefix(b"ab", b"a".as_slice()..).await?;
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"aba");
+    ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    pub async fn scan_prefix<'a, P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+    ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
-        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
     }
 
-    /// Scan all keys that share the provided prefix with custom options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// with custom options. See [`Self::scan_prefix`] for the subrange
+    /// semantics.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     /// - `options`: the scan options to use
     ///
     /// ## Returns
@@ -1147,7 +1153,7 @@ impl Db {
     ///         cache_blocks: false,
     ///         ..ScanOptions::default()
     ///     };
-    ///     let mut iter = db.scan_prefix_with_options(b"x", &options).await?;
+    ///     let mut iter = db.scan_prefix_with_options(b"x", .., &options).await?;
     ///     let kv = iter.next().await?.unwrap();
     ///     assert_eq!(kv.key.as_ref(), b"x1");
     ///     assert_eq!(kv.value.as_ref(), b"v1");
@@ -1158,17 +1164,20 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_prefix_with_options<P>(
+    pub async fn scan_prefix_with_options<'a, P, T>(
         &self,
         prefix: P,
+        subrange: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
         self.inner
-            .scan_prefix_with_options(prefix, options)
+            .scan_with_options(range, options, Some(prefix))
             .await
             .map_err(Into::into)
     }
@@ -1912,15 +1921,17 @@ impl DbReadOps for Db {
         Db::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<P>(
+    async fn scan_prefix_with_options<'a, P, T>(
         &self,
         prefix: P,
+        subrange: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
-        Db::scan_prefix_with_options(self, prefix, options).await
+        Db::scan_prefix_with_options(self, prefix, subrange, options).await
     }
 }
 
@@ -2330,7 +2341,7 @@ mod tests {
         kv_store.put(b"abb", b"v2").await.unwrap();
         kv_store.put(b"ac", b"v3").await.unwrap();
 
-        let mut iter = kv_store.scan_prefix(b"ab").await.unwrap();
+        let mut iter = kv_store.scan_prefix(b"ab", ..).await.unwrap();
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"ab");
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"aba");
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"abb");
@@ -2439,7 +2450,7 @@ mod tests {
 
         let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
         let mut iter = kv_store
-            .scan_prefix_with_options(b"prefix/", &scan_options)
+            .scan_prefix_with_options(b"prefix/", .., &scan_options)
             .await
             .unwrap();
         assert_eq!(
@@ -2479,7 +2490,7 @@ mod tests {
             ..ScanOptions::default()
         };
         let mut iter = kv_store
-            .scan_prefix_with_options(&[0xff, 0xff], &scan_options)
+            .scan_prefix_with_options(&[0xff, 0xff], .., &scan_options)
             .await
             .unwrap();
         assert_eq!(
@@ -3781,7 +3792,7 @@ mod tests {
                 let iter = self
                     .db
                     .inner
-                    .scan_with_options(range, &ScanOptions::default())
+                    .scan_with_options(range, &ScanOptions::default(), None)
                     .await
                     .unwrap();
                 Box::new(iter)
@@ -3821,7 +3832,7 @@ mod tests {
     ) {
         let mut iter = db
             .inner
-            .scan_with_options(range.clone(), scan_options)
+            .scan_with_options(range.clone(), scan_options, None)
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(table, range, IterationOrder::Ascending, &mut iter).await;
@@ -3964,7 +3975,7 @@ mod tests {
         ) {
             let mut iter = db
                 .inner
-                .scan_with_options(scan_range.clone(), &ScanOptions::default())
+                .scan_with_options(scan_range.clone(), &ScanOptions::default(), None)
                 .await
                 .unwrap();
 
@@ -10128,7 +10139,7 @@ mod tests {
     where
         R: DbReadOps + Sync,
     {
-        let mut prefix_iter = reader.scan_prefix(b"bbb").await.unwrap();
+        let mut prefix_iter = reader.scan_prefix(b"bbb", ..).await.unwrap();
         test_utils::assert_ranged_db_scan(
             table,
             Bytes::from_static(b"bbb")..Bytes::from_static(b"bbc"),

@@ -195,7 +195,7 @@ impl DbTransaction {
     pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan_prefix(prefix).await?;
+        let iter = tx.scan_prefix(prefix, ..).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -208,7 +208,7 @@ impl DbTransaction {
         let options = options.try_into()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan_prefix_with_options(prefix, &options).await?;
+        let iter = tx.scan_prefix_with_options(prefix, .., &options).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
