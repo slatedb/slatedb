@@ -8,7 +8,7 @@ use std::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, Rang
 /// yields its bounds as plain byte slices. Neither standard alternative
 /// gives `scan_prefix` a usable signature:
 ///
-/// - A generic `RangeBounds<K>` parameter (the shape
+/// - A generic `RangeBounds<K>` parameter (the signature
 ///   [`scan`](crate::Db::scan) uses) breaks the most common call,
 ///   `scan_prefix(prefix, ..)`: a `..` carries no bound values, so the
 ///   compiler cannot tell what `K` is and rejects the call unless the
@@ -16,13 +16,14 @@ use std::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, Rang
 /// - Fixing the parameter to `RangeBounds<&[u8]>` makes `..` compile but
 ///   rejects natural arguments: the bounds of `b"a"..b"b"` are
 ///   `&[u8; 1]` rather than `&[u8]`, and ranges over owned types like
-///   `Vec<u8>` or `Bytes` don't coerce either.
+///   `Vec<u8>` or `Bytes` don't coerce either. Every bound has to be
+///   converted by hand, as in `b"a".as_slice()..b"b".as_slice()`.
 ///
-/// This trait accepts all of those shapes. `..` has its own
+/// This trait accepts all of those calls as written. `..` has its own
 /// implementation, so it needs no annotation, and every other standard
 /// range type takes any bound that can be viewed as bytes
-/// (`AsRef<[u8]>`). As a result `..`, `b"a"..b"b"`, `vec_start..`,
-/// `..=bytes_end`, and explicit [`Bound`] pairs all work as written.
+/// (`AsRef<[u8]>`): `..`, `b"a"..b"b"`, `vec_start..`, `..=bytes_end`,
+/// and explicit [`Bound`] pairs all work without conversion.
 pub trait SubrangeBounds {
     /// The start bound of the subrange, as a byte-slice bound.
     fn start_bound(&self) -> Bound<&[u8]>;
