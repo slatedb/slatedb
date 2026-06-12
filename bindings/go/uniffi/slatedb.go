@@ -392,11 +392,11 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder()
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder_from_source()
 		})
-		if checksum != 30675 {
+		if checksum != 20657 {
 			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder_from_source: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2102,7 +2102,7 @@ func (ffiObject *FfiObject) freeRustArcPtr() {
 
 // Administrative read/query handle for SlateDB.
 type AdminInterface interface {
-	CreateCloneBuilder(parentPath string, parentCheckpoint *string) (*CloneBuilder, error)
+	CreateCloneBuilderFromSource(source CloneSourceSpec) (*CloneBuilder, error)
 	// Looks up a sequence number for the provided Unix UTC timestamp seconds.
 	GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (*uint64, error)
 	// Looks up a timestamp for the provided sequence number.
@@ -2128,12 +2128,12 @@ type Admin struct {
 	ffiObject FfiObject
 }
 
-func (_self *Admin) CreateCloneBuilder(parentPath string, parentCheckpoint *string) (*CloneBuilder, error) {
+func (_self *Admin) CreateCloneBuilderFromSource(source CloneSourceSpec) (*CloneBuilder, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
 	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_method_admin_create_clone_builder(
-			_pointer, FfiConverterStringINSTANCE.Lower(parentPath), FfiConverterOptionalStringINSTANCE.Lower(parentCheckpoint), _uniffiStatus)
+		return C.uniffi_slatedb_uniffi_fn_method_admin_create_clone_builder_from_source(
+			_pointer, FfiConverterCloneSourceSpecINSTANCE.Lower(source), _uniffiStatus)
 	})
 	if _uniffiErr != nil {
 		var _uniffiDefaultValue *CloneBuilder

@@ -187,7 +187,7 @@ test("admin clone merges sources into destination", async (t) => {
 
   const clonePath = uniquePath("admin-clone-clone");
   const admin = openAdmin(store, { path: clonePath, cleanup });
-  const cloneBuilder = cleanup.track(admin.create_clone_builder(sources[0].path, undefined), { shutdown: false });
+  const cloneBuilder = cleanup.track(admin.create_clone_builder_from_source(sources[0]), { shutdown: false });
   for (const source of sources.slice(1)) {
     cloneBuilder.with_source(source);
   }

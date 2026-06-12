@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ulid::Ulid;
-use uuid::Uuid;
 
 use crate::builder::CloneBuilder;
 use crate::error::{Error, SlateDbError};
 use crate::types::{
-    Checkpoint, Compaction, CompactorStateView, VersionedCompactions, VersionedManifest,
+    Checkpoint, CloneSourceSpec, Compaction, CompactorStateView, VersionedCompactions,
+    VersionedManifest,
 };
 
 fn into_u64_bounds(
@@ -120,17 +120,13 @@ impl Admin {
             .map_err(Into::into)
     }
 
-    pub fn create_clone_builder(
+    pub fn create_clone_builder_from_source(
         &self,
-        parent_path: String,
-        parent_checkpoint: Option<String>,
+        source: CloneSourceSpec,
     ) -> Result<Arc<CloneBuilder>, Error> {
-        let checkpoint = parent_checkpoint
-            .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()
-            .map_err(|source| SlateDbError::InvalidCheckpointId { source })?;
-        let builder = self.inner.create_clone_builder(parent_path, checkpoint);
-        Ok(CloneBuilder::new(builder))
+        Ok(CloneBuilder::new(
+            self.inner
+                .create_clone_builder_from_source(source.try_into()?),
+        ))
     }
 }
