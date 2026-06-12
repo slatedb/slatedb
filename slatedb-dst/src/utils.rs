@@ -117,6 +117,8 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         metric_level: None,
         commit_compacted_interval: rng
             .random_range(Duration::from_millis(1)..Duration::from_secs(5)),
+        worker_heartbeat_timeout: rng
+            .random_range(Duration::from_millis(100)..Duration::from_secs(60)),
     }
 }
 

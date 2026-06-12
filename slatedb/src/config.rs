@@ -1123,14 +1123,6 @@ pub struct CompactorOptions {
     #[serde(default = "default_compaction_worker_options")]
     pub worker: Option<CompactionWorkerOptions>,
 
-    /// How long the coordinator will wait without a heartbeat before reclaiming
-    /// a `Running` compaction from its worker and resetting it to `Submitted`.
-    /// A worker that crashes or stalls will have its jobs reclaimed after this
-    /// timeout. Default is 30 seconds.
-    #[serde(deserialize_with = "deserialize_duration")]
-    #[serde(serialize_with = "serialize_duration")]
-    pub worker_heartbeat_timeout: Duration,
-
     /// Optional metrics reporting level for standalone compactors. When a
     /// compactor is owned by a [`Settings`] configured DB, unset means inherit
     /// [`Settings::metric_level`].
@@ -1141,6 +1133,14 @@ pub struct CompactorOptions {
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub commit_compacted_interval: Duration,
+
+    /// How long the coordinator will wait without a heartbeat before reclaiming
+    /// a `Running` compaction from its worker and resetting it to `Submitted`.
+    /// A worker that crashes or stalls will have its jobs reclaimed after this
+    /// timeout. Default is 30 seconds.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub worker_heartbeat_timeout: Duration,
 }
 
 /// Default options for the compactor. Currently, only a
