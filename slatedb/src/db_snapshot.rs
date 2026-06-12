@@ -4,9 +4,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
-use crate::subrange::SubrangeBounds;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
+use crate::subrange::SubrangeBounds;
 use crate::types::KeyValue;
 
 use crate::db::DbInner;

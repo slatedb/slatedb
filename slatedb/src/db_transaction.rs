@@ -7,7 +7,6 @@ use uuid::Uuid;
 
 use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
-use crate::subrange::SubrangeBounds;
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
@@ -15,6 +14,7 @@ use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::reader::ScanContext;
+use crate::subrange::SubrangeBounds;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
 use crate::{DbReadOps, DbTransactionOps};

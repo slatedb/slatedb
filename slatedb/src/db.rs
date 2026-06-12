@@ -34,9 +34,9 @@ use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::db_transaction::DbTransaction;
-use crate::subrange::SubrangeBounds;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
+use crate::subrange::SubrangeBounds;
 use crate::transaction_manager::IsolationLevel;
 use crate::CloseReason;
 use log::{info, trace, warn};

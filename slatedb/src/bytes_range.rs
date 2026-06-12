@@ -115,10 +115,7 @@ impl BytesRange {
     /// - `from_prefix_and_subrange(prefix, ..)` is equivalent to
     ///   [`Self::from_prefix`]; an empty prefix degenerates to a plain range
     ///   over the subrange bounds.
-    pub(crate) fn from_prefix_and_subrange(
-        prefix: &[u8],
-        subrange: impl SubrangeBounds,
-    ) -> Self {
+    pub(crate) fn from_prefix_and_subrange(prefix: &[u8], subrange: impl SubrangeBounds) -> Self {
         let concat = |suffix: &[u8]| {
             let mut key = Vec::with_capacity(prefix.len() + suffix.len());
             key.extend_from_slice(prefix);
