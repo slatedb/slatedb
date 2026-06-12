@@ -339,6 +339,13 @@ impl CompactionWorkerHandler {
                         compaction.id()
                     );
                     self.active_jobs.insert(compaction.id());
+                    self.job_progress.insert(
+                        compaction.id(),
+                        JobProgressState {
+                            last_hb_sst_count: 0,
+                            last_hb_bytes: 0,
+                        },
+                    );
                     Self::dispatch_to_executor(&self.executor, args);
                 }
                 Err(e) => {
