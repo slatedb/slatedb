@@ -76,7 +76,7 @@ use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableView};
 use crate::db_status::ClosedResultWriter;
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
 use crate::manifest::{LsmTreeState, ManifestCore};
@@ -500,17 +500,17 @@ pub(crate) struct CompactorEventHandler {
 
 #[async_trait]
 impl MessageHandler<CompactorMessage> for CompactorEventHandler {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<CompactorMessage>>)> {
+    fn tickers(&mut self) -> Vec<MessageTickerDef<CompactorMessage>> {
         vec![
-            (
+            MessageTickerDef::new(
                 self.options.poll_interval,
                 Box::new(|| CompactorMessage::PollManifest),
             ),
-            (
+            MessageTickerDef::new(
                 Duration::from_secs(10),
                 Box::new(|| CompactorMessage::LogStats),
             ),
-            (
+            MessageTickerDef::new(
                 self.options.commit_compacted_interval,
                 Box::new(|| CompactorMessage::CommitCompacted),
             ),

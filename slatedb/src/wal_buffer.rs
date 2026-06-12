@@ -13,7 +13,7 @@ use crate::clock::MonotonicClock;
 use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::db_status::ClosedResultWriter;
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::oracle::{DbOracle, Oracle};
 use crate::tablestore::TableStore;
@@ -568,9 +568,9 @@ struct WalFlushHandler {
 
 #[async_trait]
 impl MessageHandler<WalFlushWork> for WalFlushHandler {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<WalFlushWork>>)> {
+    fn tickers(&mut self) -> Vec<MessageTickerDef<WalFlushWork>> {
         if let Some(max_flush_interval) = self.max_flush_interval {
-            return vec![(
+            return vec![MessageTickerDef::new(
                 max_flush_interval,
                 Box::new(|| WalFlushWork { result_tx: None }),
             )];

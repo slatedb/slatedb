@@ -13,7 +13,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -30,7 +29,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor, TickerJitter};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef, TickerJitter};
 use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
@@ -120,10 +119,10 @@ pub(crate) struct CompactionWorkerHandler {
     /// yet `Compacted`). Used to gate capacity and to know what to reset on
     /// graceful shutdown.
     active_jobs: BTreeSet<Ulid>,
-    /// Seeds the poll ticker's jitter (see [`ticker_jitter`]). Threaded through
-    /// so jitter stays deterministic under simulation testing.
+    /// Seeds the poll ticker's jitter (see [`tickers`]). Threaded through so
+    /// jitter stays deterministic under simulation testing.
     ///
-    /// [`ticker_jitter`]: MessageHandler::ticker_jitter
+    /// [`tickers`]: MessageHandler::tickers
     rand: Arc<DbRand>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
@@ -510,14 +509,7 @@ impl CompactionWorkerHandler {
 
 #[async_trait]
 impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<WorkerMessage>>)> {
-        vec![(
-            self.options.compactions_poll_interval,
-            Box::new(|| WorkerMessage::PollCompactions),
-        )]
-    }
-
-    fn ticker_jitter(&self) -> TickerJitter {
+    fn tickers(&mut self) -> Vec<MessageTickerDef<WorkerMessage>> {
         // RFC-0025: spread `.compactions` polls across workers so they don't
         // synchronize on the same read cadence. Each poll waits a random
         // duration centered on `compactions_poll_interval` (the interval plus or
@@ -525,7 +517,11 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // DbRand so the schedule stays deterministic under simulation testing,
         // and the wait lives inside the ticker future, so it never blocks the
         // worker's message channel.
-        TickerJitter::new(0.5, self.rand.rng().next_u64())
+        vec![MessageTickerDef::new(
+            self.options.compactions_poll_interval,
+            Box::new(|| WorkerMessage::PollCompactions),
+        )
+        .with_jitter(TickerJitter::new(0.5, self.rand.rng().next_u64()))]
     }
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {

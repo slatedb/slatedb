@@ -35,7 +35,7 @@
 //! ## Example
 //!
 //! ```ignore
-//! # use slatedb::dispatcher::{MessageHandlerExecutor, MessageHandler, MessageFactory};
+//! # use slatedb::dispatcher::{MessageHandlerExecutor, MessageHandler, MessageFactory, MessageTickerDef};
 //! # use slatedb::error::SlateDBError;
 //! # use slatedb_common::clock::DefaultSystemClock;
 //! # use slatedb::utils::WatchableOnceCell;
@@ -55,9 +55,12 @@
 //!
 //! #[async_trait::async_trait]
 //! impl MessageHandler<Message> for PrintMessageHandler {
-//!     fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<Message>>)> {
+//!     fn tickers(&mut self) -> Vec<MessageTickerDef<Message>> {
 //!         let mut tickers = Vec::new();
-//!         tickers.push((Duration::from_secs(1), Box::new(|| Message::Say("tick".to_string()))));
+//!         tickers.push(MessageTickerDef::new(
+//!             Duration::from_secs(1),
+//!             Box::new(|| Message::Say("tick".to_string())),
+//!         ));
 //!         tickers
 //!     }
 //!
@@ -142,13 +145,47 @@ use slatedb_common::clock::{SystemClock, SystemClockTicker};
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
 pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 
-/// Random jitter applied to each tick of a [MessageHandler]'s tickers.
+/// A single ticker definition returned by [`MessageHandler::tickers`]: a base
+/// interval, a [`MessageFactory`] to produce a message on each tick, and an
+/// optional per-ticker [`TickerJitter`].
+///
+/// Jitter is configured per ticker rather than per handler so a handler can
+/// jitter only the tickers that need it (for example, the compaction worker
+/// jitters its `.compactions` poll but would leave a stats-logging ticker
+/// unjittered).
+pub(crate) struct MessageTickerDef<T: Send> {
+    /// The base tick interval. When jitter is enabled, the randomized wait is
+    /// centered on this interval.
+    pub(crate) duration: Duration,
+    /// Produces a fresh message on each tick.
+    pub(crate) factory: Box<MessageFactory<T>>,
+    /// Optional jitter for this ticker. `None` ticks exactly on `duration`.
+    pub(crate) jitter: Option<TickerJitter>,
+}
+
+impl<T: Send> MessageTickerDef<T> {
+    /// Creates an unjittered ticker that fires every `duration`.
+    pub(crate) fn new(duration: Duration, factory: Box<MessageFactory<T>>) -> Self {
+        Self {
+            duration,
+            factory,
+            jitter: None,
+        }
+    }
+
+    /// Applies jitter to this ticker. See [`TickerJitter`].
+    pub(crate) fn with_jitter(mut self, jitter: TickerJitter) -> Self {
+        self.jitter = Some(jitter);
+        self
+    }
+}
+
+/// Random jitter applied to a single ticker's tick schedule.
 ///
 /// Independent processes that tick on the same interval — for example,
 /// compaction workers polling `.compactions` every `compactions_poll_interval`
 /// — tend to synchronize their work, concentrating object-store requests at the
-/// same instants. Randomizing each tick's wait spreads that load out without
-/// any additional configuration.
+/// same instants. Randomizing each tick's wait spreads that load out.
 ///
 /// The jitter is *centered* on the base interval: instead of waiting exactly
 /// `interval`, each jittered tick waits a fresh uniform random duration in
@@ -166,15 +203,15 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// messages and other tickers are still serviced while a jittered tick is
 /// pending.
 ///
-/// Defaults to [`TickerJitter::NONE`] (disabled).
+/// A ticker with no [`TickerJitter`] (`None`) fires exactly on its interval.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TickerJitter {
     /// Half-width of the jitter range, as a fraction of the interval. Each tick
     /// waits a uniform random duration in
     /// `[interval * (1 - spread), interval * (1 + spread)]`. For example,
     /// `0.5` spreads waits over `[interval/2, 3 * interval/2]` (the interval
-    /// plus or minus half). A value of `0.0` disables jitter; values above
-    /// `1.0` simply clamp the lower bound at zero.
+    /// plus or minus half). A value of `0.0` falls back to the fixed interval;
+    /// values above `1.0` simply clamp the lower bound at zero.
     spread: f64,
     /// Seed for the jitter RNG, threaded from the handler's
     /// [crate::rand::DbRand] so jitter stays deterministic under simulation
@@ -183,12 +220,6 @@ pub(crate) struct TickerJitter {
 }
 
 impl TickerJitter {
-    /// No jitter; ticks fire exactly on their interval.
-    pub(crate) const NONE: TickerJitter = TickerJitter {
-        spread: 0.0,
-        seed: 0,
-    };
-
     /// Jitter each tick over `[interval * (1 - spread), interval * (1 + spread)]`,
     /// driven by `seed`. For example, `spread = 0.5` waits the interval plus or
     /// minus half.
@@ -304,20 +335,17 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// A [Result] containing `Ok(())` on clean shutdown, or an error if the handler
     /// fails for any reason.
     async fn run(&mut self) -> Result<(), SlateDBError> {
-        let jitter = self.handler.ticker_jitter();
         let mut tickers = self
             .handler
             .tickers()
             .into_iter()
-            .enumerate()
-            .map(|(index, (dur, factory))| {
+            .map(|def| {
                 MessageDispatcherTicker::new(
-                    self.clock.ticker(dur),
-                    factory,
+                    self.clock.ticker(def.duration),
+                    def.factory,
                     self.clock.clone(),
-                    dur,
-                    jitter,
-                    index,
+                    def.duration,
+                    def.jitter,
                 )
             })
             .collect::<Vec<_>>();
@@ -465,10 +493,9 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     ///   jitter is enabled.
     /// * `interval`: The base tick interval, which the jitter range is centered
     ///   on.
-    /// * `jitter`: The [TickerJitter] controlling the randomized wait.
-    /// * `index`: This ticker's position among the handler's tickers. Used to
-    ///   give each ticker an independent jitter sequence when several share the
-    ///   same [TickerJitter] seed.
+    /// * `jitter`: Optional [TickerJitter] controlling the randomized wait.
+    ///   `None` (or a non-positive spread) falls back to the fixed-interval
+    ///   `inner` ticker.
     ///
     /// ## Returns
     ///
@@ -478,24 +505,20 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
         message_factory: Box<MessageFactory<T>>,
         clock: Arc<dyn SystemClock>,
         interval: Duration,
-        jitter: TickerJitter,
-        index: usize,
+        jitter: Option<TickerJitter>,
     ) -> Self {
-        let jitter = if jitter.is_enabled() {
+        let jitter = jitter.filter(|j| j.is_enabled()).map(|jitter| {
             // Center the wait on `interval`: draw uniformly from
             // [interval*(1-spread), interval*(1+spread)]. The lower bound is
             // clamped at zero so spreads above 1.0 don't underflow.
             let min = interval.mul_f64((1.0 - jitter.spread).max(0.0));
             let max = interval.mul_f64(1.0 + jitter.spread);
-            let seed = jitter.seed.wrapping_add(index as u64);
-            Some(JitterState {
-                rng: RngAlg::seed_from_u64(seed),
+            JitterState {
+                rng: RngAlg::seed_from_u64(jitter.seed),
                 min,
                 max,
-            })
-        } else {
-            None
-        };
+            }
+        });
         Self {
             inner,
             message_factory,
@@ -558,19 +581,13 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     ///
     /// ## Returns
     ///
-    /// A vector of tuples containing the duration when a message should be sent to the
-    /// [MessageDispatcher], and a message factory to generate a new message on each tick.
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<T>>)> {
+    /// A vector of [MessageTickerDef]s, each defining a tick interval, a message
+    /// factory to generate a new message on each tick, and optional per-ticker
+    /// jitter. Handlers whose tickers would otherwise synchronize across
+    /// independent processes (for example, the compaction worker polling
+    /// `.compactions`) can attach a [TickerJitter] to spread their tick timing.
+    fn tickers(&mut self) -> Vec<MessageTickerDef<T>> {
         vec![]
-    }
-
-    /// Jitter applied to every ticker returned by [`tickers`](Self::tickers).
-    /// Defaults to [`TickerJitter::NONE`] (disabled). Handlers whose tickers
-    /// would otherwise synchronize across independent processes (for example,
-    /// the compaction worker polling `.compactions`) can override this to
-    /// spread their tick timing.
-    fn ticker_jitter(&self) -> TickerJitter {
-        TickerJitter::NONE
     }
 
     /// Returns async event sources that produce messages for the dispatcher.
@@ -959,7 +976,9 @@ impl MessageHandlerExecutor {
 mod test {
     use super::{MessageDispatcher, MessageDispatcherTicker, MessageHandler};
     use crate::db_status::ClosedResultWriter;
-    use crate::dispatcher::{MessageFactory, MessageHandlerExecutor, TickerJitter};
+    use crate::dispatcher::{
+        MessageFactory, MessageHandlerExecutor, MessageTickerDef, TickerJitter,
+    };
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
@@ -993,7 +1012,7 @@ mod test {
         tickers: Vec<(Duration, u8)>,
         clock: Arc<dyn SystemClock>,
         clock_schedule: VecDeque<Duration>,
-        jitter: TickerJitter,
+        jitter: Option<TickerJitter>,
     }
 
     impl TestHandler {
@@ -1008,7 +1027,7 @@ mod test {
                 tickers: vec![],
                 clock,
                 clock_schedule: VecDeque::new(),
-                jitter: TickerJitter::NONE,
+                jitter: None,
             }
         }
 
@@ -1025,24 +1044,23 @@ mod test {
         }
 
         fn with_jitter(mut self, jitter: TickerJitter) -> Self {
-            self.jitter = jitter;
+            self.jitter = Some(jitter);
             self
         }
     }
 
     #[async_trait::async_trait]
     impl MessageHandler<TestMessage> for TestHandler {
-        fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<TestMessage>>)> {
-            let mut tickers: Vec<(Duration, Box<MessageFactory<_>>)> = vec![];
+        fn tickers(&mut self) -> Vec<MessageTickerDef<TestMessage>> {
+            let mut tickers: Vec<MessageTickerDef<TestMessage>> = vec![];
             for (interval, id) in self.tickers.iter() {
                 let id = *id as i32;
-                tickers.push((*interval, Box::new(move || TestMessage::Tick(id))));
+                let mut def =
+                    MessageTickerDef::new(*interval, Box::new(move || TestMessage::Tick(id)));
+                def.jitter = self.jitter;
+                tickers.push(def);
             }
             tickers
-        }
-
-        fn ticker_jitter(&self) -> TickerJitter {
-            self.jitter
         }
 
         async fn handle(&mut self, message: TestMessage) -> Result<(), SlateDBError> {
@@ -1088,8 +1106,7 @@ mod test {
             Box::new(|| TestMessage::Tick(1)),
             clock.clone(),
             interval,
-            TickerJitter::new(0.5, 42),
-            0,
+            Some(TickerJitter::new(0.5, 42)),
         );
 
         let mut seen = HashSet::new();
@@ -1117,8 +1134,7 @@ mod test {
             Box::new(|| TestMessage::Tick(1)),
             clock.clone(),
             interval,
-            TickerJitter::NONE,
-            0,
+            None,
         );
         assert!(ticker.next_jittered_wait().is_none());
     }
@@ -1609,7 +1625,7 @@ mod test {
 
         #[async_trait::async_trait]
         impl MessageHandler<u8> for PanicHandler {
-            fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<u8>>)> {
+            fn tickers(&mut self) -> Vec<MessageTickerDef<u8>> {
                 vec![]
             }
 
@@ -1781,12 +1797,12 @@ mod test {
 
     #[async_trait::async_trait]
     impl MessageHandler<TestMessage> for ParallelTestHandler {
-        fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<TestMessage>>)> {
+        fn tickers(&mut self) -> Vec<MessageTickerDef<TestMessage>> {
             self.tickers
                 .iter()
                 .map(|(interval, id)| {
                     let id = *id as i32;
-                    (
+                    MessageTickerDef::new(
                         *interval,
                         Box::new(move || TestMessage::Tick(id)) as Box<MessageFactory<TestMessage>>,
                     )
