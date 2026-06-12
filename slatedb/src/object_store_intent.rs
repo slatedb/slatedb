@@ -2,18 +2,16 @@
 //!
 //! SlateDB tags every compacted-SST read and write it issues with a typed
 //! intent describing the caller's purpose: a [`WriteIntent`] on writes and a
-//! [`ReadIntent`] on reads. The intent is inserted into the call's
+//! [`ReadIntent`] on reads. "Compacted" names the SST family (the compacted
+//! directory), not the origin: L0 flush outputs and compaction outputs alike
+//! are compacted SSTs; only WAL segments are not. The intent is inserted into the call's
 //! [`Extensions`] (carried by [`GetOptions`](object_store::GetOptions),
 //! [`PutOptions`](object_store::PutOptions), and
 //! [`PutMultipartOptions`](object_store::PutMultipartOptions)).
 //!
 //! All other calls carry no intent: WAL segments and fences, manifests,
 //! compactions state, the GC boundary file, and calls with no opts-capable
-//! variant (`delete`, `list`, and the convenience `head`). A caching wrapper
-//! must treat untagged calls as uncacheable and serve them from upstream:
-//! untagged objects include mutable files read with conditional requests,
-//! and WAL segments are consumed once and deleted shortly after their
-//! contents reach L0.
+//! variant (`delete`, `list`, and the convenience `head`).
 
 use object_store::Extensions;
 
@@ -152,6 +150,171 @@ pub enum RetryReason {
     BlockDecodeError,
     /// The previous response could not be decompressed.
     DecompressionError,
+}
+
+/// Test support for asserting which intents object store calls carry.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::fmt;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use object_store::path::Path;
+    use object_store::{
+        CopyOptions, GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutOptions,
+        PutPayload, PutResult,
+    };
+
+    use super::{ReadIntent, WriteIntent};
+
+    /// One object store call observed by [`IntentRecordingObjectStore`], with the
+    /// intent it carried, if any.
+    #[derive(Clone, Debug)]
+    pub(crate) enum RecordedCall {
+        Get {
+            head: bool,
+            intent: Option<ReadIntent>,
+        },
+        Put {
+            intent: Option<WriteIntent>,
+        },
+        PutMultipart {
+            intent: Option<WriteIntent>,
+        },
+    }
+
+    /// Wraps an object store and records the intent extensions carried by every
+    /// get/put/multipart-init call, delegating all I/O to the inner store.
+    #[derive(Debug)]
+    pub(crate) struct IntentRecordingObjectStore {
+        inner: Arc<dyn ObjectStore>,
+        calls: parking_lot::Mutex<Vec<RecordedCall>>,
+    }
+
+    impl IntentRecordingObjectStore {
+        pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+            Self {
+                inner,
+                calls: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+
+        pub(crate) fn calls(&self) -> Vec<RecordedCall> {
+            self.calls.lock().clone()
+        }
+
+        pub(crate) fn clear(&self) {
+            self.calls.lock().clear();
+        }
+
+        /// Intents observed on get calls matching `head`, in call order.
+        pub(crate) fn get_intents(&self, head: bool) -> Vec<Option<ReadIntent>> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    RecordedCall::Get {
+                        head: h, intent, ..
+                    } if h == head => Some(intent),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Intents observed on put and multipart-init calls, in call order.
+        pub(crate) fn write_intents(&self) -> Vec<Option<WriteIntent>> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    RecordedCall::Put { intent, .. }
+                    | RecordedCall::PutMultipart { intent, .. } => Some(intent),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    impl fmt::Display for IntentRecordingObjectStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "IntentRecordingObjectStore({})", self.inner)
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for IntentRecordingObjectStore {
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.calls.lock().push(RecordedCall::Get {
+                head: options.head,
+                intent: ReadIntent::from_extensions(&options.extensions),
+            });
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.calls.lock().push(RecordedCall::Put {
+                intent: WriteIntent::from_extensions(&opts.extensions),
+            });
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.calls.lock().push(RecordedCall::PutMultipart {
+                intent: WriteIntent::from_extensions(&opts.extensions),
+            });
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<Path>>,
+        ) -> BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_offset(
+            &self,
+            prefix: Option<&Path>,
+            offset: &Path,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list_with_offset(prefix, offset)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 }
 
 #[cfg(test)]

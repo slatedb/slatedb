@@ -153,6 +153,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
+use crate::object_store_intent::{ReadKind, WriteKind};
 use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
@@ -529,7 +530,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
-        let table_store = Arc::new(TableStore::new_with_fp_registry(
+        let table_store = Arc::new(TableStore::new_with_intents_and_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
@@ -544,6 +545,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
+            ReadKind::Foreground,
+            WriteKind::Flush,
         ));
 
         // Initialize the database
@@ -618,8 +621,10 @@ impl<P: Into<Path>> DbBuilder<P> {
             write_rx,
             &tokio_handle,
         )?;
-        // Not to pollute the cache during compaction or GC
-        let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
+        // The compactor and GC get their own table store: no block cache (so
+        // background reads do not pollute it), and reads/writes tagged with
+        // compaction intents.
+        let uncached_table_store = Arc::new(TableStore::new_with_intents_and_fp_registry(
             ObjectStores::new(
                 retrying_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
@@ -628,6 +633,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             None,
+            ReadKind::CompactionInput,
+            WriteKind::CompactionOutput,
         ));
 
         let compactor_builder = self.compactor_builder.or_else(|| {
@@ -937,14 +944,18 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
-        let table_store = Arc::new(TableStore::new(
+        let table_store = Arc::new(TableStore::new_with_intents(
             ObjectStores::new(
                 retrying_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
             path,
-            None, // no need for cache in GC
+            None, // no need for a block cache in GC
+            // GC issues only metadata, list, and delete traffic; tag it as
+            // background compaction traffic so wrappers treat it accordingly.
+            ReadKind::CompactionInput,
+            WriteKind::CompactionOutput,
         ));
         GarbageCollector::new(
             manifest_store,
@@ -1153,11 +1164,13 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
+        let table_store = Arc::new(TableStore::new_with_intents(
             ObjectStores::new(retrying_main_object_store, None),
             sst_format,
             path,
-            None, // no need for cache in GC
+            None, // no need for a block cache in the compactor
+            ReadKind::CompactionInput,
+            WriteKind::CompactionOutput,
         ));
 
         let scheduler_supplier = self
@@ -1315,11 +1328,13 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
             Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new(
+        let table_store = Arc::new(TableStore::new_with_intents(
             ObjectStores::new(self.main_object_store, None),
             SsTableFormat::default(),
             path,
             None,
+            ReadKind::CompactionInput,
+            WriteKind::CompactionOutput,
         ));
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
@@ -1602,6 +1617,9 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             )) as Arc<dyn DbCache>
         });
 
+        // DbReader serves user reads, so its compacted-SST reads are
+        // foreground. It never writes compacted SSTs; the write kind is
+        // inert.
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
             object_store,
@@ -1610,6 +1628,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             block_cache: wrapped_cache,
             block_transformer: self.block_transformer.clone(),
             filter_policies: self.filter_policies.clone(),
+            read_kind: ReadKind::Foreground,
+            write_kind: WriteKind::Flush,
         };
 
         let reader = DbReader::open_internal(
@@ -2161,5 +2181,103 @@ mod tests {
         assert!(!cached_db_path.join("gc").exists());
 
         db.close().await.expect("failed to close db");
+    }
+}
+
+/// Wiring tests: assert that the builders hand each component a table store
+/// with the intended intent kinds by observing the intents that reach the
+/// object store. Unit tests in `tablestore.rs` cover the tagging mechanics;
+/// these cover the composition.
+#[cfg(test)]
+mod intent_wiring_tests {
+    use std::sync::Arc;
+
+    use object_store::memory::InMemory;
+
+    use crate::config::{FlushOptions, FlushType};
+    use crate::object_store_intent::{ReadIntent, WriteIntent};
+    use crate::test_utils::IntentRecordingObjectStore;
+    use crate::{Db, DbReader};
+
+    #[tokio::test]
+    async fn db_tags_foreground_reads_and_flush_writes() {
+        let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+        let path = "/intent_wiring_db";
+
+        let db = Db::builder(path, recording.clone())
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
+        // Exceed the BufWriter capacity so the L0 upload takes the multipart
+        // path, which carries extensions (the single-PUT path drops them on
+        // object_store 0.13.2).
+        for i in 0..11u8 {
+            db.put(&[i], &vec![i; 1024 * 1024]).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // WAL and manifest writes are untagged; the only tagged writes must
+        // be the flush-tagged L0 upload.
+        let writes: Vec<_> = recording.write_intents().into_iter().flatten().collect();
+        assert!(
+            writes.iter().any(|i| *i == WriteIntent::flush()),
+            "expected a flush-tagged L0 write, got {writes:?}"
+        );
+        assert!(
+            writes.iter().all(|i| *i == WriteIntent::flush()),
+            "unexpected non-flush tagged writes: {writes:?}"
+        );
+
+        db.close().await.unwrap();
+        recording.clear();
+
+        // Reopen so reads must come from the object store.
+        let db = Db::builder(path, recording.clone())
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
+        assert!(db.get(&[1u8]).await.unwrap().is_some());
+        let reads: Vec<_> = recording.get_intents(false).into_iter().flatten().collect();
+        assert!(!reads.is_empty(), "expected tagged object store reads");
+        assert!(
+            reads.iter().all(|i| *i == ReadIntent::foreground()),
+            "unexpected non-foreground tagged reads: {reads:?}"
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn db_reader_tags_foreground_reads() {
+        let backing = Arc::new(InMemory::new());
+        let path = "/intent_wiring_reader";
+        let db = Db::builder(path, backing.clone()).build().await.unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let recording = Arc::new(IntentRecordingObjectStore::new(backing));
+        let reader = DbReader::builder(path, recording.clone())
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
+        assert!(reader.get(b"key").await.unwrap().is_some());
+        let reads: Vec<_> = recording.get_intents(false).into_iter().flatten().collect();
+        assert!(!reads.is_empty(), "expected tagged object store reads");
+        assert!(
+            reads.iter().all(|i| *i == ReadIntent::foreground()),
+            "unexpected non-foreground tagged reads: {reads:?}"
+        );
+        reader.close().await.unwrap();
     }
 }

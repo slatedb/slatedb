@@ -2,6 +2,7 @@ use crate::db_cache::DbCache;
 use crate::filter_policy::FilterPolicy;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::manifest::store::ManifestStore;
+use crate::object_store_intent::{ReadKind, WriteKind};
 use crate::object_stores::ObjectStores;
 use crate::tablestore::TableStore;
 use object_store::path::Path;
@@ -21,6 +22,8 @@ pub(crate) struct DefaultStoreProvider {
     pub(crate) block_cache: Option<Arc<dyn DbCache>>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
     pub(crate) filter_policies: Vec<Arc<dyn FilterPolicy>>,
+    pub(crate) read_kind: ReadKind,
+    pub(crate) write_kind: WriteKind,
 }
 
 impl StoreProvider for DefaultStoreProvider {
@@ -30,7 +33,7 @@ impl StoreProvider for DefaultStoreProvider {
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
-        Arc::new(TableStore::new(
+        Arc::new(TableStore::new_with_intents(
             ObjectStores::new(
                 Arc::clone(&self.object_store),
                 self.wal_object_store.clone(),
@@ -38,6 +41,8 @@ impl StoreProvider for DefaultStoreProvider {
             sst_format,
             self.path.clone(),
             self.block_cache.clone(),
+            self.read_kind,
+            self.write_kind,
         ))
     }
 

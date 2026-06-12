@@ -284,6 +284,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::tablestore::TableStore;
+    use crate::test_utils::IntentRecordingObjectStore;
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils};
     use bytes::Bytes;
@@ -831,5 +832,55 @@ mod tests {
         }
         writer.close().await?;
         Ok(next_seq)
+    }
+
+    /// Every object store read issued by WAL replay is untagged.
+    #[tokio::test]
+    async fn replay_reads_carry_no_intent() {
+        let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(recording.clone(), None),
+            SsTableFormat::default(),
+            Path::from("/tmp/test_kv_store"),
+            None,
+        ));
+        let entries: BTreeMap<Bytes, Bytes> = (0..16u32)
+            .map(|i| {
+                (
+                    Bytes::from(format!("key{i:04}")),
+                    Bytes::from(format!("value{i:04}")),
+                )
+            })
+            .collect();
+        let mut iter = entries.iter();
+        write_wal(1, 0, &mut iter, entries.len(), Arc::clone(&table_store))
+            .await
+            .unwrap();
+        recording.clear();
+
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
+            &ManifestCore::new(),
+            WalReplayOptions::default(),
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+        while replay_iter.next().await.unwrap().is_some() {}
+
+        let range_intents = recording.get_intents(false);
+        assert!(!range_intents.is_empty(), "replay should read WAL contents");
+        assert!(
+            range_intents.iter().all(|i| i.is_none()),
+            "expected WAL replay intents on reads, got {range_intents:?}"
+        );
+        let head_intents = recording.get_intents(true);
+        assert!(
+            !head_intents.is_empty(),
+            "replay should probe WAL existence"
+        );
+        assert!(
+            head_intents.iter().all(|i| i.is_none()),
+            "expected WAL replay intents on probes, got {head_intents:?}"
+        );
     }
 }

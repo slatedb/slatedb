@@ -63,6 +63,8 @@ pub(crate) async fn assert_next<T: RowEntryIterator>(iterator: &mut T, expected_
     assert_eq!(actual_entry, expected_entry.clone())
 }
 
+pub(crate) use crate::object_store_intent::testing::IntentRecordingObjectStore;
+
 pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
