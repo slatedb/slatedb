@@ -442,6 +442,21 @@ mod tests {
     }
 
     #[test]
+    fn should_not_notify_when_adding_no_segments() {
+        // given: a write on a non-segmented database reports an empty set.
+        let mgr = DbStatusManager::new(0);
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.add_memtable_segments(BTreeSet::new());
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+        assert!(rx.borrow_and_update().list_segments().is_empty());
+    }
+
+    #[test]
     fn should_not_notify_when_reported_segments_unchanged() {
         // given
         let mgr = DbStatusManager::new(0);

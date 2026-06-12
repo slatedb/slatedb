@@ -9999,6 +9999,45 @@ mod tests {
         assert!(db.status().list_segments().is_empty());
     }
 
+    #[tokio::test]
+    async fn should_not_report_segments_without_extractor() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_no_segments_without_extractor";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        assert!(rx.borrow_and_update().list_segments().is_empty());
+
+        // when
+        db.put_with_options(
+            b"abc-1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // the flush drains the write path and folds the memtable into the
+        // manifest, so both reporting paths have run by the time it returns.
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // then
+        assert!(db.status().list_segments().is_empty());
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum ExtractorConfig {
         None,
