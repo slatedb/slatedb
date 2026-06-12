@@ -291,9 +291,10 @@ impl DbReaderInner {
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         drop(write_guard);
-        self.status_manager.report_manifest(versioned_manifest);
-        self.status_manager
-            .report_memtable_segments(collect_touched_segments(self.state.read().as_ref()));
+        self.status_manager.report_manifest_and_memtable_segments(
+            versioned_manifest,
+            collect_touched_segments(self.state.read().as_ref()),
+        );
         Ok(())
     }
 
@@ -1426,7 +1427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_report_memtable_segments_to_subscription() {
+    async fn should_report_memtable_segments_in_status() {
         // given
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_reader_subscribe_reports_memtable_segments";
