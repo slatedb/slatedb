@@ -513,9 +513,9 @@ mod tests {
         SizeTieredCompactionScheduler, SizeTieredCompactionSchedulerSupplier,
     };
     use crate::utils::IdGenerator;
-    use crate::DbRand;
     use bytes::Bytes;
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::DbRand;
     use slatedb_txn_obj::test_utils::new_dirty_object;
     use std::sync::Arc;
 

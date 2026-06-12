@@ -156,7 +156,6 @@ use crate::merge_operator::MergeOperatorType;
 use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
-use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
@@ -167,6 +166,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
+use slatedb_common::DbRand;
 use uuid::Uuid;
 
 /// A builder for creating a new Db instance.

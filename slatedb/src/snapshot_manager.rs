@@ -4,8 +4,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::oracle::{DbOracle, Oracle};
-use crate::rand::DbRand;
 use crate::utils::IdGenerator;
+use slatedb_common::DbRand;
 
 /// Tracks active snapshot registrations by sequence number.
 ///

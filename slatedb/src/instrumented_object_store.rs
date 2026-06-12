@@ -463,9 +463,9 @@ mod tests {
     };
     use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
     use crate::object_stores::ObjectStoreType;
-    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
+    use slatedb_common::DbRand;
 
     fn histogram_count(
         recorder: &slatedb_common::metrics::DefaultMetricsRecorder,
