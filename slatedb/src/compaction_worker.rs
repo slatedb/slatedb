@@ -17,7 +17,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
-use rand::RngCore;
 use tokio::runtime::Handle;
 use ulid::Ulid;
 
@@ -29,7 +28,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
-use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef, TickerJitter};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
@@ -119,11 +118,6 @@ pub(crate) struct CompactionWorkerHandler {
     /// yet `Compacted`). Used to gate capacity and to know what to reset on
     /// graceful shutdown.
     active_jobs: BTreeSet<Ulid>,
-    /// Seeds the poll ticker's jitter (see [`tickers`]). Threaded through so
-    /// jitter stays deterministic under simulation testing.
-    ///
-    /// [`tickers`]: MessageHandler::tickers
-    rand: Arc<DbRand>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
     /// absence on early ticks.
@@ -138,7 +132,6 @@ impl CompactionWorkerHandler {
         manifest_store: Arc<ManifestStore>,
         executor: Arc<dyn CompactionExecutor + Send + Sync>,
         clock: Arc<dyn SystemClock>,
-        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             worker_id,
@@ -148,7 +141,6 @@ impl CompactionWorkerHandler {
             executor,
             clock,
             active_jobs: BTreeSet::new(),
-            rand,
             stored: None,
         }
     }
@@ -205,7 +197,6 @@ impl CompactionWorkerHandler {
             manifest_store.clone(),
             executor,
             system_clock.clone(),
-            rand.clone(),
         );
         (handler, rx)
     }
@@ -513,15 +504,15 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // RFC-0025: spread `.compactions` polls across workers so they don't
         // synchronize on the same read cadence. Each poll waits a random
         // duration centered on `compactions_poll_interval` (the interval plus or
-        // minus half), so the mean poll rate is unchanged. The seed comes from
-        // DbRand so the schedule stays deterministic under simulation testing,
-        // and the wait lives inside the ticker future, so it never blocks the
-        // worker's message channel.
+        // minus half), so the mean poll rate is unchanged. The waits are drawn
+        // from the dispatcher's DbRand so the schedule stays deterministic under
+        // simulation testing, and the wait lives inside the ticker future, so it
+        // never blocks the worker's message channel.
         vec![MessageTickerDef::new(
             self.options.compactions_poll_interval,
             Box::new(|| WorkerMessage::PollCompactions),
         )
-        .with_jitter(TickerJitter::new(0.5, self.rand.rng().next_u64()))]
+        .with_jitter(0.5)]
     }
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
@@ -664,7 +655,6 @@ mod tests {
                 manifest_store.clone(),
                 executor.clone(),
                 clock,
-                Arc::new(DbRand::default()),
             );
             // `handle()` lazily loads `.compactions` on the first message; the
             // tests below drive the child fns (poll_and_claim, handle_finished,

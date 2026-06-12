@@ -340,6 +340,7 @@ impl Compactor {
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             closed_result,
             system_clock.clone(),
+            rand.clone(),
         ));
         Self {
             manifest_store,

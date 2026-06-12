@@ -608,6 +608,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             Arc::new(status_manager),
             system_clock.clone(),
+            rand.clone(),
         ));
         if inner.wal_enabled {
             inner.wal_buffer.init(task_executor.clone()).await?;
@@ -1332,6 +1333,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             closed_result,
             self.system_clock.clone(),
+            self.rand.clone(),
         ));
         let (handler, rx) = CompactionWorkerHandler::build_worker_handler(
             manifest_store,

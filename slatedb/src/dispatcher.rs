@@ -93,12 +93,14 @@
 //! }
 //!
 //! let clock = Arc::new(DefaultSystemClock::default());
+//! let rand = Arc::new(slatedb::rand::DbRand::default());
 //! let (tx, rx) = async_channel::unbounded();
 //! let closed_result = WatchableOnceCell::new();
 //! let handle = Handle::current();
 //! let task_executor = MessageHandlerExecutor::new(
 //!     closed_result,
 //!     clock,
+//!     rand,
 //! );
 //! task_executor.add_handler(
 //!     "print_message_handler".to_string(),
@@ -132,12 +134,12 @@ use parking_lot::Mutex;
 use tokio::{runtime::Handle, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
 
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 
 use crate::{
     db_status::ClosedResultWriter,
     error::SlateDBError,
-    rand::RngAlg,
+    rand::DbRand,
     utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
 use slatedb_common::clock::{SystemClock, SystemClockTicker};
@@ -147,40 +149,12 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 
 /// A single ticker definition returned by [`MessageHandler::tickers`]: a base
 /// interval, a [`MessageFactory`] to produce a message on each tick, and an
-/// optional per-ticker [`TickerJitter`].
+/// optional per-ticker jitter spread.
 ///
 /// Jitter is configured per ticker rather than per handler so a handler can
 /// jitter only the tickers that need it (for example, the compaction worker
 /// jitters its `.compactions` poll but would leave a stats-logging ticker
 /// unjittered).
-pub(crate) struct MessageTickerDef<T: Send> {
-    /// The base tick interval. When jitter is enabled, the randomized wait is
-    /// centered on this interval.
-    pub(crate) duration: Duration,
-    /// Produces a fresh message on each tick.
-    pub(crate) factory: Box<MessageFactory<T>>,
-    /// Optional jitter for this ticker. `None` ticks exactly on `duration`.
-    pub(crate) jitter: Option<TickerJitter>,
-}
-
-impl<T: Send> MessageTickerDef<T> {
-    /// Creates an unjittered ticker that fires every `duration`.
-    pub(crate) fn new(duration: Duration, factory: Box<MessageFactory<T>>) -> Self {
-        Self {
-            duration,
-            factory,
-            jitter: None,
-        }
-    }
-
-    /// Applies jitter to this ticker. See [`TickerJitter`].
-    pub(crate) fn with_jitter(mut self, jitter: TickerJitter) -> Self {
-        self.jitter = Some(jitter);
-        self
-    }
-}
-
-/// Random jitter applied to a single ticker's tick schedule.
 ///
 /// Independent processes that tick on the same interval — for example,
 /// compaction workers polling `.compactions` every `compactions_poll_interval`
@@ -203,33 +177,39 @@ impl<T: Send> MessageTickerDef<T> {
 /// messages and other tickers are still serviced while a jittered tick is
 /// pending.
 ///
-/// A ticker with no [`TickerJitter`] (`None`) fires exactly on its interval.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct TickerJitter {
-    /// Half-width of the jitter range, as a fraction of the interval. Each tick
-    /// waits a uniform random duration in
-    /// `[interval * (1 - spread), interval * (1 + spread)]`. For example,
-    /// `0.5` spreads waits over `[interval/2, 3 * interval/2]` (the interval
-    /// plus or minus half). A value of `0.0` falls back to the fixed interval;
-    /// values above `1.0` simply clamp the lower bound at zero.
-    spread: f64,
-    /// Seed for the jitter RNG, threaded from the handler's
-    /// [crate::rand::DbRand] so jitter stays deterministic under simulation
-    /// testing.
-    seed: u64,
+/// The randomized waits are drawn from the dispatcher's [crate::rand::DbRand]
+/// so jitter stays deterministic under simulation testing.
+pub(crate) struct MessageTickerDef<T: Send> {
+    /// The base tick interval. When jitter is enabled, the randomized wait is
+    /// centered on this interval.
+    pub(crate) duration: Duration,
+    /// Produces a fresh message on each tick.
+    pub(crate) factory: Box<MessageFactory<T>>,
+    /// Optional jitter spread: the half-width of the jitter range, as a
+    /// fraction of the interval. Each tick waits a uniform random duration in
+    /// `[interval * (1 - spread), interval * (1 + spread)]`. For example, `0.5`
+    /// spreads waits over `[interval/2, 3 * interval/2]` (the interval plus or
+    /// minus half). `None` or `0.0` ticks exactly on `duration`; values above
+    /// `1.0` simply clamp the lower bound at zero.
+    pub(crate) jitter: Option<f64>,
 }
 
-impl TickerJitter {
-    /// Jitter each tick over `[interval * (1 - spread), interval * (1 + spread)]`,
-    /// driven by `seed`. For example, `spread = 0.5` waits the interval plus or
-    /// minus half.
-    pub(crate) fn new(spread: f64, seed: u64) -> TickerJitter {
-        TickerJitter { spread, seed }
+impl<T: Send> MessageTickerDef<T> {
+    /// Creates an unjittered ticker that fires every `duration`.
+    pub(crate) fn new(duration: Duration, factory: Box<MessageFactory<T>>) -> Self {
+        Self {
+            duration,
+            factory,
+            jitter: None,
+        }
     }
 
-    /// Whether jitter is enabled (a positive spread was configured).
-    fn is_enabled(&self) -> bool {
-        self.spread > 0.0
+    /// Jitters each tick over `[interval * (1 - spread), interval * (1 + spread)]`.
+    /// For example, `spread = 0.5` waits the interval plus or minus half. See
+    /// [`MessageTickerDef`] for details.
+    pub(crate) fn with_jitter(mut self, spread: f64) -> Self {
+        self.jitter = Some(spread);
+        self
     }
 }
 
@@ -272,6 +252,7 @@ struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
     rx: async_channel::Receiver<T>,
     clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
     cancellation_token: CancellationToken,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
@@ -286,18 +267,21 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `handler`: The [MessageHandler] to use for processing messages.
     /// * `rx`: The [async_channel::Receiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
+    /// * `rand`: The [DbRand] used to draw randomized waits for jittered tickers.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     #[allow(dead_code)]
     fn new(
         handler: Box<dyn MessageHandler<T>>,
         rx: async_channel::Receiver<T>,
         clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             handler,
             rx,
             clock,
+            rand,
             cancellation_token,
             fp_registry: Arc::new(FailPointRegistry::new()),
         }
@@ -346,6 +330,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                     self.clock.clone(),
                     def.duration,
                     def.jitter,
+                    self.rand.clone(),
                 )
             })
             .collect::<Vec<_>>();
@@ -474,10 +459,10 @@ struct MessageDispatcherTicker<'a, T: Send> {
     jitter: Option<JitterState>,
 }
 
-/// Per-ticker jitter state: an RNG and the inclusive bounds of the randomized
-/// per-tick wait, centered on the base interval.
+/// Per-ticker jitter state: the RNG source and the inclusive bounds of the
+/// randomized per-tick wait, centered on the base interval.
 struct JitterState {
-    rng: RngAlg,
+    rand: Arc<DbRand>,
     min: Duration,
     max: Duration,
 }
@@ -493,9 +478,11 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     ///   jitter is enabled.
     /// * `interval`: The base tick interval, which the jitter range is centered
     ///   on.
-    /// * `jitter`: Optional [TickerJitter] controlling the randomized wait.
+    /// * `jitter`: Optional jitter spread controlling the randomized wait.
     ///   `None` (or a non-positive spread) falls back to the fixed-interval
     ///   `inner` ticker.
+    /// * `rand`: The [DbRand] used to draw randomized waits when jitter is
+    ///   enabled.
     ///
     /// ## Returns
     ///
@@ -505,19 +492,16 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
         message_factory: Box<MessageFactory<T>>,
         clock: Arc<dyn SystemClock>,
         interval: Duration,
-        jitter: Option<TickerJitter>,
+        jitter: Option<f64>,
+        rand: Arc<DbRand>,
     ) -> Self {
-        let jitter = jitter.filter(|j| j.is_enabled()).map(|jitter| {
+        let jitter = jitter.filter(|spread| *spread > 0.0).map(|spread| {
             // Center the wait on `interval`: draw uniformly from
             // [interval*(1-spread), interval*(1+spread)]. The lower bound is
             // clamped at zero so spreads above 1.0 don't underflow.
-            let min = interval.mul_f64((1.0 - jitter.spread).max(0.0));
-            let max = interval.mul_f64(1.0 + jitter.spread);
-            JitterState {
-                rng: RngAlg::seed_from_u64(jitter.seed),
-                min,
-                max,
-            }
+            let min = interval.mul_f64((1.0 - spread).max(0.0));
+            let max = interval.mul_f64(1.0 + spread);
+            JitterState { rand, min, max }
         });
         Self {
             inner,
@@ -527,14 +511,14 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
         }
     }
 
-    /// Draws the next randomized wait, advancing the ticker's RNG. Returns
-    /// `None` when jitter is disabled, in which case the caller falls back to
-    /// the fixed-interval `inner` ticker.
+    /// Draws the next randomized wait from the [DbRand]. Returns `None` when
+    /// jitter is disabled, in which case the caller falls back to the
+    /// fixed-interval `inner` ticker.
     fn next_jittered_wait(&mut self) -> Option<Duration> {
-        self.jitter.as_mut().map(|state| {
+        self.jitter.as_ref().map(|state| {
             let min = state.min.as_nanos() as u64;
             let max = state.max.as_nanos() as u64;
-            Duration::from_nanos(state.rng.random_range(min..=max))
+            Duration::from_nanos(state.rand.rng().random_range(min..=max))
         })
     }
 
@@ -585,7 +569,8 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// factory to generate a new message on each tick, and optional per-ticker
     /// jitter. Handlers whose tickers would otherwise synchronize across
     /// independent processes (for example, the compaction worker polling
-    /// `.compactions`) can attach a [TickerJitter] to spread their tick timing.
+    /// `.compactions`) can attach a jitter spread via
+    /// [MessageTickerDef::with_jitter] to spread their tick timing.
     fn tickers(&mut self) -> Vec<MessageTickerDef<T>> {
         vec![]
     }
@@ -762,6 +747,8 @@ pub(crate) struct MessageHandlerExecutor {
     closed_result: Arc<dyn ClosedResultWriter>,
     /// A system clock for time keeping.
     clock: Arc<dyn SystemClock>,
+    /// A random number generator passed to each dispatcher for jittered tickers.
+    rand: Arc<DbRand>,
     /// A fail point registry for fail points.
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
@@ -774,6 +761,7 @@ impl MessageHandlerExecutor {
     ///
     /// * `closed_result`: A [ClosedResultWriter] that stores the database close result.
     /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
+    /// * `rand`: A [DbRand] passed to each dispatcher for jittered tickers.
     ///
     /// ## Returns
     ///
@@ -781,11 +769,13 @@ impl MessageHandlerExecutor {
     pub(crate) fn new(
         closed_result: Arc<dyn ClosedResultWriter>,
         clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             futures: Mutex::new(Some(vec![])),
             closed_result,
             clock,
+            rand,
             tokens: SkipMap::new(),
             results: Arc::new(SkipMap::new()),
             fp_registry: Arc::new(FailPointRegistry::new()),
@@ -849,9 +839,14 @@ impl MessageHandlerExecutor {
         let mut futures = Vec::with_capacity(handlers.len());
 
         for (group_index, handler) in handlers.into_iter().enumerate() {
-            let dispatcher =
-                MessageDispatcher::new(handler, rx.clone(), self.clock.clone(), token.clone())
-                    .with_fp_registry(self.fp_registry.clone());
+            let dispatcher = MessageDispatcher::new(
+                handler,
+                rx.clone(),
+                self.clock.clone(),
+                self.rand.clone(),
+                token.clone(),
+            )
+            .with_fp_registry(self.fp_registry.clone());
             let future = dispatcher.run_lifecycle(
                 name.clone(),
                 self.closed_result.clone(),
@@ -976,10 +971,9 @@ impl MessageHandlerExecutor {
 mod test {
     use super::{MessageDispatcher, MessageDispatcherTicker, MessageHandler};
     use crate::db_status::ClosedResultWriter;
-    use crate::dispatcher::{
-        MessageFactory, MessageHandlerExecutor, MessageTickerDef, TickerJitter,
-    };
+    use crate::dispatcher::{MessageFactory, MessageHandlerExecutor, MessageTickerDef};
     use crate::error::SlateDBError;
+    use crate::rand::DbRand;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
     use futures::stream::BoxStream;
@@ -1012,7 +1006,7 @@ mod test {
         tickers: Vec<(Duration, u8)>,
         clock: Arc<dyn SystemClock>,
         clock_schedule: VecDeque<Duration>,
-        jitter: Option<TickerJitter>,
+        jitter: Option<f64>,
     }
 
     impl TestHandler {
@@ -1043,8 +1037,8 @@ mod test {
             self
         }
 
-        fn with_jitter(mut self, jitter: TickerJitter) -> Self {
-            self.jitter = Some(jitter);
+        fn with_jitter(mut self, spread: f64) -> Self {
+            self.jitter = Some(spread);
             self
         }
     }
@@ -1106,7 +1100,8 @@ mod test {
             Box::new(|| TestMessage::Tick(1)),
             clock.clone(),
             interval,
-            Some(TickerJitter::new(0.5, 42)),
+            Some(0.5),
+            Arc::new(DbRand::new(42)),
         );
 
         let mut seen = HashSet::new();
@@ -1135,6 +1130,7 @@ mod test {
             clock.clone(),
             interval,
             None,
+            Arc::new(DbRand::new(0)),
         );
         assert!(ticker.next_jittered_wait().is_none());
     }
@@ -1155,13 +1151,14 @@ mod test {
         // its wait and can only fire once the clock advances.
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(100), 1)
-            .with_jitter(TickerJitter::new(0.5, 1));
+            .with_jitter(0.5);
         let cancellation_token = CancellationToken::new();
         let fp = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
+            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp.clone());
@@ -1229,6 +1226,7 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
+            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp.clone());
@@ -1285,8 +1283,12 @@ mod test {
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
         let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
-            .with_fp_registry(fp_registry.clone());
+        let task_executor = MessageHandlerExecutor::new(
+            closed_result.clone(),
+            clock.clone(),
+            Arc::new(DbRand::new(0)),
+        )
+        .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
         task_executor
@@ -1354,6 +1356,7 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
+            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1425,6 +1428,7 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
+            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1500,6 +1504,7 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
+            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1575,6 +1580,7 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
+            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1651,7 +1657,11 @@ mod test {
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
+        let task_executor = MessageHandlerExecutor::new(
+            closed_result.clone(),
+            clock.clone(),
+            Arc::new(DbRand::new(0)),
+        );
 
         // Spawn the panic task
         task_executor
@@ -1704,8 +1714,12 @@ mod test {
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
         let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
-            .with_fp_registry(fp_registry.clone());
+        let task_executor = MessageHandlerExecutor::new(
+            closed_result.clone(),
+            clock.clone(),
+            Arc::new(DbRand::new(0)),
+        )
+        .with_fp_registry(fp_registry.clone());
 
         fail_parallel::cfg(
             fp_registry.clone(),
@@ -1868,7 +1882,8 @@ mod test {
             .with_block_on(block2.clone());
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
+        let task_executor =
+            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)));
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -1920,7 +1935,8 @@ mod test {
             .add_ticker(Duration::from_millis(1), 20);
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
+        let task_executor =
+            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)));
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -1976,7 +1992,8 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), cleanup2).with_error_after(1);
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock);
+        let task_executor =
+            MessageHandlerExecutor::new(closed_result.clone(), clock, Arc::new(DbRand::new(0)));
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -2034,7 +2051,11 @@ mod test {
             .with_block_on(block2.clone());
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = Arc::new(MessageHandlerExecutor::new(closed_result, clock));
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            closed_result,
+            clock,
+            Arc::new(DbRand::new(0)),
+        ));
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -2088,7 +2109,8 @@ mod test {
 
         let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor =
-            MessageHandlerExecutor::new(closed_result, clock).with_fp_registry(fp_registry.clone());
+            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)))
+                .with_fp_registry(fp_registry.clone());
         // Pause the run loop so messages queue up
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         task_executor
@@ -2147,7 +2169,8 @@ mod test {
         );
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
+        let task_executor =
+            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)));
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -2279,8 +2302,13 @@ mod test {
         };
 
         let cancellation_token = CancellationToken::new();
-        let mut dispatcher =
-            MessageDispatcher::new(Box::new(handler), rx, clock, cancellation_token.clone());
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(handler),
+            rx,
+            clock,
+            Arc::new(DbRand::new(0)),
+            cancellation_token.clone(),
+        );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Send work that requires watermark >= 5.
