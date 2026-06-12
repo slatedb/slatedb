@@ -224,8 +224,10 @@ mod composite_filters {
 }
 
 mod subrange {
+    use std::ops::Bound;
     use std::sync::Arc;
 
+    use bytes::Bytes;
     use slatedb::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
     use slatedb::db_stats::{FILTER_KIND_LABEL, FILTER_KIND_PREFIX, SST_FILTER_NEGATIVE_COUNT};
     use slatedb::object_store::memory::InMemory;
@@ -322,7 +324,7 @@ mod subrange {
         // subrange, and the two sandwich SSTs are skipped on the filter.
         let negatives_before = prefix_filter_negatives(&recorder);
         let iter = db
-            .scan_prefix(b"bbb", b"2".as_slice()..b"4".as_slice())
+            .scan_prefix(b"bbb", b"2"..b"4")
             .await
             .expect("scan_prefix failed");
         assert_eq!(
@@ -337,12 +339,39 @@ mod subrange {
 
         // Inclusive end bound.
         let iter = db
-            .scan_prefix(b"bbb", ..=b"2".as_slice())
+            .scan_prefix(b"bbb", ..=b"2")
             .await
             .expect("scan_prefix failed");
         assert_eq!(
             collect_keys(iter).await,
             vec![b"bbb1".to_vec(), b"bbb2".to_vec()]
+        );
+
+        // Owned bound types (Vec<u8>, Bytes) and explicit Bound pairs are
+        // accepted wherever byte-slice bounds are.
+        let iter = db
+            .scan_prefix(b"bbb", b"2".to_vec()..b"4".to_vec())
+            .await
+            .expect("scan_prefix failed");
+        assert_eq!(
+            collect_keys(iter).await,
+            vec![b"bbb2".to_vec(), b"bbb3".to_vec()]
+        );
+        let iter = db
+            .scan_prefix(b"bbb", Bytes::from_static(b"2")..Bytes::from_static(b"4"))
+            .await
+            .expect("scan_prefix failed");
+        assert_eq!(
+            collect_keys(iter).await,
+            vec![b"bbb2".to_vec(), b"bbb3".to_vec()]
+        );
+        let iter = db
+            .scan_prefix(b"bbb", (Bound::Excluded(b"1"), Bound::Included(b"3")))
+            .await
+            .expect("scan_prefix failed");
+        assert_eq!(
+            collect_keys(iter).await,
+            vec![b"bbb2".to_vec(), b"bbb3".to_vec()]
         );
 
         // Full subrange is equivalent to the classic prefix scan.
@@ -461,10 +490,10 @@ mod prop_test {
         db.flush().await.expect("flush failed");
     }
 
-    async fn collect_prefix_scan<'a>(
+    async fn collect_prefix_scan(
         db: &Db,
         prefix: &[u8],
-        subrange: impl std::ops::RangeBounds<&'a [u8]> + Send,
+        subrange: impl slatedb::SubrangeBounds + Send,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut iter = db
             .scan_prefix_with_options(prefix, subrange, &ScanOptions::default())

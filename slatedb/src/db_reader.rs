@@ -1,4 +1,5 @@
 use crate::bytes_range::BytesRange;
+use crate::subrange::SubrangeBounds;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
@@ -1037,14 +1038,14 @@ impl DbReader {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    pub async fn scan_prefix<'a, P, T>(
+    pub async fn scan_prefix<P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -1062,7 +1063,7 @@ impl DbReader {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    pub async fn scan_prefix_with_options<'a, P, T>(
+    pub async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1070,7 +1071,7 @@ impl DbReader {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
@@ -1147,7 +1148,7 @@ impl DbReadOps for DbReader {
         DbReader::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<'a, P, T>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1155,7 +1156,7 @@ impl DbReadOps for DbReader {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         DbReader::scan_prefix_with_options(self, prefix, subrange, options).await
     }

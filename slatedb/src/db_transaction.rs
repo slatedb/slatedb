@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
+use crate::subrange::SubrangeBounds;
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
@@ -245,14 +246,14 @@ impl DbTransaction {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix<'a, P, T>(
+    pub async fn scan_prefix<P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -271,7 +272,7 @@ impl DbTransaction {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix_with_options<'a, P, T>(
+    pub async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -279,7 +280,7 @@ impl DbTransaction {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
@@ -662,7 +663,7 @@ impl DbReadOps for DbTransaction {
         DbTransaction::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<'a, P, T>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -670,7 +671,7 @@ impl DbReadOps for DbTransaction {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         DbTransaction::scan_prefix_with_options(self, prefix, subrange, options).await
     }

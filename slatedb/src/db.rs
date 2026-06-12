@@ -34,6 +34,7 @@ use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::db_transaction::DbTransaction;
+use crate::subrange::SubrangeBounds;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
@@ -1100,21 +1101,21 @@ impl Db {
     ///     assert_eq!(None, iter.next().await?);
     ///
     ///     // Restrict the scan to suffixes from b"a" onward.
-    ///     let mut iter = db.scan_prefix(b"ab", b"a".as_slice()..).await?;
+    ///     let mut iter = db.scan_prefix(b"ab", b"a"..).await?;
     ///     let kv = iter.next().await?.unwrap();
     ///     assert_eq!(kv.key.as_ref(), b"aba");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_prefix<'a, P, T>(
+    pub async fn scan_prefix<P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -1164,7 +1165,7 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_prefix_with_options<'a, P, T>(
+    pub async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1172,7 +1173,7 @@ impl Db {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
@@ -1921,7 +1922,7 @@ impl DbReadOps for Db {
         Db::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<'a, P, T>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1929,7 +1930,7 @@ impl DbReadOps for Db {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         Db::scan_prefix_with_options(self, prefix, subrange, options).await
     }

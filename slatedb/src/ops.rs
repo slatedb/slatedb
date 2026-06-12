@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
+use crate::subrange::SubrangeBounds;
 use crate::config::{
     FlushOptions, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
 };
@@ -172,14 +173,14 @@ pub trait DbReadOps {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    async fn scan_prefix<'a, P, T>(
+    async fn scan_prefix<P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -197,7 +198,7 @@ pub trait DbReadOps {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    async fn scan_prefix_with_options<'a, P, T>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -205,7 +206,7 @@ pub trait DbReadOps {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: SubrangeBounds + Send,
     {
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
         self.scan_with_options(range, options).await

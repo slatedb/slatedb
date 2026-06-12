@@ -4,6 +4,7 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 
 use crate::comparable_range::{ComparableRange, EndBound, StartBound};
+use crate::subrange::SubrangeBounds;
 
 /// Concrete struct representing a range of Bytes. Gets around much of
 /// the cumbersome work associated with the generic trait RangeBounds<Bytes>
@@ -114,11 +115,11 @@ impl BytesRange {
     /// - `from_prefix_and_subrange(prefix, ..)` is equivalent to
     ///   [`Self::from_prefix`]; an empty prefix degenerates to a plain range
     ///   over the subrange bounds.
-    pub(crate) fn from_prefix_and_subrange<'a>(
+    pub(crate) fn from_prefix_and_subrange(
         prefix: &[u8],
-        subrange: impl RangeBounds<&'a [u8]>,
+        subrange: impl SubrangeBounds,
     ) -> Self {
-        let concat = |suffix: &&[u8]| {
+        let concat = |suffix: &[u8]| {
             let mut key = Vec::with_capacity(prefix.len() + suffix.len());
             key.extend_from_slice(prefix);
             key.extend_from_slice(suffix);
