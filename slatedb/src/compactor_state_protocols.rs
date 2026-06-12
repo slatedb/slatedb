@@ -146,7 +146,7 @@ impl CompactorStateWriter {
         let mut dirty_compactions = compactions.prepare_dirty()?;
         // Reset scheduled and stale running compactions back to submitted on restart.
         // Scheduled compactions have no worker yet, so they always reset. Running
-        // compactions are only reset if the worker's heartbeat has gone stale — a
+        // compactions are only reset if the worker's heartbeat has gone stale: a
         // worker that is still alive and heartbeating is left in Running so it can
         // finish without being interrupted by the restarted coordinator.
         let now_ms = system_clock.now().timestamp_millis() as u64;

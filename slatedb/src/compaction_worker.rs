@@ -373,33 +373,33 @@ impl CompactionWorkerHandler {
             return Ok(false);
         }
         loop {
-            let stored = self.stored.as_mut().expect("ensure_loaded set stored");
+            let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
-            let Some(existing) = stored.compactions().get(&compaction_id).cloned() else {
+            let mut dirty = stored.prepare_dirty()?;
+            let Some(existing) = dirty.value.get(&compaction_id).cloned() else {
                 debug!(
-                    "heartbeat: compaction entry missing [id={}]; skipping",
+                    "heartbeat: compaction entry missing [worker_id={}, compaction_id={}]; skipping",
+                    self.worker_id,
                     compaction_id
                 );
                 return Ok(false);
             };
             if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
                 debug!(
-                    "heartbeat: no longer owner of compaction [id={}]; skipping",
+                    "heartbeat: no longer owner of compaction [worker_id={} compaction_id={}]; skipping",
+                    self.worker_id,
                     compaction_id
                 );
                 return Ok(false);
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
-            let new_worker = WorkerSpec::new(self.worker_id.clone(), now_ms);
-            let updated = if let Some(ssts) = output_ssts.clone() {
-                existing
-                    .with_worker(Some(new_worker))
-                    .with_output_ssts(ssts)
+            let new_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
+            let updated_compaction = if let Some(ssts) = output_ssts.clone() {
+                existing.with_worker(Some(new_spec)).with_output_ssts(ssts)
             } else {
-                existing.with_worker(Some(new_worker))
+                existing.with_worker(Some(new_spec))
             };
-            let mut dirty = stored.prepare_dirty()?;
-            dirty.value.insert(updated);
+            dirty.value.insert(updated_compaction);
             match stored.update(dirty).await {
                 Ok(()) => {
                     debug!(
