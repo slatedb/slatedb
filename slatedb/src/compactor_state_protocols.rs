@@ -21,8 +21,8 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use crate::utils::IdGenerator;
-use crate::DbRand;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 /// A read-only view of compactor state suitable for consumers like GC.
 ///

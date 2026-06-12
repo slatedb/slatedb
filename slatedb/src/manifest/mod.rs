@@ -8,12 +8,12 @@ use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
 use crate::error::SlateDBError;
-use crate::rand::DbRand;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::{debug, warn};
 use serde::Serialize;
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 use uuid::Uuid;
 
@@ -1550,7 +1550,6 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::{LsmTreeState, ManifestCore, ProjectionConfig, Segment};
-    use crate::rand::DbRand;
     use crate::Checkpoint;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -1558,6 +1557,7 @@ mod tests {
     use object_store::ObjectStore;
     use proptest::proptest;
     use rstest::rstest;
+    use slatedb_common::DbRand;
     use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;

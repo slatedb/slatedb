@@ -17,7 +17,6 @@ use slatedb_common::clock::SystemClock;
 
 use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
-use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
 use crate::utils::WatchableOnceCell;
@@ -26,6 +25,7 @@ use chrono::{DateTime, Utc};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
+use slatedb_common::DbRand;
 use std::env;
 use std::env::VarError;
 use std::ops::{Bound, RangeBounds};

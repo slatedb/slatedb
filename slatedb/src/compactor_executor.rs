@@ -26,12 +26,12 @@ use crate::merge_operator::{
     MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
-use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{

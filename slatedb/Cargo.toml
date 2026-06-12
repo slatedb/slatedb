@@ -40,7 +40,6 @@ opendal = { workspace = true, optional = true }
 ouroboros = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
-rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
@@ -66,7 +65,6 @@ tokio-util = { workspace = true, default-features = false, features = [
     "rt",
     "join-map",
 ] }
-thread_local = { workspace = true }
 url = "2.5.4"
 
 [dev-dependencies]

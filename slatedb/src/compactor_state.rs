@@ -1092,12 +1092,12 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{LsmTreeState, Segment};
     use crate::utils::IdGenerator;
-    use crate::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::DbRand;
     use slatedb_txn_obj::test_utils::new_dirty_object;
     use tokio::runtime::{Handle, Runtime};
 

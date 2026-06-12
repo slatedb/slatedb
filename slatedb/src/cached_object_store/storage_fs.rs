@@ -1,5 +1,4 @@
 use crate::cached_object_store::stats::CachedObjectStoreStats;
-use crate::rand::DbRand;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use log::{debug, error, warn};
@@ -8,6 +7,7 @@ use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use rand::{distr::Alphanumeric, Rng};
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::io::Write;

@@ -2,7 +2,6 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::storage_fs::FsCacheStorage;
 use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
-use crate::rand::DbRand;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
@@ -12,6 +11,7 @@ use object_store::{
 };
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 use std::{ops::Range, sync::Arc};
 use tokio::sync::OnceCell;
 
@@ -852,10 +852,10 @@ mod tests {
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
     use crate::cached_object_store::storage_fs::FsCacheEntry;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
-    use crate::rand::DbRand;
     use crate::test_utils::{gen_rand_bytes, FlakyObjectStore, GatedObjectStore};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::DbRand;
 
     fn new_test_cache_folder() -> std::path::PathBuf {
         let mut rng = rand::rng();
