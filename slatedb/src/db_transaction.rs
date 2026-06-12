@@ -1127,6 +1127,56 @@ mod tests {
         assert!(txn1.commit().await.is_err());
     }
 
+    /// A `scan_prefix` with a bounded subrange must register exactly the
+    /// composed range for SSI conflict detection: a concurrent write inside
+    /// the subrange aborts the transaction even if never yielded, while a
+    /// write under the same prefix but outside the subrange does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_ssi_scan_prefix_subrange_tracks_composed_range() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        db.put(b"users/m_mallory", b"v").await.unwrap();
+        db.flush().await.unwrap();
+
+        // A write under the prefix but before the subrange start is not a
+        // conflict: the tracked range starts at users/m, not users/.
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        {
+            let mut iter = txn1.scan_prefix(b"users/", b"m"..).await.unwrap();
+            let kv = iter.next().await.unwrap().expect("mallory in subrange");
+            assert_eq!(kv.key.as_ref(), b"users/m_mallory");
+            assert!(iter.next().await.unwrap().is_none());
+        }
+        db.put(b"users/alice", b"outside subrange").await.unwrap();
+        txn1.put(b"t1_marker", b"x").unwrap();
+        txn1.commit()
+            .await
+            .expect("write under prefix but outside subrange must not conflict");
+
+        // A write inside the subrange is a phantom even though the scan never
+        // yielded it.
+        let txn2 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        {
+            let mut iter = txn2.scan_prefix(b"users/", b"m"..).await.unwrap();
+            let kv = iter.next().await.unwrap().expect("mallory in subrange");
+            assert_eq!(kv.key.as_ref(), b"users/m_mallory");
+            assert!(iter.next().await.unwrap().is_none());
+        }
+        db.put(b"users/zach", b"inside subrange").await.unwrap();
+        txn2.put(b"t2_marker", b"x").unwrap();
+        assert!(
+            txn2.commit().await.is_err(),
+            "write inside the subrange must abort the transaction"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_txn_commit_await_durable_false() {
         use crate::config::{DurabilityLevel::*, ReadOptions, WriteOptions};

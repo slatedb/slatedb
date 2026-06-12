@@ -10149,6 +10149,27 @@ mod tests {
         )
         .await;
 
+        // Bounded subranges compose with the prefix on every read surface:
+        // a start bound that excludes earlier suffixes...
+        let mut subrange_iter = reader.scan_prefix(b"bbb", b"-002"..).await.unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"bbb-002")..Bytes::from_static(b"bbc"),
+            IterationOrder::Ascending,
+            &mut subrange_iter,
+        )
+        .await;
+
+        // ...and an end bound that excludes later suffixes.
+        let mut subrange_iter = reader.scan_prefix(b"ddd", b"-001"..b"-004").await.unwrap();
+        test_utils::assert_ranged_db_scan(
+            table,
+            Bytes::from_static(b"ddd-001")..Bytes::from_static(b"ddd-004"),
+            IterationOrder::Ascending,
+            &mut subrange_iter,
+        )
+        .await;
+
         let mut asc_iter = reader
             .scan::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec())
             .await
