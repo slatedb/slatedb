@@ -4,14 +4,25 @@ use std::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, Rang
 /// [`Db::scan_prefix`](crate::Db::scan_prefix) and
 /// [`Db::scan_prefix_with_options`](crate::Db::scan_prefix_with_options).
 ///
-/// This mirrors [`std::ops::RangeBounds`] over byte strings, but is
-/// monomorphic in the bound type it yields. With a generic
-/// `RangeBounds<K>` parameter the unbounded subrange `..` fails to infer
-/// `K` (E0283) and every such call would need a turbofish; with this
-/// trait `..` resolves to the dedicated [`RangeFull`] impl, while the
-/// other standard range types accept any `AsRef<[u8]>` bound, so
-/// `b"a"..b"b"`, `vec_start..`, `..=bytes_end`, explicit
-/// [`Bound`] pairs, and `..` all work unannotated.
+/// This plays the same role as [`std::ops::RangeBounds`], but always
+/// yields its bounds as plain byte slices. Neither standard alternative
+/// gives `scan_prefix` a usable signature:
+///
+/// - A generic `RangeBounds<K>` parameter (the shape
+///   [`scan`](crate::Db::scan) uses) breaks the most common call,
+///   `scan_prefix(prefix, ..)`: a `..` carries no bound values, so the
+///   compiler cannot tell what `K` is and rejects the call unless the
+///   caller spells out a type annotation.
+/// - Fixing the parameter to `RangeBounds<&[u8]>` makes `..` compile but
+///   rejects natural arguments: the bounds of `b"a"..b"b"` are
+///   `&[u8; 1]` rather than `&[u8]`, and ranges over owned types like
+///   `Vec<u8>` or `Bytes` don't coerce either.
+///
+/// This trait accepts all of those shapes. `..` has its own
+/// implementation, so it needs no annotation, and every other standard
+/// range type takes any bound that can be viewed as bytes
+/// (`AsRef<[u8]>`). As a result `..`, `b"a"..b"b"`, `vec_start..`,
+/// `..=bytes_end`, and explicit [`Bound`] pairs all work as written.
 pub trait SubrangeBounds {
     /// The start bound of the subrange, as a byte-slice bound.
     fn start_bound(&self) -> Bound<&[u8]>;
