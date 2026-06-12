@@ -504,10 +504,7 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // RFC-0025: spread `.compactions` polls across workers so they don't
         // synchronize on the same read cadence. Each poll waits a random
         // duration centered on `compactions_poll_interval` (the interval plus or
-        // minus half), so the mean poll rate is unchanged. The waits are drawn
-        // from the dispatcher's DbRand so the schedule stays deterministic under
-        // simulation testing, and the wait lives inside the ticker future, so it
-        // never blocks the worker's message channel.
+        // minus half), so the mean poll rate is unchanged.
         vec![MessageTickerDef::new(
             self.options.compactions_poll_interval,
             Box::new(|| WorkerMessage::PollCompactions),

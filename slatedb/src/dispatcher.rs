@@ -150,35 +150,6 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// A single ticker definition returned by [`MessageHandler::tickers`]: a base
 /// interval, a [`MessageFactory`] to produce a message on each tick, and an
 /// optional per-ticker jitter spread.
-///
-/// Jitter is configured per ticker rather than per handler so a handler can
-/// jitter only the tickers that need it (for example, the compaction worker
-/// jitters its `.compactions` poll but would leave a stats-logging ticker
-/// unjittered).
-///
-/// Independent processes that tick on the same interval — for example,
-/// compaction workers polling `.compactions` every `compactions_poll_interval`
-/// — tend to synchronize their work, concentrating object-store requests at the
-/// same instants. Randomizing each tick's wait spreads that load out.
-///
-/// The jitter is *centered* on the base interval: instead of waiting exactly
-/// `interval`, each jittered tick waits a fresh uniform random duration in
-/// `[interval * (1 - spread), interval * (1 + spread)]`. Because the range is
-/// centered on `interval`, the mean wait — and therefore the average tick rate
-/// — is still `interval`. A one-sided "interval + jitter" scheme would instead
-/// bias every gap later than `interval`.
-///
-/// Crucially, a jittered tick draws its *entire* wait at random rather than
-/// adding a delay on top of a fixed-interval floor; stacking jitter on a fixed
-/// floor would push the mean gap above `interval` (RFC-0025).
-///
-/// The wait is performed inside the ticker future (one branch of the
-/// dispatcher's `select!`), so it never blocks message processing: incoming
-/// messages and other tickers are still serviced while a jittered tick is
-/// pending.
-///
-/// The randomized waits are drawn from the dispatcher's [crate::rand::DbRand]
-/// so jitter stays deterministic under simulation testing.
 pub(crate) struct MessageTickerDef<T: Send> {
     /// The base tick interval. When jitter is enabled, the randomized wait is
     /// centered on this interval.
