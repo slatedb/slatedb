@@ -20,7 +20,7 @@
 //! }
 //! ```
 
-pub use crate::db_status::DbStatus;
+pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::{Range, RangeBounds};
@@ -51,9 +51,10 @@ use crate::config::{
     FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
     WriteOptions,
 };
+use crate::db_common::extract_segment_prefix;
 use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
-use crate::db_state::{DbState, SsTableId};
+use crate::db_state::{collect_touched_segments, DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -566,14 +567,8 @@ impl DbInner {
                     std::collections::BTreeSet::new();
                 let mut iter = replayed_table.table.table().iter();
                 while let Some(entry) = iter.next_sync() {
-                    match extractor.prefix_len(&crate::PrefixTarget::Point(entry.key.clone())) {
-                        Some(0) | None => {
-                            return Err(SlateDBError::EmptySegmentPrefix { key: entry.key });
-                        }
-                        Some(n) => {
-                            touched_segments.insert(entry.key.slice(0..n));
-                        }
-                    }
+                    touched_segments
+                        .insert(extract_segment_prefix(extractor.as_ref(), &entry.key)?);
                 }
                 replayed_table
                     .table
@@ -592,6 +587,10 @@ impl DbInner {
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
+
+        let guard = self.state.read();
+        self.status_manager
+            .report_memtable_segments(collect_touched_segments(&guard.view()));
 
         Ok(())
     }
@@ -9875,6 +9874,165 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn should_report_new_memtable_segments_in_subscription() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_subscribe_reports_memtable_segments";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        assert!(rx.borrow_and_update().list_segments().is_empty());
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // when
+        db.put_with_options(b"abc-1", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .iter()
+                .any(|seg| seg.prefix.as_ref() == b"abc")
+        })
+        .await
+        .unwrap();
+
+        // when
+        db.put_with_options(b"xyz-1", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .into_iter()
+                .map(|seg| seg.prefix)
+                .collect::<Vec<_>>()
+                == vec![Bytes::from_static(b"abc"), Bytes::from_static(b"xyz")]
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_report_segments_in_manifest_after_flush() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_report_segments_in_manifest_after_flush";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        db.put_with_options(
+            b"abc-1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .iter()
+                .any(|seg| seg.prefix.as_ref() == b"abc")
+        })
+        .await
+        .unwrap();
+
+        // when
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .into_iter()
+                .map(|seg| seg.prefix)
+                .collect::<Vec<_>>()
+                == vec![Bytes::from_static(b"abc")]
+        })
+        .await
+        .unwrap();
+
+        // when
+        // the segments are deleted from the manifest (as a full compaction would)
+        db.inner
+            .state
+            .write()
+            .modify(|m| m.state.manifest.value.core.segments.clear());
+        let manifest = db.inner.state.read().state().manifest.clone();
+        db.inner.status_manager.report_manifest(manifest.into());
+
+        // then
+        assert!(db.status().list_segments().is_empty());
+    }
+
+    #[tokio::test]
+    async fn should_not_report_segments_without_extractor() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_no_segments_without_extractor";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        assert!(rx.borrow_and_update().list_segments().is_empty());
+
+        // when
+        db.put_with_options(
+            b"abc-1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // the flush drains the write path and folds the memtable into the
+        // manifest, so both reporting paths have run by the time it returns.
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // then
+        assert!(db.status().list_segments().is_empty());
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum ExtractorConfig {
         None,
@@ -10455,6 +10613,7 @@ mod tests {
         db.close().await.unwrap();
 
         let reader = DbReaderBuilder::new(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
             .build()
             .await
             .unwrap();
