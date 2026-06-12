@@ -1180,7 +1180,6 @@ pub mod stats {
     pub const COMPACTOR_EPOCH: &str = compactor_stat_name!("epoch");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
-    pub const SSTS_WRITTEN: &str = compactor_stat_name!("ssts_written");
     pub const TOTAL_BYTES_BEING_COMPACTED: &str =
         compactor_stat_name!("total_bytes_being_compacted");
     pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
@@ -1193,13 +1192,6 @@ pub mod stats {
     pub const ENTRY_TYPE_LABEL: &str = "entry_type";
     pub const ENTRY_TYPE_VALUE: &str = "value";
     pub const ENTRY_TYPE_MERGE: &str = "merge";
-    /// Coordinator-side counter: `Submitted → Running` transitions observed via `.compactions`.
-    pub const JOBS_CLAIMED: &str = compactor_stat_name!("jobs_claimed");
-    /// Coordinator-side counter: stale `Running` jobs reset to `Submitted`.
-    pub const JOBS_RECLAIMED: &str = compactor_stat_name!("jobs_reclaimed");
-    /// Coordinator-side gauge: last observed heartbeat timestamp (ms) per worker.
-    pub const WORKER_LAST_HEARTBEAT_MS: &str = compactor_stat_name!("worker_last_heartbeat_ms");
-    pub const WORKER_ID_LABEL: &str = "worker_id";
 
     pub(crate) struct CompactionStats {
         pub(crate) compactor_epoch: Arc<dyn GaugeFn>,
