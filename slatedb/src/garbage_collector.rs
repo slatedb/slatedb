@@ -427,7 +427,6 @@ mod tests {
     use crate::compactions_store::StoredCompactions;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
-    use crate::db_status::ClosedResultWriter;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -447,10 +446,6 @@ mod tests {
         },
         tablestore::TableStore,
     };
-
-    fn closed_result() -> Arc<dyn ClosedResultWriter> {
-        Arc::new(WatchableOnceCell::new())
-    }
 
     #[tokio::test]
     async fn test_collect_garbage_manifest() {
@@ -1138,7 +1133,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1206,7 +1201,7 @@ mod tests {
             gc_opts,
             &helper,
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1269,7 +1264,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1347,7 +1342,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1801,7 +1796,7 @@ mod tests {
             gc_opts,
             recorder,
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1876,7 +1871,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         // Send a WAL GC message. Correct behavior: only WAL GC runs.
@@ -1946,7 +1941,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
         gc.run_gc_once().await;
 
@@ -1995,7 +1990,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         let intervals: Vec<_> = gc
@@ -2052,7 +2047,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
         gc.start().expect("failed to start garbage collector");
         gc.stop().await.expect("failed to stop garbage collector");
@@ -2377,7 +2372,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            closed_result(),
+            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
