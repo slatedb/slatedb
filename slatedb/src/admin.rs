@@ -8,18 +8,14 @@ use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
-use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
-use crate::utils::WatchableOnceCell;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use object_store::path::Path;
@@ -31,7 +27,6 @@ use std::env::VarError;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -303,15 +298,26 @@ impl Admin {
         Ok(())
     }
 
-    /// Run the garbage collector in the background.
+    /// Run the garbage collector in the foreground until the provided cancellation token is cancelled.
     ///
-    /// This function runs the garbage collector in a Tokio background task.
+    /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
+    /// graceful shutdown and waits for the garbage collector to stop.
     ///
     /// # Arguments
     ///
-    /// * `gc_opts`: The garbage collector options.
+    /// * `cancellation_token`: Token used to request garbage collector shutdown.
     ///
-    pub async fn run_gc(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
+    pub async fn run_gc(&self, cancellation_token: CancellationToken) -> Result<(), crate::Error> {
+        self.run_gc_with_options(cancellation_token, GarbageCollectorOptions::default())
+            .await
+    }
+
+    /// Like [`Admin::run_gc`] but accepts explicit [`GarbageCollectorOptions`].
+    pub async fn run_gc_with_options(
+        &self,
+        cancellation_token: CancellationToken,
+        gc_opts: GarbageCollectorOptions,
+    ) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -322,23 +328,14 @@ impl Admin {
         .with_seed(self.rand.rng().next_u64())
         .build();
 
-        let (_, rx) = async_channel::unbounded();
-        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
+        gc.start()?;
 
-        task_executor
-            .add_handler(
-                GC_TASK_NAME.to_string(),
-                Box::new(gc),
-                rx,
-                &Handle::current(),
-            )
-            .map_err(Into::<crate::Error>::into)?;
-
-        task_executor
-            .join_task(GC_TASK_NAME)
-            .await
-            .map_err(Into::<crate::Error>::into)
+        tokio::select! {
+            result = gc.join() => result,
+            _ = cancellation_token.cancelled() => {
+                gc.stop().await
+            }
+        }
     }
 
     /// Run the compactor in the foreground until the provided cancellation token is cancelled.
@@ -818,6 +815,7 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
+    use crate::config::GarbageCollectorOptions;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::test_utils::FlakyObjectStore;
@@ -827,6 +825,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
     use ulid::Ulid;
 
     #[test]
@@ -935,6 +934,20 @@ mod tests {
         assert_eq!(first.manifest.compactor_epoch, 0);
         assert_eq!(first.manifest.core.next_wal_sst_id, 1);
         assert_eq!(first.manifest.core.last_l0_seq, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admin_run_gc_with_options_stops_on_cancellation() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_run_gc_with_options_stops_on_cancellation");
+        let admin = AdminBuilder::new(path, object_store).build();
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let result = admin
+            .run_gc_with_options(cancellation_token, GarbageCollectorOptions::default())
+            .await;
+        assert!(matches!(result, Ok(())));
     }
 
     #[tokio::test]

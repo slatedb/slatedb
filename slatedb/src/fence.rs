@@ -179,6 +179,7 @@ mod tests {
     use crate::config::{
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     };
+    use crate::db_status::ClosedResultWriter;
     use crate::error::SlateDBError;
     use crate::fence::{FailPointCtl, WriterFencer};
     use crate::format::sst::SsTableFormat;
@@ -188,6 +189,7 @@ mod tests {
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
     use crate::tablestore::TableStore;
+    use crate::utils::WatchableOnceCell;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -200,6 +202,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn closed_result() -> Arc<dyn ClosedResultWriter> {
+        Arc::new(WatchableOnceCell::new())
+    }
 
     struct WriterFencerTestHarness {
         object_store: Arc<dyn ObjectStore>,
@@ -317,6 +323,7 @@ mod tests {
                 gc_opts,
                 &MetricsRecorderHelper::noop(),
                 Arc::new(DefaultSystemClock::new()),
+                closed_result(),
             );
             gc.run_gc_once().await;
             // verify all regular (size > 0) wals up to wal_id are deleted (the wal
