@@ -101,10 +101,10 @@ impl<'a> SystemClockTicker<'a> {
     ///
     /// Otherwise the duration is calculated as `duration - (now - last_tick)`.
     fn calc_duration(&self) -> Duration {
-        if let Some(jitter) = &self.jitter {
+        if let (Some(jitter), Some(rand)) = (&self.jitter, &self.rand) {
             let min = jitter.start.as_nanos() as u64;
             let max = jitter.end.as_nanos() as u64;
-            return Duration::from_nanos(self.rand.clone().unwrap().rng().random_range(min..max));
+            return Duration::from_nanos(rand.rng().random_range(min..max));
         }
         let zero = Duration::from_millis(0);
         let now_dt = self.clock.now();
