@@ -1000,6 +1000,18 @@ mod tests {
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
+        assert_eq!(
+            Path::from(ROOT)
+                .join("manifest")
+                .join("00000000000000000001.manifest"),
+            manifests[0].location
+        );
+        assert_eq!(
+            Path::from(ROOT)
+                .join("manifest")
+                .join("00000000000000000002.manifest"),
+            manifests[1].location
+        );
 
         // Check bounded
         let manifests = ms.list_manifests(1..2).await.unwrap();
