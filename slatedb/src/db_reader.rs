@@ -85,7 +85,7 @@ struct CheckpointState {
 }
 
 static EMPTY_TABLE: LazyLock<Arc<KVTable>> =
-    LazyLock::new(|| Arc::new(KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX))));
+    LazyLock::new(|| Arc::new(KVTable::new(ByteBufferManager::unbounded())));
 
 impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
@@ -763,7 +763,7 @@ impl DbReader {
 
         // DbReader is read-only; it uses an unbounded buffer manager for WAL replay
         // since it doesn't need write backpressure.
-        let write_buffer_manager = ByteBufferManager::new(usize::MAX, usize::MAX);
+        let write_buffer_manager = ByteBufferManager::unbounded();
 
         let status_manager = DbStatusManager::new_with_manifest(
             manifest.db_state().last_l0_seq,
@@ -1608,7 +1608,7 @@ mod tests {
             clock.clone(),
             test_provider.rand.clone(),
             recorder,
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
             stored_manifest,
         )
         .await
@@ -1730,7 +1730,7 @@ mod tests {
             &core,
             &mut into_tables,
             false,
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1795,7 +1795,7 @@ mod tests {
             &core,
             &mut into_tables,
             false,
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1847,7 +1847,7 @@ mod tests {
             &core,
             &mut into_tables,
             false,
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1883,7 +1883,7 @@ mod tests {
             &core,
             &mut into_tables,
             true,
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1914,7 +1914,7 @@ mod tests {
             &core,
             &mut into_tables,
             true,
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1960,7 +1960,7 @@ mod tests {
             &core,
             &mut into_tables,
             true,
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -2426,7 +2426,7 @@ mod tests {
             reader,
             status_manager: DbStatusManager::new(0),
             rand: test_provider.rand.clone(),
-            write_buffer_manager: ByteBufferManager::new(usize::MAX, usize::MAX),
+            write_buffer_manager: ByteBufferManager::unbounded(),
             recorder,
         };
 
@@ -2508,7 +2508,7 @@ mod tests {
             reader,
             status_manager: DbStatusManager::new(0),
             rand: test_provider.rand.clone(),
-            write_buffer_manager: ByteBufferManager::new(usize::MAX, usize::MAX),
+            write_buffer_manager: ByteBufferManager::unbounded(),
             recorder,
         }
     }

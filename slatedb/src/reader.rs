@@ -525,7 +525,7 @@ mod tests {
             ));
 
             Self {
-                memtable: Arc::new(KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX))),
+                memtable: Arc::new(KVTable::new(ByteBufferManager::unbounded())),
                 imm_memtable: VecDeque::new(),
                 core: ManifestCore::new(),
                 table_store,

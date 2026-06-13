@@ -807,7 +807,7 @@ mod tests {
         // given:
         let mut db_state = DbState::new(
             new_dirty_manifest(),
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         );
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
@@ -837,7 +837,7 @@ mod tests {
         // given:
         let mut db_state = DbState::new(
             new_dirty_manifest(),
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         );
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
@@ -878,7 +878,7 @@ mod tests {
         // given:
         let mut db_state = DbState::new(
             new_dirty_manifest(),
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         );
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().tree.l0.clone();
@@ -914,7 +914,7 @@ mod tests {
         // Local writer has a segment extractor configured and a populated segment.
         let mut db_state = DbState::new(
             new_dirty_manifest(),
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         );
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
@@ -971,7 +971,7 @@ mod tests {
         // Local writer: v1 (already absorbed by compactor) and v2 (backfill).
         let mut db_state = DbState::new(
             new_dirty_manifest(),
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         );
         db_state.modify(|m| {
             let core = &mut m.state.manifest.value.core;
@@ -1012,7 +1012,7 @@ mod tests {
     fn test_should_keep_local_sequence_tracker_on_merge() {
         let mut db_state = DbState::new(
             new_dirty_manifest(),
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         );
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;

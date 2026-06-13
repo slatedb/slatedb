@@ -26,6 +26,14 @@ impl ByteBufferManager {
         }
     }
 
+    /// Creates an unbounded write-buffer manager that never applies backpressure.
+    ///
+    /// Use this for read-only paths (e.g. WAL replay, empty sentinel tables) where
+    /// memory accounting is unnecessary but the API requires a `ByteBufferManager`.
+    pub fn unbounded() -> Self {
+        Self::new(usize::MAX, usize::MAX)
+    }
+
     /// Unconditionally reserves `num_bytes` without waiting.
     /// The bytes are tracked by the budget (so `available()` reflects them)
     /// but the call never blocks, even if the budget is fully exhausted.
@@ -56,6 +64,11 @@ impl ByteBufferManager {
     /// Returns the total byte budget capacity.
     pub fn capacity(&self) -> usize {
         self.inner.capacity
+    }
+
+    /// Returns the total number of bytes currently allocated (outstanding).
+    pub fn allocated(&self) -> usize {
+        self.inner.allocated()
     }
 
     /// Returns `true` if allocated bytes have reached or exceeded the high

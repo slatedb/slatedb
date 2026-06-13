@@ -136,7 +136,7 @@ impl WritableKVTable {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self {
-            table: Arc::new(KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX))),
+            table: Arc::new(KVTable::new(ByteBufferManager::unbounded())),
         }
     }
 
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_returns_false_when_table_has_no_touched_segments() {
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         assert!(!table
             .ensure_valid_segment(&Bytes::from_static(b"abc"))
             .unwrap());
@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_returns_true_on_exact_match() {
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc"]));
         assert!(table
             .ensure_valid_segment(&Bytes::from_static(b"abc"))
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_returns_false_when_disjoint() {
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc", b"xyz"]));
         // "def" sorts between but does not nest with either neighbor.
         assert!(!table
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_rejects_when_predecessor_is_proper_prefix() {
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc"]));
         let err = table
             .ensure_valid_segment(&Bytes::from_static(b"abcd"))
@@ -1013,7 +1013,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_rejects_when_candidate_is_proper_prefix_of_successor() {
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc"]));
         let err = table
             .ensure_valid_segment(&Bytes::from_static(b"ab"))
@@ -1025,7 +1025,7 @@ mod tests {
     fn ensure_valid_segment_only_inspects_immediate_neighbors() {
         // Predecessor "aa" doesn't nest with "ac"; successor "az" doesn't
         // either. The far-away "x" must not be consulted.
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"aa", b"az", b"x"]));
         assert!(!table
             .ensure_valid_segment(&Bytes::from_static(b"ac"))
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_handles_candidate_smaller_than_all() {
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"mmm", b"ppp"]));
         // "aaa" has no predecessor; "mmm" doesn't start with "aaa".
         assert!(!table
@@ -1044,7 +1044,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_handles_candidate_larger_than_all() {
-        let table = KVTable::new(ByteBufferManager::new(usize::MAX, usize::MAX));
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"aaa", b"bbb"]));
         // "zzz" has no successor; predecessor "bbb" is not a prefix of "zzz".
         assert!(!table

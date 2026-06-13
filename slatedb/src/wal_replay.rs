@@ -322,7 +322,7 @@ mod tests {
                 db_state,
                 options,
                 table_store,
-                ByteBufferManager::new(usize::MAX, usize::MAX),
+                ByteBufferManager::unbounded(),
             )
             .await
         }
@@ -463,7 +463,7 @@ mod tests {
         .unwrap();
 
         let full_replayed_table =
-            WritableKVTable::with_buffer_manager(ByteBufferManager::new(usize::MAX, usize::MAX));
+            WritableKVTable::with_buffer_manager(ByteBufferManager::unbounded());
         let mut last_wal_id = 0;
         let mut replayed_entry_count = 0;
 

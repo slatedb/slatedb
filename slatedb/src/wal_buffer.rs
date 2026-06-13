@@ -684,7 +684,7 @@ mod tests {
 
     /// Creates a WalBuffer with a dummy permit for unit testing.
     fn make_wal_buffer() -> WalBuffer {
-        let mgr = ByteBufferManager::new(usize::MAX, usize::MAX);
+        let mgr = ByteBufferManager::unbounded();
         WalBuffer::new(&mgr)
     }
 
@@ -909,7 +909,7 @@ mod tests {
             mono_clock,
             1000,                 // max_wal_bytes_size
             Some(flush_interval), // max_flush_interval
-            ByteBufferManager::new(usize::MAX, usize::MAX),
+            ByteBufferManager::unbounded(),
         ));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             Arc::new(status_manager),

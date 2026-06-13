@@ -348,6 +348,7 @@ impl DbInner {
             self.check_closed()?;
 
             let write_buffer_remaining = self.write_buffer_manager.available();
+            let write_buffer_allocated = self.write_buffer_manager.allocated();
 
             let (wal_size_bytes, imm_memtable_size_bytes) = {
                 let wal_size_bytes = self.wal_buffer.estimated_bytes()?;
@@ -375,11 +376,12 @@ impl DbInner {
                 .set(total_mem_size_bytes as i64);
 
             trace!(
-                "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}, write_buffer_remaining={}]",
+                "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}, write_buffer_allocated={}, write_buffer_remaining={}]",
                 format_bytes_si(total_mem_size_bytes as u64),
                 format_bytes_si(wal_size_bytes as u64),
                 format_bytes_si(imm_memtable_size_bytes as u64),
                 format_bytes_si(self.settings.max_unflushed_bytes as u64),
+                format_bytes_si(write_buffer_allocated as u64),
                 format_bytes_si(write_buffer_remaining as u64)
             );
 
@@ -387,11 +389,12 @@ impl DbInner {
                 self.db_stats.backpressure_count.increment(1);
                 fail_point!(Arc::clone(&self.fp_registry), "db-backpressure-applied");
                 warn!(
-                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}, write_buffer_remaining={}]",
+                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}, write_buffer_allocated={}, write_buffer_remaining={}]",
                     format_bytes_si(total_mem_size_bytes as u64),
                     format_bytes_si(wal_size_bytes as u64),
                     format_bytes_si(imm_memtable_size_bytes as u64),
                     format_bytes_si(self.settings.max_unflushed_bytes as u64),
+                    format_bytes_si(write_buffer_allocated as u64),
                     format_bytes_si(write_buffer_remaining as u64)
                 );
 
@@ -8482,7 +8485,7 @@ mod tests {
         )
         .with_seed(REPRO_SEED)
         .with_settings(options)
-        .with_write_buffer_manager(ByteBufferManager::new(usize::MAX, usize::MAX))
+        .with_write_buffer_manager(ByteBufferManager::unbounded())
         .build()
         .await
         .unwrap();

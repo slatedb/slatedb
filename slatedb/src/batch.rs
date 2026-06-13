@@ -64,31 +64,11 @@ impl Default for WriteBatch {
 }
 
 /// A write operation in a batch.
+#[derive(PartialEq, Clone)]
 pub(crate) enum WriteOp {
     Put(Bytes, PutOptions),
     Delete,
     Merge(Bytes, MergeOptions),
-}
-
-impl Clone for WriteOp {
-    fn clone(&self) -> Self {
-        match self {
-            WriteOp::Put(value, options) => WriteOp::Put(value.clone(), options.clone()),
-            WriteOp::Delete => WriteOp::Delete,
-            WriteOp::Merge(value, options) => WriteOp::Merge(value.clone(), options.clone()),
-        }
-    }
-}
-
-impl PartialEq for WriteOp {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (WriteOp::Put(v1, o1), WriteOp::Put(v2, o2)) => v1 == v2 && o1 == o2,
-            (WriteOp::Delete, WriteOp::Delete) => true,
-            (WriteOp::Merge(v1, o1), WriteOp::Merge(v2, o2)) => v1 == v2 && o1 == o2,
-            _ => false,
-        }
-    }
 }
 
 impl std::fmt::Debug for WriteOp {
@@ -116,7 +96,7 @@ impl std::fmt::Debug for WriteOp {
 }
 
 impl WriteOp {
-    /// Convert WriteOp to RowEntry.
+    /// Convert WriteOp to RowEntry for queries
     pub(crate) fn to_row_entry(
         &self,
         key: &Bytes,
