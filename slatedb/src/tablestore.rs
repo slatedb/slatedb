@@ -50,9 +50,7 @@ pub(crate) struct TableStore {
 
 struct ReadOnlyObject {
     object_store: Arc<dyn ObjectStore>,
-    path: Path,
-    /// Intent attached to each read; [`with_validation_retry`] sets the
-    /// retry tag here between validation-retry attempts.
+    path: Arc<Path>,
     intent: Option<ReadIntent>,
 }
 
@@ -629,17 +627,20 @@ impl TableStore {
         &self,
         id: &SsTableId,
     ) -> Result<(SsTableInfo, u16), SlateDBError> {
-        let mut obj = ReadOnlyObject {
-            object_store: self.object_stores.store_for(id),
-            path: self.path(id),
-            intent: self.read_intent_for(id),
-        };
-        with_validation_retry!(obj, {
+        let object_store = self.object_stores.store_for(id);
+        let path = Arc::new(self.path(id));
+        read_with_validation_retry(self.read_intent_for(id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
             self.sst_format
                 .read_info_and_version(&obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))
         })
+        .await
     }
 
     /// Reads the filters of an SSTable. Every returned entry is decoded.
@@ -690,17 +691,20 @@ impl TableStore {
                 }
             }
         }
-        let mut obj = ReadOnlyObject {
-            object_store: self.object_stores.store_for(&handle.id),
-            path: self.path(&handle.id),
-            intent: self.read_intent_for(&handle.id),
-        };
-        with_validation_retry!(obj, {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
             self.sst_format
                 .read_filters(&handle.info, &obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))
         })
+        .await
     }
 
     /// Reads the stats block of an SSTable.
@@ -730,17 +734,20 @@ impl TableStore {
                 return Ok(Some(stats.as_ref().clone()));
             }
         }
-        let mut obj = ReadOnlyObject {
-            object_store: self.object_stores.store_for(&handle.id),
-            path: self.path(&handle.id),
-            intent: self.read_intent_for(&handle.id),
-        };
-        with_validation_retry!(obj, {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
             self.sst_format
                 .read_stats(&handle.info, &obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))
         })
+        .await
     }
 
     /// Reads the index of an SSTable.
@@ -768,17 +775,20 @@ impl TableStore {
                 return Ok(index);
             }
         }
-        let mut obj = ReadOnlyObject {
-            object_store: self.object_stores.store_for(&handle.id),
-            path: self.path(&handle.id),
-            intent: self.read_intent_for(&handle.id),
-        };
-        let index = with_validation_retry!(obj, {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
+        let index = read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
             self.sst_format
                 .read_index(&handle.info, &obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))
-        })?;
+        })
+        .await?;
         Ok(Arc::new(index))
     }
 
@@ -792,19 +802,19 @@ impl TableStore {
     fn read_loader(&self, handle: &SsTableHandle, target: CacheTarget) -> CacheLoader {
         let info = handle.info.clone();
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
         let sst_format = self.sst_format.clone();
         let intent = self.read_intent_for(&handle.id);
         Box::new(move || {
             Box::pin(async move {
                 // Only the stats arm can produce `None` (stats_len > 0 but no
                 // stats decoded); filters and index always yield an entry.
-                let mut obj = ReadOnlyObject {
-                    object_store,
-                    path,
-                    intent,
-                };
-                let entry = with_validation_retry!(obj, {
+                let entry = read_with_validation_retry(intent, async |intent| {
+                    let obj = ReadOnlyObject {
+                        object_store: object_store.clone(),
+                        path: path.clone(),
+                        intent,
+                    };
                     match target.clone() {
                         CacheTarget::Filters => {
                             let filters = sst_format
@@ -831,7 +841,8 @@ impl TableStore {
                             unreachable!("data blocks use block_loader, not read_loader")
                         }
                     }
-                })?;
+                })
+                .await?;
                 entry.ok_or_else(|| {
                     crate::Error::data("stats_len > 0 but read_stats returned no stats".to_string())
                 })
@@ -850,22 +861,23 @@ impl TableStore {
     ) -> CacheLoader {
         let info = handle.info.clone();
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
         let sst_format = self.sst_format.clone();
         let intent = self.read_intent_for(&handle.id);
         Box::new(move || {
             Box::pin(async move {
-                let mut obj = ReadOnlyObject {
-                    object_store,
-                    path,
-                    intent,
-                };
-                let block = with_validation_retry!(obj, {
+                let block = read_with_validation_retry(intent, async |intent| {
+                    let obj = ReadOnlyObject {
+                        object_store: object_store.clone(),
+                        path: path.clone(),
+                        intent,
+                    };
                     sst_format
                         .read_block(&info, &index, block_num, &obj)
                         .await
                         .map_err(|e| e.with_path(&obj.path))
-                })?;
+                })
+                .await?;
                 Ok(CachedEntry::with_block(Arc::new(block)))
             })
         })
@@ -878,17 +890,20 @@ impl TableStore {
         blocks: Range<usize>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let index = self.read_index(handle, false).await?;
-        let mut obj = ReadOnlyObject {
-            object_store: self.object_stores.store_for(&handle.id),
-            path: self.path(&handle.id),
-            intent: self.read_intent_for(&handle.id),
-        };
-        with_validation_retry!(obj, {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
             self.sst_format
                 .read_blocks(&handle.info, &index, blocks.clone(), &obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))
         })
+        .await
     }
 
     /// Reads specified blocks from an SSTable using the provided index.
@@ -927,7 +942,7 @@ impl TableStore {
         }
 
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
@@ -979,17 +994,18 @@ impl TableStore {
             let path = &path;
             let index = &index;
             async move {
-                let mut obj = ReadOnlyObject {
-                    object_store: object_store.clone(),
-                    path: path.clone(),
-                    intent: self.read_intent_for(&handle.id),
-                };
-                with_validation_retry!(obj, {
+                read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+                    let obj = ReadOnlyObject {
+                        object_store: object_store.clone(),
+                        path: path.clone(),
+                        intent,
+                    };
                     self.sst_format
                         .read_blocks(&handle.info, index, range.clone(), &obj)
                         .await
                         .map_err(|e| e.with_path(&obj.path))
                 })
+                .await
             }
         }))
         .await;
@@ -1029,17 +1045,20 @@ impl TableStore {
         block: usize,
     ) -> Result<Block, SlateDBError> {
         let index = self.read_index(handle, false).await?;
-        let mut obj = ReadOnlyObject {
-            object_store: self.object_stores.store_for(&handle.id),
-            path: self.path(&handle.id),
-            intent: self.read_intent_for(&handle.id),
-        };
-        with_validation_retry!(obj, {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
             self.sst_format
                 .read_block(&handle.info, &index, block, &obj)
                 .await
                 .map_err(|e| e.with_path(&obj.path))
         })
+        .await
     }
 
     fn path(&self, id: &SsTableId) -> Path {
@@ -1143,39 +1162,36 @@ fn validation_retry_reason(err: &SlateDBError) -> Option<RetryReason> {
     }
 }
 
-/// Evaluates `$read` (a `Result` expression that reads through `$obj`),
-/// re-evaluating it once more per allowed retry with [`ReadIntent::retry`]
-/// tagged on `$obj` when the result is a recoverable validation failure
-/// (see [`validation_retry_reason`]). The retry tag tells a caching wrapper
-/// to drop any local copy of the object instead of serving the same corrupt
-/// bytes again; reads from an untagged store retry without a tag. Expands
-/// to plain sequential code, so the borrow of `$obj` inside `$read` never
-/// overlaps the tagging.
-macro_rules! with_validation_retry {
-    ($obj:ident, $read:expr) => {{
-        let mut result = $read;
-        let mut attempts = 0;
-        while attempts < MAX_VALIDATION_RETRIES {
-            match &result {
-                Err(err) => match validation_retry_reason(err) {
-                    Some(reason) => {
-                        warn!(
-                            "retrying SST read after validation failure [reason={:?}, error={}]",
-                            reason, err
-                        );
-                        $obj.intent = $obj.intent.map(|i| i.with_retry(reason));
-                    }
-                    None => break,
-                },
-                Ok(_) => break,
-            }
-            attempts += 1;
-            result = $read;
+/// Runs `read` with the given intent, reissuing it with [`ReadIntent::retry`]
+/// set when the result is a recoverable validation failure (see
+/// [`validation_retry_reason`]). The retry tag tells a caching wrapper to drop
+/// any local copy of the object instead of serving the same corrupt bytes
+/// again; reads from an untagged store retry without a tag.
+async fn read_with_validation_retry<T, Fut>(
+    mut intent: Option<ReadIntent>,
+    mut read: impl FnMut(Option<ReadIntent>) -> Fut,
+) -> Result<T, SlateDBError>
+where
+    Fut: std::future::Future<Output = Result<T, SlateDBError>>,
+{
+    for _ in 0..MAX_VALIDATION_RETRIES {
+        let result = read(intent).await;
+        match result {
+            Err(ref err) => match validation_retry_reason(err) {
+                Some(reason) => {
+                    warn!(
+                        "retrying SST read after validation failure [reason={:?}, error={}]",
+                        reason, err
+                    );
+                    intent = intent.map(|i| i.with_retry(reason));
+                }
+                None => return result,
+            },
+            Ok(_) => return result,
         }
-        result
-    }};
+    }
+    read(intent).await
 }
-use with_validation_retry;
 
 impl TableStore {
     /// The intent for a read of `id`, if any: compacted-SST reads carry the
