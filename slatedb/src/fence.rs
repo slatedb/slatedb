@@ -307,6 +307,7 @@ mod tests {
                 compacted_options: None,
                 compactions_options: None,
                 detach_options: None,
+                metric_level: None,
             };
             let gc = GarbageCollector::new(
                 self.manifest_store.clone(),

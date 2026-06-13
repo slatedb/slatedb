@@ -1,5 +1,5 @@
 use std::cmp::{max, min, Ordering};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
@@ -8,12 +8,12 @@ use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
 use crate::error::SlateDBError;
-use crate::rand::DbRand;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::{debug, warn};
 use serde::Serialize;
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 use uuid::Uuid;
 
@@ -1429,14 +1429,18 @@ impl Manifest {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
         }
 
+        // Canonicalize before generating final checkpoint IDs. The manifest
+        // stores both external_dbs and nested sst_ids as vectors, so unordered
+        // iteration here would make manifest bytes and UUID assignment depend
+        // on HashMap/HashSet seed order.
         let external_dbs_merged = Self::build_external_dbs(&ordered_sources)
             .into_iter()
             .fold(
-                HashMap::new(),
-                |mut map: HashMap<(String, Uuid), HashSet<SsTableId>>, db| {
+                BTreeMap::new(),
+                |mut map: BTreeMap<(String, Uuid), BTreeSet<SsTableId>>, db| {
                     map.entry((db.path, db.source_checkpoint_id))
                         .or_default()
-                        .extend::<HashSet<SsTableId>>(HashSet::from_iter(db.sst_ids));
+                        .extend(db.sst_ids);
                     map
                 },
             )
@@ -1546,7 +1550,6 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::{LsmTreeState, ManifestCore, ProjectionConfig, Segment};
-    use crate::rand::DbRand;
     use crate::Checkpoint;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -1554,6 +1557,7 @@ mod tests {
     use object_store::ObjectStore;
     use proptest::proptest;
     use rstest::rstest;
+    use slatedb_common::DbRand;
     use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
@@ -3329,6 +3333,85 @@ mod tests {
         let merged_ids: HashSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
         let expected_ids: HashSet<SsTableId> = [sst_a, sst_b, sst_c].iter().copied().collect();
         assert_eq!(merged_ids, expected_ids);
+    }
+
+    #[test]
+    fn test_union_orders_external_dbs_and_sst_ids_deterministically() {
+        let source1_cp = Uuid::from_u128(100);
+        let source2_cp = Uuid::from_u128(200);
+        let ancestor_a_final_cp = Uuid::from_u128(10);
+        let ancestor_z_final_cp = Uuid::from_u128(30);
+
+        let ancestor_a_sst1 = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let ancestor_a_sst2 = SsTableId::Compacted(Ulid::from_parts(1001, 0));
+        let ancestor_z_sst1 = SsTableId::Compacted(Ulid::from_parts(3000, 0));
+        let ancestor_z_sst2 = SsTableId::Compacted(Ulid::from_parts(3001, 0));
+        let source1_sst = SsTableId::Compacted(Ulid::from_parts(5000, 0));
+        let source2_sst = SsTableId::Compacted(Ulid::from_parts(6000, 0));
+
+        let mut manifest1 =
+            manifest_with_one_compacted_sst(source1_sst, b"a", BytesRange::from_ref("a".."m"));
+        manifest1.external_dbs.push(ExternalDb {
+            path: "z-parent".to_string(),
+            source_checkpoint_id: Uuid::from_u128(31),
+            final_checkpoint_id: Some(ancestor_z_final_cp),
+            sst_ids: vec![ancestor_z_sst2, ancestor_z_sst1],
+        });
+
+        let mut manifest2 =
+            manifest_with_one_compacted_sst(source2_sst, b"m", BytesRange::from_ref("m"..));
+        manifest2.external_dbs.push(ExternalDb {
+            path: "a-parent".to_string(),
+            source_checkpoint_id: Uuid::from_u128(11),
+            final_checkpoint_id: Some(ancestor_a_final_cp),
+            sst_ids: vec![ancestor_a_sst2, ancestor_a_sst1],
+        });
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: manifest1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(source1_cp),
+                },
+                CloneSource {
+                    manifest: manifest2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(source2_cp),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        let actual: Vec<_> = union
+            .external_dbs
+            .iter()
+            .map(|db| {
+                (
+                    db.path.as_str(),
+                    db.source_checkpoint_id,
+                    db.sst_ids.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "a-parent",
+                    ancestor_a_final_cp,
+                    vec![ancestor_a_sst1, ancestor_a_sst2],
+                ),
+                ("tmp/db1", source1_cp, vec![source1_sst]),
+                ("tmp/db2", source2_cp, vec![source2_sst]),
+                (
+                    "z-parent",
+                    ancestor_z_final_cp,
+                    vec![ancestor_z_sst1, ancestor_z_sst2],
+                ),
+            ]
+        );
     }
 
     fn segment_with_prefix(prefix: &[u8], seed: u64) -> super::Segment {

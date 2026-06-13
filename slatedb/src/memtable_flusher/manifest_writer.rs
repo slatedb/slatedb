@@ -858,7 +858,6 @@ mod tests {
     use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
-    use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
@@ -870,6 +869,7 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;

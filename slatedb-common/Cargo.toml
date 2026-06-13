@@ -10,7 +10,10 @@ homepage.workspace = true
 [dependencies]
 chrono = { workspace = true }
 log = { workspace = true }
+rand = { workspace = true }
+rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
+thread_local = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [features]

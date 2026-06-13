@@ -21,8 +21,8 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use crate::utils::IdGenerator;
-use crate::DbRand;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 /// A read-only view of compactor state suitable for consumers like GC.
 ///
@@ -144,12 +144,18 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Move running compactions back to submitted so we can resume them after restart.
-        // Submitted compactions are left intact for future scheduling.
-        // Keep only the most recent finished compaction for GC safety (#1044).
+        // Move running and scheduled compactions back to submitted so we can resume them
+        // after restart. Re-routing through Submitted forces re-validation against the
+        // post-restart manifest before any worker can claim them again. Submitted
+        // compactions are left intact for future scheduling. Keep only the most recent
+        // finished compaction for GC safety (#1044).
         dirty_compactions.value.iter_mut().for_each(|c| {
-            if matches!(c.status(), CompactionStatus::Running) {
+            if matches!(
+                c.status(),
+                CompactionStatus::Running | CompactionStatus::Scheduled
+            ) {
                 c.set_status(CompactionStatus::Submitted);
+                c.set_worker(None);
             }
         });
         dirty_compactions.value.retain_active_and_last_finished();
@@ -296,10 +302,12 @@ impl CompactorStateWriter {
                     return Ok(());
                 }
                 Err(err) if err.is_sequenced_write_conflict() => {
-                    // Retry with a refreshed view. Refresh will surface fencing if the epoch advanced.
-                    // If another process modified the compactions file legally (such as an external
-                    // compaction request triggered from the CLI), this will pick up those changes.
-                    self.compactions.refresh().await?;
+                    // Merge the latest remote state (e.g. a worker's Compacted write) into
+                    // the coordinator's view before retrying. Without this, retrying with a stale
+                    // desired_value could silently overwrite worker progress.
+                    self.load_compactions().await?;
+                    desired_value = self.state.compactions().value.clone();
+                    desired_value.retain_active_and_last_finished();
                 }
                 Err(err) => return Err(err),
             }

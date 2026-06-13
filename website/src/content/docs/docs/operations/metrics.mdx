@@ -21,19 +21,33 @@ all metric operations are silently discarded with nearly no overhead.
 Pass your recorder to `DbBuilder`:
 
 ```rust
-use slatedb::Db;
+use slatedb::{config::MetricLevel, Db, Settings};
 use slatedb::object_store::memory::InMemory;
 use slatedb_common::metrics::MetricsRecorder;
 use std::sync::Arc;
 
 let recorder: Arc<dyn MetricsRecorder> = /* your implementation */;
+let settings = Settings {
+    metric_level: MetricLevel::Debug,
+    ..Settings::default()
+};
 
 let db = Db::builder("my_db", Arc::new(InMemory::new()))
+    .with_settings(settings)
     .with_metrics_recorder(recorder)
     .build()
     .await
     .unwrap();
 ```
+
+### Metric levels
+
+`MetricLevel` controls which metrics are registered. Metrics below the configured
+level are replaced with no-op handles when they are registered.
+
+`MetricLevel::Info` is the default and registers standard operational metrics.
+`MetricLevel::Debug` also registers debug-level metrics when SlateDB defines
+them. Configure the level with `Settings::metric_level`.
 
 ## The MetricsRecorder trait
 

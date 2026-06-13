@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
@@ -8,13 +8,14 @@ use chrono::TimeDelta;
 use futures::future::{join, join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter_iterator::CompactionFilterIterator;
-use crate::compactor::CompactorMessage;
-use crate::config::CompactorOptions;
+use crate::compaction_worker::WorkerMessage;
+use crate::config::CompactionWorkerOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
@@ -25,12 +26,12 @@ use crate::merge_operator::{
     MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
-use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{
@@ -174,36 +175,13 @@ pub(crate) trait CompactionExecutor {
 
     /// Stops the executor and cancels any in-flight tasks, waiting for them to finish.
     fn stop(&self);
-
-    /// Returns true if the executor has been stopped (but not necessarily finished).
-    fn is_stopped(&self) -> bool;
-}
-
-/// Implemented by message types that the executor sends on job completion and progress.
-pub(crate) trait ExecutorMessage: Send + 'static {
-    fn job_finished(id: Ulid, result: Result<SortedRun, SlateDBError>) -> Self;
-    fn job_progress(id: Ulid, bytes_processed: u64, output_ssts: Vec<SsTableHandle>) -> Self;
-}
-
-impl ExecutorMessage for CompactorMessage {
-    fn job_finished(id: Ulid, result: Result<SortedRun, SlateDBError>) -> Self {
-        CompactorMessage::CompactionJobFinished { id, result }
-    }
-
-    fn job_progress(id: Ulid, bytes_processed: u64, output_ssts: Vec<SsTableHandle>) -> Self {
-        CompactorMessage::CompactionJobProgress {
-            id,
-            bytes_processed,
-            output_ssts,
-        }
-    }
 }
 
 /// Options for creating a [`TokioCompactionExecutor`].
-pub(crate) struct TokioCompactionExecutorOptions<M = CompactorMessage> {
+pub(crate) struct TokioCompactionExecutorOptions {
     pub handle: tokio::runtime::Handle,
-    pub options: Arc<CompactorOptions>,
-    pub worker_tx: async_channel::Sender<M>,
+    pub options: Arc<CompactionWorkerOptions>,
+    pub worker_tx: async_channel::Sender<WorkerMessage>,
     pub table_store: Arc<TableStore>,
     pub rand: Arc<DbRand>,
     pub stats: Arc<CompactionStats>,
@@ -214,12 +192,12 @@ pub(crate) struct TokioCompactionExecutorOptions<M = CompactorMessage> {
     pub compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
-pub(crate) struct TokioCompactionExecutor<M = CompactorMessage> {
-    inner: Arc<TokioCompactionExecutorInner<M>>,
+pub(crate) struct TokioCompactionExecutor {
+    inner: Arc<TokioCompactionExecutorInner>,
 }
 
-impl<M: ExecutorMessage> TokioCompactionExecutor<M> {
-    pub(crate) fn new(opts: TokioCompactionExecutorOptions<M>) -> Self {
+impl TokioCompactionExecutor {
+    pub(crate) fn new(opts: TokioCompactionExecutorOptions) -> Self {
         let stats = opts.stats;
         let merge_operator = opts.merge_operator.map(|merge_operator| {
             instrument_merge_operator(
@@ -235,7 +213,7 @@ impl<M: ExecutorMessage> TokioCompactionExecutor<M> {
                 worker_tx: opts.worker_tx,
                 table_store: opts.table_store,
                 rand: opts.rand,
-                tasks: Arc::new(Mutex::new(HashMap::new())),
+                tasks: Arc::new(Mutex::new(BTreeMap::new())),
                 stats,
                 clock: opts.clock,
                 is_stopped: AtomicBool::new(false),
@@ -248,7 +226,7 @@ impl<M: ExecutorMessage> TokioCompactionExecutor<M> {
     }
 }
 
-impl<M: ExecutorMessage> CompactionExecutor for TokioCompactionExecutor<M> {
+impl CompactionExecutor for TokioCompactionExecutor {
     fn start_compaction_job(&self, compaction: StartCompactionJobArgs) {
         self.inner.start_compaction_job(compaction);
     }
@@ -256,22 +234,18 @@ impl<M: ExecutorMessage> CompactionExecutor for TokioCompactionExecutor<M> {
     fn stop(&self) {
         self.inner.stop()
     }
-
-    fn is_stopped(&self) -> bool {
-        self.inner.is_stopped()
-    }
 }
 
 struct TokioCompactionTask {
     task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
-pub(crate) struct TokioCompactionExecutorInner<M = CompactorMessage> {
-    options: Arc<CompactorOptions>,
+pub(crate) struct TokioCompactionExecutorInner {
+    options: Arc<CompactionWorkerOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: async_channel::Sender<M>,
+    worker_tx: async_channel::Sender<WorkerMessage>,
     table_store: Arc<TableStore>,
-    tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
+    tasks: Arc<Mutex<BTreeMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     clock: Arc<dyn SystemClock>,
@@ -282,7 +256,7 @@ pub(crate) struct TokioCompactionExecutorInner<M = CompactorMessage> {
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
-impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
+impl TokioCompactionExecutorInner {
     /// Builds input iterators for all sources (L0 and SR) and wraps them with optional
     /// merge, retention, and compaction filter logic.
     async fn load_iterators<'a>(
@@ -297,8 +271,11 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         };
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: self.options.max_fetch_tasks,
-            blocks_to_fetch: 256,
+            blocks_to_fetch: self
+                .table_store
+                .bytes_to_blocks(self.options.bytes_to_fetch),
             cache_blocks: false, // don't clobber the cache
+            cache_metadata: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
@@ -389,15 +366,40 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         // component. They can do what they want. If the send fails (e.g., during
         // DB shutdown), we log it and continue with the compaction work.
         #[allow(clippy::disallowed_methods)]
-        if let Err(e) =
-            self.worker_tx
-                .try_send(M::job_progress(id, bytes_processed, output_ssts.to_vec()))
+        if let Err(e) = self
+            .worker_tx
+            .try_send(WorkerMessage::CompactionJobProgress {
+                id,
+                bytes_processed,
+                output_ssts: output_ssts.to_vec(),
+            })
         {
             debug!(
                 "failed to send compaction progress (likely DB shutdown) [error={:?}]",
                 e
             );
         }
+    }
+
+    /// Awaits an in-flight SST close, records its stats, and appends the
+    /// resulting handle to `output_ssts`. Handles are appended in spawn order,
+    /// which preserves the ascending-key ordering required within a sorted run.
+    async fn collect_close(
+        &self,
+        pending: AbortOnDropHandle<Result<SsTableHandle, SlateDBError>>,
+        output_ssts: &mut Vec<SsTableHandle>,
+    ) -> Result<(), SlateDBError> {
+        let sst = pending.await.map_err(|e| {
+            let name = "compactor_sst_close".to_string();
+            if e.is_cancelled() {
+                SlateDBError::BackgroundTaskCancelled(name)
+            } else {
+                SlateDBError::BackgroundTaskPanic(name)
+            }
+        })??;
+        self.stats.bytes_compacted.increment(sst.info.filter_offset);
+        output_ssts.push(sst);
+        Ok(())
     }
 
     /// Executes a single compaction job and returns the resulting [`SortedRun`].
@@ -427,7 +429,27 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
             estimate_bytes_before_key(args.sorted_runs.as_slice(), k)
         });
 
+        // At most one SST close runs in the background at a time (depth-1
+        // pipeline). While a finished SST flushes to the object store we keep
+        // merging input and filling the next SST, instead of stalling the loop
+        // on close(). Only one buffered SST is held outstanding, which bounds
+        // memory and applies backpressure when the object store is slow.
+        let mut pending_close: Option<AbortOnDropHandle<Result<SsTableHandle, SlateDBError>>> =
+            None;
+
         while let Some(kv) = all_iter.next().await? {
+            // Opportunistically collect a finished background close without
+            // stalling the merge loop to promptly lets us report progress
+            // and persist the newly uploaded output SST in compactor state
+            // as soon as the close finishes, rather than waiting until the
+            // next SST fills up.
+            if let Some(pending) = pending_close.take_if(|p| p.is_finished()) {
+                self.collect_close(pending, &mut output_ssts).await?;
+                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
+                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
+                last_progress_report = self.clock.now();
+            }
+
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
@@ -441,16 +463,23 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
             }
 
             if bytes_written > self.options.max_sst_size {
+                // Depth-1 backpressure: drain the previous close (collecting its
+                // handle in order) before starting another.
+                if let Some(pending) = pending_close.take() {
+                    self.collect_close(pending, &mut output_ssts).await?;
+                }
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store.table_writer(SsTableId::Compacted(
                         self.rand.rng().gen_ulid(self.clock.as_ref()),
                     )),
                 );
-                let sst = finished_writer.close().await?;
-
-                self.stats.bytes_compacted.increment(sst.info.filter_offset);
-                output_ssts.push(sst);
+                pending_close = Some(AbortOnDropHandle::new(spawn_bg_task(
+                    format!("compactor_sst_close:{:?}", finished_writer.id()),
+                    &self.handle,
+                    |_| {},
+                    async move { finished_writer.close().await },
+                )));
                 bytes_written = 0;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 self.send_compaction_progress(args.id, total_bytes, &output_ssts);
@@ -458,6 +487,11 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
             }
         }
 
+        // Drain the in-flight close, then flush the final partial SST. Order
+        // matters: the pending SST's keys all precede the final writer's keys.
+        if let Some(pending) = pending_close.take() {
+            self.collect_close(pending, &mut output_ssts).await?;
+        }
         if !current_writer.is_drained() {
             let sst = current_writer.close().await?;
 
@@ -506,7 +540,10 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
                 // component. They can do what they want. If the send fails (e.g., during
                 // DB shutdown), we log it and continue with cleanup.
                 #[allow(clippy::disallowed_methods)]
-                if let Err(e) = this_cleanup.worker_tx.try_send(M::job_finished(id, result)) {
+                if let Err(e) = this_cleanup
+                    .worker_tx
+                    .try_send(WorkerMessage::CompactionJobFinished { id, result })
+                {
                     debug!(
                         "failed to send compaction finished msg (likely DB shutdown) [error={:?}]",
                         e
@@ -526,10 +563,15 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
         // lock and remove the task from the map.
         let task_handles = {
             let mut tasks = self.tasks.lock();
-            for task in tasks.values() {
+            // BTreeMap keeps abort/join order stable by destination. HashMap
+            // iteration order is randomized, which can feed the DST runtime a
+            // process-dependent shutdown order.
+            let mut task_handles = Vec::with_capacity(tasks.len());
+            while let Some((_, task)) = tasks.pop_first() {
                 task.task.abort();
+                task_handles.push(task.task);
             }
-            tasks.drain().map(|(_, task)| task.task).collect::<Vec<_>>()
+            task_handles
         };
 
         let wait_for_task_termination = async move {
@@ -544,16 +586,8 @@ impl<M: ExecutorMessage> TokioCompactionExecutorInner<M> {
             }
         };
 
-        #[cfg(dst)]
         self.handle.spawn(wait_for_task_termination);
-        #[cfg(not(dst))]
-        self.handle.block_on(wait_for_task_termination);
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
-    }
-
-    /// Returns true if the executor has been stopped (but not necessarily finished).
-    fn is_stopped(&self) -> bool {
-        self.is_stopped.load(atomic::Ordering::SeqCst)
     }
 }
 
@@ -567,7 +601,7 @@ mod tests {
     use crate::proptest_util::arbitrary;
     use crate::sst_iter::SstView;
     use crate::test_utils::StringConcatMergeOperator;
-    use crate::test_utils::{build_row_entries, build_sorted_runs, write_ssts};
+    use crate::test_utils::{build_row_entries, build_sorted_runs, write_ssts, GatedObjectStore};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::Db;
     use bytes::Bytes;
@@ -1005,8 +1039,8 @@ mod tests {
         #[case] expected_rows: Vec<RowEntry>,
     ) {
         let handle = tokio::runtime::Handle::current();
-        let options = Arc::new(CompactorOptions::default());
-        let (tx, _rx) = async_channel::unbounded::<CompactorMessage>();
+        let options = Arc::new(CompactionWorkerOptions::default());
+        let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let root_path = Path::from("testdb-load-iterators");
         let clock = Arc::new(DefaultSystemClock::new());
@@ -1209,12 +1243,12 @@ mod tests {
                 };
 
                 let handle = tokio::runtime::Handle::current();
-                let options = CompactorOptions {
+                let options = CompactionWorkerOptions {
                     max_sst_size: MAX_SST_SIZE,
                     ..Default::default()
                 };
                 let options = Arc::new(options);
-                let (tx, _rx) = async_channel::unbounded::<CompactorMessage>();
+                let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
                 let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
                 let root_path = Path::from("testdb-exec-resume");
                 let clock = Arc::new(DefaultSystemClock::new());
@@ -1343,11 +1377,170 @@ mod tests {
         });
     }
 
+    /// A blocked SST `close()` (the object-store flush of a finished output SST)
+    /// must not stall the merge loop. We gate the object store's `put` so the
+    /// first output SST's flush blocks indefinitely, then assert the executor
+    /// still makes progress (emits a progress message) while that flush is in
+    /// flight. Before `close()` was pipelined off the loop, the loop would be
+    /// parked inside `close()` and emit nothing until the flush completed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn should_keep_processing_while_sst_flush_is_blocked() {
+        // given: an executor writing through a gated object store, with a tiny
+        // max_sst_size so each finished block rolls into a new output SST
+        // (guaranteeing several SST boundaries, and thus background closes).
+        let handle = tokio::runtime::Handle::current();
+        let options = Arc::new(CompactionWorkerOptions {
+            max_sst_size: 1,
+            ..CompactionWorkerOptions::default()
+        });
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner));
+        let object_store: Arc<dyn ObjectStore> = gated.clone();
+        let root_path = Path::from("testdb-flush-no-block");
+        let clock = Arc::new(DefaultSystemClock::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat {
+                block_size: 64,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle,
+            options,
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: Arc::new(DbRand::new(100u64)),
+            stats: {
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
+            },
+            clock,
+            manifest_store,
+            merge_operator: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
+
+        // given: a single L0 SST with enough rows to span many output SSTs.
+        let entries: Vec<RowEntry> = (0u64..64)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:04}").as_bytes(),
+                    format!("val{i:04}").as_bytes(),
+                    i + 1,
+                )
+            })
+            .collect();
+        let input_ssts = write_sst(&table_store, &entries, usize::MAX).await;
+        let sst_views: Vec<SsTableView> =
+            input_ssts.into_iter().map(SsTableView::identity).collect();
+
+        // given: the object-store flush (`put`) for output SSTs is blocked. Setup
+        // writes above ran with the gate open (the default), so only the
+        // compaction's output flushes are affected. The gate counts every call
+        // (even pass-throughs), so baseline the setup puts to reason relatively.
+        let setup_puts = gated.put_opts_gate.arrivals();
+        gated.put_opts_gate.close();
+
+        // when: the compaction job runs.
+        executor.start_compaction_job(StartCompactionJobArgs {
+            id: Ulid::new(),
+            compaction_id: Ulid::new(),
+            destination: 0,
+            sst_views,
+            sorted_runs: vec![],
+            output_ssts: vec![],
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+        });
+
+        // when: the first output SST's flush is parked at the closed gate.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            gated.put_opts_gate.wait_for_arrivals(setup_puts + 1),
+        )
+        .await
+        .expect("a close() should reach the blocked put gate");
+
+        // then: the loop keeps running and emits a progress message while the
+        // flush is blocked. A `Finished` message here would mean the job somehow
+        // completed despite the blocked flush.
+        let progressed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await.unwrap() {
+                    WorkerMessage::CompactionJobProgress { .. } => break,
+                    WorkerMessage::CompactionJobFinished { .. } => {
+                        panic!("job finished while its SST flush was blocked")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert!(
+            progressed.is_ok(),
+            "expected a progress message while the SST flush was blocked"
+        );
+
+        // then: depth-1 backpressure holds — only one close is in flight at a
+        // time, since the loop parks at the next boundary draining it.
+        assert_eq!(gated.put_opts_gate.arrivals(), setup_puts + 1);
+
+        // when: the blocked flush is released.
+        gated.put_opts_gate.release();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let WorkerMessage::CompactionJobFinished { result, .. } =
+                    rx.recv().await.unwrap()
+                {
+                    return result;
+                }
+            }
+        })
+        .await
+        .expect("job should finish after the gate is released")
+        .expect("compaction should succeed");
+
+        // then: multiple output SSTs were produced (proving real boundaries and
+        // background closes ran) ...
+        assert!(
+            result.sst_views.len() >= 2,
+            "expected multiple output SSTs, got {}",
+            result.sst_views.len()
+        );
+        // ... and the merged output preserves every key in ascending order.
+        let mut read_back = Vec::new();
+        for sst in &result.sst_views {
+            let mut iter = SstIterator::new(
+                SstView::Borrowed(sst, BytesRange::from(..)),
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .unwrap();
+            iter.init().await.unwrap();
+            while let Some(entry) = iter.next().await.unwrap() {
+                read_back.push(entry.key);
+            }
+        }
+        let expected: Vec<Bytes> = entries.iter().map(|e| e.key.clone()).collect();
+        assert_eq!(read_back, expected);
+    }
+
     /// Test context for compaction executor tests.
     struct TestContext {
         executor: TokioCompactionExecutor,
         table_store: Arc<TableStore>,
-        rx: async_channel::Receiver<CompactorMessage>,
+        rx: async_channel::Receiver<WorkerMessage>,
     }
 
     /// Builder for creating test context with configurable options.
@@ -1384,7 +1577,7 @@ mod tests {
 
         async fn build(self) -> TestContext {
             let handle = tokio::runtime::Handle::current();
-            let options = Arc::new(CompactorOptions::default());
+            let options = Arc::new(CompactionWorkerOptions::default());
             let (tx, rx) = async_channel::unbounded();
             let os = Arc::new(InMemory::new());
             let clock = Arc::new(DefaultSystemClock::new());
@@ -1448,7 +1641,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async move {
                 loop {
                     let msg = self.rx.recv().await.unwrap();
-                    if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
+                    if let WorkerMessage::CompactionJobFinished { id: _, result } = msg {
                         return result;
                     }
                 }

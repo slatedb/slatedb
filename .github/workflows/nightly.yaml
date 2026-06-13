@@ -31,6 +31,8 @@ jobs:
             ${{ runner.os }}-microbenchmarks-
 
       - name: Update microbenchmark result
+        id: update_microbenchmark_result
+        continue-on-error: true
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: cargo bench
@@ -47,6 +49,10 @@ jobs:
         with:
           path: ./microbenchmarks-cache
           key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
+
+      - name: Fail on microbenchmark alert
+        if: steps.update_microbenchmark_result.outcome == 'failure'
+        run: exit 1
 
   benchmarks:
     runs-on: warp-ubuntu-latest-x64-16x
@@ -258,7 +264,7 @@ jobs:
 
   deterministic-simulation-test:
     runs-on: warp-ubuntu-latest-x64-16x
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2

@@ -342,7 +342,7 @@ pub(crate) fn max_l0_overlap(l0: &VecDeque<SsTableView>) -> usize {
 }
 
 /// An identifier for an SSTable, which can be either a WAL SST or a compacted SST.
-#[derive(Clone, PartialEq, Hash, Eq, Copy, Serialize)]
+#[derive(Clone, PartialEq, PartialOrd, Ord, Hash, Eq, Copy, Serialize)]
 pub enum SsTableId {
     /// A WAL SST identified by its unique WAL ID.
     Wal(u64),

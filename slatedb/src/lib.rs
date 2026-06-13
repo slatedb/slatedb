@@ -40,9 +40,11 @@ pub use compaction_filter::{
     CompactionFilter, CompactionFilterDecision, CompactionFilterError, CompactionFilterSupplier,
     CompactionJobContext,
 };
+pub use compaction_worker::CompactionWorker;
 pub use compactor::CompactorBuilder;
 pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
+pub use db::builder::{CloneSourceSpec, CompactionWorkerBuilder};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_cache_manager::CacheTarget;
@@ -64,7 +66,7 @@ pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
-pub use rand::DbRand;
+pub use slatedb_common::DbRand;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
 pub use sst_reader::{SstFile, SstReader};
@@ -148,7 +150,6 @@ mod paths;
 mod peeking_iterator;
 #[cfg(test)]
 mod proptest_util;
-mod rand;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;

@@ -249,7 +249,7 @@ mod tests {
 
         settings
             .set(
-                "compactor_options.max_sst_size".to_owned(),
+                "compactor_options.worker.max_sst_size".to_owned(),
                 "33554432".to_owned(),
             )
             .unwrap();
@@ -259,6 +259,8 @@ mod tests {
                 .inner()
                 .compactor_options
                 .expect("compactor options should exist")
+                .worker
+                .expect("worker options should exist")
                 .max_sst_size,
             33_554_432
         );
@@ -346,11 +348,16 @@ flush_interval = "1s"
     fn settings_from_env_reads_config() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("FFI_SETTINGS_FLUSH_INTERVAL", "1s");
+            jail.set_env("FFI_SETTINGS_METRIC_LEVEL", "Debug");
 
             let settings = Settings::from_env("FFI_SETTINGS_".to_owned()).unwrap();
             assert_eq!(
                 settings.inner().flush_interval,
                 Some(Duration::from_secs(1))
+            );
+            assert_eq!(
+                settings.inner().metric_level,
+                slatedb::config::MetricLevel::Debug
             );
 
             Ok(())

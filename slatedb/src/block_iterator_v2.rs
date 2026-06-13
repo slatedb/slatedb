@@ -499,7 +499,7 @@ pub mod benches {
 
         const SEED: u64 = 0x51A7_EDBB_E4C4;
 
-        let rand = crate::rand::DbRand::new(SEED);
+        let rand = slatedb_common::DbRand::new(SEED);
         let mut rng = rand.rng();
         let mut pool: Vec<(Bytes, Bytes)> = (0..config.num_entries)
             .map(|_| {

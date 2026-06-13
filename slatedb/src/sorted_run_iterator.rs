@@ -22,14 +22,24 @@ enum SortedRunView<'a> {
 }
 
 impl<'a> SortedRunView<'a> {
+    /// Pops the next table, restricting the iteration range to the table's
+    /// view range. Projected tables (e.g. in cloned manifests) may have a
+    /// `visible_range` narrower than the requested range; tables whose view
+    /// range does not intersect the requested range are skipped entirely.
     fn pop_sst(&mut self) -> Option<SstView<'a>> {
         match self {
-            SortedRunView::Owned(tables, r) => tables
-                .pop_front()
-                .map(|table| SstView::Owned(Box::new(table), r.clone())),
-            SortedRunView::Borrowed(tables, r) => tables
-                .pop_front()
-                .map(|table| SstView::Borrowed(table, BytesRange::from_slice(*r))),
+            SortedRunView::Owned(tables, r) => loop {
+                let table = tables.pop_front()?;
+                if let Some(view_range) = table.calculate_view_range(r.clone()) {
+                    return Some(SstView::Owned(Box::new(table), view_range));
+                }
+            },
+            SortedRunView::Borrowed(tables, r) => loop {
+                let table = tables.pop_front()?;
+                if let Some(view_range) = table.calculate_view_range(BytesRange::from_slice(*r)) {
+                    return Some(SstView::Borrowed(table, view_range));
+                }
+            },
         }
     }
 
@@ -375,6 +385,92 @@ mod tests {
         assert_eq!(kv.value, b"value3".as_slice());
         let kv = iter.next().await.unwrap().map(KeyValue::from);
         assert!(kv.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sr_iter_respects_visible_range() {
+        // given: a sorted run whose views carry visible_range restrictions,
+        // as produced by manifest projection (e.g. range-restricted clones)
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+        let mut builder = table_store.table_builder();
+        for i in 1..=4 {
+            let key = format!("key{i}");
+            let value = format!("value{i}");
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i), None)
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id1 = SsTableId::Compacted(ulid::Ulid::new());
+        let handle1 = table_store.write_sst(&id1, &encoded, false).await.unwrap();
+        let mut builder = table_store.table_builder();
+        for i in 5..=8 {
+            let key = format!("key{i}");
+            let value = format!("value{i}");
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i), None)
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id2 = SsTableId::Compacted(ulid::Ulid::new());
+        let handle2 = table_store.write_sst(&id2, &encoded, false).await.unwrap();
+        let sr = SortedRun {
+            id: 0,
+            sst_views: vec![
+                SsTableView::new_projected(
+                    ulid::Ulid::new(),
+                    handle1,
+                    Some(BytesRange::from_ref("key2".."key4")),
+                ),
+                SsTableView::new_projected(
+                    ulid::Ulid::new(),
+                    handle2,
+                    Some(BytesRange::from_ref("key5".."key7")),
+                ),
+            ],
+        };
+
+        // when: iterating the full range, then: only visible keys appear
+        let mut iter = SortedRunIterator::new_borrowed_initialized(
+            ..,
+            &sr,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
+        for i in [2, 3, 5, 6] {
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
+            assert_eq!(kv.key.as_ref(), format!("key{i}").as_bytes());
+        }
+        assert!(iter.next().await.unwrap().is_none());
+
+        // when: iterating a sub-range, then: the narrower bound applies and
+        // tables disjoint with the query range are skipped entirely
+        let mut iter = SortedRunIterator::new_owned_initialized(
+            BytesRange::from_ref("key6"..),
+            sr,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
+        assert_eq!(kv.key.as_ref(), b"key6");
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]

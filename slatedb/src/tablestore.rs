@@ -274,20 +274,20 @@ impl TableStore {
         Ok(self.last_seen_wal_id(wal_id_last_compacted).await? + 1)
     }
 
-    pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter<'_> {
+    pub(crate) fn table_writer(self: &Arc<Self>, id: SsTableId) -> EncodedSsTableWriter {
         let object_store = self.object_stores.store_for(&id);
         let path = self.path(&id);
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
             writer: BufWriter::new(object_store, path),
-            table_store: self,
+            table_store: self.clone(),
             #[cfg(test)]
             blocks_written: 0,
         }
     }
 
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
     }
 
@@ -1017,16 +1017,16 @@ async fn write_sst_streaming_in_object_store(
     Ok(())
 }
 
-pub(crate) struct EncodedSsTableWriter<'a> {
+pub(crate) struct EncodedSsTableWriter {
     id: SsTableId,
-    builder: EncodedSsTableBuilder<'a>,
+    builder: EncodedSsTableBuilder,
     writer: BufWriter,
-    table_store: &'a TableStore,
+    table_store: Arc<TableStore>,
     #[cfg(test)]
     blocks_written: usize,
 }
 
-impl EncodedSsTableWriter<'_> {
+impl EncodedSsTableWriter {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
@@ -1069,6 +1069,10 @@ impl EncodedSsTableWriter<'_> {
         self.builder.is_drained()
     }
 
+    pub(crate) fn id(&self) -> SsTableId {
+        self.id
+    }
+
     #[cfg(test)]
     pub(crate) fn blocks_written(&self) -> usize {
         self.blocks_written
@@ -1101,7 +1105,6 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
-    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
@@ -1110,6 +1113,7 @@ mod tests {
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::DbRand;
 
     const ROOT: &str = "/root";
 
@@ -1854,6 +1858,63 @@ mod tests {
         let _ = reader.read_filters(&handle, true).await.unwrap();
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_read_stats_honors_cache_blocks() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let writer = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_tombstone(b"key2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
+        assert!(handle.info.stats_len > 0);
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        );
+        assert_eq!(meta_cache.entry_count(), 0);
+
+        let stats = reader.read_stats(&handle, false).await.unwrap();
+        assert!(stats.is_some());
+        assert!(meta_cache
+            .get_stats(&(handle.id, handle.info.stats_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let _ = reader.read_stats(&handle, true).await.unwrap();
+        assert!(meta_cache
+            .get_stats(&(handle.id, handle.info.stats_offset).into())
             .await
             .unwrap()
             .is_some());
