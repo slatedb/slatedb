@@ -18,6 +18,10 @@
 //!    *and* at least `heartbeat_min_interval` has elapsed since the last such
 //!    write, the worker emits a cheap heartbeat (no output_ssts update).
 //!
+//! Both triggers are strictly per-job: a job that stops making progress stops
+//! heartbeating and is reclaimed independently of its siblings on the same
+//! worker, so a stalled job can be handed off to a less-loaded worker.
+//!
 //! The coordinator reclaims stale Running compactions whose
 //! `last_heartbeat_ms` is older than `CompactorOptions::worker_heartbeat_timeout`.
 
@@ -140,6 +144,10 @@ struct JobProgressState {
     last_hb_sst_count: usize,
     /// Total bytes processed as of the last bytes-based heartbeat write.
     last_hb_bytes: u64,
+    /// Wall-clock timestamp (ms) of this job's most recent heartbeat write
+    /// (either trigger). Used to throttle the bytes trigger to at most one
+    /// write per `heartbeat_min_interval`, independently of sibling jobs.
+    last_hb_ms: u64,
 }
 
 /// Internal `MessageHandler` for the worker's event loop.
@@ -164,9 +172,6 @@ pub(crate) struct CompactionWorkerHandler {
     rand: Arc<DbRand>,
     /// Per-job heartbeat bookkeeping. Entry present iff the job is active.
     job_progress: HashMap<Ulid, JobProgressState>,
-    /// Wall-clock timestamp (ms) of the most recent bytes-based heartbeat
-    /// write (across all jobs). Used to enforce `heartbeat_min_interval`.
-    worker_last_bytes_hb_ms: u64,
 }
 
 impl CompactionWorkerHandler {
@@ -190,7 +195,6 @@ impl CompactionWorkerHandler {
             stored: None,
             rand,
             job_progress: HashMap::new(),
-            worker_last_bytes_hb_ms: 0,
         }
     }
 
@@ -365,6 +369,7 @@ impl CompactionWorkerHandler {
                         JobProgressState {
                             last_hb_sst_count: 0,
                             last_hb_bytes: 0,
+                            last_hb_ms: self.clock.now().timestamp_millis() as u64,
                         },
                     );
                     Self::dispatch_to_executor(&self.executor, args);
@@ -452,11 +457,10 @@ impl CompactionWorkerHandler {
     /// trigger relies on this by comparing `output_ssts.len()` against the
     /// count last heartbeated.
     ///
-    /// In-memory progress bookkeeping (`last_hb_sst_count`, `last_hb_bytes`,
-    /// and the worker-global `worker_last_bytes_hb_ms`) is only advanced after
-    /// `write_heartbeat` confirms a durable write, so a skipped write (entry
-    /// gone / ownership lost) does not mark un-persisted progress as
-    /// heartbeated.
+    /// Per-job progress bookkeeping (`last_hb_sst_count`, `last_hb_bytes`, and
+    /// `last_hb_ms`) is only advanced after `write_heartbeat` confirms a durable
+    /// write, so a skipped write (entry gone / ownership lost) does not mark
+    /// un-persisted progress as heartbeated.
     async fn handle_progress(
         &mut self,
         id: Ulid,
@@ -480,23 +484,25 @@ impl CompactionWorkerHandler {
                 self.worker_id, id, new_count
             );
             if self.write_heartbeat(id, Some(output_ssts)).await? {
+                let now_ms = self.clock.now().timestamp_millis() as u64;
                 if let Some(state) = self.job_progress.get_mut(&id) {
                     state.last_hb_sst_count = new_count;
                     state.last_hb_bytes = bytes_processed;
+                    // Reset this job's bytes-heartbeat throttle so it doesn't
+                    // immediately re-fire right after an SST heartbeat.
+                    state.last_hb_ms = now_ms;
                 }
-                // Update the worker-level bytes heartbeat timestamp so the bytes
-                // trigger doesn't immediately re-fire after an SST heartbeat.
-                self.worker_last_bytes_hb_ms = self.clock.now().timestamp_millis() as u64;
             }
             return Ok(());
         }
 
         // --- Bytes trigger -----------------------------------------------------
-        // Note: `worker_last_bytes_hb_ms` is worker-global (shared across all
-        // jobs on this worker) while `last_hb_bytes` is per-job, so one job's
-        // bytes heartbeat can suppress another's for up to `heartbeat_min_interval`.
-        // That is intentional: the throttle bounds heartbeat write rate per
-        // worker, not per job.
+        // Liveness is tied to *this job's own* progress: both the threshold
+        // (`last_hb_bytes`) and the throttle (`last_hb_ms`) are per-job, so a
+        // job that stops making byte progress stops heartbeating and is
+        // reclaimed by the coordinator even while its siblings on this worker
+        // stay busy. That lets a stalled job be handed off to a less-loaded
+        // worker rather than being kept alive by a busy neighbor.
         let should_write = {
             let Some(state) = self.job_progress.get(&id) else {
                 return Ok(());
@@ -505,7 +511,7 @@ impl CompactionWorkerHandler {
             if bytes_since_last_hb >= self.options.heartbeat_bytes {
                 let now_ms = self.clock.now().timestamp_millis() as u64;
                 let min_interval_ms = self.options.heartbeat_min_interval.as_millis() as u64;
-                now_ms.saturating_sub(self.worker_last_bytes_hb_ms) >= min_interval_ms
+                now_ms.saturating_sub(state.last_hb_ms) >= min_interval_ms
             } else {
                 false
             }
@@ -517,10 +523,11 @@ impl CompactionWorkerHandler {
                 self.worker_id, id, bytes_processed
             );
             if self.write_heartbeat(id, None).await? {
+                let now_ms = self.clock.now().timestamp_millis() as u64;
                 if let Some(state) = self.job_progress.get_mut(&id) {
                     state.last_hb_bytes = bytes_processed;
+                    state.last_hb_ms = now_ms;
                 }
-                self.worker_last_bytes_hb_ms = self.clock.now().timestamp_millis() as u64;
             }
         }
 
