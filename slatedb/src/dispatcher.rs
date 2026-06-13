@@ -117,7 +117,7 @@
 //! ```
 
 use std::{
-    collections::HashMap, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc,
+    collections::HashMap, future::Future, ops::Range, panic::AssertUnwindSafe, pin::Pin, sync::Arc,
     time::Duration,
 };
 
@@ -134,15 +134,16 @@ use parking_lot::Mutex;
 use tokio::{runtime::Handle, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
 
-use rand::Rng;
-
 use crate::{
     db_status::ClosedResultWriter,
     error::SlateDBError,
-    rand::DbRand,
     utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
-use slatedb_common::clock::{SystemClock, SystemClockTicker};
+use rand::Rng;
+use slatedb_common::{
+    clock::{SystemClock, SystemClockTicker},
+    DbRand,
+};
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
 pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
@@ -151,25 +152,21 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// interval, a [`MessageFactory`] to produce a message on each tick, and an
 /// optional per-ticker jitter spread.
 pub(crate) struct MessageTickerDef<T: Send> {
-    /// The base tick interval. When jitter is enabled, the randomized wait is
-    /// centered on this interval.
-    pub(crate) duration: Duration,
     /// Produces a fresh message on each tick.
     pub(crate) factory: Box<MessageFactory<T>>,
-    /// Optional jitter spread: the half-width of the jitter range, as a
-    /// fraction of the interval. Each tick waits a uniform random duration in
-    /// `[interval * (1 - spread), interval * (1 + spread)]`. For example, `0.5`
-    /// spreads waits over `[interval/2, 3 * interval/2]` (the interval plus or
-    /// minus half). `None` or `0.0` ticks exactly on `duration`; values above
-    /// `1.0` simply clamp the lower bound at zero.
+    /// The base tick interval. When jitter is enabled, the randomized wait is
+    /// centered on this interval.
+    pub(crate) interval: Duration,
+    /// The half-width of the jitter range, as a fraction of the interval.
+    /// Each tick waits a uniform random duration in `[interval * (1 - jitter), interval * (1 + jitter)]`.
     pub(crate) jitter: Option<f64>,
 }
 
 impl<T: Send> MessageTickerDef<T> {
     /// Creates an unjittered ticker that fires every `duration`.
-    pub(crate) fn new(duration: Duration, factory: Box<MessageFactory<T>>) -> Self {
+    pub(crate) fn new(interval: Duration, factory: Box<MessageFactory<T>>) -> Self {
         Self {
-            duration,
+            interval,
             factory,
             jitter: None,
         }
@@ -296,11 +293,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             .into_iter()
             .map(|def| {
                 MessageDispatcherTicker::new(
-                    self.clock.ticker(def.duration),
-                    def.factory,
+                    self.clock.ticker(def.interval),
+                    def,
                     self.clock.clone(),
-                    def.duration,
-                    def.jitter,
                     self.rand.clone(),
                 )
             })
@@ -420,22 +415,10 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
 /// message, and the message is returned as a [Future].
 struct MessageDispatcherTicker<'a, T: Send> {
     inner: SystemClockTicker<'a>,
-    message_factory: Box<MessageFactory<T>>,
-    /// Clock used to sleep for the randomized wait when jitter is enabled.
+    def: MessageTickerDef<T>,
     clock: Arc<dyn SystemClock>,
-    /// Per-ticker jitter state. `None` when jitter is disabled, in which case
-    /// ticks fire on the fixed-interval `inner` ticker. When `Some`, ticks
-    /// ignore `inner` and instead sleep a fresh random duration drawn uniformly
-    /// from the inclusive `[min, max]` bounds.
-    jitter: Option<JitterState>,
-}
-
-/// Per-ticker jitter state: the RNG source and the inclusive bounds of the
-/// randomized per-tick wait, centered on the base interval.
-struct JitterState {
     rand: Arc<DbRand>,
-    min: Duration,
-    max: Duration,
+    jitter: Option<Range<Duration>>,
 }
 
 impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
@@ -460,24 +443,26 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// The new [MessageDispatcherTicker].
     fn new(
         inner: SystemClockTicker<'a>,
-        message_factory: Box<MessageFactory<T>>,
+        def: MessageTickerDef<T>,
         clock: Arc<dyn SystemClock>,
-        interval: Duration,
-        jitter: Option<f64>,
         rand: Arc<DbRand>,
     ) -> Self {
-        let jitter = jitter.filter(|spread| *spread > 0.0).map(|spread| {
+        let jitter = def.jitter.filter(|spread| *spread > 0.0).map(|spread| {
             // Center the wait on `interval`: draw uniformly from
             // [interval*(1-spread), interval*(1+spread)]. The lower bound is
             // clamped at zero so spreads above 1.0 don't underflow.
-            let min = interval.mul_f64((1.0 - spread).max(0.0));
-            let max = interval.mul_f64(1.0 + spread);
-            JitterState { rand, min, max }
+            let min = def.interval.mul_f64((1.0 - spread).max(0.0));
+            let max = def.interval.mul_f64(1.0 + spread);
+            Range {
+                start: (min),
+                end: (max),
+            }
         });
         Self {
             inner,
-            message_factory,
+            def,
             clock,
+            rand,
             jitter,
         }
     }
@@ -486,10 +471,10 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// jitter is disabled, in which case the caller falls back to the
     /// fixed-interval `inner` ticker.
     fn next_jittered_wait(&mut self) -> Option<Duration> {
-        self.jitter.as_ref().map(|state| {
-            let min = state.min.as_nanos() as u64;
-            let max = state.max.as_nanos() as u64;
-            Duration::from_nanos(state.rand.rng().random_range(min..=max))
+        self.jitter.as_ref().map(|jitter| {
+            let min = jitter.start.as_nanos() as u64;
+            let max = jitter.end.as_nanos() as u64;
+            Duration::from_nanos(self.rand.rng().random_range(min..=max))
         })
     }
 
@@ -506,7 +491,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     ///
     /// A [Future] that resolves when the ticker ticks.
     fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
-        let message = (self.message_factory)();
+        let message = (self.def.factory)();
         let jittered_wait = self.next_jittered_wait();
         Box::pin(async move {
             match jittered_wait {
@@ -944,12 +929,12 @@ mod test {
     use crate::db_status::ClosedResultWriter;
     use crate::dispatcher::{MessageFactory, MessageHandlerExecutor, MessageTickerDef};
     use crate::error::SlateDBError;
-    use crate::rand::DbRand;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
     use futures::stream::BoxStream;
     use futures::StreamExt;
     use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
+    use slatedb_common::DbRand;
     use std::collections::{HashSet, VecDeque};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1066,12 +1051,11 @@ mod test {
     fn test_ticker_jitter_is_centered_and_bounded() {
         let clock = Arc::new(MockSystemClock::new());
         let interval = Duration::from_millis(1000);
+        let ticker_def = MessageTickerDef::new(interval, Box::new(|| TestMessage::Tick(1)));
         let mut ticker: MessageDispatcherTicker<'_, TestMessage> = MessageDispatcherTicker::new(
             clock.ticker(interval),
-            Box::new(|| TestMessage::Tick(1)),
+            ticker_def,
             clock.clone(),
-            interval,
-            Some(0.5),
             Arc::new(DbRand::new(42)),
         );
 
@@ -1095,12 +1079,11 @@ mod test {
     fn test_ticker_without_jitter_has_no_randomized_wait() {
         let clock = Arc::new(MockSystemClock::new());
         let interval = Duration::from_millis(1000);
+        let ticker_def = MessageTickerDef::new(interval, Box::new(|| TestMessage::Tick(1)));
         let mut ticker: MessageDispatcherTicker<'_, TestMessage> = MessageDispatcherTicker::new(
             clock.ticker(interval),
-            Box::new(|| TestMessage::Tick(1)),
+            ticker_def,
             clock.clone(),
-            interval,
-            None,
             Arc::new(DbRand::new(0)),
         );
         assert!(ticker.next_jittered_wait().is_none());

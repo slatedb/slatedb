@@ -33,7 +33,6 @@ use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
 use crate::merge_operator::MergeOperatorType;
-use crate::rand::DbRand;
 use crate::tablestore::TableStore;
 use crate::utils::IdGenerator;
 #[cfg(feature = "compaction_filters")]

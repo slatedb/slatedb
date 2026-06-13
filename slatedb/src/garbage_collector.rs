@@ -1936,7 +1936,7 @@ mod tests {
             Arc::new(DefaultSystemClock::default()),
         );
 
-        let intervals: Vec<_> = gc.tickers().into_iter().map(|def| def.duration).collect();
+        let intervals: Vec<_> = gc.tickers().into_iter().map(|def| def.interval).collect();
         assert_eq!(
             intervals,
             vec![
@@ -1993,7 +1993,7 @@ mod tests {
         let executor = MessageHandlerExecutor::new(
             closed_result,
             clock,
-            Arc::new(crate::rand::DbRand::new(0)),
+            Arc::new(slatedb_common::DbRand::new(0)),
         );
         executor
             .add_handler(

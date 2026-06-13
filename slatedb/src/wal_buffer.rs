@@ -874,7 +874,7 @@ mod tests {
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             Arc::new(status_manager),
             system_clock.clone(),
-            Arc::new(crate::rand::DbRand::new(0)),
+            Arc::new(slatedb_common::DbRand::new(0)),
         ));
         wal_buffer.init(task_executor.clone()).await.unwrap();
         task_executor
