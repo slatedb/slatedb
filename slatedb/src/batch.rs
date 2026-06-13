@@ -16,7 +16,6 @@ use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
-use uuid::Uuid;
 
 /// A batch of write operations (puts, deletes, and merges). All operations in
 /// the batch are applied atomically to the database. Put and delete operations
@@ -52,7 +51,6 @@ use uuid::Uuid;
 pub struct WriteBatch {
     pub(crate) ops: BTreeMap<Bytes, SmallVec<[WriteOp; 1]>>,
     pub(crate) op_count: usize,
-    pub(crate) txn_id: Option<Uuid>,
     pub(crate) has_merge_ops: bool,
 }
 
@@ -139,17 +137,7 @@ impl WriteBatch {
         WriteBatch {
             ops: BTreeMap::new(),
             op_count: 0,
-            txn_id: None,
             has_merge_ops: false,
-        }
-    }
-
-    pub(crate) fn with_txn_id(self, txn_id: Uuid) -> Self {
-        Self {
-            ops: self.ops,
-            op_count: self.op_count,
-            txn_id: Some(txn_id),
-            has_merge_ops: self.has_merge_ops,
         }
     }
 

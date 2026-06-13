@@ -1,10 +1,10 @@
 use crate::bytes_range::BytesRange;
 use crate::oracle::{DbOracle, Oracle};
-use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::warn;
 use parking_lot::RwLock;
+use slatedb_common::DbRand;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -394,10 +394,10 @@ impl TransactionManagerInner {
 mod tests {
     use super::*;
     use crate::db_status::DbStatusManager;
-    use crate::rand::DbRand;
     use bytes::Bytes;
     use parking_lot::Mutex;
     use rstest::rstest;
+    use slatedb_common::DbRand;
     use std::collections::HashSet;
 
     struct CheckConflictTestCase {

@@ -1,11 +1,14 @@
 use std::ops::Bound;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
+use crate::builder::CloneBuilder;
 use crate::error::{Error, SlateDbError};
 use crate::types::{
-    Checkpoint, Compaction, CompactorStateView, VersionedCompactions, VersionedManifest,
+    Checkpoint, CloneSourceSpec, Compaction, CompactorStateView, VersionedCompactions,
+    VersionedManifest,
 };
 
 fn into_u64_bounds(
@@ -115,5 +118,15 @@ impl Admin {
             .get_sequence_for_timestamp(timestamp, round_up)
             .await
             .map_err(Into::into)
+    }
+
+    pub fn create_clone_builder_from_source(
+        &self,
+        source: CloneSourceSpec,
+    ) -> Result<Arc<CloneBuilder>, Error> {
+        Ok(CloneBuilder::new(
+            self.inner
+                .create_clone_builder_from_source(source.try_into()?),
+        ))
     }
 }

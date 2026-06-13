@@ -157,7 +157,6 @@ use crate::object_store_intent::{ReadKind, WriteKind};
 use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
-use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
@@ -168,6 +167,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
+use slatedb_common::DbRand;
 use uuid::Uuid;
 
 /// A builder for creating a new Db instance.
@@ -1820,7 +1820,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     }
 
     /// Build and execute the clone operation.
-    pub async fn build(self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn build(self) -> Result<(), crate::Error> {
         crate::clone::create_clone(
             self.sources,
             self.clone_path,
@@ -1833,8 +1833,8 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
             self.segment_filter,
             self.segment_projection,
         )
-        .await?;
-        Ok(())
+        .await
+        .map_err(crate::Error::from)
     }
 }
 

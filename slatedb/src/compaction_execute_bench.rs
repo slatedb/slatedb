@@ -29,13 +29,13 @@ use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::object_store_intent::{ReadKind, WriteKind};
 use crate::object_stores::ObjectStores;
-use crate::rand::DbRand;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
 use crate::utils::IdGenerator;
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::DbRand;
 
 pub struct CompactionExecuteBench {
     path: Path,

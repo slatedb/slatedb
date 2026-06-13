@@ -285,7 +285,8 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
-    /// Whether or not fetched blocks should be cached
+    /// Whether fetched data blocks should be cached. SST indexes, filters,
+    /// and stats are cached independently of this setting.
     pub cache_blocks: bool,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
@@ -346,7 +347,8 @@ pub struct ScanOptions {
     /// block size when fetching from object storage. The default is 1, which
     /// rounds up to one block.
     pub read_ahead_bytes: usize,
-    /// Whether or not fetched blocks should be cached
+    /// Whether or not fetched data blocks should be cached. SST indexes,
+    /// filters, and stats are cached independently of this setting.
     pub cache_blocks: bool,
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.

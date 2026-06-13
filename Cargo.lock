@@ -3268,7 +3268,6 @@ dependencies = [
  "pprof",
  "proptest",
  "rand 0.9.4",
- "rand_xoshiro",
  "rstest",
  "serde",
  "serde_json",
@@ -3280,7 +3279,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror 1.0.69",
- "thread_local",
  "tokio",
  "tokio-test",
  "tokio-util",
@@ -3336,7 +3334,10 @@ version = "0.13.0"
 dependencies = [
  "chrono",
  "log",
+ "rand 0.9.4",
+ "rand_xoshiro",
  "serde",
+ "thread_local",
  "tokio",
 ]
 

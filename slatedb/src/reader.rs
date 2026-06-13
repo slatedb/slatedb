@@ -286,6 +286,7 @@ impl Reader {
             max_fetch_tasks: options.max_fetch_tasks,
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
+            cache_metadata: true,
             eager_spawn: true,
             order: options.order,
             prefix: ctx.prefix,
@@ -348,6 +349,7 @@ impl Reader {
             max_fetch_tasks: options.max_fetch_tasks,
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
+            cache_metadata: true,
             // Recency scans are designed for early-stop. Eager spawning would
             // proactively fetch blocks for sources the caller may never reach,
             // defeating the early-stop savings.
