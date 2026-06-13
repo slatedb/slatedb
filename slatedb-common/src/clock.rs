@@ -9,8 +9,10 @@
 
 #![allow(clippy::disallowed_methods)]
 
+use crate::DbRand;
 use chrono::{DateTime, Utc};
-use std::{fmt::Debug, future::Future, pin::Pin, time::Duration};
+use rand::Rng;
+use std::{fmt::Debug, future::Future, ops::Range, pin::Pin, sync::Arc, time::Duration};
 
 #[cfg(feature = "test-util")]
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -24,8 +26,16 @@ pub trait SystemClock: Debug + Send + Sync {
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     /// Sleeps for the specified duration
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-    /// Returns a ticker that emits a signal every `duration` interval
-    fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a>;
+    /// Returns a ticker that emits a signal every `duration` interval. When both
+    /// `jitter` and `rand` are `Some`, each wait is drawn uniformly from the
+    /// centered range `[duration * (1 - jitter), duration * (1 + jitter)]` using
+    /// `rand`. If either is `None`, the ticker uses the fixed `duration`.
+    fn ticker<'a>(
+        &'a self,
+        duration: Duration,
+        jitter: Option<f64>,
+        rand: Option<Arc<DbRand>>,
+    ) -> SystemClockTicker<'a>;
 }
 
 /// A ticker that emits a signal every `duration` interval. This allows us to use our
@@ -37,15 +47,35 @@ pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
     duration: Duration,
     last_tick: DateTime<Utc>,
+    jitter: Option<Range<Duration>>,
+    rand: Option<Arc<DbRand>>,
 }
 
 impl<'a> SystemClockTicker<'a> {
-    /// Creates a new ticker that emits a signal every `duration` interval.
-    pub fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
+    /// Creates a new ticker that emits a signal every `duration` interval. When
+    /// both `jitter` and `rand` are `Some`, each wait is drawn uniformly from the
+    /// centered range using `rand`; otherwise the ticker uses the fixed
+    /// `duration`.
+    pub fn new(
+        clock: &'a dyn SystemClock,
+        duration: Duration,
+        jitter: Option<f64>,
+        rand: Option<Arc<DbRand>>,
+    ) -> Self {
+        let jitter = jitter.filter(|spread| *spread > 0.0).map(|spread| {
+            // Center the wait on `interval`: draw uniformly from
+            // [interval*(1-spread), interval*(1+spread)]. The lower bound is
+            // clamped at zero so spreads above 1.0 don't underflow.
+            let min = duration.mul_f64((1.0 - spread).max(0.0));
+            let max = duration.mul_f64(1.0 + spread);
+            min..max
+        });
         Self {
             clock,
             duration,
             last_tick: DateTime::<Utc>::MIN_UTC,
+            jitter,
+            rand,
         }
     }
 
@@ -65,8 +95,17 @@ impl<'a> SystemClockTicker<'a> {
 
     /// Calculates the duration until the next tick.
     ///
-    /// The duration is calculated as `duration - (now - last_tick)`.
+    /// When jitter is enabled, each tick draws a fresh wait uniformly from the
+    /// centered jitter range. Unlike the fixed-interval path, the jittered wait
+    /// is not adjusted for elapsed time and the first tick is not immediate.
+    ///
+    /// Otherwise the duration is calculated as `duration - (now - last_tick)`.
     fn calc_duration(&self) -> Duration {
+        if let Some(jitter) = &self.jitter {
+            let min = jitter.start.as_nanos() as u64;
+            let max = jitter.end.as_nanos() as u64;
+            return Duration::from_nanos(self.rand.clone().unwrap().rng().random_range(min..max));
+        }
         let zero = Duration::from_millis(0);
         let now_dt = self.clock.now();
         let elapsed = now_dt
@@ -121,8 +160,13 @@ impl SystemClock for DefaultSystemClock {
         Box::pin(tokio::time::sleep(duration))
     }
 
-    fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a> {
-        SystemClockTicker::new(self, duration)
+    fn ticker<'a>(
+        &'a self,
+        duration: Duration,
+        jitter: Option<f64>,
+        rand: Option<Arc<DbRand>>,
+    ) -> SystemClockTicker<'a> {
+        SystemClockTicker::new(self, duration, jitter, rand)
     }
 }
 
@@ -196,8 +240,13 @@ impl SystemClock for MockSystemClock {
         })
     }
 
-    fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a> {
-        SystemClockTicker::new(self, duration)
+    fn ticker<'a>(
+        &'a self,
+        duration: Duration,
+        jitter: Option<f64>,
+        rand: Option<Arc<DbRand>>,
+    ) -> SystemClockTicker<'a> {
+        SystemClockTicker::new(self, duration, jitter, rand)
     }
 }
 
@@ -311,7 +360,7 @@ mod tests {
         let tick_duration = Duration::from_millis(100);
 
         // Create a ticker
-        let mut ticker = clock.ticker(tick_duration);
+        let mut ticker = clock.ticker(tick_duration, None, None);
 
         // First tick should complete immediately
         assert!(
@@ -383,7 +432,7 @@ mod tests {
         let tick_duration = Duration::from_millis(10);
 
         // Create a ticker
-        let mut ticker = clock.ticker(tick_duration);
+        let mut ticker = clock.ticker(tick_duration, None, None);
 
         // First tick should complete immediately
         assert!(
@@ -400,5 +449,47 @@ mod tests {
         ticker.tick().await;
         let after = clock.now();
         assert_eq!(before + tick_duration, after);
+    }
+
+    // The centered jitter draws each wait uniformly from
+    // [interval*(1-spread), interval*(1+spread)], so waits stay within those
+    // bounds and actually vary from tick to tick.
+    #[test]
+    #[cfg(feature = "test-util")]
+    fn test_ticker_jitter_is_centered_and_bounded() {
+        let clock = MockSystemClock::new();
+        let interval = Duration::from_millis(1000);
+        let ticker =
+            SystemClockTicker::new(&clock, interval, Some(0.5), Some(Arc::new(DbRand::new(42))));
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let wait = ticker.calc_duration();
+            assert!(
+                (Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&wait),
+                "wait {wait:?} is outside the centered [interval/2, 3*interval/2] range"
+            );
+            seen.insert(wait.as_nanos());
+        }
+        assert!(seen.len() > 1, "jittered waits should vary across ticks");
+    }
+
+    // A ticker with a non-positive (or absent) spread disables jitter: each call
+    // returns the deterministic fixed-interval wait with no randomization.
+    #[test]
+    #[cfg(feature = "test-util")]
+    fn test_ticker_without_jitter_is_not_randomized() {
+        let clock = MockSystemClock::new();
+        let interval = Duration::from_millis(1000);
+        for jitter in [None, Some(0.0)] {
+            let ticker =
+                SystemClockTicker::new(&clock, interval, jitter, Some(Arc::new(DbRand::new(0))));
+            let first = ticker.calc_duration();
+            assert_eq!(
+                first,
+                ticker.calc_duration(),
+                "a non-jittered ticker must return the same wait on repeated calls"
+            );
+        }
     }
 }
