@@ -805,10 +805,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(
-            new_dirty_manifest(),
-            ByteBufferManager::unbounded(),
-        );
+        let mut db_state = DbState::new(new_dirty_manifest(), ByteBufferManager::unbounded());
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.value.core = db_state.state.core().clone();
@@ -835,10 +832,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(
-            new_dirty_manifest(),
-            ByteBufferManager::unbounded(),
-        );
+        let mut db_state = DbState::new(new_dirty_manifest(), ByteBufferManager::unbounded());
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
@@ -876,10 +870,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(
-            new_dirty_manifest(),
-            ByteBufferManager::unbounded(),
-        );
+        let mut db_state = DbState::new(new_dirty_manifest(), ByteBufferManager::unbounded());
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().tree.l0.clone();
 
@@ -912,10 +903,7 @@ mod tests {
         let v1 = view(1);
 
         // Local writer has a segment extractor configured and a populated segment.
-        let mut db_state = DbState::new(
-            new_dirty_manifest(),
-            ByteBufferManager::unbounded(),
-        );
+        let mut db_state = DbState::new(new_dirty_manifest(), ByteBufferManager::unbounded());
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.segment_extractor_name = Some("hour-bucket".to_string());
@@ -969,10 +957,7 @@ mod tests {
         let v2 = view(2); // backfill, written after compactor's snapshot.
 
         // Local writer: v1 (already absorbed by compactor) and v2 (backfill).
-        let mut db_state = DbState::new(
-            new_dirty_manifest(),
-            ByteBufferManager::unbounded(),
-        );
+        let mut db_state = DbState::new(new_dirty_manifest(), ByteBufferManager::unbounded());
         db_state.modify(|m| {
             let core = &mut m.state.manifest.value.core;
             core.segment_extractor_name = Some("hour".into());
@@ -1010,10 +995,7 @@ mod tests {
 
     #[test]
     fn test_should_keep_local_sequence_tracker_on_merge() {
-        let mut db_state = DbState::new(
-            new_dirty_manifest(),
-            ByteBufferManager::unbounded(),
-        );
+        let mut db_state = DbState::new(new_dirty_manifest(), ByteBufferManager::unbounded());
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.last_l0_seq = 3;
