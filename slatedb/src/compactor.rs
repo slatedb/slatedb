@@ -367,6 +367,11 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
+        self.start().await?;
+        self.join().await
+    }
+
+    pub(crate) async fn start(&self) -> Result<(), crate::Error> {
         // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
@@ -388,7 +393,7 @@ impl Compactor {
                 rx,
                 &Handle::current(),
             )
-            .expect("failed to spawn compactor task");
+            .map_err(crate::Error::from)?;
 
         // Spawn an in-process worker if configured. The worker runs under its
         // own cancellation token; Compactor::stop and run() are responsible for
@@ -414,10 +419,14 @@ impl Compactor {
                     worker_rx,
                     &Handle::current(),
                 )
-                .expect("failed to spawn embedded compaction worker task");
+                .map_err(crate::Error::from)?;
         }
 
         self.task_executor.monitor_on(&Handle::current())?;
+        Ok(())
+    }
+
+    pub(crate) async fn join(&self) -> Result<(), crate::Error> {
         self.task_executor
             .join_task(COMPACTOR_TASK_NAME)
             .await

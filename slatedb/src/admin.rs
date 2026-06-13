@@ -381,24 +381,14 @@ impl Admin {
 
         let compactor = builder.build();
 
-        let mut run_task = tokio::spawn({
-            let compactor = compactor.clone();
-            async move { compactor.run().await }
-        });
+        compactor.start().await?;
 
         tokio::select! {
-            result = &mut run_task => {
-                return match result {
-                    Ok(inner) => inner,
-                    Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string()).with_source(Box::new(join_err))),
-                };
-            }
+            result = compactor.join() => result,
             _ = cancellation_token.cancelled() => {
-                // fall through to shutdown logic
+                compactor.stop().await
             }
         }
-
-        compactor.stop().await
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
@@ -815,7 +805,7 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::config::GarbageCollectorOptions;
+    use crate::config::{CompactorOptions, GarbageCollectorOptions};
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::test_utils::FlakyObjectStore;
@@ -946,6 +936,34 @@ mod tests {
 
         let result = admin
             .run_gc_with_options(cancellation_token, GarbageCollectorOptions::default())
+            .await;
+        assert!(matches!(result, Ok(())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admin_run_compactor_with_options_stops_on_cancellation() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_run_compactor_with_options_stops_on_cancellation");
+        StoredManifest::create_new_db(
+            Arc::new(ManifestStore::new(&path, object_store.clone())),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let admin = AdminBuilder::new(path, object_store).build();
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let result = admin
+            .run_compactor_with_options(
+                cancellation_token,
+                CompactorOptions {
+                    worker: None,
+                    ..CompactorOptions::default()
+                },
+            )
             .await;
         assert!(matches!(result, Ok(())));
     }
