@@ -129,7 +129,7 @@ path.
 The core primitive is an async semaphore built on `AtomicUsize` + `tokio::Notify`
 that tracks allocations in bytes rather than discrete permits.
 
-```slatedb/slatedb/src/byte_buffer_manager.rs#L216-L221
+```slatedb/slatedb/src/byte_buffer_manager.rs#L178-L183
 struct ByteBudgetSemaphore {
     notify: Notify,
     allocated_bytes: AtomicUsize,
@@ -147,7 +147,7 @@ this soft-cap behavior, which `tokio::sync::Semaphore` does not support.
 
 The semaphore operations used in production:
 
-```slatedb/slatedb/src/byte_buffer_manager.rs#L223-L345
+```slatedb/slatedb/src/byte_buffer_manager.rs#L185-L255
 impl ByteBudgetSemaphore {
     fn new(capacity: usize) -> Self;
     fn force_acquire(&self, num_bytes: usize);
@@ -190,7 +190,7 @@ time to drain.
 
 Methods:
 
-```slatedb/slatedb/src/byte_buffer_manager.rs#L20-L118
+```slatedb/slatedb/src/byte_buffer_manager.rs#L20-L81
 impl ByteBufferManager {
     pub fn new(capacity: usize, high_watermark: usize) -> Self;
     pub fn force_acquire(&self, num_bytes: usize) -> ByteBufferPermit;
@@ -689,10 +689,8 @@ apply.
 - **Unit tests:** Comprehensive tests for `ByteBudgetSemaphore` and
   `ByteBufferManager` covering:
   - Full budget availability on creation.
-  - Budget reduction on acquire.
+  - Budget reduction on `force_acquire`.
   - Budget restoration on permit drop.
-  - Blocking when budget is exhausted.
-  - Unblocking after permit drop.
   - `merge()` combining sizes correctly.
   - `merge()` preventing double-release on source drop.
   - `merge()` panicking on cross-manager merge.
@@ -803,3 +801,8 @@ handles skewed workloads naturally.
   `high_watermark` field and `at_capacity()`/`await_capacity()` methods.
   Updated backpressure section to describe the two-condition check with
   memtable freezing. Status changed from Draft to Implemented.
+- **2026-06-12:** Removed unused `acquire` and `try_acquire` methods from
+  `ByteBufferManager` and `ByteBudgetSemaphore`. The production write path
+  exclusively uses `force_acquire` (non-blocking); the blocking `acquire` and
+  non-blocking `try_acquire` were never called outside of unit tests. Updated
+  line-number references and testing section accordingly.
