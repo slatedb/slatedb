@@ -44,10 +44,11 @@ assert_eq!(kv.key.as_ref(), b"test_key3");
 
 ## Scan for prefixes
 
-If your access pattern is "all keys that start with this prefix," use `scan_prefix` instead of manually building a start and end range.
+If your access pattern is "all keys that start with this prefix," use `scan_prefix` instead of manually building a start and end range. The second argument restricts the scan to a range of key *suffixes* relative to the prefix; pass `..` to scan the prefix's entire keyspace.
 
 ```rust
-let mut iter = db.scan_prefix(b"test_key").await?;
+let mut iter = db.scan_prefix(b"test_key", ..).await?;   // all keys with the prefix
+let mut iter = db.scan_prefix(b"test_key", b"2"..).await?; // test_key2 onward
 ```
 
 ## Complete example

@@ -12,6 +12,7 @@ use crate::db_cache_manager::CacheTarget;
 use crate::db_state::SsTableId;
 use crate::db_status::DbStatus;
 use crate::manifest::VersionedManifest;
+use crate::subrange::SubrangeBounds;
 use crate::transaction_manager::IsolationLevel;
 use crate::types::KeyValue;
 use crate::DbIterator;
@@ -158,38 +159,52 @@ pub trait DbReadOps {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send;
 
-    /// Scan all keys that share the provided prefix using the default scan options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// using the default scan options.
+    ///
+    /// The subrange bounds are key *suffixes* interpreted relative to the
+    /// prefix: a bound `s` selects the full key `prefix ++ s`. Pass `..` to
+    /// scan the prefix's entire keyspace.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    async fn scan_prefix<P, T>(&self, prefix: P, subrange: T) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: SubrangeBounds + Send,
     {
-        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
     }
 
-    /// Scan all keys that share the provided prefix with custom options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// with custom options. See [`Self::scan_prefix`] for the subrange
+    /// semantics.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     /// - `options`: the scan options to use
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    async fn scan_prefix_with_options<P>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
+        subrange: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: SubrangeBounds + Send,
     {
-        let range = BytesRange::from_prefix(prefix.as_ref());
+        let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
         self.scan_with_options(range, options).await
     }
 }

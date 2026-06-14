@@ -71,6 +71,7 @@ pub use slatedb_common::DbRand;
 pub use sst_builder::BlockFormat;
 pub use sst_reader::{SstFile, SstReader};
 pub use sst_stats::{BlockStats, SstStats};
+pub use subrange::SubrangeBounds;
 pub use tablestore::SstFileMetadata;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
@@ -160,6 +161,7 @@ mod sst_iter;
 mod sst_reader;
 mod sst_stats;
 mod store_provider;
+mod subrange;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;

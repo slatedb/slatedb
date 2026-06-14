@@ -140,7 +140,9 @@ where
 {
     let mut total = 0u128;
     let mut seen = vec![false; bank.account_count()];
-    let mut iter = reader.scan_prefix(bank.scan_prefix().as_bytes()).await?;
+    let mut iter = reader
+        .scan_prefix(bank.scan_prefix().as_bytes(), ..)
+        .await?;
 
     while let Some(kv) = iter.next().await? {
         let account_id = bank.parse_account_id(kv.key.as_ref())?;

@@ -372,7 +372,7 @@ async fn verify_scan(
     let scan_options = ScanOptions::new().with_durability_filter(read_durability);
     let mut iter = ctx
         .db()
-        .scan_prefix_with_options(key_prefix.as_bytes(), &scan_options)
+        .scan_prefix_with_options(key_prefix.as_bytes(), .., &scan_options)
         .await?;
     let mut seen = BTreeSet::new();
 

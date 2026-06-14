@@ -1832,7 +1832,7 @@ mod tests {
 
         // Per-segment prefix scan should return only that segment's keys.
         for prefix in prefixes {
-            let mut iter = db.scan_prefix(prefix).await.unwrap();
+            let mut iter = db.scan_prefix(prefix, ..).await.unwrap();
             let mut keys: Vec<Vec<u8>> = Vec::new();
             while let Some(kv) = iter.next().await.unwrap() {
                 keys.push(kv.key.to_vec());
