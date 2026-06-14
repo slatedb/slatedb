@@ -75,14 +75,8 @@ impl<'a> SystemClockTicker<'a> {
             min..max
         };
 
-        self.jitter = if Some(jittered_duration.clone())
-            .filter(|d| d.start < d.end)
-            .is_none()
-        {
-            None
-        } else {
-            Some((jittered_duration, rand))
-        };
+        self.jitter =
+            (jittered_duration.start < jittered_duration.end).then_some((jittered_duration, rand));
     }
 
     /// Returns a future that emits a signal every `duration` interval. The next tick is
