@@ -499,7 +499,7 @@ mod tests {
 
         assert!(
             ticker.jitter.is_none(),
-            "the tickers jitter was not set to none if 0 is passed to with_jitter"
+            "the ticker's jitter should be set to none if 0 passed to with_jitter"
         );
 
         full_tick = ticker.calc_duration();

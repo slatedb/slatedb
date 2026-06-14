@@ -154,8 +154,8 @@ pub(crate) struct MessageTickerDef<T: Send> {
     /// The base tick interval. When jitter is enabled, the randomized wait is
     /// centered on this interval.
     pub(crate) interval: Duration,
-    /// The half-width of the jitter range, as a fraction of the interval.
-    /// Each tick waits a uniform random duration in `[interval * (1 - jitter), interval * (1 + jitter)]`.
+    /// The jitter range, as a fraction of the interval.
+    /// Each tick waits a uniform random duration in `[interval * (1 - jitter.0), interval * (1 + jitter.0)]`.
     pub(crate) jitter: Option<(f64, Arc<DbRand>)>,
 }
 
@@ -231,7 +231,6 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `handler`: The [MessageHandler] to use for processing messages.
     /// * `rx`: The [async_channel::Receiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
-    /// * `rand`: The [DbRand] used to draw randomized waits for jittered tickers.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     #[allow(dead_code)]
     fn new(
@@ -660,7 +659,6 @@ impl MessageHandlerExecutor {
     ///
     /// * `closed_result`: A [ClosedResultWriter] that stores the database close result.
     /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
-    /// * `rand`: A [DbRand] passed to each dispatcher for jittered tickers.
     ///
     /// ## Returns
     ///
