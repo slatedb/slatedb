@@ -56,18 +56,18 @@ impl<'a> SystemClockTicker<'a> {
         }
     }
 
-    // Center the wait on `duration`: draw uniformly from
-    // [duration*(1-jitter), duration*(1+jitter)]. The lower bound is
-    // clamped at zero so spreads above 1.0 don't underflow.
-    //
-    // ## Arguments
-    // - `jitter`: Optional fractional spread applied to `duration`. When `Some`
-    //   and `jittered_duration.start < jittered_duration.end`, each wait is drawn from
-    //   `[duration * (1 - jitter), duration * (1 + jitter)]`, with the lower
-    //   bound clamped at zero. `None` or `0.0` disables jitter.
-    // - `rand`: RNG used to draw the jittered wait. Jitter applies only when
-    //   both `jitter` and `rand` are `Some`; otherwise the fixed `duration` is
-    //   used.
+    /// Center the wait on `duration`: draw uniformly from
+    /// [duration*(1-jitter), duration*(1+jitter)]. The lower bound is
+    /// clamped at zero so spreads above 1.0 don't underflow.
+    ///
+    /// ## Arguments
+    /// - `jitter`: Optional fractional spread applied to `duration`. When `Some`
+    ///   and `jittered_duration.start < jittered_duration.end`, each wait is drawn from
+    ///   `[duration * (1 - jitter), duration * (1 + jitter)]`, with the lower
+    ///   bound clamped at zero. `None` or `0.0` disables jitter.
+    /// - `rand`: RNG used to draw the jittered wait. Jitter applies only when
+    ///   both `jitter` and `rand` are `Some`; otherwise the fixed `duration` is
+    ///   used.
     pub fn with_jitter(&mut self, jitter: f64, rand: Arc<DbRand>) {
         let jittered_duration = {
             let min = self.duration.mul_f64((1.0 - jitter).max(0.0));
@@ -101,14 +101,15 @@ impl<'a> SystemClockTicker<'a> {
 
     /// Calculates the duration until the next tick.
     ///
-    /// The first tick is always immediate, regardless of wether or not the tick is jittered, mirroring Tokio's
+    /// The first tick is always immediate, regardless of whether or not the tick is jittered, mirroring Tokio's
     /// `Interval` (i.e. `ticker.tick()` fires right away on the first `tick()` call).
     ///
     /// After the first tick: when jitter is enabled, each tick draws a fresh
     /// tick duration uniformly from the centered jitter range. When jitter not enabled, skip
     /// drawing a fresh tick duration and just return the remaining duration of the tick.
     ///
-    /// ## Returns: `duration - (now - last_tick)`, the duration left before the next tick.
+    /// ## Returns:
+    /// - `Duration`: the duration left before the next tick (now - last_tick).
     fn calc_duration(&self) -> Duration {
         let zero = Duration::from_millis(0);
         let now_dt = self.clock.now();
@@ -123,6 +124,7 @@ impl<'a> SystemClockTicker<'a> {
             .signed_duration_since(self.last_tick)
             .to_std()
             .expect("elapsed time is negative");
+        // If we've already passed the next tick, sleep for 0ms to tick immediately.
         duration.checked_sub(elapsed).unwrap_or(zero)
     }
 }
