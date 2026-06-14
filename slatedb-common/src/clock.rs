@@ -44,8 +44,8 @@ pub struct SystemClockTicker<'a> {
 
 impl<'a> SystemClockTicker<'a> {
     /// Creates a new ticker that emits a signal every `duration` interval. When
-    /// both `jitter` and `rand` are `Some`, each wait is drawn uniformly from the
-    /// centered range using `rand`; otherwise the ticker uses the fixed
+    /// `jitter` is `Some`, each wait is drawn uniformly from the
+    /// centered range using `DbRand` entry in the jitter tuple; otherwise the ticker uses the fixed
     /// `duration`.
     pub fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
         Self {
