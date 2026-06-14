@@ -1230,7 +1230,6 @@ mod tests {
     use crate::merge_operator::MergeOperatorType;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
-    use crate::paths::PathResolver;
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
     use crate::reader::Reader;
@@ -2691,13 +2690,15 @@ mod tests {
 
     impl StoreProvider for TestProvider {
         fn table_store(&self) -> Arc<TableStore> {
-            Arc::new(TableStore::new_with_fp_registry(
-                ObjectStores::new(Arc::clone(&self.object_store), None),
-                SsTableFormat::default(),
-                PathResolver::new(self.path.clone()),
-                Arc::clone(&self.fp_registry),
-                None,
-            ))
+            Arc::new(
+                TableStore::builder(
+                    ObjectStores::new(Arc::clone(&self.object_store), None),
+                    SsTableFormat::default(),
+                    self.path.clone(),
+                )
+                .with_fp_registry(Arc::clone(&self.fp_registry))
+                .build(),
+            )
         }
 
         fn manifest_store(&self) -> Arc<ManifestStore> {

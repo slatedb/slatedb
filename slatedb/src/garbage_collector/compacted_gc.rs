@@ -268,12 +268,9 @@ mod tests {
         let main_store = Arc::new(InMemory::new());
         let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            object_stores,
-            format.clone(),
-            Path::from("/root"),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(object_stores, format.clone(), Path::from("/root")).build(),
+        );
 
         // Manifest store and initial manifest
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
@@ -372,12 +369,9 @@ mod tests {
         let main_store = Arc::new(InMemory::new());
         let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            object_stores,
-            format.clone(),
-            Path::from("/root"),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(object_stores, format.clone(), Path::from("/root")).build(),
+        );
 
         // Manifest store and initial manifest
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
@@ -478,12 +472,9 @@ mod tests {
         let main_store = Arc::new(InMemory::new());
         let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            object_stores,
-            format.clone(),
-            Path::from("/root"),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(object_stores, format.clone(), Path::from("/root")).build(),
+        );
 
         // Manifest store with empty DB
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
@@ -580,12 +571,9 @@ mod tests {
         let main_store = Arc::new(InMemory::new());
         let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            object_stores,
-            format.clone(),
-            Path::from("/root"),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(object_stores, format.clone(), Path::from("/root")).build(),
+        );
 
         // Manifest with an L0 newer than the compaction output.
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));

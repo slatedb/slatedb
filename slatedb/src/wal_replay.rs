@@ -761,12 +761,14 @@ mod tests {
     fn test_table_store() -> Arc<TableStore> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            SsTableFormat::default(),
-            path,
-            None,
-        ))
+        Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                SsTableFormat::default(),
+                path,
+            )
+            .build(),
+        )
     }
 
     /// Write a sequence of WALs with a random (bounded) number of entries.
@@ -838,12 +840,14 @@ mod tests {
     #[tokio::test]
     async fn replay_reads_carry_no_intent() {
         let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(recording.clone(), None),
-            SsTableFormat::default(),
-            Path::from("/tmp/test_kv_store"),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(recording.clone(), None),
+                SsTableFormat::default(),
+                Path::from("/tmp/test_kv_store"),
+            )
+            .build(),
+        );
         let entries: BTreeMap<Bytes, Bytes> = (0..16u32)
             .map(|i| {
                 (

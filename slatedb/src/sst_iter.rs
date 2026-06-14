@@ -1082,12 +1082,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1331,12 +1333,12 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let writer = TableStore::new(
+        let writer = TableStore::builder(
             ObjectStores::new(object_store.clone(), None),
             format.clone(),
             root_path.clone(),
-            None,
-        );
+        )
+        .build();
         let mut builder = writer.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1362,12 +1364,11 @@ mod tests {
                 .with_meta_cache(Some(meta_cache.clone()))
                 .build(),
         );
-        let reader = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            Some(cache),
-        ));
+        let reader = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path)
+                .with_block_cache(cache)
+                .build(),
+        );
 
         let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
 
@@ -1416,12 +1417,12 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let writer = TableStore::new(
+        let writer = TableStore::builder(
             ObjectStores::new(object_store.clone(), None),
             format.clone(),
             root_path.clone(),
-            None,
-        );
+        )
+        .build();
         let mut builder = writer.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1447,12 +1448,11 @@ mod tests {
                 .with_meta_cache(Some(meta_cache.clone()))
                 .build(),
         );
-        let reader = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            Some(cache),
-        ));
+        let reader = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path)
+                .with_block_cache(cache)
+                .build(),
+        );
 
         let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
 
@@ -1501,12 +1501,9 @@ mod tests {
             filter_policies: vec![Arc::new(BloomFilterPolicy::new(filter_bits_per_key))],
             ..SsTableFormat::default()
         };
-        Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ))
+        Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        )
     }
 
     async fn build_single_block_sst(table_store: &Arc<TableStore>, keys: &[&[u8]]) -> SsTableView {
@@ -1536,12 +1533,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let mut builder = table_store.table_builder();
 
         for i in 0..1000 {
@@ -1612,12 +1611,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
         let mut test_case_key_gen = key_gen.clone();
@@ -1662,12 +1663,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let mut expected_key_gen = key_gen.clone();
@@ -1706,12 +1709,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let first_val = [2u8; 16];
@@ -1747,12 +1752,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
 
         // Build SST with specified format (keys 0-99)
         let builder = table_store.table_builder();
@@ -1823,12 +1830,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let first_val = [2u8; 16];
@@ -1933,12 +1942,15 @@ mod tests {
                 .with_meta_cache(Some(meta_cache))
                 .build(),
         );
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            Some(split_cache.clone()),
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .with_block_cache(split_cache.clone())
+            .build(),
+        );
 
         let mut builder = table_store.table_builder();
         builder
@@ -2050,12 +2062,9 @@ mod tests {
             min_filter_keys: 10,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        );
 
         let keys_and_values = vec![
             (b"key1".as_slice(), b"value1".as_slice()),
@@ -2098,12 +2107,9 @@ mod tests {
             min_filter_keys: 10,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        );
 
         let keys_and_values = vec![
             (b"key1".as_slice(), b"value1".as_slice()),
@@ -2148,12 +2154,9 @@ mod tests {
             min_filter_keys: 1000,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        );
 
         // Create keys with shared prefixes to exercise prefix compression
         let mut builder = table_store
@@ -2211,12 +2214,9 @@ mod tests {
             min_filter_keys: 1000,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        );
 
         // Create keys that will span multiple blocks
         let mut builder = table_store
@@ -2279,12 +2279,9 @@ mod tests {
             min_filter_keys: 1000,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        );
 
         let mut builder = table_store
             .table_builder()
@@ -2332,12 +2329,9 @@ mod tests {
             min_filter_keys: 1000,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        );
 
         let mut builder = table_store
             .table_builder()
@@ -2391,12 +2385,14 @@ mod tests {
             min_filter_keys: 100,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
 
         // Build an SST with enough keys to span multiple blocks
         // Using key pattern: key000, key001, ..., key099
@@ -2529,12 +2525,14 @@ mod tests {
             min_filter_keys: 100,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
 
         // Build an SST with enough data for multiple blocks
         let mut builder = table_store.table_builder();
@@ -2598,12 +2596,14 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
 
         let mut writer = table_store.table_writer(SsTableId::Wal(0));
         writer
@@ -2694,12 +2694,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
 
         // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.
         // Gaps like key_035 don't exist.

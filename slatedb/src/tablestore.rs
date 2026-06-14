@@ -110,88 +110,92 @@ pub struct SstFileMetadata {
     pub size: u64,
 }
 
-impl TableStore {
-    /// Creates a table store whose calls carry no intents. Use
-    /// [`Self::new_with_intents`] for a store whose compacted-SST traffic
-    /// should be visible to caching wrappers.
-    pub(crate) fn new<P: Into<Path>>(
-        object_stores: ObjectStores,
-        sst_format: SsTableFormat,
-        root_path: P,
-        block_cache: Option<Arc<dyn DbCache>>,
-    ) -> Self {
-        Self::new_with_fp_registry(
-            object_stores,
-            sst_format,
-            PathResolver::new(root_path),
-            Arc::new(FailPointRegistry::new()),
-            block_cache,
-        )
+/// Builder for [`TableStore`]. Required inputs are passed to
+/// [`TableStore::builder`]; optional inputs default as documented and are
+/// overridden with the `with_*` methods.
+pub(crate) struct TableStoreBuilder {
+    object_stores: ObjectStores,
+    sst_format: SsTableFormat,
+    path_resolver: PathResolver,
+    fp_registry: Arc<FailPointRegistry>,
+    block_cache: Option<Arc<dyn DbCache>>,
+    read_kind: Option<CompactedSstReadKind>,
+    write_kind: Option<CompactedSstWriteKind>,
+}
+
+impl TableStoreBuilder {
+    /// Replaces the default [`PathResolver::new`] resolver, for example to
+    /// register external SSTs via [`PathResolver::new_with_external_ssts`].
+    pub(crate) fn with_path_resolver(mut self, path_resolver: PathResolver) -> Self {
+        self.path_resolver = path_resolver;
+        self
     }
 
-    /// Like [`Self::new`], but compacted-SST reads are tagged with
-    /// `read_kind` and compacted-SST writes with `write_kind`, fixed for
-    /// the instance's lifetime. WAL SST calls carry no intent regardless
-    /// of the kinds.
-    pub(crate) fn new_with_intents<P: Into<Path>>(
-        object_stores: ObjectStores,
-        sst_format: SsTableFormat,
-        root_path: P,
-        block_cache: Option<Arc<dyn DbCache>>,
-        read_kind: CompactedSstReadKind,
+    /// Sets the block cache for data blocks, indices, and filters.
+    ///
+    /// Defaults to no cache.
+    pub(crate) fn with_block_cache(mut self, block_cache: Arc<dyn DbCache>) -> Self {
+        self.block_cache = Some(block_cache);
+        self
+    }
+
+    /// Sets the fail-point registry.
+    ///
+    /// Defaults to a fresh empty registry.
+    pub(crate) fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = fp_registry;
+        self
+    }
+
+    /// Tags compacted-SST reads from this store with `read_kind` (L0 SSTs
+    /// included), fixed for the store's lifetime. WAL SST reads carry no
+    /// intent regardless. Defaults to untagged.
+    pub(crate) fn with_compacted_sst_read_kind(mut self, read_kind: CompactedSstReadKind) -> Self {
+        self.read_kind = Some(read_kind);
+        self
+    }
+
+    /// Tags compacted-SST writes from this store with `write_kind` (L0
+    /// flushes included), fixed for the store's lifetime. WAL SST writes
+    /// carry no intent regardless. Defaults to untagged.
+    pub(crate) fn with_compacted_sst_write_kind(
+        mut self,
         write_kind: CompactedSstWriteKind,
     ) -> Self {
-        Self::new_with_intents_and_fp_registry(
-            object_stores,
-            sst_format,
-            PathResolver::new(root_path),
-            Arc::new(FailPointRegistry::new()),
-            block_cache,
-            read_kind,
-            write_kind,
-        )
+        self.write_kind = Some(write_kind);
+        self
     }
 
-    pub(crate) fn new_with_fp_registry(
+    pub(crate) fn build(self) -> TableStore {
+        TableStore {
+            object_stores: self.object_stores,
+            sst_format: self.sst_format,
+            path_resolver: self.path_resolver,
+            fp_registry: self.fp_registry,
+            cache: self.block_cache,
+            read_kind: self.read_kind,
+            write_kind: self.write_kind,
+        }
+    }
+}
+
+impl TableStore {
+    /// Starts building a table store rooted at `root_path`.
+    pub(crate) fn builder<P: Into<Path>>(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
-        path_resolver: PathResolver,
-        fp_registry: Arc<FailPointRegistry>,
-        cache: Option<Arc<dyn DbCache>>,
-    ) -> Self {
-        Self {
+        root_path: P,
+    ) -> TableStoreBuilder {
+        TableStoreBuilder {
             object_stores,
             sst_format,
-            path_resolver,
-            fp_registry,
-            cache,
+            path_resolver: PathResolver::new(root_path),
+            fp_registry: Arc::new(FailPointRegistry::new()),
+            block_cache: None,
             read_kind: None,
             write_kind: None,
         }
     }
-
-    /// Like [`Self::new_with_fp_registry`], but with intent kinds (see
-    /// [`Self::new_with_intents`]).
-    pub(crate) fn new_with_intents_and_fp_registry(
-        object_stores: ObjectStores,
-        sst_format: SsTableFormat,
-        path_resolver: PathResolver,
-        fp_registry: Arc<FailPointRegistry>,
-        cache: Option<Arc<dyn DbCache>>,
-        read_kind: CompactedSstReadKind,
-        write_kind: CompactedSstWriteKind,
-    ) -> Self {
-        Self {
-            object_stores,
-            sst_format,
-            path_resolver,
-            fp_registry,
-            cache,
-            read_kind: Some(read_kind),
-            write_kind: Some(write_kind),
-        }
-    }
-
     /// Get the number of blocks for a size specified in bytes.
     /// The returned value will be rounded down to the nearest block.
     pub(crate) fn bytes_to_blocks(&self, bytes: usize) -> usize {
@@ -1520,12 +1524,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store.clone()),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
         // when:
@@ -1593,12 +1599,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store.clone()),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let id = SsTableId::Wal(123);
 
         // when:
@@ -1662,12 +1670,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let wal_id = SsTableId::Wal(1);
 
         // write a wal sst
@@ -1692,12 +1702,14 @@ mod tests {
     #[tokio::test]
     async fn test_wal_fence_should_write_zero_bytes() {
         let os = Arc::new(InMemory::new());
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                SsTableFormat::default(),
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         ts.write_wal_fence(1).await.unwrap();
 
@@ -1708,12 +1720,14 @@ mod tests {
     #[tokio::test]
     async fn test_wal_fence_should_fail_when_fenced() {
         let os = Arc::new(InMemory::new());
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                SsTableFormat::default(),
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         ts.write_wal_fence(1).await.unwrap();
         let result = ts.write_wal_fence(1).await;
@@ -1723,12 +1737,14 @@ mod tests {
     #[tokio::test]
     async fn test_wal_write_should_fail_after_zero_byte_fence() {
         let os = Arc::new(InMemory::new());
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                SsTableFormat::default(),
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         ts.write_wal_fence(1).await.unwrap();
 
@@ -1754,12 +1770,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
         let mut builder = ts.table_builder();
@@ -1797,12 +1815,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let wal_id = SsTableId::Wal(1);
 
         let mut builder = ts.table_builder();
@@ -1838,12 +1858,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
         let mut writer = ts.table_writer(id);
@@ -1905,12 +1927,15 @@ mod tests {
             &recorder,
             Arc::new(DefaultSystemClock::default()),
         ));
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            format,
-            Path::from("/root"),
-            Some(wrapper.clone()),
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                format,
+                Path::from("/root"),
+            )
+            .with_block_cache(wrapper.clone())
+            .build(),
+        );
 
         // Create and write SST
         let id = SsTableId::Compacted(ulid::Ulid::new());
@@ -2032,12 +2057,12 @@ mod tests {
             min_filter_keys: u32::MAX,
             ..SsTableFormat::default()
         };
-        let writer = TableStore::new(
+        let writer = TableStore::builder(
             ObjectStores::new(main_store.clone(), None),
             format.clone(),
             Path::from(ROOT),
-            None,
-        );
+        )
+        .build();
 
         let mut builder = writer.table_builder();
         builder
@@ -2060,12 +2085,13 @@ mod tests {
                 .with_meta_cache(Some(meta_cache.clone()))
                 .build(),
         );
-        let reader = TableStore::new(
+        let reader = TableStore::builder(
             ObjectStores::new(main_store.clone(), None),
             format,
             Path::from(ROOT),
-            Some(cache),
-        );
+        )
+        .with_block_cache(cache)
+        .build();
         assert_eq!(meta_cache.entry_count(), 0);
 
         let _ = reader.read_index(&handle, false).await.unwrap();
@@ -2090,12 +2116,12 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let writer = TableStore::new(
+        let writer = TableStore::builder(
             ObjectStores::new(main_store.clone(), None),
             format.clone(),
             Path::from(ROOT),
-            None,
-        );
+        )
+        .build();
 
         let mut builder = writer.table_builder();
         builder
@@ -2118,12 +2144,13 @@ mod tests {
                 .with_meta_cache(Some(meta_cache.clone()))
                 .build(),
         );
-        let reader = TableStore::new(
+        let reader = TableStore::builder(
             ObjectStores::new(main_store.clone(), None),
             format,
             Path::from(ROOT),
-            Some(cache),
-        );
+        )
+        .with_block_cache(cache)
+        .build();
         assert_eq!(meta_cache.entry_count(), 0);
 
         let filters = reader.read_filters(&handle, false).await.unwrap();
@@ -2146,12 +2173,12 @@ mod tests {
     async fn test_read_stats_honors_cache_blocks() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
-        let writer = TableStore::new(
+        let writer = TableStore::builder(
             ObjectStores::new(main_store.clone(), None),
             format.clone(),
             Path::from(ROOT),
-            None,
-        );
+        )
+        .build();
 
         let mut builder = writer.table_builder();
         builder
@@ -2175,12 +2202,13 @@ mod tests {
                 .with_meta_cache(Some(meta_cache.clone()))
                 .build(),
         );
-        let reader = TableStore::new(
+        let reader = TableStore::builder(
             ObjectStores::new(main_store.clone(), None),
             format,
             Path::from(ROOT),
-            Some(cache),
-        );
+        )
+        .with_block_cache(cache)
+        .build();
         assert_eq!(meta_cache.entry_count(), 0);
 
         let stats = reader.read_stats(&handle, false).await.unwrap();
@@ -2218,12 +2246,15 @@ mod tests {
             &recorder,
             Arc::new(DefaultSystemClock::default()),
         ));
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            SsTableFormat::default(),
-            Path::from("/root"),
-            Some(wrapper.clone()),
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                SsTableFormat::default(),
+                Path::from("/root"),
+            )
+            .with_block_cache(wrapper.clone())
+            .build(),
+        );
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
@@ -2263,12 +2294,15 @@ mod tests {
             &recorder,
             Arc::new(DefaultSystemClock::default()),
         ));
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            SsTableFormat::default(),
-            Path::from("/root"),
-            Some(wrapper),
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                SsTableFormat::default(),
+                Path::from("/root"),
+            )
+            .with_block_cache(wrapper)
+            .build(),
+        );
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
@@ -2323,12 +2357,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
         // Need to do this because the Ulids are sometimes generated in the same millisecond
@@ -2392,12 +2428,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store.clone()),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         let id1 = SsTableId::Wal(1);
         let id2 = SsTableId::Wal(2);
@@ -2465,12 +2503,14 @@ mod tests {
     }
 
     fn make_ts(store: Arc<dyn ObjectStore>) -> Arc<TableStore> {
-        Arc::new(TableStore::new(
-            ObjectStores::new(store, None),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ))
+        Arc::new(
+            TableStore::builder(
+                ObjectStores::new(store, None),
+                SsTableFormat::default(),
+                Path::from(ROOT),
+            )
+            .build(),
+        )
     }
 
     // Boundary values picked from the algorithm:
@@ -2521,12 +2561,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(retrying, None),
-            format.clone(),
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(retrying, None),
+                format.clone(),
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         // Build an SST and compute expected bytes
         let id = SsTableId::Compacted(ulid::Ulid::new());
@@ -2558,12 +2600,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store.clone()),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         let id1 = SsTableId::Compacted(ulid::Ulid::new());
         let id2 = SsTableId::Compacted(ulid::Ulid::new());
@@ -2602,12 +2646,14 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            format,
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store.clone()),
+                format,
+                Path::from(ROOT),
+            )
+            .build(),
+        );
 
         let id1 = SsTableId::Wal(123);
         let id2 = SsTableId::Wal(321);
@@ -2651,12 +2697,14 @@ mod tests {
         #[case] main_store: Arc<dyn ObjectStore>,
         #[case] wal_store: Option<Arc<dyn ObjectStore>>,
     ) {
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store),
+                SsTableFormat::default(),
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let path = ts.path(&id);
         let bytes = Bytes::from_static(b"compacted");
@@ -2675,12 +2723,14 @@ mod tests {
         #[case] main_store: Arc<dyn ObjectStore>,
         #[case] wal_store: Option<Arc<dyn ObjectStore>>,
     ) {
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
+        let ts = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(main_store.clone(), wal_store.clone()),
+                SsTableFormat::default(),
+                Path::from(ROOT),
+            )
+            .build(),
+        );
         let id = SsTableId::Wal(42);
         let path = ts.path(&id);
         let bytes = Bytes::from_static(b"wal");
@@ -2703,8 +2753,7 @@ mod tests {
         ) {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
-            let ts = Arc::new(TableStore::new(ObjectStores::new(os, None),
-                format, Path::from(ROOT), None));
+            let ts = Arc::new(TableStore::builder(ObjectStores::new(os, None), format, Path::from(ROOT)).build());
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }
@@ -2735,12 +2784,12 @@ mod tests {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
 
-        let writer = TableStore::new(
+        let writer = TableStore::builder(
             ObjectStores::new(inner.clone(), None),
             format.clone(),
             Path::from(ROOT),
-            None,
-        );
+        )
+        .build();
         let mut builder = writer.table_builder();
         builder
             .add(RowEntry::new_value(b"k1", b"v1", 0))
@@ -2769,12 +2818,15 @@ mod tests {
         });
         let counting_store: Arc<dyn ObjectStore> = counting.clone();
         let cache: Arc<dyn DbCache> = Arc::new(FoyerCache::new());
-        let reader = Arc::new(TableStore::new(
-            ObjectStores::new(counting_store, None),
-            format,
-            Path::from(ROOT),
-            Some(cache),
-        ));
+        let reader = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(counting_store, None),
+                format,
+                Path::from(ROOT),
+            )
+            .with_block_cache(cache)
+            .build(),
+        );
 
         // when: task A starts reading the index; its loader will pause inside the
         // wrapped object store
@@ -2835,12 +2887,12 @@ mod tests {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
 
-        let writer = TableStore::new(
+        let writer = TableStore::builder(
             ObjectStores::new(inner.clone(), None),
             format.clone(),
             Path::from(ROOT),
-            None,
-        );
+        )
+        .build();
         let mut builder = writer.table_builder();
         builder
             .add(RowEntry::new_value(b"k1", b"v1", 0))
@@ -2874,12 +2926,15 @@ mod tests {
         });
         let counting_store: Arc<dyn ObjectStore> = counting.clone();
         let cache: Arc<dyn DbCache> = Arc::new(FoyerCache::new());
-        let reader = Arc::new(TableStore::new(
-            ObjectStores::new(counting_store, None),
-            format,
-            Path::from(ROOT),
-            Some(cache),
-        ));
+        let reader = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(counting_store, None),
+                format,
+                Path::from(ROOT),
+            )
+            .with_block_cache(cache)
+            .build(),
+        );
 
         // when: task A starts a single-block read; its loader will pause inside the
         // wrapped object store
@@ -2965,14 +3020,16 @@ mod tests {
                 min_filter_keys: 1,
                 ..SsTableFormat::default()
             };
-            Arc::new(TableStore::new_with_intents(
-                ObjectStores::new(recording.clone(), None),
-                format,
-                Path::from(ROOT),
-                None,
-                read_kind,
-                write_kind,
-            ))
+            Arc::new(
+                TableStore::builder(
+                    ObjectStores::new(recording.clone(), None),
+                    format,
+                    Path::from(ROOT),
+                )
+                .with_compacted_sst_read_kind(read_kind)
+                .with_compacted_sst_write_kind(write_kind)
+                .build(),
+            )
         }
 
         async fn build_sst(ts: &Arc<TableStore>, value_size: usize) -> EncodedSsTable {

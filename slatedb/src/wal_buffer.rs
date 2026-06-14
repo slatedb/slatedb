@@ -846,12 +846,14 @@ mod tests {
             next_id: AtomicU64::new(1),
         });
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            SsTableFormat::default(),
-            Path::from("/root"),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                SsTableFormat::default(),
+                Path::from("/root"),
+            )
+            .build(),
+        );
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());

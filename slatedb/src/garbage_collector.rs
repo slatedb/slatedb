@@ -1557,12 +1557,14 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
         let compactions_store = Arc::new(CompactionsStore::new(&path, local_object_store.clone()));
         let sst_format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(local_object_store.clone(), None),
-            sst_format,
-            path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(local_object_store.clone(), None),
+                sst_format,
+                path,
+            )
+            .build(),
+        );
 
         (
             manifest_store,

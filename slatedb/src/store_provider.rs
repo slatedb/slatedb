@@ -33,17 +33,20 @@ impl StoreProvider for DefaultStoreProvider {
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
-        Arc::new(TableStore::new_with_intents(
+        let mut builder = TableStore::builder(
             ObjectStores::new(
                 Arc::clone(&self.object_store),
                 self.wal_object_store.clone(),
             ),
             sst_format,
             self.path.clone(),
-            self.block_cache.clone(),
-            self.read_kind,
-            self.write_kind,
-        ))
+        )
+        .with_compacted_sst_read_kind(self.read_kind)
+        .with_compacted_sst_write_kind(self.write_kind);
+        if let Some(cache) = self.block_cache.clone() {
+            builder = builder.with_block_cache(cache);
+        }
+        Arc::new(builder.build())
     }
 
     fn manifest_store(&self) -> Arc<ManifestStore> {

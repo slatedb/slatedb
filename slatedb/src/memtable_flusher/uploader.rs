@@ -292,7 +292,6 @@ mod tests {
     use crate::iter::RowEntryIterator;
     use crate::manifest::ManifestCore;
     use crate::object_stores::ObjectStores;
-    use crate::paths::PathResolver;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::FixedThreeBytePrefixExtractor;
@@ -336,13 +335,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(Arc::clone(&object_store), None),
-            SsTableFormat::default(),
-            PathResolver::new(Path::from(path)),
-            fp_registry.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(Arc::clone(&object_store), None),
+                SsTableFormat::default(),
+                Path::from(path),
+            )
+            .with_fp_registry(fp_registry.clone())
+            .build(),
+        );
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());

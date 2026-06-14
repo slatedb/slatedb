@@ -516,12 +516,14 @@ mod tests {
     impl TestDbState {
         async fn new() -> Self {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store, None),
-                SsTableFormat::default(),
-                Path::from("/test"),
-                None,
-            ));
+            let table_store = Arc::new(
+                TableStore::builder(
+                    ObjectStores::new(object_store, None),
+                    SsTableFormat::default(),
+                    Path::from("/test"),
+                )
+                .build(),
+            );
 
             Self {
                 memtable: Arc::new(KVTable::new()),

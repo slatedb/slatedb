@@ -274,12 +274,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -331,12 +333,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -397,12 +401,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let mut builder = table_store.table_builder();
         for i in 1..=4 {
             let key = format!("key{i}");
@@ -481,12 +487,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut test_case_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
@@ -525,12 +533,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut expected_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
@@ -563,12 +573,14 @@ mod tests {
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path.clone(),
+            )
+            .build(),
+        );
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
@@ -589,12 +601,14 @@ mod tests {
     async fn test_seek_through_sorted_run() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            SsTableFormat::default(),
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                SsTableFormat::default(),
+                root_path.clone(),
+            )
+            .build(),
+        );
 
         let mut rng = proptest_util::rng::new_test_rng(None);
         let table = sample::table(&mut rng, 400, 10);
@@ -735,12 +749,10 @@ mod tests {
                 min_filter_keys: 10,
                 ..SsTableFormat::default()
             };
-            let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store, None),
-                format,
-                root_path,
-                None,
-            ));
+            let table_store = Arc::new(
+                TableStore::builder(ObjectStores::new(object_store, None), format, root_path)
+                    .build(),
+            );
 
             // Build a sorted run with v1, v2, v1, v2 SSTs
             let sst1_v1 = build_sst_v1(
@@ -806,12 +818,10 @@ mod tests {
                 min_filter_keys: 10,
                 ..SsTableFormat::default()
             };
-            let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store, None),
-                format,
-                root_path,
-                None,
-            ));
+            let table_store = Arc::new(
+                TableStore::builder(ObjectStores::new(object_store, None), format, root_path)
+                    .build(),
+            );
 
             // Build a sorted run with v1, v2, v1, v2 SSTs
             let sst1_v1 = build_sst_v1(

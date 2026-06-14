@@ -206,12 +206,14 @@ impl WalReader {
     /// object store here.
     pub fn new<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
         let sst_format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            sst_format,
-            path.into(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store, None),
+                sst_format,
+                path.into(),
+            )
+            .build(),
+        );
         Self { table_store }
     }
 

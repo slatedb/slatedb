@@ -856,7 +856,6 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
     use crate::object_stores::ObjectStores;
-    use crate::paths::PathResolver;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
@@ -1009,13 +1008,15 @@ mod tests {
         .await
         .unwrap();
         let manifest_dirty = stored_manifest.prepare_dirty().unwrap();
-        let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(Arc::clone(&object_store), None),
-            SsTableFormat::default(),
-            PathResolver::new(Path::from(path.clone())),
-            Arc::clone(&fp_registry),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(Arc::clone(&object_store), None),
+                SsTableFormat::default(),
+                Path::from(path.clone()),
+            )
+            .with_fp_registry(Arc::clone(&fp_registry))
+            .build(),
+        );
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());

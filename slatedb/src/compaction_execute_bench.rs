@@ -74,14 +74,16 @@ impl CompactionExecuteBench {
             compression_codec,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new_with_intents(
-            ObjectStores::new(self.object_store.clone(), None),
-            sst_format,
-            self.path.clone(),
-            None,
-            CompactedSstReadKind::Foreground,
-            CompactedSstWriteKind::Flush,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(self.object_store.clone(), None),
+                sst_format,
+                self.path.clone(),
+            )
+            .with_compacted_sst_read_kind(CompactedSstReadKind::Foreground)
+            .with_compacted_sst_write_kind(CompactedSstWriteKind::Flush)
+            .build(),
+        );
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
         self.rand.rng().fill_bytes(key_start.as_mut_slice());
@@ -327,14 +329,16 @@ impl CompactionExecuteBench {
             compression_codec,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new_with_intents(
-            ObjectStores::new(self.object_store.clone(), None),
-            sst_format,
-            self.path.clone(),
-            None,
-            CompactedSstReadKind::CompactionInput,
-            CompactedSstWriteKind::CompactionOutput,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(self.object_store.clone(), None),
+                sst_format,
+                self.path.clone(),
+            )
+            .with_compacted_sst_read_kind(CompactedSstReadKind::CompactionInput)
+            .with_compacted_sst_write_kind(CompactedSstWriteKind::CompactionOutput)
+            .build(),
+        );
         let (tx, rx) = async_channel::unbounded();
         let worker_options = CompactionWorkerOptions::default();
         let recorder = MetricsRecorderHelper::noop();

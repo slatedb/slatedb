@@ -481,12 +481,12 @@ mod tests {
         };
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store.clone(), None),
             format.clone(),
             root_path.clone(),
-            None,
-        );
+        )
+        .build();
         let path_resolver = PathResolver::new(root_path);
 
         // 16-byte keys/values, no timestamps. Keys are spread across the
@@ -586,12 +586,8 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 8], &[b'1'; 8], Some(1), None)
@@ -641,12 +637,12 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
-        );
+        )
+        .build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 8], &[b'1'; 8], Some(1), None)
@@ -739,12 +735,12 @@ mod tests {
     ) {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
-        );
+        )
+        .build();
         let mut builder = table_store.table_builder();
         for k in 1..=8 {
             builder
@@ -823,12 +819,8 @@ mod tests {
             compression_codec: compression,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -890,12 +882,12 @@ mod tests {
             compression_codec: compression,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store.clone(), None),
             format,
             root_path.clone(),
-            None,
-        );
+        )
+        .build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -917,12 +909,8 @@ mod tests {
             compression_codec: dummy_codec,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
@@ -975,12 +963,12 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
-        );
+        )
+        .build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 2], &[1u8; 2], None, None)
@@ -1027,12 +1015,8 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1095,12 +1079,12 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
-        );
+        )
+        .build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1150,12 +1134,9 @@ mod tests {
             block_size: 1024,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build(),
+        );
         let mut builder = table_store.table_builder();
         for key in 'a'..='z' {
             let key_bytes = [key as u8];
@@ -1270,12 +1251,8 @@ mod tests {
             block_transformer: Some(transformer.clone()),
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1325,12 +1302,8 @@ mod tests {
             compression_codec: compression,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1412,12 +1385,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
-        );
+        )
+        .build();
         let mut builder = table_store
             .table_builder()
             .with_block_format(BlockFormat::V1);
@@ -1478,12 +1451,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
-        );
+        )
+        .build();
         let mut builder = table_store.table_builder();
         let mut expected = Vec::new();
         for i in 0..num_entries {
@@ -1541,12 +1514,8 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
 
         // Add a put
@@ -1648,12 +1617,8 @@ mod tests {
             compression_codec: compression,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1690,12 +1655,8 @@ mod tests {
             block_transformer: Some(transformer),
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         builder
             .add_value(b"key1", b"value1", Some(1), None)
@@ -1735,12 +1696,8 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
+        let table_store =
+            TableStore::builder(ObjectStores::new(object_store, None), format, root_path).build();
         let mut builder = table_store.table_builder();
         // Block 0: put
         builder
@@ -1832,12 +1789,12 @@ mod tests {
             filter_policies: vec![policy1.clone(), policy2.clone()],
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store.clone(), None),
             format,
             root_path.clone(),
-            None,
-        );
+        )
+        .build();
 
         // Write keys whose 3-byte prefix is "key".
         let mut builder = table_store.table_builder();
@@ -1888,12 +1845,12 @@ mod tests {
             filter_policies: vec![policy1.clone()],
             ..SsTableFormat::default()
         };
-        let store_partial = TableStore::new(
+        let store_partial = TableStore::builder(
             ObjectStores::new(object_store, None),
             format_partial,
             root_path,
-            None,
-        );
+        )
+        .build();
         let handle_partial = store_partial.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let partial = store_partial
             .read_filters(&handle_partial, false)

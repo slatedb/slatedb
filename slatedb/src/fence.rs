@@ -221,12 +221,14 @@ mod tests {
             let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
             let manifest_store =
                 Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-            let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store.clone(), None),
-                SsTableFormat::default(),
-                path,
-                None,
-            ));
+            let table_store = Arc::new(
+                TableStore::builder(
+                    ObjectStores::new(object_store.clone(), None),
+                    SsTableFormat::default(),
+                    path,
+                )
+                .build(),
+            );
             let stored_manifest = StoredManifest::create_new_db(
                 manifest_store.clone(),
                 ManifestCore::new(),

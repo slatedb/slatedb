@@ -441,12 +441,14 @@ mod tests {
         table_id: &SsTableId,
         kv: (&Bytes, &Bytes),
     ) {
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(Arc::clone(&object_store), None),
-            SsTableFormat::default(),
-            path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(Arc::clone(&object_store), None),
+                SsTableFormat::default(),
+                path.clone(),
+            )
+            .build(),
+        );
         let sst_handle = SsTableView::identity(table_store.open_sst(table_id).await.unwrap());
 
         let mut sst_iter = SstIterator::for_key_with_stats_initialized(

@@ -5407,12 +5407,14 @@ mod tests {
         };
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let compactions_store = Arc::new(CompactionsStore::new(&Path::from(PATH), os.clone()));
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
-            sst_format,
-            Path::from(PATH),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(os.clone(), None),
+                sst_format,
+                Path::from(PATH),
+            )
+            .build(),
+        );
         (manifest_store, compactions_store, table_store)
     }
 

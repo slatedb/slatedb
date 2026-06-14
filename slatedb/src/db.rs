@@ -4219,12 +4219,14 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let sst_format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            sst_format,
-            path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                sst_format,
+                path.clone(),
+            )
+            .build(),
+        );
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
             .with_system_clock(clock.clone())
@@ -4319,12 +4321,14 @@ mod tests {
             min_filter_keys: 10,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            sst_format,
-            path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                sst_format,
+                path,
+            )
+            .build(),
+        );
 
         // Write data a few times such that each loop results in a memtable flush
         let mut last_wal_id = 0;
@@ -4505,12 +4509,14 @@ mod tests {
             min_filter_keys: 10,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            sst_format,
-            path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                sst_format,
+                path,
+            )
+            .build(),
+        );
 
         // Write some data to populate the memtable
         let key1 = b"test_key_1";
@@ -6039,12 +6045,14 @@ mod tests {
         db.close().await.unwrap();
 
         let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            SsTableFormat::default(),
-            path,
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                SsTableFormat::default(),
+                path,
+            )
+            .build(),
+        );
 
         // Get the next WAL SST ID based on what's currently in the object store
         let next_wal_sst_id = table_store.next_wal_sst_id(0).await.unwrap();
@@ -6349,12 +6357,14 @@ mod tests {
         // Wait for W1 to write its fence WAL — at that point W1 has finished
         // fence_writers and has either entered or is about to enter the paused
         // replay_wal call.
-        let probe_table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            SsTableFormat::default(),
-            path,
-            None,
-        ));
+        let probe_table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                SsTableFormat::default(),
+                path,
+            )
+            .build(),
+        );
         let mut w1_paused = false;
         for _ in 0..600 {
             let wals = probe_table_store.list_wal_ssts(..).await.unwrap();
@@ -6444,12 +6454,12 @@ mod tests {
             })
         };
 
-        let probe_table_store = TableStore::new(
+        let probe_table_store = TableStore::builder(
             ObjectStores::new(base_store.clone(), None),
             SsTableFormat::default(),
             path,
-            None,
-        );
+        )
+        .build();
         wait_for_wal_sst_count(
             &probe_table_store,
             1,
@@ -6521,12 +6531,12 @@ mod tests {
             })
         };
 
-        let probe_table_store = TableStore::new(
+        let probe_table_store = TableStore::builder(
             ObjectStores::new(base_store.clone(), None),
             SsTableFormat::default(),
             path,
-            None,
-        );
+        )
+        .build();
         wait_for_wal_sst_count(
             &probe_table_store,
             1,
@@ -7764,12 +7774,12 @@ mod tests {
 
         // Build a read-only TableStore sharing the same underlying object store
         // and assert that the referenced L0 SST still exists.
-        let table_store = TableStore::new(
+        let table_store = TableStore::builder(
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
             path.clone(),
-            None,
-        );
+        )
+        .build();
         let compacted_ssts = table_store
             .list_compacted_ssts(..)
             .await

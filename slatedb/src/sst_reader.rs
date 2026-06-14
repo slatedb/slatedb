@@ -88,12 +88,12 @@ impl SstReader {
             block_transformer,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            sst_format,
-            root_path.into(),
-            cache,
-        ));
+        let mut builder =
+            TableStore::builder(ObjectStores::new(object_store, None), sst_format, root_path);
+        if let Some(cache) = cache {
+            builder = builder.with_block_cache(cache);
+        }
+        let table_store = Arc::new(builder.build());
         Self { table_store }
     }
 

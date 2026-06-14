@@ -530,24 +530,28 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
-        let table_store = Arc::new(TableStore::new_with_intents_and_fp_registry(
+        let mut table_store_builder = TableStore::builder(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
             ),
             sst_format.clone(),
-            path_resolver.clone(),
-            self.fp_registry.clone(),
-            self.db_cache.as_ref().map(|c| {
-                Arc::new(DbCacheWrapper::new(
-                    c.clone(),
-                    &recorder,
-                    system_clock.clone(),
-                )) as Arc<dyn DbCache>
-            }),
-            CompactedSstReadKind::Foreground,
-            CompactedSstWriteKind::Flush,
-        ));
+            path.clone(),
+        )
+        .with_path_resolver(path_resolver.clone())
+        .with_fp_registry(self.fp_registry.clone())
+        .with_compacted_sst_read_kind(CompactedSstReadKind::Foreground)
+        .with_compacted_sst_write_kind(CompactedSstWriteKind::Flush);
+        if let Some(cache) = self.db_cache.as_ref().map(|c| {
+            Arc::new(DbCacheWrapper::new(
+                c.clone(),
+                &recorder,
+                system_clock.clone(),
+            )) as Arc<dyn DbCache>
+        }) {
+            table_store_builder = table_store_builder.with_block_cache(cache);
+        }
+        let table_store = Arc::new(table_store_builder.build());
 
         // Initialize the database
         let stored_manifest = match latest_manifest {
@@ -624,18 +628,21 @@ impl<P: Into<Path>> DbBuilder<P> {
         // The compactor and GC get their own table store: no block cache (so
         // background reads do not pollute it), and reads/writes tagged with
         // compaction intents.
-        let uncached_table_store = Arc::new(TableStore::new_with_intents_and_fp_registry(
-            ObjectStores::new(
-                retrying_main_object_store.clone(),
-                retrying_wal_object_store.clone(),
-            ),
-            sst_format,
-            path_resolver.clone(),
-            self.fp_registry.clone(),
-            None,
-            CompactedSstReadKind::CompactionInput,
-            CompactedSstWriteKind::CompactionOutput,
-        ));
+        let uncached_table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(
+                    retrying_main_object_store.clone(),
+                    retrying_wal_object_store.clone(),
+                ),
+                sst_format,
+                path.clone(),
+            )
+            .with_path_resolver(path_resolver.clone())
+            .with_fp_registry(self.fp_registry.clone())
+            .with_compacted_sst_read_kind(CompactedSstReadKind::CompactionInput)
+            .with_compacted_sst_write_kind(CompactedSstWriteKind::CompactionOutput)
+            .build(),
+        );
 
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
@@ -944,19 +951,22 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
-        let table_store = Arc::new(TableStore::new_with_intents(
-            ObjectStores::new(
-                retrying_main_object_store.clone(),
-                retrying_wal_object_store.clone(),
-            ),
-            SsTableFormat::default(), // read only SSTs can use default
-            path,
-            None, // no need for a block cache in GC
-            // GC issues only metadata, list, and delete traffic; tag it as
-            // background compaction traffic so wrappers treat it accordingly.
-            CompactedSstReadKind::CompactionInput,
-            CompactedSstWriteKind::CompactionOutput,
-        ));
+        // GC issues only metadata, list, and delete traffic; tag it as
+        // background compaction traffic so wrappers treat it accordingly.
+        // Read-only SSTs use the default format and need no block cache.
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(
+                    retrying_main_object_store.clone(),
+                    retrying_wal_object_store.clone(),
+                ),
+                SsTableFormat::default(),
+                path,
+            )
+            .with_compacted_sst_read_kind(CompactedSstReadKind::CompactionInput)
+            .with_compacted_sst_write_kind(CompactedSstWriteKind::CompactionOutput)
+            .build(),
+        );
         GarbageCollector::new(
             manifest_store,
             compactions_store,
@@ -1164,14 +1174,17 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new_with_intents(
-            ObjectStores::new(retrying_main_object_store, None),
-            sst_format,
-            path,
-            None, // no need for a block cache in the compactor
-            CompactedSstReadKind::CompactionInput,
-            CompactedSstWriteKind::CompactionOutput,
-        ));
+        // The compactor needs no block cache.
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(retrying_main_object_store, None),
+                sst_format,
+                path,
+            )
+            .with_compacted_sst_read_kind(CompactedSstReadKind::CompactionInput)
+            .with_compacted_sst_write_kind(CompactedSstWriteKind::CompactionOutput)
+            .build(),
+        );
 
         let scheduler_supplier = self
             .scheduler_supplier
@@ -1328,14 +1341,16 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
             Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new_with_intents(
-            ObjectStores::new(self.main_object_store, None),
-            SsTableFormat::default(),
-            path,
-            None,
-            CompactedSstReadKind::CompactionInput,
-            CompactedSstWriteKind::CompactionOutput,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(self.main_object_store, None),
+                SsTableFormat::default(),
+                path,
+            )
+            .with_compacted_sst_read_kind(CompactedSstReadKind::CompactionInput)
+            .with_compacted_sst_write_kind(CompactedSstWriteKind::CompactionOutput)
+            .build(),
+        );
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
             self.options.metric_level.unwrap_or_default(),

@@ -1044,15 +1044,17 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let root_path = Path::from("testdb-load-iterators");
         let clock = Arc::new(DefaultSystemClock::new());
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            SsTableFormat {
-                block_size,
-                ..SsTableFormat::default()
-            },
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                SsTableFormat {
+                    block_size,
+                    ..SsTableFormat::default()
+                },
+                root_path.clone(),
+            )
+            .build(),
+        );
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
             .await
@@ -1252,15 +1254,7 @@ mod tests {
                 let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
                 let root_path = Path::from("testdb-exec-resume");
                 let clock = Arc::new(DefaultSystemClock::new());
-                let table_store = Arc::new(TableStore::new(
-                    ObjectStores::new(object_store.clone(), None),
-                    SsTableFormat {
-                        block_size: BLOCK_SIZE,
-                        ..SsTableFormat::default()
-                    },
-                    root_path.clone(),
-                    None,
-                ));
+                let table_store = Arc::new(TableStore::builder(ObjectStores::new(object_store.clone(), None), SsTableFormat { block_size: BLOCK_SIZE, ..SsTableFormat::default() }, root_path.clone()).build());
                 let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
                 StoredManifest::create_new_db(
                     manifest_store.clone(),
@@ -1399,15 +1393,17 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = gated.clone();
         let root_path = Path::from("testdb-flush-no-block");
         let clock = Arc::new(DefaultSystemClock::new());
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
-            SsTableFormat {
-                block_size: 64,
-                ..SsTableFormat::default()
-            },
-            root_path.clone(),
-            None,
-        ));
+        let table_store = Arc::new(
+            TableStore::builder(
+                ObjectStores::new(object_store.clone(), None),
+                SsTableFormat {
+                    block_size: 64,
+                    ..SsTableFormat::default()
+                },
+                root_path.clone(),
+            )
+            .build(),
+        );
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
             .await
