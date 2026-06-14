@@ -2,7 +2,7 @@ use crate::db_cache::DbCache;
 use crate::filter_policy::FilterPolicy;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::manifest::store::ManifestStore;
-use crate::object_store_intent::{ReadKind, WriteKind};
+use crate::object_store_intent::{CompactedSstReadKind, CompactedSstWriteKind};
 use crate::object_stores::ObjectStores;
 use crate::tablestore::TableStore;
 use object_store::path::Path;
@@ -22,8 +22,8 @@ pub(crate) struct DefaultStoreProvider {
     pub(crate) block_cache: Option<Arc<dyn DbCache>>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
     pub(crate) filter_policies: Vec<Arc<dyn FilterPolicy>>,
-    pub(crate) read_kind: ReadKind,
-    pub(crate) write_kind: WriteKind,
+    pub(crate) read_kind: CompactedSstReadKind,
+    pub(crate) write_kind: CompactedSstWriteKind,
 }
 
 impl StoreProvider for DefaultStoreProvider {

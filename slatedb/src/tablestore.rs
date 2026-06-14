@@ -22,7 +22,9 @@ use crate::filter_policy::NamedFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
-use crate::object_store_intent::{ReadIntent, ReadKind, RetryReason, WriteIntent, WriteKind};
+use crate::object_store_intent::{
+    CompactedSstReadKind, CompactedSstWriteKind, ReadIntent, RetryReason, WriteIntent,
+};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
@@ -41,11 +43,11 @@ pub(crate) struct TableStore {
     /// Intent kind tagged on compacted-SST reads (L0 SSTs included)
     /// issued by this instance, or `None` for an untagged store. WAL SST
     /// reads carry no intent either way.
-    read_kind: Option<ReadKind>,
+    read_kind: Option<CompactedSstReadKind>,
     /// Intent kind tagged on compacted-SST writes (L0 flushes included)
     /// issued by this instance, or `None` for an untagged store. WAL SST
     /// writes carry no intent either way.
-    write_kind: Option<WriteKind>,
+    write_kind: Option<CompactedSstWriteKind>,
 }
 
 struct ReadOnlyObject {
@@ -136,8 +138,8 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: P,
         block_cache: Option<Arc<dyn DbCache>>,
-        read_kind: ReadKind,
-        write_kind: WriteKind,
+        read_kind: CompactedSstReadKind,
+        write_kind: CompactedSstWriteKind,
     ) -> Self {
         Self::new_with_intents_and_fp_registry(
             object_stores,
@@ -176,8 +178,8 @@ impl TableStore {
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         cache: Option<Arc<dyn DbCache>>,
-        read_kind: ReadKind,
-        write_kind: WriteKind,
+        read_kind: CompactedSstReadKind,
+        write_kind: CompactedSstWriteKind,
     ) -> Self {
         Self {
             object_stores,
@@ -2939,20 +2941,24 @@ mod tests {
         use crate::db_state::SsTableHandle;
         use crate::format::sst::EncodedSsTable;
         use crate::object_store_intent::{
-            ReadIntent, ReadKind, RetryReason, WriteIntent, WriteKind,
+            CompactedSstReadKind, CompactedSstWriteKind, ReadIntent, RetryReason, WriteIntent,
         };
         use crate::test_utils::IntentRecordingObjectStore;
         use object_store::memory::InMemory;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         fn recording_table_store(recording: &Arc<IntentRecordingObjectStore>) -> Arc<TableStore> {
-            recording_table_store_with_kinds(recording, ReadKind::Foreground, WriteKind::Flush)
+            recording_table_store_with_kinds(
+                recording,
+                CompactedSstReadKind::Foreground,
+                CompactedSstWriteKind::Flush,
+            )
         }
 
         fn recording_table_store_with_kinds(
             recording: &Arc<IntentRecordingObjectStore>,
-            read_kind: ReadKind,
-            write_kind: WriteKind,
+            read_kind: CompactedSstReadKind,
+            write_kind: CompactedSstWriteKind,
         ) -> Arc<TableStore> {
             let format = SsTableFormat {
                 block_size: 32,
@@ -3037,8 +3043,8 @@ mod tests {
             let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
             let ts = recording_table_store_with_kinds(
                 &recording,
-                ReadKind::Foreground,
-                WriteKind::CompactionOutput,
+                CompactedSstReadKind::Foreground,
+                CompactedSstWriteKind::CompactionOutput,
             );
 
             let sst = build_sst(&ts, 11 * 1024 * 1024).await;
@@ -3091,8 +3097,8 @@ mod tests {
 
             let ts = recording_table_store_with_kinds(
                 &recording,
-                ReadKind::CompactionInput,
-                WriteKind::Flush,
+                CompactedSstReadKind::CompactionInput,
+                CompactedSstWriteKind::Flush,
             );
             let handle = ts.open_sst(&id).await.unwrap();
             ts.read_index(&handle, false).await.unwrap();

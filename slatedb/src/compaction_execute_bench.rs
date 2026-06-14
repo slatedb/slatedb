@@ -27,7 +27,7 @@ use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::object_store_intent::{ReadKind, WriteKind};
+use crate::object_store_intent::{CompactedSstReadKind, CompactedSstWriteKind};
 use crate::object_stores::ObjectStores;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -79,8 +79,8 @@ impl CompactionExecuteBench {
             sst_format,
             self.path.clone(),
             None,
-            ReadKind::Foreground,
-            WriteKind::Flush,
+            CompactedSstReadKind::Foreground,
+            CompactedSstWriteKind::Flush,
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
@@ -332,8 +332,8 @@ impl CompactionExecuteBench {
             sst_format,
             self.path.clone(),
             None,
-            ReadKind::CompactionInput,
-            WriteKind::CompactionOutput,
+            CompactedSstReadKind::CompactionInput,
+            CompactedSstWriteKind::CompactionOutput,
         ));
         let (tx, rx) = async_channel::unbounded();
         let worker_options = CompactionWorkerOptions::default();

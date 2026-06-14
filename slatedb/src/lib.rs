@@ -64,7 +64,9 @@ pub use instrumented_object_store::stats as instrumented_object_store_stats;
 pub use iter::IterationOrder;
 pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
-pub use object_store_intent::{ReadIntent, ReadKind, RetryReason, WriteIntent, WriteKind};
+pub use object_store_intent::{
+    CompactedSstReadKind, CompactedSstWriteKind, ReadIntent, RetryReason, WriteIntent,
+};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
 pub use slatedb_common::DbRand;

@@ -18,20 +18,20 @@ use object_store::Extensions;
 /// Declares the purpose of a compacted-SST write issued by SlateDB.
 ///
 /// Attached to the extensions of every compacted-SST write (`put_opts` and
-/// multipart upload initiation). A wrapper can use the [`WriteKind`] to
+/// multipart upload initiation). A wrapper can use the [`CompactedSstWriteKind`] to
 /// decide admission per kind, for example admitting flushes while skipping
 /// bulk compaction outputs.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WriteIntent {
     /// The kind of write being performed.
-    pub kind: WriteKind,
+    pub kind: CompactedSstWriteKind,
 }
 
 /// The kind of write being performed.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WriteKind {
+pub enum CompactedSstWriteKind {
     /// A memtable flush producing an L0 SST.
     Flush,
     /// An SST produced by compaction.
@@ -40,18 +40,18 @@ pub enum WriteKind {
 
 impl WriteIntent {
     /// Creates a write intent with the given kind.
-    pub fn new(kind: WriteKind) -> Self {
+    pub fn new(kind: CompactedSstWriteKind) -> Self {
         Self { kind }
     }
 
-    /// A memtable flush write ([`WriteKind::Flush`]).
+    /// A memtable flush write ([`CompactedSstWriteKind::Flush`]).
     pub fn flush() -> Self {
-        Self::new(WriteKind::Flush)
+        Self::new(CompactedSstWriteKind::Flush)
     }
 
-    /// A compaction output write ([`WriteKind::CompactionOutput`]).
+    /// A compaction output write ([`CompactedSstWriteKind::CompactionOutput`]).
     pub fn compaction_output() -> Self {
-        Self::new(WriteKind::CompactionOutput)
+        Self::new(CompactedSstWriteKind::CompactionOutput)
     }
 
     /// Returns a fresh [`Extensions`] map carrying this intent.
@@ -71,14 +71,14 @@ impl WriteIntent {
 ///
 /// Attached to the extensions of every compacted-SST read (`get_opts`,
 /// including head-style requests issued via `get_opts` with `head` set). A
-/// wrapper can use the [`ReadKind`] to apply different policies to foreground
+/// wrapper can use the [`CompactedSstReadKind`] to apply different policies to foreground
 /// queries and compaction-input scans, and use [`ReadIntent::retry`] to
 /// detect a reissued read after a validation failure.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadIntent {
     /// The kind of read being performed.
-    pub kind: ReadKind,
+    pub kind: CompactedSstReadKind,
     /// Set when SlateDB reissues a read after the previous response failed
     /// validation (CRC mismatch, block decode error, decompression error).
     ///
@@ -93,7 +93,7 @@ pub struct ReadIntent {
 /// The kind of read being performed.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadKind {
+pub enum CompactedSstReadKind {
     /// A read on the caller's critical path (point reads and scans). Cache
     /// warmup reads issued via
     /// [`DbCacheManagerOps::warm_sst`](crate::DbCacheManagerOps::warm_sst)
@@ -105,18 +105,18 @@ pub enum ReadKind {
 
 impl ReadIntent {
     /// Creates a read intent with the given kind and no retry reason.
-    pub fn new(kind: ReadKind) -> Self {
+    pub fn new(kind: CompactedSstReadKind) -> Self {
         Self { kind, retry: None }
     }
 
-    /// A foreground read ([`ReadKind::Foreground`]).
+    /// A foreground read ([`CompactedSstReadKind::Foreground`]).
     pub fn foreground() -> Self {
-        Self::new(ReadKind::Foreground)
+        Self::new(CompactedSstReadKind::Foreground)
     }
 
-    /// A compaction input read ([`ReadKind::CompactionInput`]).
+    /// A compaction input read ([`CompactedSstReadKind::CompactionInput`]).
     pub fn compaction_input() -> Self {
-        Self::new(ReadKind::CompactionInput)
+        Self::new(CompactedSstReadKind::CompactionInput)
     }
 
     /// Returns this intent marked as a retry for the given reason.
@@ -327,7 +327,10 @@ mod tests {
 
         let intent = WriteIntent::from_extensions(&extensions);
 
-        assert_eq!(intent, Some(WriteIntent::new(WriteKind::CompactionOutput)));
+        assert_eq!(
+            intent,
+            Some(WriteIntent::new(CompactedSstWriteKind::CompactionOutput))
+        );
         assert_eq!(ReadIntent::from_extensions(&extensions), None);
     }
 
@@ -342,7 +345,7 @@ mod tests {
         assert_eq!(
             intent,
             Some(ReadIntent {
-                kind: ReadKind::Foreground,
+                kind: CompactedSstReadKind::Foreground,
                 retry: Some(RetryReason::CrcMismatch),
             })
         );
@@ -365,15 +368,18 @@ mod tests {
 
     #[test]
     fn should_construct_intents_with_expected_kinds() {
-        assert_eq!(WriteIntent::flush().kind, WriteKind::Flush);
+        assert_eq!(WriteIntent::flush().kind, CompactedSstWriteKind::Flush);
         assert_eq!(
             WriteIntent::compaction_output().kind,
-            WriteKind::CompactionOutput
+            CompactedSstWriteKind::CompactionOutput
         );
-        assert_eq!(ReadIntent::foreground().kind, ReadKind::Foreground);
+        assert_eq!(
+            ReadIntent::foreground().kind,
+            CompactedSstReadKind::Foreground
+        );
         assert_eq!(
             ReadIntent::compaction_input().kind,
-            ReadKind::CompactionInput
+            CompactedSstReadKind::CompactionInput
         );
         assert_eq!(ReadIntent::foreground().retry, None);
     }

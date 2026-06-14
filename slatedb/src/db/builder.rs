@@ -153,7 +153,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
-use crate::object_store_intent::{ReadKind, WriteKind};
+use crate::object_store_intent::{CompactedSstReadKind, CompactedSstWriteKind};
 use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
@@ -545,8 +545,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
-            ReadKind::Foreground,
-            WriteKind::Flush,
+            CompactedSstReadKind::Foreground,
+            CompactedSstWriteKind::Flush,
         ));
 
         // Initialize the database
@@ -633,8 +633,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             None,
-            ReadKind::CompactionInput,
-            WriteKind::CompactionOutput,
+            CompactedSstReadKind::CompactionInput,
+            CompactedSstWriteKind::CompactionOutput,
         ));
 
         let compactor_builder = self.compactor_builder.or_else(|| {
@@ -954,8 +954,8 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             None, // no need for a block cache in GC
             // GC issues only metadata, list, and delete traffic; tag it as
             // background compaction traffic so wrappers treat it accordingly.
-            ReadKind::CompactionInput,
-            WriteKind::CompactionOutput,
+            CompactedSstReadKind::CompactionInput,
+            CompactedSstWriteKind::CompactionOutput,
         ));
         GarbageCollector::new(
             manifest_store,
@@ -1169,8 +1169,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             sst_format,
             path,
             None, // no need for a block cache in the compactor
-            ReadKind::CompactionInput,
-            WriteKind::CompactionOutput,
+            CompactedSstReadKind::CompactionInput,
+            CompactedSstWriteKind::CompactionOutput,
         ));
 
         let scheduler_supplier = self
@@ -1333,8 +1333,8 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             SsTableFormat::default(),
             path,
             None,
-            ReadKind::CompactionInput,
-            WriteKind::CompactionOutput,
+            CompactedSstReadKind::CompactionInput,
+            CompactedSstWriteKind::CompactionOutput,
         ));
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
@@ -1628,8 +1628,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             block_cache: wrapped_cache,
             block_transformer: self.block_transformer.clone(),
             filter_policies: self.filter_policies.clone(),
-            read_kind: ReadKind::Foreground,
-            write_kind: WriteKind::Flush,
+            read_kind: CompactedSstReadKind::Foreground,
+            write_kind: CompactedSstWriteKind::Flush,
         };
 
         let reader = DbReader::open_internal(
