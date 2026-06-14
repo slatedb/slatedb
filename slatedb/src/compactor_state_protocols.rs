@@ -143,27 +143,36 @@ impl CompactorStateWriter {
         )
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
-        let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Reset scheduled and stale running compactions back to submitted on restart.
-        // Scheduled compactions have no worker yet, so they always reset. Running
-        // compactions are only reset if the worker's heartbeat has gone stale: a
-        // worker that is still alive and heartbeating is left in Running so it can
-        // finish without being interrupted by the restarted coordinator.
-        let now_ms = system_clock.now().timestamp_millis() as u64;
-        let timeout_ms = options.worker_heartbeat_timeout.as_millis() as u64;
-        dirty_compactions.value.iter_mut().for_each(|c| {
-            let stale_running = matches!(c.status(), CompactionStatus::Running)
-                && c.worker()
-                    .map(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
-                    .unwrap_or(true);
-            if matches!(c.status(), CompactionStatus::Scheduled) || stale_running {
-                c.set_status(CompactionStatus::Submitted);
-                c.set_worker(None);
+        let dirty_compactions = loop {
+            let mut dirty_compactions = compactions.prepare_dirty()?;
+            // Reset scheduled and stale running compactions back to submitted on restart.
+            // Scheduled compactions have no worker yet, so they always reset. Running
+            // compactions are only reset if the worker's heartbeat has gone stale: a
+            // worker that is still alive and heartbeating is left in Running so it can
+            // finish without being interrupted by the restarted coordinator.
+            let now_ms = system_clock.now().timestamp_millis() as u64;
+            let timeout_ms = options.worker_heartbeat_timeout.as_millis() as u64;
+            dirty_compactions.value.iter_mut().for_each(|c| {
+                let stale_running = matches!(c.status(), CompactionStatus::Running)
+                    && c.worker()
+                        .map(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
+                        .unwrap_or(true);
+                if matches!(c.status(), CompactionStatus::Scheduled) || stale_running {
+                    c.set_status(CompactionStatus::Submitted);
+                    c.set_worker(None);
+                }
+            });
+            dirty_compactions.value.retain_active_and_last_finished();
+            // Persist recovery state before any refresh() can overwrite it.
+            match compactions.update(dirty_compactions.clone()).await {
+                Ok(()) => break dirty_compactions,
+                Err(err) if err.is_sequenced_write_conflict() => {
+                    compactions.refresh().await?;
+                }
+                Err(err) => return Err(err),
             }
-        });
-        dirty_compactions.value.retain_active_and_last_finished();
-        // Persist recovery state before any refresh() can overwrite it.
-        compactions.update(dirty_compactions.clone()).await?;
+        };
+
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
