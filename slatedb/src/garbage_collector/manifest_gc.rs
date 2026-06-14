@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::{GcStats, GcTask};
 
+#[derive(Clone)]
 pub(crate) struct ManifestGcTask {
     manifest_store: Arc<ManifestStore>,
     stats: Arc<GcStats>,

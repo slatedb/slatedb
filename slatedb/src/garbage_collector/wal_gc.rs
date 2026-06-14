@@ -29,6 +29,7 @@ pub(super) enum WalGcMode {
     Fence,
 }
 
+#[derive(Clone)]
 pub(crate) struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,

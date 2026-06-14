@@ -38,6 +38,7 @@ use super::{GcStats, GcTask};
 /// `final_checkpoint_id` points to a missing checkpoint — the next tick retries
 /// step 1 as a no-op and completes step 2. The reverse order would leak the
 /// parent's checkpoint forever on a crash.
+#[derive(Clone)]
 pub(crate) struct DetachGcTask {
     manifest_store: Arc<ManifestStore>,
     object_store: Arc<dyn ObjectStore>,

@@ -88,7 +88,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             wal_fence,
             compacted,
             compactions,
-        } => schedule_gc(&admin, manifest, wal, wal_fence, compacted, compactions).await?,
+        } => {
+            schedule_gc(
+                &admin,
+                manifest,
+                wal,
+                wal_fence,
+                compacted,
+                compactions,
+                cancellation_token.clone(),
+            )
+            .await?
+        }
         CliCommands::SubmitCompaction { scheduler, request } => {
             exec_submit_compaction(&admin, scheduler, request).await?
         }
@@ -321,6 +332,7 @@ async fn schedule_gc(
     wal_fence_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
     compactions_schedule: Option<GcSchedule>,
+    cancellation_token: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -339,7 +351,9 @@ async fn schedule_gc(
         metric_level: None,
     };
 
-    admin.run_gc(gc_opts).await?;
+    admin
+        .run_gc_with_options(cancellation_token, gc_opts)
+        .await?;
     Ok(())
 }
 

@@ -823,6 +823,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     metrics_recorder: Arc<dyn MetricsRecorder>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
+    closed_result: Arc<dyn ClosedResultWriter>,
 }
 
 impl<P: Into<Path>> GarbageCollectorBuilder<P> {
@@ -835,6 +836,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
+            closed_result: Arc::new(WatchableOnceCell::new()),
         }
     }
 
@@ -848,6 +850,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             metrics_recorder: self.metrics_recorder,
             system_clock: self.system_clock,
             rand: self.rand,
+            closed_result: self.closed_result,
         }
     }
 
@@ -901,6 +904,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.options,
             &recorder,
             self.system_clock,
+            self.closed_result,
         )
     }
 
@@ -954,6 +958,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.options,
             &recorder,
             self.system_clock,
+            self.closed_result,
         )
     }
 }
