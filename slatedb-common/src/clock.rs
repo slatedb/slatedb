@@ -38,7 +38,7 @@ pub trait SystemClock: Debug + Send + Sync {
 pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
     duration: Duration,
-    last_tick: Option<DateTime<Utc>>,
+    last_tick: DateTime<Utc>,
     jitter: Option<(Range<Duration>, Arc<DbRand>)>,
 }
 
@@ -51,7 +51,7 @@ impl<'a> SystemClockTicker<'a> {
         Self {
             clock,
             duration,
-            last_tick: None,
+            last_tick: DateTime::<Utc>::MIN_UTC,
             jitter: None,
         }
     }
@@ -95,7 +95,7 @@ impl<'a> SystemClockTicker<'a> {
         Box::pin(async move {
             let sleep_duration = self.calc_duration();
             self.clock.sleep(sleep_duration).await;
-            self.last_tick.replace(self.clock.now());
+            self.last_tick = self.clock.now();
         })
     }
 
@@ -111,7 +111,7 @@ impl<'a> SystemClockTicker<'a> {
     /// ## Returns: `duration - (now - last_tick)`, the duration left before the next tick.
     fn calc_duration(&self) -> Duration {
         let zero = Duration::from_millis(0);
-        if self.last_tick.is_none() {
+        if self.last_tick == DateTime::<Utc>::MIN_UTC {
             return zero;
         }
         let now_dt = self.clock.now();
@@ -123,7 +123,7 @@ impl<'a> SystemClockTicker<'a> {
             self.duration
         };
         let elapsed = now_dt
-            .signed_duration_since(self.last_tick.unwrap())
+            .signed_duration_since(self.last_tick)
             .to_std()
             .expect("elapsed time is negative");
         duration.checked_sub(elapsed).unwrap_or(zero)
@@ -465,7 +465,7 @@ mod tests {
         let mut ticker = SystemClockTicker::new(&clock, interval);
         ticker.with_jitter(0.5, Arc::new(DbRand::new(42)));
         // Populate `last_tick` to force the full duration to be calculated in `calc_duration`
-        ticker.last_tick = Some(ticker.clock.now());
+        ticker.last_tick = ticker.clock.now();
         let mut seen = std::collections::HashSet::new();
         for _ in 0..1000 {
             let wait = ticker.calc_duration();
@@ -487,7 +487,7 @@ mod tests {
         let interval = Duration::from_millis(1000);
         let mut ticker = SystemClockTicker::new(&clock, interval);
         // Populate `last_tick` to force the full duration to be calculated in `calc_duration`
-        ticker.last_tick = Some(ticker.clock.now());
+        ticker.last_tick = ticker.clock.now();
         let mut full_tick = ticker.calc_duration();
         assert_eq!(
             full_tick,
