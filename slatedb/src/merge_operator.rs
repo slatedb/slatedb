@@ -346,7 +346,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
     ) -> Result<Bytes, SlateDBError> {
         batch.reverse();
         let mut operands: Vec<Bytes> = Vec::with_capacity(batch.len());
-        for entry in &*batch {
+        for entry in batch.iter_mut() {
             merge_tracker.update(entry)?;
             if let Some(v) = entry.value.as_bytes() {
                 operands.push(v);
@@ -416,10 +416,9 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         let base_value = base.as_ref().and_then(|b| b.value.as_bytes());
         let found_base = base.is_some();
 
-        // Fold the base entry's metadata into the tracker so that its
-        // create_ts and expire_ts are reflected in the merged result.
-        if let Some(ref base_entry) = base {
-            merge_tracker.update(base_entry)?;
+        // Fold the base entry's metadata into the tracker.
+        if let Some(base_entry) = base {
+            merge_tracker.update(&base_entry)?;
         }
 
         // If we have no results and either no base or a tombstone base, return None

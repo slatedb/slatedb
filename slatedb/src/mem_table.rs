@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
+
 use ouroboros::self_referencing;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
@@ -14,6 +15,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
+use crate::byte_buffer_manager::{ByteBufferManager, ByteBufferPermit};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
@@ -107,6 +109,8 @@ pub(crate) struct KVTable {
     /// paths after the antichain check. Empty when no extractor is
     /// configured.
     touched_segments: Mutex<std::collections::BTreeSet<Bytes>>,
+    write_buffer_manager: ByteBufferManager,
+    write_buffer_permit: Arc<ByteBufferPermit>,
 }
 
 pub(crate) struct KVTableMetadata {
@@ -127,9 +131,18 @@ pub(crate) struct WritableKVTable {
 }
 
 impl WritableKVTable {
+    /// Creates a new `WritableKVTable` with a noop buffer manager (unlimited capacity).
+    /// Useful for tests that don't need memory tracking.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self {
-            table: Arc::new(KVTable::new()),
+            table: Arc::new(KVTable::new(ByteBufferManager::unbounded())),
+        }
+    }
+
+    pub(crate) fn with_buffer_manager(buffer_manager: ByteBufferManager) -> Self {
+        Self {
+            table: Arc::new(KVTable::new(buffer_manager)),
         }
     }
 
@@ -156,6 +169,12 @@ impl WritableKVTable {
     /// Delegate to [`KVTable::record_touched_segments`].
     pub(crate) fn record_touched_segments(&self, prefixes: std::collections::BTreeSet<Bytes>) {
         self.table.record_touched_segments(prefixes);
+    }
+
+    /// Attaches a write-buffer budget permit to the underlying table.
+    /// When the table is dropped, the permit releases its reserved bytes.
+    pub(crate) fn add_write_permit(&self, permit: &ByteBufferPermit) {
+        self.table.add_write_permit(permit);
     }
 }
 
@@ -327,7 +346,8 @@ impl ImmutableMemtable {
     /// number greater than the given `seq`. [`ImmutableMemtable::recent_flushed_wal_id`]
     /// remains the same.
     pub(crate) fn filter_after_seq(&self, seq: u64) -> Self {
-        let new_table = WritableKVTable::new();
+        let new_table =
+            WritableKVTable::with_buffer_manager(self.table.write_buffer_manager.clone());
         let original_segments = self.table.touched_segments();
         let mut surviving_segments = std::collections::BTreeSet::new();
         let mut table_iter = self.table.iter();
@@ -350,7 +370,45 @@ impl ImmutableMemtable {
 }
 
 impl KVTable {
-    pub(crate) fn new() -> Self {
+    /// Fixed size of a `SequencedKey` struct: one `Bytes` handle (for `user_key`)
+    /// plus a `u64` sequence number. This is the key type stored in the SkipMap.
+    pub(crate) const SEQUENCED_KEY_SIZE: usize = std::mem::size_of::<SequencedKey>();
+
+    /// Fixed size of the `KVTable` struct itself (all inline fields, Arc
+    /// handles, atomics, etc.). Used when accounting for the base cost of
+    /// creating a new memtable.
+    pub(crate) const KVTABLE_SIZE: usize = std::mem::size_of::<KVTable>();
+
+    /// Estimated per-entry overhead for the crossbeam SkipMap node:
+    /// tower pointers (avg height ~1.3 at p=0.5), node header,
+    /// key/value storage, and alignment padding.
+    pub(crate) const SKIPMAP_ENTRY_OVERHEAD: usize = 128;
+
+    /// The SequenceTracker pre-allocates two Vec::with_capacity(8192) vectors
+    /// (one for u64 sequence numbers, one for i64 timestamps).
+    pub(crate) const SEQ_TRACKER_OVERHEAD: usize = 8192 * std::mem::size_of::<u64>() * 2;
+
+    // The theoretical minimum write-buffer capacity required to create a
+    // KVTable and write at least one entry without deadlocking on backpressure:
+    //
+    // Without WAL:
+    //   8192 * size_of::<u64>() * 2           (SequenceTracker pre-allocation)
+    //   + size_of::<Bytes>() * 2              (per-entry key/value handle overhead)
+    //   + 128                                 (SkipMap node overhead estimate)
+    //   + size_of::<SequencedKey>()           (SkipMap key struct)
+    //   + size_of::<KVTable>()                (base struct cost)
+    //   + size_of::<WalBuffer>()              (always created even if WAL disabled)
+    //
+    // With WAL (adds first VecDeque allocation on first push):
+    //   + 4 * size_of::<RowEntry>()           (VecDeque initial capacity)
+    //
+    // In practice we use a round 1MB minimum to provide comfortable headroom
+    // for real-world key/value sizes and multiple concurrent writes.
+
+    pub(crate) fn new(write_buffer_manager: ByteBufferManager) -> Self {
+        let write_buffer_permit = Arc::new(
+            write_buffer_manager.force_acquire(Self::SEQ_TRACKER_OVERHEAD + Self::KVTABLE_SIZE),
+        );
         Self {
             map: Arc::new(SkipMap::new()),
             entries_size_in_bytes: AtomicUsize::new(0),
@@ -360,6 +418,8 @@ impl KVTable {
             first_seq: AtomicU64::new(u64::MAX),
             sequence_tracker: Mutex::new(SequenceTracker::new()),
             touched_segments: Mutex::new(std::collections::BTreeSet::new()),
+            write_buffer_manager,
+            write_buffer_permit,
         }
     }
 
@@ -509,7 +569,23 @@ impl KVTable {
         iterator
     }
 
+    /// Inserts a row entry into the table.
+    ///
+    /// Acquires the per-entry structural overhead (`SKIPMAP_ENTRY_OVERHEAD +
+    /// SEQUENCED_KEY_SIZE`) from the buffer manager. The caller is responsible
+    /// for ensuring the key/value data bytes are already covered by the
+    /// table's `write_buffer_permit` (via `add_write_permit`).
+    ///
+    /// For the rare overwrite case (same SequencedKey already exists),
+    /// excess pre-allocated overhead is released back to the semaphore.
     pub(crate) fn put(&self, row: RowEntry) {
+        // Acquire per-entry skiplist overhead from the buffer manager.
+        let entry_overhead = Self::SKIPMAP_ENTRY_OVERHEAD
+            + std::mem::size_of::<SequencedKey>()
+            + std::mem::size_of::<RowEntry>();
+        self.write_buffer_manager
+            .force_expand(&self.write_buffer_permit, entry_overhead);
+
         let internal_key = SequencedKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
@@ -535,11 +611,24 @@ impl KVTable {
             true
         });
         if let Some(size) = previous_size.take() {
-            self.entries_size_in_bytes
-                .fetch_sub(size, Ordering::Relaxed);
-            self.entries_size_in_bytes
-                .fetch_add(row_size, Ordering::Relaxed);
+            // Overwrite (same SequencedKey): no new SkipMap node was created.
+            // Release the pre-allocated structural overhead that wasn't needed,
+            // plus the old entry's data budget (now replaced by the new entry).
+            let excess = Self::SKIPMAP_ENTRY_OVERHEAD + Self::SEQUENCED_KEY_SIZE + size;
+            let _ = self.write_buffer_permit.take(excess);
+            match size.cmp(&row_size) {
+                std::cmp::Ordering::Less => {
+                    self.entries_size_in_bytes
+                        .fetch_add(row_size - size, Ordering::Relaxed);
+                }
+                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Greater => {
+                    self.entries_size_in_bytes
+                        .fetch_sub(size - row_size, Ordering::Relaxed);
+                }
+            }
         } else {
+            // New entry: budget was pre-allocated by the caller.
             self.entries_size_in_bytes
                 .fetch_add(row_size, Ordering::Relaxed);
         }
@@ -560,6 +649,12 @@ impl KVTable {
 
     pub(crate) fn sequence_tracker_snapshot(&self) -> SequenceTracker {
         self.sequence_tracker.lock().clone()
+    }
+
+    /// Merges an external write-buffer budget permit into this table's
+    /// permit so that a single drop releases the combined reservation.
+    pub(crate) fn add_write_permit(&self, permit: &ByteBufferPermit) {
+        self.write_buffer_permit.merge(permit);
     }
 }
 
@@ -881,7 +976,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_returns_false_when_table_has_no_touched_segments() {
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         assert!(!table
             .ensure_valid_segment(&Bytes::from_static(b"abc"))
             .unwrap());
@@ -889,7 +984,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_returns_true_on_exact_match() {
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc"]));
         assert!(table
             .ensure_valid_segment(&Bytes::from_static(b"abc"))
@@ -898,7 +993,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_returns_false_when_disjoint() {
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc", b"xyz"]));
         // "def" sorts between but does not nest with either neighbor.
         assert!(!table
@@ -908,7 +1003,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_rejects_when_predecessor_is_proper_prefix() {
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc"]));
         let err = table
             .ensure_valid_segment(&Bytes::from_static(b"abcd"))
@@ -918,7 +1013,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_rejects_when_candidate_is_proper_prefix_of_successor() {
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"abc"]));
         let err = table
             .ensure_valid_segment(&Bytes::from_static(b"ab"))
@@ -930,7 +1025,7 @@ mod tests {
     fn ensure_valid_segment_only_inspects_immediate_neighbors() {
         // Predecessor "aa" doesn't nest with "ac"; successor "az" doesn't
         // either. The far-away "x" must not be consulted.
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"aa", b"az", b"x"]));
         assert!(!table
             .ensure_valid_segment(&Bytes::from_static(b"ac"))
@@ -939,7 +1034,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_handles_candidate_smaller_than_all() {
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"mmm", b"ppp"]));
         // "aaa" has no predecessor; "mmm" doesn't start with "aaa".
         assert!(!table
@@ -949,7 +1044,7 @@ mod tests {
 
     #[test]
     fn ensure_valid_segment_handles_candidate_larger_than_all() {
-        let table = KVTable::new();
+        let table = KVTable::new(ByteBufferManager::unbounded());
         table.record_touched_segments(touched(&[b"aaa", b"bbb"]));
         // "zzz" has no successor; predecessor "bbb" is not a prefix of "zzz".
         assert!(!table

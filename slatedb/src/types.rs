@@ -14,7 +14,7 @@ pub struct KeyValue {
 /// Represents a key-value pair that may be a tombstone.
 ///
 /// This is the entry type passed to compaction for each key value pair.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct RowEntry {
     /// The key bytes.
     pub key: Bytes,
@@ -26,6 +26,28 @@ pub struct RowEntry {
     pub create_ts: Option<i64>,
     /// The expiration timestamp (if set).
     pub expire_ts: Option<i64>,
+}
+
+impl Clone for RowEntry {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            seq: self.seq,
+            create_ts: self.create_ts,
+            expire_ts: self.expire_ts,
+        }
+    }
+}
+
+impl PartialEq for RowEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.value == other.value
+            && self.seq == other.seq
+            && self.create_ts == other.create_ts
+            && self.expire_ts == other.expire_ts
+    }
 }
 
 impl RowEntry {

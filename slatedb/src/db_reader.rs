@@ -1,3 +1,4 @@
+use crate::byte_buffer_manager::ByteBufferManager;
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -61,6 +62,7 @@ struct DbReaderInner {
     reader: Reader,
     status_manager: DbStatusManager,
     rand: Arc<DbRand>,
+    write_buffer_manager: ByteBufferManager,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
     /// See: https://github.com/slatedb/slatedb/issues/1469
@@ -82,7 +84,8 @@ struct CheckpointState {
     last_remote_persisted_seq: u64,
 }
 
-static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
+static EMPTY_TABLE: LazyLock<Arc<KVTable>> =
+    LazyLock::new(|| Arc::new(KVTable::new(ByteBufferManager::unbounded())));
 
 impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
@@ -115,6 +118,7 @@ impl DbReaderInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        write_buffer_manager: ByteBufferManager,
         mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
         let checkpoint =
@@ -129,6 +133,7 @@ impl DbReaderInner {
                 &options,
                 checkpoint,
                 replay_new_wals,
+                write_buffer_manager.clone(),
             )
             .await?,
         );
@@ -172,6 +177,7 @@ impl DbReaderInner {
             reader,
             status_manager,
             rand,
+            write_buffer_manager,
             recorder,
         })
     }
@@ -303,6 +309,7 @@ impl DbReaderInner {
                 current_checkpoint.core(),
                 &mut imm_memtable,
                 true,
+                self.write_buffer_manager.clone(),
             )
             .await?;
 
@@ -325,6 +332,7 @@ impl DbReaderInner {
         options: &DbReaderOptions,
         checkpoint: Checkpoint,
         replay_new_wals: bool,
+        write_buffer_manager: ByteBufferManager,
     ) -> Result<CheckpointState, SlateDBError> {
         let manifest = manifest_store.read_manifest(checkpoint.manifest_id).await?;
         let imm_memtable = VecDeque::new();
@@ -335,6 +343,7 @@ impl DbReaderInner {
             replay_new_wals,
             Arc::clone(&table_store),
             options,
+            write_buffer_manager,
         )
         .await
     }
@@ -378,6 +387,7 @@ impl DbReaderInner {
             !self.options.skip_wal_replay,
             Arc::clone(&self.table_store),
             &self.options,
+            self.write_buffer_manager.clone(),
         )
         .await
     }
@@ -389,6 +399,7 @@ impl DbReaderInner {
         replay_new_wals: bool,
         table_store: Arc<TableStore>,
         options: &DbReaderOptions,
+        write_buffer_manager: ByteBufferManager,
     ) -> Result<CheckpointState, SlateDBError> {
         let (last_wal_id, last_committed_seq) = Self::replay_wal_into(
             Arc::clone(&table_store),
@@ -396,6 +407,7 @@ impl DbReaderInner {
             &manifest.core,
             &mut imm_memtable,
             replay_new_wals,
+            write_buffer_manager,
         )
         .await?;
 
@@ -474,6 +486,7 @@ impl DbReaderInner {
         core: &ManifestCore,
         into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
+        write_buffer_manager: ByteBufferManager,
     ) -> Result<(u64, u64), SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
@@ -514,6 +527,7 @@ impl DbReaderInner {
             core,
             replay_options,
             Arc::clone(&table_store),
+            write_buffer_manager,
         )
         .await?;
 
@@ -747,6 +761,10 @@ impl DbReader {
             return Err(SlateDBError::InvalidDBState);
         }
 
+        // DbReader is read-only; it uses an unbounded buffer manager for WAL replay
+        // since it doesn't need write backpressure.
+        let write_buffer_manager = ByteBufferManager::unbounded();
+
         let status_manager = DbStatusManager::new_with_manifest(
             manifest.db_state().last_l0_seq,
             VersionedManifest::from_manifest(manifest.id(), manifest.manifest().clone()),
@@ -764,6 +782,7 @@ impl DbReader {
                 system_clock,
                 rand,
                 recorder,
+                write_buffer_manager,
                 manifest,
             )
             .await?,
@@ -1213,6 +1232,7 @@ fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> 
 #[cfg(test)]
 mod tests {
     use super::CheckpointState;
+    use crate::byte_buffer_manager::ByteBufferManager;
     use crate::clock::MonotonicClock;
     use crate::config::{
         CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, Settings,
@@ -1588,6 +1608,7 @@ mod tests {
             clock.clone(),
             test_provider.rand.clone(),
             recorder,
+            ByteBufferManager::unbounded(),
             stored_manifest,
         )
         .await
@@ -1709,6 +1730,7 @@ mod tests {
             &core,
             &mut into_tables,
             false,
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1773,6 +1795,7 @@ mod tests {
             &core,
             &mut into_tables,
             false,
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1824,6 +1847,7 @@ mod tests {
             &core,
             &mut into_tables,
             false,
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1859,6 +1883,7 @@ mod tests {
             &core,
             &mut into_tables,
             true,
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1889,6 +1914,7 @@ mod tests {
             &core,
             &mut into_tables,
             true,
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -1934,6 +1960,7 @@ mod tests {
             &core,
             &mut into_tables,
             true,
+            ByteBufferManager::unbounded(),
         )
         .await
         .unwrap();
@@ -2399,6 +2426,7 @@ mod tests {
             reader,
             status_manager: DbStatusManager::new(0),
             rand: test_provider.rand.clone(),
+            write_buffer_manager: ByteBufferManager::unbounded(),
             recorder,
         };
 
@@ -2480,6 +2508,7 @@ mod tests {
             reader,
             status_manager: DbStatusManager::new(0),
             rand: test_provider.rand.clone(),
+            write_buffer_manager: ByteBufferManager::unbounded(),
             recorder,
         }
     }

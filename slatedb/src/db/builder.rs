@@ -117,6 +117,7 @@ use tokio::runtime::Handle;
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
+use crate::byte_buffer_manager::ByteBufferManager;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
@@ -169,6 +170,15 @@ use slatedb_common::metrics::NoopMetricsRecorder;
 use slatedb_common::DbRand;
 use uuid::Uuid;
 
+/// The minimum write-buffer capacity enforced at build time (1 MB).
+///
+/// This must be large enough to cover the fixed overhead from:
+/// - `KVTable` (see `slatedb/src/mem_table.rs`): struct size, SequenceTracker
+///   pre-allocation, SkipMap node overhead, and per-entry key/value handles.
+/// - `WalBuffer` (see `slatedb/src/wal_buffer.rs`): struct size and the
+///   initial VecDeque allocation on first append.
+pub(crate) const MIN_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
+
 /// A builder for creating a new Db instance.
 ///
 /// This builder provides a fluent API for configuring and opening a SlateDB database.
@@ -191,6 +201,7 @@ pub struct DbBuilder<P: Into<Path>> {
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    write_buffer_manager: Option<ByteBufferManager>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -214,6 +225,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_policies: default_filter_policies(),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
+            write_buffer_manager: None,
         }
     }
 
@@ -226,6 +238,17 @@ impl<P: Into<Path>> DbBuilder<P> {
         extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
     ) -> Self {
         self.segment_extractor = Some(extractor);
+        self
+    }
+
+    /// Sets a custom [`WriteBufferManager`] for controlling the memory
+    /// budget of in-flight writes. If not set, a default manager is
+    /// created with a budget equal to `max_unflushed_bytes`.
+    ///
+    /// The capacity must be at least [`MIN_WRITE_BUFFER_SIZE`](Self::MIN_WRITE_BUFFER_SIZE)
+    /// (1 MB). Otherwise [`build`](Self::build) will return an error.
+    pub fn with_write_buffer_manager(mut self, write_buffer_manager: ByteBufferManager) -> Self {
+        self.write_buffer_manager = Some(write_buffer_manager);
         self
     }
 
@@ -584,6 +607,21 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
+        let write_buffer_manager = self.write_buffer_manager.unwrap_or_else(|| {
+            ByteBufferManager::new(
+                self.settings.max_unflushed_bytes,
+                self.settings.max_unflushed_bytes,
+            )
+        });
+        if write_buffer_manager.capacity() < MIN_WRITE_BUFFER_SIZE {
+            return Err(crate::Error::invalid(
+                format!(
+                    "invalid configuration: write_buffer_manager capacity ({}) must be at least MIN_WRITE_BUFFER_SIZE ({})",
+                    write_buffer_manager.capacity(),
+                    MIN_WRITE_BUFFER_SIZE,
+                )
+            ));
+        }
         let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
         let inner = Arc::new(
             DbInner::new(
@@ -599,6 +637,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.merge_operator.clone(),
                 status_manager.clone(),
                 self.segment_extractor.clone(),
+                write_buffer_manager,
             )
             .await?,
         );
@@ -1887,6 +1926,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 mod tests {
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::{CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings};
+    use crate::db::builder::MIN_WRITE_BUFFER_SIZE;
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
@@ -2116,6 +2156,57 @@ mod tests {
         );
 
         db.close().await.expect("failed to close db");
+    }
+
+    /// Validates that `MIN_WRITE_BUFFER_SIZE` is sufficient for a single write.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_min_write_buffer_size_is_sufficient() {
+        use crate::byte_buffer_manager::ByteBufferManager;
+
+        let capacity = MIN_WRITE_BUFFER_SIZE;
+        let db = crate::Db::builder(
+            "test_min_write_buffer_size_is_sufficient",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            flush_interval: Some(std::time::Duration::from_millis(10)),
+            max_unflushed_bytes: 1024 * 1024,
+            ..Settings::default()
+        })
+        .with_write_buffer_manager(ByteBufferManager::new(capacity, capacity))
+        .build()
+        .await
+        .expect("build with MIN_WRITE_BUFFER_SIZE should succeed");
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), db.put(b"k", b"")).await;
+        assert!(
+            result.is_ok(),
+            "put timed out — MIN_WRITE_BUFFER_SIZE may be too small"
+        );
+        result.unwrap().expect("put should succeed");
+
+        db.close().await.expect("close should succeed");
+    }
+
+    /// Validates that capacity below `MIN_WRITE_BUFFER_SIZE` is rejected.
+    #[tokio::test]
+    async fn test_write_buffer_below_minimum_is_rejected() {
+        use crate::byte_buffer_manager::ByteBufferManager;
+
+        let capacity = MIN_WRITE_BUFFER_SIZE - 1;
+        let result = crate::Db::builder(
+            "test_write_buffer_below_minimum_is_rejected",
+            Arc::new(InMemory::new()),
+        )
+        .with_write_buffer_manager(ByteBufferManager::new(capacity, 0))
+        .build()
+        .await;
+
+        assert!(
+            result.is_err(),
+            "build should reject capacity below MIN_WRITE_BUFFER_SIZE"
+        );
     }
 
     #[tokio::test]

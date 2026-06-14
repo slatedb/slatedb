@@ -13,7 +13,9 @@ use slatedb::fail_parallel::{self, FailPointRegistry};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+use slatedb::ByteBufferManager;
 use slatedb::{CompactorBuilder, Db};
+use slatedb_common::metrics::DefaultMetricsRecorder;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -205,6 +207,7 @@ async fn test_concurrent_writers_and_readers() {
         .with_max_delay(Duration::from_millis(1));
     // Always use a unique DB path per test run to avoid cross-run residue
     // in remote object stores (important for chaos scenarios).
+    let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
     let db = Arc::new(
         (|| async {
             let ts = std::time::SystemTime::now()
@@ -214,6 +217,8 @@ async fn test_concurrent_writers_and_readers() {
             let db_path = format!("/tmp/test_concurrent_writers_readers_{}", ts);
             Db::builder(db_path.clone(), object_store.clone())
                 .with_settings(config.clone())
+                .with_write_buffer_manager(ByteBufferManager::unbounded())
+                .with_metrics_recorder(metrics_recorder.clone())
                 .with_compactor_builder(
                     CompactorBuilder::new(db_path, object_store.clone())
                         .with_options(compactor_options.clone())
@@ -344,6 +349,27 @@ async fn test_concurrent_writers_and_readers() {
     futures::future::try_join_all(reader_handles)
         .await
         .expect("Reader handles failed");
+
+    // Print DB stats before closing
+    let snapshot = metrics_recorder.snapshot();
+    log::info!("=== DB Stats ===");
+    for metric in snapshot.all() {
+        let labels = if metric.labels.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{{{}}}",
+                metric
+                    .labels
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        log::info!("  {}{}: {}", metric.name, labels, metric.value);
+    }
+    log::info!("=== End DB Stats ===");
 
     // Close with retries to handle transient failures on teardown.
     (|| async { db.close().await })

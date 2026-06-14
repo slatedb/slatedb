@@ -4,6 +4,7 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
+use crate::byte_buffer_manager::{ByteBufferManager, ByteBufferPermit};
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
@@ -16,6 +17,7 @@ use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
+use std::sync::Arc;
 
 /// A batch of write operations (puts, deletes, and merges). All operations in
 /// the batch are applied atomically to the database. Put and delete operations
@@ -52,6 +54,7 @@ pub struct WriteBatch {
     pub(crate) ops: BTreeMap<Bytes, SmallVec<[WriteOp; 1]>>,
     pub(crate) op_count: usize,
     pub(crate) has_merge_ops: bool,
+    pub(crate) write_buffer_permit: Option<Arc<ByteBufferPermit>>,
 }
 
 impl Default for WriteBatch {
@@ -130,6 +133,14 @@ impl WriteOp {
             ),
         }
     }
+
+    /// Returns the estimated key/value byte size of this write operation
+    pub(crate) fn estimated_kv_size(&self, key: &Bytes) -> usize {
+        match self {
+            WriteOp::Put(value, _) | WriteOp::Merge(value, _) => key.len() + value.len(),
+            WriteOp::Delete => key.len(),
+        }
+    }
 }
 
 impl WriteBatch {
@@ -138,6 +149,7 @@ impl WriteBatch {
             ops: BTreeMap::new(),
             op_count: 0,
             has_merge_ops: false,
+            write_buffer_permit: None,
         }
     }
 
@@ -368,6 +380,25 @@ impl WriteBatch {
             entries.push(entry);
         }
         Ok((entries, touched_segments, entries_bytes))
+    }
+
+    pub(crate) fn set_write_buffer(&mut self, write_buffer_manager: &ByteBufferManager) {
+        let permit = write_buffer_manager.force_acquire(self.estimated_size());
+        self.write_buffer_permit = Some(Arc::new(permit));
+    }
+
+    /// Returns the total estimated key/value byte footprint of this batch.
+    /// Currently we don't track the size of the channel that the WriteBatch is
+    /// sent to so we only account for the key/value size here.
+    pub(crate) fn estimated_size(&self) -> usize {
+        self.ops
+            .iter()
+            .map(|(key, ops)| {
+                ops.iter()
+                    .map(|op| op.estimated_kv_size(key))
+                    .sum::<usize>()
+            })
+            .sum()
     }
 }
 

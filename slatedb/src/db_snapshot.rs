@@ -250,6 +250,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::byte_buffer_manager::ByteBufferManager;
     use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
@@ -299,6 +300,7 @@ mod tests {
 
         Db::builder("/tmp/snapshot_test", object_store)
             .with_settings(config)
+            .with_write_buffer_manager(ByteBufferManager::new(1024 * 1024, 1024 * 1024))
             .build()
             .await
             .expect("Failed to create test database")
@@ -739,6 +741,7 @@ mod tests {
             Db::builder("/tmp/failpoint_test", object_store)
                 .with_settings(config)
                 .with_fp_registry(fp_registry.clone())
+                .with_write_buffer_manager(ByteBufferManager::new(1024 * 1024, 1024 * 1024))
                 .build()
                 .await
                 .expect("Failed to create test database"),
