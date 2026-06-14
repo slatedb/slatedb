@@ -49,7 +49,6 @@ use crate::manifest::Manifest;
 /// watermark timestamp as `last_tick` and the offending ULID timestamp as
 /// `next_tick`. The txn-obj layer wraps the boxed error in `CallbackError`, which
 /// maps back to `SlateDBError::InvalidClockTick` for the caller.
-#[allow(dead_code)]
 pub(crate) fn l0_ulid_cutoff(
     dirty: &Manifest,
     current: &Manifest,
@@ -85,9 +84,9 @@ pub(crate) fn l0_ulid_cutoff(
 }
 
 /// The invariants enforced on every `.manifest` update (RFC-0025 GC cutoff
-/// rules). Will be attached once at [`StoredManifest`](super::store::StoredManifest)
-/// construction via `with_invariants` in the follow-up wiring PR.
-#[allow(dead_code)]
+/// rules). Attached once at [`StoredManifest`](super::store::StoredManifest)
+/// construction via `with_invariants`, so every manifest `update` validates the
+/// dirty value against the current committed value before the CAS write.
 pub(crate) fn manifest_invariants() -> Vec<Invariant<Manifest>> {
     vec![Arc::new(l0_ulid_cutoff)]
 }

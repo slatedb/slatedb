@@ -527,10 +527,6 @@ impl ManifestCore {
     /// and every segment. Returned as a `Ulid` (not a raw timestamp) so the L0
     /// cutoff invariant ([`l0_ulid_cutoff`](crate::manifest::invariants::l0_ulid_cutoff))
     /// and the open-time skew check share one definition of the watermark.
-    // TODO: Wire this into the manifest update path in a follow-up PR for
-    // https://github.com/slatedb/slatedb/issues/1707
-    // until then unit-tested via `l0_ulid_cutoff`.
-    #[allow(dead_code)]
     pub(crate) fn max_l0_ulid_timestamp_across_trees(&self) -> Option<ulid::Ulid> {
         self.trees()
             .filter_map(|tree| {
