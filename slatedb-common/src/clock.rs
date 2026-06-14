@@ -111,9 +111,6 @@ impl<'a> SystemClockTicker<'a> {
     /// ## Returns: `duration - (now - last_tick)`, the duration left before the next tick.
     fn calc_duration(&self) -> Duration {
         let zero = Duration::from_millis(0);
-        if self.last_tick == DateTime::<Utc>::MIN_UTC {
-            return zero;
-        }
         let now_dt = self.clock.now();
         let duration = if let Some((jitter, rand)) = &self.jitter {
             let min = jitter.start.as_nanos() as u64;
