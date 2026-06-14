@@ -17,7 +17,7 @@ use crate::compactions_store::CompactionsStore;
 use crate::config::GarbageCollectorOptions;
 pub use crate::db::builder::GarbageCollectorBuilder;
 use crate::db_status::ClosedResultWriter;
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -100,41 +100,41 @@ pub struct GarbageCollector {
 
 #[async_trait]
 impl MessageHandler<GcMessage> for GarbageCollector {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<GcMessage>>)> {
-        let mut tickers: Vec<(Duration, Box<MessageFactory<GcMessage>>)> = Vec::new();
+    fn tickers(&mut self) -> Vec<MessageTickerDef<GcMessage>> {
+        let mut tickers: Vec<MessageTickerDef<GcMessage>> = Vec::new();
 
         if let Some(opts) = self.options.manifest_options {
-            tickers.push((
+            tickers.push(MessageTickerDef::new(
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Manifest),
             ));
         }
         if let Some(opts) = self.options.wal_options {
-            tickers.push((
+            tickers.push(MessageTickerDef::new(
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Wal),
             ));
         }
         if let Some(opts) = self.options.wal_fence_options {
-            tickers.push((
+            tickers.push(MessageTickerDef::new(
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::WalFence),
             ));
         }
         if let Some(opts) = self.options.compacted_options {
-            tickers.push((
+            tickers.push(MessageTickerDef::new(
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Compacted),
             ));
         }
         if let Some(opts) = self.options.compactions_options {
-            tickers.push((
+            tickers.push(MessageTickerDef::new(
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Compactions),
             ));
         }
         if let Some(opts) = self.options.detach_options {
-            tickers.push((
+            tickers.push(MessageTickerDef::new(
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
                 Box::new(|| GcMessage::Detach),
             ));
@@ -1993,11 +1993,7 @@ mod tests {
             Arc::new(WatchableOnceCell::new()),
         );
 
-        let intervals: Vec<_> = gc
-            .tickers()
-            .into_iter()
-            .map(|(interval, _)| interval)
-            .collect();
+        let intervals: Vec<_> = gc.tickers().into_iter().map(|def| def.interval).collect();
         assert_eq!(
             intervals,
             vec![

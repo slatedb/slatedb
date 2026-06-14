@@ -6,7 +6,7 @@ use crate::db_cache_manager::{self, CacheTarget};
 use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -37,7 +37,6 @@ use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::time::Duration;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
@@ -578,8 +577,8 @@ struct ManifestPoller {
 
 #[async_trait]
 impl MessageHandler<DbReaderMessage> for ManifestPoller {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<DbReaderMessage>>)> {
-        vec![(
+    fn tickers(&mut self) -> Vec<MessageTickerDef<DbReaderMessage>> {
+        vec![MessageTickerDef::new(
             self.inner.options.manifest_poll_interval,
             Box::new(|| DbReaderMessage::PollManifest),
         )]

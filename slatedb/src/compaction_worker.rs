@@ -13,7 +13,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -29,7 +28,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
@@ -122,6 +121,7 @@ pub(crate) struct CompactionWorkerHandler {
     /// coordinator creates the file on first run; the worker tolerates its
     /// absence on early ticks.
     stored: Option<StoredCompactions>,
+    rand: Arc<DbRand>,
 }
 
 impl CompactionWorkerHandler {
@@ -132,6 +132,7 @@ impl CompactionWorkerHandler {
         manifest_store: Arc<ManifestStore>,
         executor: Arc<dyn CompactionExecutor + Send + Sync>,
         clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             worker_id,
@@ -142,6 +143,7 @@ impl CompactionWorkerHandler {
             clock,
             active_jobs: BTreeSet::new(),
             stored: None,
+            rand,
         }
     }
 
@@ -197,6 +199,7 @@ impl CompactionWorkerHandler {
             manifest_store.clone(),
             executor,
             system_clock.clone(),
+            rand.clone(),
         );
         (handler, rx)
     }
@@ -500,11 +503,16 @@ impl CompactionWorkerHandler {
 
 #[async_trait]
 impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<WorkerMessage>>)> {
-        vec![(
+    fn tickers(&mut self) -> Vec<MessageTickerDef<WorkerMessage>> {
+        // RFC-0025: spread `.compactions` polls across workers so they don't
+        // synchronize on the same read cadence. Each poll waits a random
+        // duration centered on `compactions_poll_interval` (the interval plus or
+        // minus half), so the mean poll rate is unchanged.
+        vec![MessageTickerDef::new(
             self.options.compactions_poll_interval,
             Box::new(|| WorkerMessage::PollCompactions),
-        )]
+        )
+        .with_jitter(0.5, self.rand.clone())]
     }
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
@@ -647,6 +655,7 @@ mod tests {
                 manifest_store.clone(),
                 executor.clone(),
                 clock,
+                Arc::new(DbRand::new(0)),
             );
             // `handle()` lazily loads `.compactions` on the first message; the
             // tests below drive the child fns (poll_and_claim, handle_finished,

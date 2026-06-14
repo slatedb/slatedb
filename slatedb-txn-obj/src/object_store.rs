@@ -28,7 +28,8 @@ use std::sync::Arc;
 /// - We rely on `put_if_not_exists` to enforce CAS at the storage layer. If a file with
 ///   the same id already exists, the write fails with `ObjectVersionExists`.
 pub struct ObjectStoreSequencedStorageProtocol<T> {
-    object_store: Box<dyn ObjectStore>,
+    object_store: Arc<dyn ObjectStore>,
+    dir_path: Path,
     codec: Box<dyn ObjectCodec<T>>,
     file_suffix: &'static str,
     boundary: Arc<dyn BoundaryObject>,
@@ -66,10 +67,8 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
         boundary: Arc<dyn BoundaryObject>,
     ) -> Self {
         Self {
-            object_store: Box::new(::object_store::prefix::PrefixStore::new(
-                object_store,
-                root_path.clone().join(subdir),
-            )),
+            object_store,
+            dir_path: root_path.clone().join(subdir),
             codec,
             file_suffix,
             boundary,
@@ -77,7 +76,9 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
     }
 
     fn path_for(&self, id: MonotonicId) -> Path {
-        Path::from(format!("{:020}.{}", id.id(), self.file_suffix))
+        self.dir_path
+            .clone()
+            .join(format!("{:020}.{}", id.id(), self.file_suffix))
     }
 
     fn parse_id(&self, path: &Path) -> Result<MonotonicId, TransactionalObjectError> {
@@ -107,7 +108,7 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
 /// that support conditional GETs to return `NotModified`; in that case the cached
 /// boundary is reused without fetching the object body again.
 pub struct ObjectStoreBoundaryObject {
-    object_store: Box<dyn ObjectStore>,
+    object_store: Arc<dyn ObjectStore>,
     filepath: Path,
     /// Caches the last observed boundary and object-store version metadata for
     /// conditional reads.
@@ -117,11 +118,11 @@ pub struct ObjectStoreBoundaryObject {
 impl ObjectStoreBoundaryObject {
     pub fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>, name: &str) -> Self {
         Self {
-            object_store: Box::new(::object_store::prefix::PrefixStore::new(
-                object_store,
-                root_path.clone().join("gc"),
-            )),
-            filepath: Path::from(format!("{name}.boundary")),
+            object_store,
+            filepath: root_path
+                .clone()
+                .join("gc")
+                .join(format!("{name}.boundary")),
             cache: Mutex::new(None),
         }
     }
@@ -391,8 +392,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
     ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
-        let base = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(base));
+        let mut files_stream = self.object_store.list(Some(&self.dir_path));
         let mut items = Vec::new();
         let id_range = (from, to);
         while let Some(file) = match files_stream.next().await.transpose() {
@@ -410,7 +410,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                 }
                 Err(e) => warn!(
                     "unknown file in directory [base={}, location={}, object_store={}, error={:?}]",
-                    base, file.location, self.object_store, e,
+                    self.dir_path, file.location, self.object_store, e,
                 ),
                 _ => {}
             }
@@ -864,6 +864,14 @@ mod tests {
         let all = store.list(Unbounded, Unbounded).await.unwrap();
         assert_eq!(4, all.len());
         assert!(all.windows(2).all(|w| w[0].id < w[1].id));
+        assert_eq!(
+            Path::from("/root/test/00000000000000000001.val"),
+            all[0].location
+        );
+        assert_eq!(
+            Path::from("/root/test/00000000000000000004.val"),
+            all[3].location
+        );
 
         let right_bounded = store.list(Unbounded, Excluded(3.into())).await.unwrap();
         assert_eq!(2, right_bounded.len());
@@ -909,7 +917,8 @@ mod tests {
         let flaky_store = Arc::new(FlakyListStore::new(inner, missing_id, present_id, "val"));
         let object_store: Arc<dyn ObjectStore> = flaky_store.clone();
         let store = ObjectStoreSequencedStorageProtocol {
-            object_store: Box::new(object_store),
+            object_store,
+            dir_path: Path::default(),
             codec: Box::new(TestValCodec),
             file_suffix: "val",
             boundary: Arc::new(ObjectStoreBoundaryObject::new(
