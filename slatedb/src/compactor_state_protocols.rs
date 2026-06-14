@@ -21,8 +21,8 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use crate::utils::IdGenerator;
-use crate::DbRand;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 /// A read-only view of compactor state suitable for consumers like GC.
 ///
@@ -145,6 +145,7 @@ impl CompactorStateWriter {
         let dirty_manifest = manifest.prepare_dirty()?;
         let dirty_compactions = loop {
             let mut dirty_compactions = compactions.prepare_dirty()?;
+
             // Reset scheduled and stale running compactions back to submitted on restart.
             // Scheduled compactions have no worker yet, so they always reset. Running
             // compactions are only reset if the worker's heartbeat has gone stale: a
@@ -163,7 +164,6 @@ impl CompactorStateWriter {
                 }
             });
             dirty_compactions.value.retain_active_and_last_finished();
-            // Persist recovery state before any refresh() can overwrite it.
             match compactions.update(dirty_compactions.clone()).await {
                 Ok(()) => break dirty_compactions,
                 Err(err) if err.is_sequenced_write_conflict() => {
@@ -172,7 +172,6 @@ impl CompactorStateWriter {
                 Err(err) => return Err(err),
             }
         };
-
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,

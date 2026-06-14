@@ -293,7 +293,6 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
-    use crate::rand::DbRand;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::FixedThreeBytePrefixExtractor;
@@ -306,6 +305,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;

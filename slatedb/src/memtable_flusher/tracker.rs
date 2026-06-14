@@ -536,7 +536,6 @@ mod tests {
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
-    use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::{SafeSender, WatchableOnceCell};
@@ -550,6 +549,7 @@ mod tests {
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
         MetricsRecorderHelper,
     };
+    use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;

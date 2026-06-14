@@ -16,9 +16,9 @@ use object_store::{
     PutPayload, PutResult, RenameOptions,
 };
 
-use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 /// Metadata key used to store the ULID for put operations.
 /// This is used to verify if a failed put actually succeeded.
@@ -547,7 +547,6 @@ impl ObjectStore for RetryingObjectStore {
 #[cfg(test)]
 mod tests {
     use super::RetryingObjectStore;
-    use crate::rand::DbRand;
     use crate::test_utils::FlakyObjectStore;
     use bytes::Bytes;
     use futures::TryStreamExt;
@@ -555,6 +554,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::DbRand;
     use slatedb_common::MockSystemClock;
     use std::sync::Arc;
     use std::time::Duration;

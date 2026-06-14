@@ -1105,7 +1105,6 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
-    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
@@ -1114,6 +1113,7 @@ mod tests {
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::DbRand;
 
     const ROOT: &str = "/root";
 

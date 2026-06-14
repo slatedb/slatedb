@@ -303,12 +303,12 @@ mod tests {
     use super::*;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::error;
-    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::DbRand;
     use slatedb_txn_obj::object_store::ObjectStoreBoundaryObject;
     use slatedb_txn_obj::{BoundaryObject, MonotonicId};
     use std::time::Duration;

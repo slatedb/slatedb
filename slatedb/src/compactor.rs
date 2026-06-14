@@ -81,11 +81,11 @@ use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
 use crate::manifest::{LsmTreeState, ManifestCore};
 use crate::merge_operator::MergeOperatorType;
-use crate::rand::DbRand;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::DbRand;
 
 pub use crate::compactor_state::{
     Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,

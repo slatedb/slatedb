@@ -53,8 +53,8 @@ use crate::tablestore::TableStore;
 use crate::utils::IdGenerator;
 #[cfg(feature = "compaction_filters")]
 use crate::CompactionFilterSupplier;
-use crate::DbRand;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 

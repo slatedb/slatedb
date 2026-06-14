@@ -63,7 +63,6 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
-use crate::rand::DbRand;
 use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
@@ -76,6 +75,7 @@ use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -2090,7 +2090,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
-    use crate::rand::DbRand;
     use crate::seq_tracker::FindOption;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
@@ -2113,6 +2112,7 @@ mod tests {
         lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricValue,
         MetricsRecorderHelper,
     };
+    use slatedb_common::DbRand;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::sync::atomic::{AtomicBool, Ordering};

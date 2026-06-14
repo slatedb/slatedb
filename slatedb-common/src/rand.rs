@@ -13,8 +13,8 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rand::RngCore;
-use rand::SeedableRng;
+use ::rand::RngCore;
+use ::rand::SeedableRng;
 use rand_xoshiro::Xoroshiro128PlusPlus;
 use thread_local::ThreadLocal;
 
@@ -35,10 +35,10 @@ pub(crate) type RngAlg = Xoroshiro128PlusPlus;
 /// ## Usage
 ///
 /// ```ignore
-/// use slate_db::rand::DbRand;
+/// use slatedb_common::DbRand;
 ///
 /// let rng = DbRand::new(42);
-/// let _ = rng.next_u64();
+/// let _ = rng.rng().next_u64();
 /// ```
 #[derive(Debug)]
 pub struct DbRand {
@@ -75,7 +75,7 @@ impl DbRand {
 
 impl Default for DbRand {
     fn default() -> Self {
-        Self::new(rand::random())
+        Self::new(::rand::random())
     }
 }
 

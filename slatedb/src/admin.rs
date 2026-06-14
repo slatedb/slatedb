@@ -17,7 +17,6 @@ use slatedb_common::clock::SystemClock;
 
 use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
-use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
 use crate::utils::WatchableOnceCell;
@@ -26,6 +25,7 @@ use chrono::{DateTime, Utc};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
+use slatedb_common::DbRand;
 use std::env;
 use std::env::VarError;
 use std::ops::{Bound, RangeBounds};
@@ -593,10 +593,15 @@ impl Admin {
     /// New writes will be written to the newly created db and will not be reflected in the
     /// parent database.
     ///
+    /// The first source's [`CloneSourceSpec`] is passed directly, so any `projection_range`
+    /// already set on it is preserved.  This matters when multiple sources are combined via
+    /// [`CloneBuilder::with_source`]: each source must carry its own per-source range so that
+    /// [`crate::manifest::Manifest::cloned_from_union`] sees non-overlapping effective ranges.
+    ///
     /// # Examples
     ///
     /// ```
-    /// use slatedb::admin::{Admin, AdminBuilder};
+    /// use slatedb::admin::{Admin, AdminBuilder, CloneSourceSpec};
     /// use slatedb::Db;
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::error::Error;
@@ -610,20 +615,15 @@ impl Admin {
     ///    db.close().await?;
     ///
     ///    let admin = AdminBuilder::new("clone_path", object_store).build();
-    ///    admin.create_clone_builder("parent_path", None).build().await?;
+    ///    admin.create_clone_builder_from_source(CloneSourceSpec::new("parent_path")).build().await?;
     ///
     ///    Ok(())
     /// }
     /// ```
-    pub fn create_clone_builder<P: Into<Path>>(
+    pub fn create_clone_builder_from_source(
         &self,
-        parent_path: P,
-        parent_checkpoint: Option<Uuid>,
+        source: CloneSourceSpec<(Bound<Bytes>, Bound<Bytes>)>,
     ) -> CloneBuilder<(Bound<Bytes>, Bound<Bytes>)> {
-        let source = match parent_checkpoint {
-            Some(cp) => CloneSourceSpec::with_checkpoint(parent_path, cp),
-            None => CloneSourceSpec::new(parent_path),
-        };
         CloneBuilder::new(
             self.path.clone(),
             source,
@@ -1254,6 +1254,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_clone_builder() {
+        use crate::admin::CloneSourceSpec;
         use crate::manifest::store::ManifestStore;
         use crate::Db;
 
@@ -1269,7 +1270,7 @@ mod tests {
         let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
 
         // Test basic builder without checkpoint
-        let r = admin.create_clone_builder(parent_path.clone(), None);
+        let r = admin.create_clone_builder_from_source(CloneSourceSpec::new(parent_path.clone()));
         r.build().await.expect("clone should succeed");
 
         // Verify clone was created
@@ -1329,14 +1330,14 @@ mod tests {
         // propagates through `cloned_from_union`.
         AdminBuilder::new(parent_path1.clone(), object_store.clone())
             .build()
-            .create_clone_builder(grandparent_path1.clone(), None)
+            .create_clone_builder_from_source(CloneSourceSpec::new(grandparent_path1.clone()))
             .build()
             .await
             .expect("parent clone 1 should succeed");
 
         AdminBuilder::new(parent_path2.clone(), object_store.clone())
             .build()
-            .create_clone_builder(grandparent_path2.clone(), None)
+            .create_clone_builder_from_source(CloneSourceSpec::new(grandparent_path2.clone()))
             .build()
             .await
             .expect("parent clone 2 should succeed");
@@ -1344,7 +1345,7 @@ mod tests {
         let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
 
         admin
-            .create_clone_builder(parent_path1.clone(), None)
+            .create_clone_builder_from_source(CloneSourceSpec::new(parent_path1.clone()))
             .with_source(CloneSourceSpec::new(parent_path2.clone()))
             .build()
             .await
