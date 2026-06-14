@@ -14,10 +14,13 @@ Table of Contents:
     - [ByteBufferManager](#bytebuffermanager)
     - [ByteBufferPermit](#bytebufferpermit)
     - [Integration into the Write Path](#integration-into-the-write-path)
+    - [Memory Tracking Responsibilities](#memory-tracking-responsibilities)
+    - [Size Estimation Algorithms](#size-estimation-algorithms)
     - [Memtable Permit Tracking](#memtable-permit-tracking)
     - [WAL Replay](#wal-replay)
     - [Backpressure Enhancement](#backpressure-enhancement)
     - [Public API and Builder](#public-api-and-builder)
+    - [Defaults](#defaults)
   - [Phase 2: Instance Registry for Intelligent Backpressure (WIP)](#phase-2-instance-registry-for-intelligent-backpressure-wip)
 - [Pathological Cases](#pathological-cases)
 - [Impact Analysis](#impact-analysis)
@@ -93,8 +96,8 @@ The `ByteBufferManager` addresses these opportunities by:
   memtable flush).
   - The memory usage of the allocated write buffers (both current and immutable) should count towards the limit. This should not be double counted if it is one allocation.
   - This will not track buffers used for compaction.
-  - DbReader instances should be able to use the memory budget in future interactions. 
-- The buffer memory limits should be observed as strictly as possible. Erroring towards over counting if needed. KVTable and other container struct allocation size do not count towards this.
+  - DbReader instances should be able to use the memory budget in future phases.
+- The buffer memory limits should be observed as strictly as possible, erring towards over-counting if needed. Both user-provided key/value bytes and structural overhead (KVTable, WalBuffer, SkipMap nodes, etc.) count towards the budget.
 - Provide an RAII permit lifecycle: acquire before write, release on memtable
   drop.
 - Complement (not replace) the existing `max_unflushed_bytes` backpressure.
@@ -102,20 +105,19 @@ The `ByteBufferManager` addresses these opportunities by:
 - (Phase 2) Allow callers to share a budget across multiple DB instances via
   `DbBuilder::with_write_buffer_manager()` and establish a registry pattern
   for intelligent backpressure.
-- The configuration of the memory manager should be as simple as possible -- ideally just one size. Additional configs can be added in future and then only if they are really needed.
-
+- The configuration of the memory manager should be as simple as possible — ideally just one size. Additional configs can be added in future and then only if they are really needed.
 
 ## Non-Goals
 
-- Replacing the existing `max_unflushed_bytes` backpressure mechanism entirely.
+- Replacing the existing `max_unflushed_bytes` backpressure mechanism entirely. 
+  - The existing mechanisms should be replaceable with this new system. It should just not be implemented as a part of the first iteration. 
 - Tracking block cache or read-path memory.
-- Track struct byte allocations that will never be released like `DbInner::write_notifier`.
-- Enforce a hard limit on memory. 
+- Tracking struct byte allocations that will never be released like `DbInner::write_notifier`.
+- Enforcing a hard limit on memory.
 - Guaranteeing exact byte-level accounting (estimates are conservative
   approximations).
 - (Phase 2) Per-instance tracking and intelligent backpressure policies — this
   RFC only outlines the direction.
-
 
 ## Design
 
@@ -583,8 +585,8 @@ When Phase 2 introduces shared budgets across instances, the following
 pathological case can arise: 1 to N instances obtain buffer permits so that the
 total allocated buffer is slightly under or equal to the high watermark. This
 will cause any write by any other instance to always trigger a small memtable to
-be flushed. Essentially making each instance write to any of the instances that
-don't own a significant portion of the buffer permits a new memtable. In order
+be flushed — essentially making each write to any instance that doesn't own a
+significant portion of the buffer permits produce a new memtable. In order
 to properly handle this kind of issue, the `ByteBufferManager` needs a way to
 know what allocations are being held and a mechanism to trigger their release.
 Phase 2's instance registry and intelligent backpressure policies are designed
@@ -771,8 +773,8 @@ reordered due to budget contention, and separates the concerns of tracking
 We could assign each writer its own slice of the budget, avoiding contention
 entirely. This would be more complex to configure and would not handle
 heterogeneous write sizes well (one writer with large batches would exhaust its
-slice while another's sits idle). A global budget with atomic CAS is simple and
-handles skewed workloads naturally.
+slice while another's sits idle). A global budget with lock-free atomics is
+simple and handles skewed workloads naturally.
 
 ## Open Questions
 
@@ -789,7 +791,7 @@ handles skewed workloads naturally.
 
 - [Issue #1669: Better Memory Management With A ByteBufferManager](https://github.com/slatedb/slatedb/issues/1669)
 - [PR #1 (prototype): adding the primitive](https://github.com/zach-schoenberger/slatedb/pull/1)
-- RocksDB [`ByteBufferManager`](https://github.com/facebook/rocksdb/wiki/Write-Buffer-Manager)
+- RocksDB [`WriteBufferManager`](https://github.com/facebook/rocksdb/wiki/Write-Buffer-Manager)
   — prior art for global memtable memory budgeting in an LSM engine.
 
 ## Updates
