@@ -93,7 +93,7 @@
 //! }
 //!
 //! let clock = Arc::new(DefaultSystemClock::default());
-//! let rand = Arc::new(slatedb::rand::DbRand::default());
+//! let rand = Arc::new(slatedb_common::DbRand::default());
 //! let (tx, rx) = async_channel::unbounded();
 //! let closed_result = WatchableOnceCell::new();
 //! let handle = Handle::current();
@@ -291,11 +291,11 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             .tickers()
             .into_iter()
             .map(|def| {
-                MessageDispatcherTicker::new(
-                    self.clock
-                        .ticker(def.interval, def.jitter, Some(self.rand.clone())),
-                    def,
-                )
+                let mut ticker = self.clock.ticker(def.interval);
+                if let Some(jitter) = def.jitter {
+                    ticker.with_jitter(jitter, self.rand.clone());
+                }
+                MessageDispatcherTicker::new(ticker, def)
             })
             .collect::<Vec<_>>();
         let mut ticker_futures: FuturesUnordered<_> =
