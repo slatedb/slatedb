@@ -92,6 +92,16 @@ pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
 pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
     let min_compaction_sources = rng.random_range(2..=4);
     let max_compaction_sources = rng.random_range(min_compaction_sources..=16);
+
+    // Draw the worker's poll interval and minimum heartbeat interval first, then derive
+    // `worker_heartbeat_timeout` from them. Drawing the heartbeat timeout independently can
+    // produce `timeout < interval`, which reclaims healthy jobs and livelocks compaction.
+    let compactions_poll_interval =
+        rng.random_range(Duration::from_millis(1)..Duration::from_secs(5));
+    let heartbeat_min_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(5));
+    let max_worker_heartbeat = heartbeat_min_interval.max(compactions_poll_interval);
+    let worker_heartbeat_timeout = max_worker_heartbeat * rng.random_range(3..=10);
+
     CompactorOptions {
         poll_interval: rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         manifest_update_timeout: rng
@@ -105,10 +115,8 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         .into(),
         worker: Some(CompactionWorkerOptions {
             max_concurrent_compactions: rng.random_range(1..=4),
-            compactions_poll_interval: rng
-                .random_range(Duration::from_millis(1)..Duration::from_secs(5)),
-            heartbeat_min_interval: rng
-                .random_range(Duration::from_millis(1)..Duration::from_secs(5)),
+            compactions_poll_interval,
+            heartbeat_min_interval,
             max_sst_size: rng.random_range(KIB_8..GIB_2),
             max_fetch_tasks: rng.random_range(1..=8),
             bytes_to_fetch: rng.random_range(KIB_8..=(8 * MIB_1)),
@@ -117,6 +125,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         metric_level: None,
         commit_compacted_interval: rng
             .random_range(Duration::from_millis(1)..Duration::from_secs(5)),
+        worker_heartbeat_timeout,
     }
 }
 
