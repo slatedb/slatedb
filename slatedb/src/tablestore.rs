@@ -9,19 +9,20 @@ use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_cache_manager::CacheTarget;
-use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
 use crate::error::SlateDBError;
 use crate::filter_policy::NamedFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
+use crate::object_store_intent::{ReadIntent, ReadKind, RetryReason, WriteIntent, WriteKind};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
@@ -37,27 +38,60 @@ pub(crate) struct TableStore {
     fp_registry: Arc<FailPointRegistry>,
     /// In-memory cache for data blocks, indices, and filters
     cache: Option<Arc<dyn DbCache>>,
+    /// Intent kind tagged on compacted-SST reads (L0 SSTs included)
+    /// issued by this instance, or `None` for an untagged store. WAL SST
+    /// reads carry no intent either way.
+    read_kind: Option<ReadKind>,
+    /// Intent kind tagged on compacted-SST writes (L0 flushes included)
+    /// issued by this instance, or `None` for an untagged store. WAL SST
+    /// writes carry no intent either way.
+    write_kind: Option<WriteKind>,
 }
 
 struct ReadOnlyObject {
     object_store: Arc<dyn ObjectStore>,
-    path: Path,
+    path: Arc<Path>,
+    intent: Option<ReadIntent>,
 }
 
 impl ReadOnlyBlob for ReadOnlyObject {
     async fn len(&self) -> Result<u64, SlateDBError> {
-        let object_metadata = self.object_store.head(&self.path).await?;
-        Ok(object_metadata.size)
+        let opts = GetOptions {
+            head: true,
+            extensions: self
+                .intent
+                .map(ReadIntent::into_extensions)
+                .unwrap_or_default(),
+            ..GetOptions::default()
+        };
+        let result = self.object_store.get_opts(&self.path, opts).await?;
+        Ok(result.meta.size)
     }
 
     async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
-        let bytes = self.object_store.get_range(&self.path, range).await?;
+        let opts = GetOptions {
+            range: Some(GetRange::Bounded(range)),
+            extensions: self
+                .intent
+                .map(ReadIntent::into_extensions)
+                .unwrap_or_default(),
+            ..GetOptions::default()
+        };
+        let result = self.object_store.get_opts(&self.path, opts).await?;
+        let bytes = result.bytes().await?;
         Ok(bytes)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
-        let file = self.object_store.get(&self.path).await?;
-        let bytes = file.bytes().await?;
+        let opts = GetOptions {
+            extensions: self
+                .intent
+                .map(ReadIntent::into_extensions)
+                .unwrap_or_default(),
+            ..GetOptions::default()
+        };
+        let result = self.object_store.get_opts(&self.path, opts).await?;
+        let bytes = result.bytes().await?;
         Ok(bytes)
     }
 }
@@ -75,6 +109,9 @@ pub struct SstFileMetadata {
 }
 
 impl TableStore {
+    /// Creates a table store whose calls carry no intents. Use
+    /// [`Self::new_with_intents`] for a store whose compacted-SST traffic
+    /// should be visible to caching wrappers.
     pub(crate) fn new<P: Into<Path>>(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
@@ -87,6 +124,29 @@ impl TableStore {
             PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
             block_cache,
+        )
+    }
+
+    /// Like [`Self::new`], but compacted-SST reads are tagged with
+    /// `read_kind` and compacted-SST writes with `write_kind`, fixed for
+    /// the instance's lifetime. WAL SST calls carry no intent regardless
+    /// of the kinds.
+    pub(crate) fn new_with_intents<P: Into<Path>>(
+        object_stores: ObjectStores,
+        sst_format: SsTableFormat,
+        root_path: P,
+        block_cache: Option<Arc<dyn DbCache>>,
+        read_kind: ReadKind,
+        write_kind: WriteKind,
+    ) -> Self {
+        Self::new_with_intents_and_fp_registry(
+            object_stores,
+            sst_format,
+            PathResolver::new(root_path),
+            Arc::new(FailPointRegistry::new()),
+            block_cache,
+            read_kind,
+            write_kind,
         )
     }
 
@@ -103,6 +163,30 @@ impl TableStore {
             path_resolver,
             fp_registry,
             cache,
+            read_kind: None,
+            write_kind: None,
+        }
+    }
+
+    /// Like [`Self::new_with_fp_registry`], but with intent kinds (see
+    /// [`Self::new_with_intents`]).
+    pub(crate) fn new_with_intents_and_fp_registry(
+        object_stores: ObjectStores,
+        sst_format: SsTableFormat,
+        path_resolver: PathResolver,
+        fp_registry: Arc<FailPointRegistry>,
+        cache: Option<Arc<dyn DbCache>>,
+        read_kind: ReadKind,
+        write_kind: WriteKind,
+    ) -> Self {
+        Self {
+            object_stores,
+            sst_format,
+            path_resolver,
+            fp_registry,
+            cache,
+            read_kind: Some(read_kind),
+            write_kind: Some(write_kind),
         }
     }
 
@@ -278,9 +362,9 @@ impl TableStore {
         let object_store = self.object_stores.store_for(&id);
         let path = self.path(&id);
         EncodedSsTableWriter {
-            id,
             builder: self.sst_format.table_builder(),
-            writer: BufWriter::new(object_store, path),
+            writer: intent_tagged_buf_writer(object_store, path, self.write_intent_for(&id)),
+            id,
             table_store: self.clone(),
             #[cfg(test)]
             blocks_written: 0,
@@ -314,19 +398,30 @@ impl TableStore {
             |_| Result::Err(slatedb_io_error())
         );
 
-        let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         match id {
             SsTableId::Compacted(_) => {
-                write_sst_streaming_in_object_store(object_store.clone(), &path, encoded_sst)
-                    .await?;
+                write_sst_streaming_in_object_store(
+                    self.object_stores.store_for(id),
+                    &path,
+                    encoded_sst,
+                    self.write_intent_for(id),
+                )
+                .await?;
             }
             // WAL SSTs rely on PutMode::Create for fencing. The generic
             // object_store multipart API cannot express that condition, so WALs
             // stay on the conditional single-PUT path for now.
             SsTableId::Wal(_) => {
                 let data = encoded_sst.remaining_as_bytes();
-                write_sst_in_object_store(object_store.clone(), id, &path, &data).await?;
+                write_sst_in_object_store(
+                    self.object_stores.store_for(id),
+                    id,
+                    &path,
+                    &data,
+                    self.write_intent_for(id),
+                )
+                .await?;
             }
         }
 
@@ -375,6 +470,7 @@ impl TableStore {
             &id,
             &self.path(&id),
             &Bytes::new(),
+            None,
         )
         .await
     }
@@ -450,7 +546,15 @@ impl TableStore {
     pub(crate) async fn metadata(&self, id: &SsTableId) -> Result<SstFileMetadata, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        let metadata = object_store.head(&path).await?;
+        let opts = GetOptions {
+            head: true,
+            extensions: self
+                .read_intent_for(id)
+                .map(ReadIntent::into_extensions)
+                .unwrap_or_default(),
+            ..GetOptions::default()
+        };
+        let metadata = object_store.get_opts(&path, opts).await?.meta;
         Ok(SstFileMetadata {
             id: *id,
             location: path,
@@ -509,28 +613,34 @@ impl TableStore {
     }
 
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
-        let object_store = self.object_stores.store_for(id);
-        let path = self.path(id);
-        let obj = ReadOnlyObject { object_store, path };
-        let (info, version) = self
-            .sst_format
-            .read_info_and_version(&obj)
-            .await
-            .map_err(|e| e.with_path(&obj.path))?;
+        let (info, version) = self.read_info_and_version(id).await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 
     #[cfg(test)]
     pub(crate) async fn read_sst_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
-        let object_store = self.object_stores.store_for(id);
-        let path = self.path(id);
-        let obj = ReadOnlyObject { object_store, path };
-        let (_, version) = self
-            .sst_format
-            .read_info_and_version(&obj)
-            .await
-            .map_err(|e| e.with_path(&obj.path))?;
+        let (_, version) = self.read_info_and_version(id).await?;
         Ok(version)
+    }
+
+    async fn read_info_and_version(
+        &self,
+        id: &SsTableId,
+    ) -> Result<(SsTableInfo, u16), SlateDBError> {
+        let object_store = self.object_stores.store_for(id);
+        let path = Arc::new(self.path(id));
+        read_with_validation_retry(self.read_intent_for(id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
+            self.sst_format
+                .read_info_and_version(&obj)
+                .await
+                .map_err(|e| e.with_path(&obj.path))
+        })
+        .await
     }
 
     /// Reads the filters of an SSTable. Every returned entry is decoded.
@@ -582,12 +692,19 @@ impl TableStore {
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        self.sst_format
-            .read_filters(&handle.info, &obj)
-            .await
-            .map_err(|e| e.with_path(&obj.path))
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
+            self.sst_format
+                .read_filters(&handle.info, &obj)
+                .await
+                .map_err(|e| e.with_path(&obj.path))
+        })
+        .await
     }
 
     /// Reads the stats block of an SSTable.
@@ -618,12 +735,19 @@ impl TableStore {
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        self.sst_format
-            .read_stats(&handle.info, &obj)
-            .await
-            .map_err(|e| e.with_path(&obj.path))
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
+            self.sst_format
+                .read_stats(&handle.info, &obj)
+                .await
+                .map_err(|e| e.with_path(&obj.path))
+        })
+        .await
     }
 
     /// Reads the index of an SSTable.
@@ -652,14 +776,20 @@ impl TableStore {
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        Ok(Arc::new(
+        let path = Arc::new(self.path(&handle.id));
+        let index = read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
             self.sst_format
                 .read_index(&handle.info, &obj)
                 .await
-                .map_err(|e| e.with_path(&obj.path))?,
-        ))
+                .map_err(|e| e.with_path(&obj.path))
+        })
+        .await?;
+        Ok(Arc::new(index))
     }
 
     /// Build a [`CacheLoader`] for a section-level cache entry (filter, stats,
@@ -672,42 +802,50 @@ impl TableStore {
     fn read_loader(&self, handle: &SsTableHandle, target: CacheTarget) -> CacheLoader {
         let info = handle.info.clone();
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
         let sst_format = self.sst_format.clone();
+        let intent = self.read_intent_for(&handle.id);
         Box::new(move || {
             Box::pin(async move {
-                let obj = ReadOnlyObject { object_store, path };
-                match target {
-                    CacheTarget::Filters => {
-                        let filters = sst_format
-                            .read_filters(&info, &obj)
-                            .await
-                            .map_err(|e| e.with_path(&obj.path))?;
-                        Ok(CachedEntry::with_filters(filters))
+                // Only the stats arm can produce `None` (stats_len > 0 but no
+                // stats decoded); filters and index always yield an entry.
+                let entry = read_with_validation_retry(intent, async |intent| {
+                    let obj = ReadOnlyObject {
+                        object_store: object_store.clone(),
+                        path: path.clone(),
+                        intent,
+                    };
+                    match target.clone() {
+                        CacheTarget::Filters => {
+                            let filters = sst_format
+                                .read_filters(&info, &obj)
+                                .await
+                                .map_err(|e| e.with_path(&obj.path))?;
+                            Ok(Some(CachedEntry::with_filters(filters)))
+                        }
+                        CacheTarget::Stats => {
+                            let stats = sst_format
+                                .read_stats(&info, &obj)
+                                .await
+                                .map_err(|e| e.with_path(&obj.path))?;
+                            Ok(stats.map(|s| CachedEntry::with_sst_stats(Arc::new(s))))
+                        }
+                        CacheTarget::Index => {
+                            let index = sst_format
+                                .read_index(&info, &obj)
+                                .await
+                                .map_err(|e| e.with_path(&obj.path))?;
+                            Ok(Some(CachedEntry::with_sst_index(Arc::new(index))))
+                        }
+                        CacheTarget::Data(_) => {
+                            unreachable!("data blocks use block_loader, not read_loader")
+                        }
                     }
-                    CacheTarget::Stats => {
-                        let stats = sst_format
-                            .read_stats(&info, &obj)
-                            .await
-                            .map_err(|e| e.with_path(&obj.path))?
-                            .ok_or_else(|| {
-                                crate::Error::data(
-                                    "stats_len > 0 but read_stats returned no stats".to_string(),
-                                )
-                            })?;
-                        Ok(CachedEntry::with_sst_stats(Arc::new(stats)))
-                    }
-                    CacheTarget::Index => {
-                        let index = sst_format
-                            .read_index(&info, &obj)
-                            .await
-                            .map_err(|e| e.with_path(&obj.path))?;
-                        Ok(CachedEntry::with_sst_index(Arc::new(index)))
-                    }
-                    CacheTarget::Data(_) => {
-                        unreachable!("data blocks use block_loader, not read_loader")
-                    }
-                }
+                })
+                .await?;
+                entry.ok_or_else(|| {
+                    crate::Error::data("stats_len > 0 but read_stats returned no stats".to_string())
+                })
             })
         })
     }
@@ -723,15 +861,23 @@ impl TableStore {
     ) -> CacheLoader {
         let info = handle.info.clone();
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
+        let path = Arc::new(self.path(&handle.id));
         let sst_format = self.sst_format.clone();
+        let intent = self.read_intent_for(&handle.id);
         Box::new(move || {
             Box::pin(async move {
-                let obj = ReadOnlyObject { object_store, path };
-                let block = sst_format
-                    .read_block(&info, &index, block_num, &obj)
-                    .await
-                    .map_err(|e| e.with_path(&obj.path))?;
+                let block = read_with_validation_retry(intent, async |intent| {
+                    let obj = ReadOnlyObject {
+                        object_store: object_store.clone(),
+                        path: path.clone(),
+                        intent,
+                    };
+                    sst_format
+                        .read_block(&info, &index, block_num, &obj)
+                        .await
+                        .map_err(|e| e.with_path(&obj.path))
+                })
+                .await?;
                 Ok(CachedEntry::with_block(Arc::new(block)))
             })
         })
@@ -743,18 +889,21 @@ impl TableStore {
         handle: &SsTableHandle,
         blocks: Range<usize>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
+        let index = self.read_index(handle, false).await?;
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = self
-            .sst_format
-            .read_index(&handle.info, &obj)
-            .await
-            .map_err(|e| e.with_path(&obj.path))?;
-        self.sst_format
-            .read_blocks(&handle.info, &index, blocks, &obj)
-            .await
-            .map_err(|e| e.with_path(&obj.path))
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
+            self.sst_format
+                .read_blocks(&handle.info, &index, blocks.clone(), &obj)
+                .await
+                .map_err(|e| e.with_path(&obj.path))
+        })
+        .await
     }
 
     /// Reads specified blocks from an SSTable using the provided index.
@@ -792,10 +941,8 @@ impl TableStore {
             }
         }
 
-        // Create a ReadOnlyObject for accessing the SSTable file
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
+        let path = Arc::new(self.path(&handle.id));
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
@@ -843,13 +990,22 @@ impl TableStore {
         }
         // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
-            let obj_ref = &obj;
-            let index_ref = &index;
+            let object_store = &object_store;
+            let path = &path;
+            let index = &index;
             async move {
-                self.sst_format
-                    .read_blocks(&handle.info, index_ref, range.clone(), obj_ref)
-                    .await
-                    .map_err(|e| e.with_path(&obj_ref.path))
+                read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+                    let obj = ReadOnlyObject {
+                        object_store: object_store.clone(),
+                        path: path.clone(),
+                        intent,
+                    };
+                    self.sst_format
+                        .read_blocks(&handle.info, index, range.clone(), &obj)
+                        .await
+                        .map_err(|e| e.with_path(&obj.path))
+                })
+                .await
             }
         }))
         .await;
@@ -888,13 +1044,21 @@ impl TableStore {
         handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
+        let index = self.read_index(handle, false).await?;
         let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
-        self.sst_format
-            .read_block(&handle.info, &index, block, &obj)
-            .await
+        let path = Arc::new(self.path(&handle.id));
+        read_with_validation_retry(self.read_intent_for(&handle.id), async |intent| {
+            let obj = ReadOnlyObject {
+                object_store: object_store.clone(),
+                path: path.clone(),
+                intent,
+            };
+            self.sst_format
+                .read_block(&handle.info, &index, block, &obj)
+                .await
+                .map_err(|e| e.with_path(&obj.path))
+        })
+        .await
     }
 
     fn path(&self, id: &SsTableId) -> Path {
@@ -970,11 +1134,94 @@ impl TableStore {
     }
 }
 
+/// Number of additional attempts after an SST read fails validation (CRC
+/// mismatch, decode error, decompression error). The retry carries
+/// `ReadIntent::retry` so a caching wrapper drops its local copy and fetches
+/// fresh bytes from upstream; if the fresh bytes fail validation too, the
+/// object itself is corrupt and more retries cannot help.
+const MAX_VALIDATION_RETRIES: usize = 1;
+
+/// Classifies an error as a recoverable SST validation failure that should be
+/// retried with a retry-tagged [`ReadIntent`], or `None` if it is not.
+fn validation_retry_reason(err: &SlateDBError) -> Option<RetryReason> {
+    match err {
+        SlateDBError::ChecksumMismatch { .. } => Some(RetryReason::CrcMismatch),
+        #[cfg(any(
+            feature = "snappy",
+            feature = "zlib",
+            feature = "lz4",
+            feature = "zstd"
+        ))]
+        SlateDBError::BlockDecompressionError => Some(RetryReason::DecompressionError),
+        SlateDBError::InvalidFlatbuffer(_)
+        | SlateDBError::EmptyBlock
+        | SlateDBError::EmptyBlockMeta
+        | SlateDBError::InvalidFilterBlock
+        | SlateDBError::BlockTransformError => Some(RetryReason::BlockDecodeError),
+        _ => None,
+    }
+}
+
+/// Runs `read` with the given intent, reissuing it with [`ReadIntent::retry`]
+/// set when the result is a recoverable validation failure (see
+/// [`validation_retry_reason`]). The retry tag tells a caching wrapper to drop
+/// any local copy of the object instead of serving the same corrupt bytes
+/// again; reads from an untagged store retry without a tag.
+async fn read_with_validation_retry<T, Fut>(
+    mut intent: Option<ReadIntent>,
+    mut read: impl FnMut(Option<ReadIntent>) -> Fut,
+) -> Result<T, SlateDBError>
+where
+    Fut: std::future::Future<Output = Result<T, SlateDBError>>,
+{
+    for _ in 0..MAX_VALIDATION_RETRIES {
+        let result = read(intent).await;
+        match result {
+            Err(ref err) => match validation_retry_reason(err) {
+                Some(reason) => {
+                    warn!(
+                        "retrying SST read after validation failure [reason={:?}, error={}]",
+                        reason, err
+                    );
+                    intent = intent.map(|i| i.with_retry(reason));
+                }
+                None => return result,
+            },
+            Ok(_) => return result,
+        }
+    }
+    read(intent).await
+}
+
+impl TableStore {
+    /// The intent for a read of `id`, if any: compacted-SST reads carry the
+    /// instance's read kind, WAL SST reads carry no intent.
+    fn read_intent_for(&self, id: &SsTableId) -> Option<ReadIntent> {
+        match id {
+            SsTableId::Wal(_) => None,
+            SsTableId::Compacted(_) => self.read_kind.map(ReadIntent::new),
+        }
+    }
+
+    /// The intent for a write of `id`, if any: compacted-SST writes carry the
+    /// instance's write kind, WAL SST writes carry no intent.
+    fn write_intent_for(&self, id: &SsTableId) -> Option<WriteIntent> {
+        match id {
+            SsTableId::Wal(_) => None,
+            SsTableId::Compacted(_) => self.write_kind.map(WriteIntent::new),
+        }
+    }
+}
+
 async fn wal_object_exists(
     object_store: &Arc<dyn ObjectStore>,
     path: &Path,
 ) -> Result<bool, SlateDBError> {
-    match object_store.head(path).await {
+    let opts = GetOptions {
+        head: true,
+        ..GetOptions::default()
+    };
+    match object_store.get_opts(path, opts).await {
         Ok(_) => Ok(true),
         Err(object_store::Error::NotFound { .. }) => Ok(false),
         Err(e) => Err(SlateDBError::from(e)),
@@ -986,9 +1233,15 @@ async fn write_sst_in_object_store(
     id: &SsTableId,
     path: &Path,
     data: &Bytes,
+    intent: Option<WriteIntent>,
 ) -> Result<(), SlateDBError> {
+    let opts = PutOptions {
+        mode: PutMode::Create,
+        extensions: intent.map(WriteIntent::into_extensions).unwrap_or_default(),
+        ..PutOptions::default()
+    };
     object_store
-        .put_opts(path, data.clone().into(), PutOptions::from(PutMode::Create))
+        .put_opts(path, data.clone().into(), opts)
         .await
         .map_err(|e| match e {
             object_store::Error::AlreadyExists { path: _, source: _ } => match id {
@@ -1007,14 +1260,36 @@ async fn write_sst_streaming_in_object_store(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
     encoded_sst: &EncodedSsTable,
+    intent: Option<WriteIntent>,
 ) -> Result<(), SlateDBError> {
-    let mut writer = BufWriter::new(object_store, path.clone());
+    let mut writer = intent_tagged_buf_writer(object_store, path.clone(), intent);
     for block in &encoded_sst.unconsumed_blocks {
         writer.put(block.encoded_bytes.clone()).await?;
     }
     writer.put(encoded_sst.footer.clone()).await?;
     writer.shutdown().await?;
     Ok(())
+}
+
+/// Builds a [`BufWriter`] whose upload carries `intent` in its extensions.
+///
+/// Caveat: object_store 0.13.2 drops the extensions on `BufWriter`'s
+/// single-PUT shutdown path (payload fits within the writer's capacity), so
+/// SSTs below that threshold reach wrappers untagged. Fixed upstream on the
+/// object_store main branch. The tagging becomes complete once the
+/// dependency picks the fix up. See the
+/// `bufwriter_*_write_intent` tests, which pin the current behavior and flag
+/// the upgrade.
+fn intent_tagged_buf_writer(
+    object_store: Arc<dyn ObjectStore>,
+    path: Path,
+    intent: Option<WriteIntent>,
+) -> BufWriter {
+    let writer = BufWriter::new(object_store, path);
+    match intent {
+        Some(intent) => writer.with_extensions(intent.into_extensions()),
+        None => writer,
+    }
 }
 
 pub(crate) struct EncodedSsTableWriter {
@@ -1039,10 +1314,10 @@ impl EncodedSsTableWriter {
     pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
         let mut encoded_sst = self.builder.build().await?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
-            self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+            self.writer.put(block.encoded_bytes).await?;
         }
 
-        self.writer.write_all(encoded_sst.footer.as_ref()).await?;
+        self.writer.put(encoded_sst.footer.clone()).await?;
         self.writer.shutdown().await?;
         self.table_store
             .cache_filters(self.id, encoded_sst.info.filter_offset, encoded_sst.filters)
@@ -1056,7 +1331,9 @@ impl EncodedSsTableWriter {
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
         while let Some(block) = self.builder.next_block() {
-            self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+            // BufWriter::put appends the Bytes without copying, unlike
+            // AsyncWriteExt::write_all.
+            self.writer.put(block.encoded_bytes).await?;
             #[cfg(test)]
             {
                 self.blocks_written += 1;
@@ -2655,5 +2932,336 @@ mod tests {
             1,
             "concurrent single-block reads must dedup into a single object-store read"
         );
+    }
+
+    mod intents {
+        use super::*;
+        use crate::db_state::SsTableHandle;
+        use crate::format::sst::EncodedSsTable;
+        use crate::object_store_intent::{
+            ReadIntent, ReadKind, RetryReason, WriteIntent, WriteKind,
+        };
+        use crate::test_utils::IntentRecordingObjectStore;
+        use object_store::memory::InMemory;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn recording_table_store(recording: &Arc<IntentRecordingObjectStore>) -> Arc<TableStore> {
+            recording_table_store_with_kinds(recording, ReadKind::Foreground, WriteKind::Flush)
+        }
+
+        fn recording_table_store_with_kinds(
+            recording: &Arc<IntentRecordingObjectStore>,
+            read_kind: ReadKind,
+            write_kind: WriteKind,
+        ) -> Arc<TableStore> {
+            let format = SsTableFormat {
+                block_size: 32,
+                min_filter_keys: 1,
+                ..SsTableFormat::default()
+            };
+            Arc::new(TableStore::new_with_intents(
+                ObjectStores::new(recording.clone(), None),
+                format,
+                Path::from(ROOT),
+                None,
+                read_kind,
+                write_kind,
+            ))
+        }
+
+        async fn build_sst(ts: &Arc<TableStore>, value_size: usize) -> EncodedSsTable {
+            let mut builder = ts.table_builder();
+            builder
+                .add(RowEntry::new(
+                    Bytes::from_static(b"key"),
+                    ValueDeletable::Value(Bytes::from(vec![b'x'; value_size])),
+                    0,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            builder.build().await.unwrap()
+        }
+
+        #[tokio::test]
+        async fn wal_writes_carry_no_intent() {
+            let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+            let ts = recording_table_store(&recording);
+
+            let sst = build_sst(&ts, 32).await;
+            ts.write_sst(&SsTableId::Wal(1), &sst, false).await.unwrap();
+            ts.write_wal_fence(2).await.unwrap();
+
+            let intents = recording.write_intents();
+            assert_eq!(intents.len(), 2);
+            assert!(intents.iter().all(|i| i.is_none()));
+        }
+
+        /// Documents the upstream BufWriter bug: object_store 0.13.2 drops
+        /// extensions on the single-PUT shutdown path, so compacted SSTs below
+        /// the BufWriter capacity reach wrappers untagged. Fixed on the
+        /// object_store main branch. When the dependency picks the fix up
+        /// this test fails and should be
+        /// updated to assert `Some(WriteIntent::flush())`.
+        #[tokio::test]
+        async fn bufwriter_small_payload_drops_write_intent() {
+            let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+            let ts = recording_table_store(&recording);
+
+            let sst = build_sst(&ts, 32).await;
+            ts.write_sst(&SsTableId::Compacted(ulid::Ulid::new()), &sst, false)
+                .await
+                .unwrap();
+
+            assert_eq!(recording.write_intents(), vec![None]);
+        }
+
+        #[tokio::test]
+        async fn bufwriter_large_payload_carries_write_intent() {
+            let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+            let ts = recording_table_store(&recording);
+
+            // Exceed the 10 MB BufWriter capacity to force the multipart path,
+            // which forwards extensions.
+            let sst = build_sst(&ts, 11 * 1024 * 1024).await;
+            ts.write_sst(&SsTableId::Compacted(ulid::Ulid::new()), &sst, false)
+                .await
+                .unwrap();
+
+            assert_eq!(recording.write_intents(), vec![Some(WriteIntent::flush())]);
+        }
+
+        #[tokio::test]
+        async fn compacted_write_intent_follows_write_kind() {
+            let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+            let ts = recording_table_store_with_kinds(
+                &recording,
+                ReadKind::Foreground,
+                WriteKind::CompactionOutput,
+            );
+
+            let sst = build_sst(&ts, 11 * 1024 * 1024).await;
+            ts.write_sst(&SsTableId::Compacted(ulid::Ulid::new()), &sst, false)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                recording.write_intents(),
+                vec![Some(WriteIntent::compaction_output())]
+            );
+        }
+
+        #[tokio::test]
+        async fn reads_carry_foreground_intent_by_default() {
+            let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+            let ts = recording_table_store(&recording);
+            let id = SsTableId::Compacted(ulid::Ulid::new());
+            let sst = build_sst(&ts, 256).await;
+            ts.write_sst(&id, &sst, false).await.unwrap();
+            recording.clear();
+
+            let handle = ts.open_sst(&id).await.unwrap();
+            let index = ts.read_index(&handle, false).await.unwrap();
+            ts.read_blocks_using_index(&handle, index, 0..1, false)
+                .await
+                .unwrap();
+            ts.metadata(&id).await.unwrap();
+
+            let range_intents = recording.get_intents(false);
+            assert!(!range_intents.is_empty());
+            assert!(range_intents
+                .iter()
+                .all(|i| *i == Some(ReadIntent::foreground())));
+            let head_intents = recording.get_intents(true);
+            assert!(!head_intents.is_empty());
+            assert!(head_intents
+                .iter()
+                .all(|i| *i == Some(ReadIntent::foreground())));
+        }
+
+        #[tokio::test]
+        async fn reads_carry_compaction_input_intent_when_configured() {
+            let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+            let ts = recording_table_store(&recording);
+            let id = SsTableId::Compacted(ulid::Ulid::new());
+            let sst = build_sst(&ts, 256).await;
+            ts.write_sst(&id, &sst, false).await.unwrap();
+            recording.clear();
+
+            let ts = recording_table_store_with_kinds(
+                &recording,
+                ReadKind::CompactionInput,
+                WriteKind::Flush,
+            );
+            let handle = ts.open_sst(&id).await.unwrap();
+            ts.read_index(&handle, false).await.unwrap();
+
+            let intents = recording.get_intents(false);
+            assert!(!intents.is_empty());
+            assert!(intents
+                .iter()
+                .all(|i| *i == Some(ReadIntent::compaction_input())));
+        }
+
+        /// Corrupts the body of range reads. When `heal_on_retry` is set,
+        /// reads tagged with `ReadIntent::retry` are served clean, modeling a
+        /// cache that drops its corrupt copy and refetches from upstream.
+        #[derive(Debug)]
+        struct CorruptingObjectStore {
+            inner: Arc<dyn ObjectStore>,
+            heal_on_retry: bool,
+            range_gets: AtomicUsize,
+        }
+
+        impl std::fmt::Display for CorruptingObjectStore {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "CorruptingObjectStore({})", self.inner)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ObjectStore for CorruptingObjectStore {
+            async fn get_opts(
+                &self,
+                location: &Path,
+                options: object_store::GetOptions,
+            ) -> object_store::Result<object_store::GetResult> {
+                if options.range.is_none() {
+                    return self.inner.get_opts(location, options).await;
+                }
+                self.range_gets.fetch_add(1, Ordering::SeqCst);
+                let is_retry = ReadIntent::from_extensions(&options.extensions)
+                    .is_some_and(|i| i.retry.is_some());
+                let result = self.inner.get_opts(location, options).await?;
+                if self.heal_on_retry && is_retry {
+                    return Ok(result);
+                }
+                let meta = result.meta.clone();
+                let range = result.range.clone();
+                let attributes = result.attributes.clone();
+                let mut body = result.bytes().await?.to_vec();
+                if let Some(byte) = body.first_mut() {
+                    *byte ^= 0xFF;
+                }
+                Ok(object_store::GetResult {
+                    payload: object_store::GetResultPayload::Stream(
+                        futures::stream::once(async move { Ok(Bytes::from(body)) }).boxed(),
+                    ),
+                    meta,
+                    range,
+                    attributes,
+                })
+            }
+
+            async fn put_opts(
+                &self,
+                location: &Path,
+                payload: object_store::PutPayload,
+                opts: object_store::PutOptions,
+            ) -> object_store::Result<object_store::PutResult> {
+                self.inner.put_opts(location, payload, opts).await
+            }
+
+            async fn put_multipart_opts(
+                &self,
+                location: &Path,
+                opts: object_store::PutMultipartOptions,
+            ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+                self.inner.put_multipart_opts(location, opts).await
+            }
+
+            fn delete_stream(
+                &self,
+                locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+            ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+                self.inner.delete_stream(locations)
+            }
+
+            fn list(
+                &self,
+                prefix: Option<&Path>,
+            ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+            {
+                self.inner.list(prefix)
+            }
+
+            async fn list_with_delimiter(
+                &self,
+                prefix: Option<&Path>,
+            ) -> object_store::Result<object_store::ListResult> {
+                self.inner.list_with_delimiter(prefix).await
+            }
+
+            async fn copy_opts(
+                &self,
+                from: &Path,
+                to: &Path,
+                options: object_store::CopyOptions,
+            ) -> object_store::Result<()> {
+                self.inner.copy_opts(from, to, options).await
+            }
+        }
+
+        /// Writes an SST to a clean store and returns a handle plus a
+        /// recording store that wraps a corrupting layer over the same data.
+        async fn corrupting_setup(
+            heal_on_retry: bool,
+        ) -> (
+            Arc<IntentRecordingObjectStore>,
+            Arc<CorruptingObjectStore>,
+            Arc<TableStore>,
+            SsTableHandle,
+        ) {
+            let backing = Arc::new(InMemory::new());
+            let clean_ts =
+                recording_table_store(&Arc::new(IntentRecordingObjectStore::new(backing.clone())));
+            let id = SsTableId::Compacted(ulid::Ulid::new());
+            let sst = build_sst(&clean_ts, 256).await;
+            clean_ts.write_sst(&id, &sst, false).await.unwrap();
+            let handle = clean_ts.open_sst(&id).await.unwrap();
+
+            let corrupting = Arc::new(CorruptingObjectStore {
+                inner: backing,
+                heal_on_retry,
+                range_gets: AtomicUsize::new(0),
+            });
+            let recording = Arc::new(IntentRecordingObjectStore::new(corrupting.clone()));
+            let ts = recording_table_store(&recording);
+            (recording, corrupting, ts, handle)
+        }
+
+        #[tokio::test]
+        async fn reissues_read_with_retry_intent_on_checksum_mismatch() {
+            let (recording, _corrupting, ts, handle) = corrupting_setup(true).await;
+
+            let index = ts.read_index(&handle, false).await;
+
+            assert!(index.is_ok(), "retry should recover: {:?}", index.err());
+            let intents = recording.get_intents(false);
+            assert_eq!(intents.len(), 2);
+            assert_eq!(intents[0], Some(ReadIntent::foreground()));
+            assert_eq!(
+                intents[1],
+                Some(ReadIntent::foreground().with_retry(RetryReason::CrcMismatch))
+            );
+        }
+
+        #[tokio::test]
+        async fn surfaces_checksum_mismatch_after_retries_exhausted() {
+            let (_recording, corrupting, ts, handle) = corrupting_setup(false).await;
+
+            let result = ts.read_index(&handle, false).await;
+
+            assert!(matches!(
+                result,
+                Err(error::SlateDBError::ChecksumMismatch { .. })
+            ));
+            assert_eq!(
+                corrupting.range_gets.load(Ordering::SeqCst),
+                1 + super::super::MAX_VALIDATION_RETRIES,
+                "one initial read plus the bounded retries"
+            );
+        }
     }
 }

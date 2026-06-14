@@ -227,6 +227,8 @@ mod tests {
     use crate::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
     use crate::db::Db;
     use crate::db_cache::{CachedKey, DbCache};
+    use crate::object_store_intent::ReadIntent;
+    use crate::test_utils::IntentRecordingObjectStore;
     use crate::DbCacheManagerOps;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -782,6 +784,36 @@ mod tests {
         assert!(
             cache.get_index(&index_key).await.unwrap().is_none(),
             "stats target must not fetch the index",
+        );
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_tag_warmup_reads_with_foreground_intent() {
+        // given: a flushed SST whose cache entries have been evicted, behind a
+        // store that records read intents
+        let recording = Arc::new(IntentRecordingObjectStore::new(Arc::new(InMemory::new())));
+        let db = open_db_single_sst(recording.clone()).await;
+        write_keys(&db, 64).await;
+        flush_to_l0(&db).await;
+        let sst_id = first_l0_sst_id(&db);
+        db.evict_cached_sst(sst_id).await.expect("evict");
+        recording.clear();
+
+        // when
+        db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
+            .await
+            .expect("warm_sst");
+
+        // then: every object store read issued by the warmup carries the
+        // foreground intent (warmup has no dedicated kind)
+        let intents = recording.get_intents(false);
+        assert!(!intents.is_empty(), "warmup should read from object store");
+        assert!(
+            intents.iter().all(|i| *i == Some(ReadIntent::foreground())),
+            "expected foreground intents, got {:?}",
+            intents,
         );
 
         db.close().await.expect("close");
