@@ -905,7 +905,6 @@ mod tests {
         let executor = crate::dispatcher::MessageHandlerExecutor::new(
             Arc::new(closed_result.clone()),
             system_clock,
-            Arc::new(slatedb_common::DbRand::new(0)),
         );
         let (tracker_tx, tracker_rx) =
             crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());

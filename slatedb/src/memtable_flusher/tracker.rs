@@ -826,7 +826,6 @@ mod tests {
         let executor = crate::dispatcher::MessageHandlerExecutor::new(
             Arc::new(closed_result.clone()) as Arc<dyn ClosedResultWriter>,
             system_clock,
-            Arc::new(slatedb_common::DbRand::new(0)),
         );
         let flusher = MemtableFlusher::new(&closed_result);
         flusher

@@ -1990,11 +1990,7 @@ mod tests {
         let (_, rx) = async_channel::unbounded();
         let clock = Arc::new(DefaultSystemClock::default());
         let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-        let executor = MessageHandlerExecutor::new(
-            closed_result,
-            clock,
-            Arc::new(slatedb_common::DbRand::new(0)),
-        );
+        let executor = MessageHandlerExecutor::new(closed_result, clock);
         executor
             .add_handler(
                 "garbage_collector".to_string(),

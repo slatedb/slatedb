@@ -324,11 +324,7 @@ impl Admin {
 
         let (_, rx) = async_channel::unbounded();
         let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(
-            closed_result,
-            self.system_clock.clone(),
-            self.rand.clone(),
-        );
+        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor
             .add_handler(

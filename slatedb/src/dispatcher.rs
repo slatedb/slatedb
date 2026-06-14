@@ -93,14 +93,12 @@
 //! }
 //!
 //! let clock = Arc::new(DefaultSystemClock::default());
-//! let rand = Arc::new(slatedb_common::DbRand::default());
 //! let (tx, rx) = async_channel::unbounded();
 //! let closed_result = WatchableOnceCell::new();
 //! let handle = Handle::current();
 //! let task_executor = MessageHandlerExecutor::new(
 //!     closed_result,
 //!     clock,
-//!     rand,
 //! );
 //! task_executor.add_handler(
 //!     "print_message_handler".to_string(),
@@ -158,7 +156,7 @@ pub(crate) struct MessageTickerDef<T: Send> {
     pub(crate) interval: Duration,
     /// The half-width of the jitter range, as a fraction of the interval.
     /// Each tick waits a uniform random duration in `[interval * (1 - jitter), interval * (1 + jitter)]`.
-    pub(crate) jitter: Option<f64>,
+    pub(crate) jitter: Option<(f64, Arc<DbRand>)>,
 }
 
 impl<T: Send> MessageTickerDef<T> {
@@ -174,8 +172,8 @@ impl<T: Send> MessageTickerDef<T> {
     /// Jitters each tick over `[interval * (1 - spread), interval * (1 + spread)]`.
     /// For example, `spread = 0.5` waits the interval plus or minus half. See
     /// [`MessageTickerDef`] for details.
-    pub(crate) fn with_jitter(mut self, spread: f64) -> Self {
-        self.jitter = Some(spread);
+    pub(crate) fn with_jitter(mut self, spread: f64, rand: Arc<DbRand>) -> Self {
+        self.jitter = Some((spread, rand));
         self
     }
 }
@@ -219,7 +217,6 @@ struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
     rx: async_channel::Receiver<T>,
     clock: Arc<dyn SystemClock>,
-    rand: Arc<DbRand>,
     cancellation_token: CancellationToken,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
@@ -241,14 +238,12 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         handler: Box<dyn MessageHandler<T>>,
         rx: async_channel::Receiver<T>,
         clock: Arc<dyn SystemClock>,
-        rand: Arc<DbRand>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             handler,
             rx,
             clock,
-            rand,
             cancellation_token,
             fp_registry: Arc::new(FailPointRegistry::new()),
         }
@@ -292,8 +287,8 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             .into_iter()
             .map(|def| {
                 let mut ticker = self.clock.ticker(def.interval);
-                if let Some(jitter) = def.jitter {
-                    ticker.with_jitter(jitter, self.rand.clone());
+                if let Some(ref jitter) = def.jitter {
+                    ticker.with_jitter(jitter.0, jitter.1.clone());
                 }
                 MessageDispatcherTicker::new(ticker, def)
             })
@@ -653,8 +648,6 @@ pub(crate) struct MessageHandlerExecutor {
     closed_result: Arc<dyn ClosedResultWriter>,
     /// A system clock for time keeping.
     clock: Arc<dyn SystemClock>,
-    /// A random number generator passed to each dispatcher for jittered tickers.
-    rand: Arc<DbRand>,
     /// A fail point registry for fail points.
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
@@ -675,13 +668,11 @@ impl MessageHandlerExecutor {
     pub(crate) fn new(
         closed_result: Arc<dyn ClosedResultWriter>,
         clock: Arc<dyn SystemClock>,
-        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             futures: Mutex::new(Some(vec![])),
             closed_result,
             clock,
-            rand,
             tokens: SkipMap::new(),
             results: Arc::new(SkipMap::new()),
             fp_registry: Arc::new(FailPointRegistry::new()),
@@ -745,14 +736,9 @@ impl MessageHandlerExecutor {
         let mut futures = Vec::with_capacity(handlers.len());
 
         for (group_index, handler) in handlers.into_iter().enumerate() {
-            let dispatcher = MessageDispatcher::new(
-                handler,
-                rx.clone(),
-                self.clock.clone(),
-                self.rand.clone(),
-                token.clone(),
-            )
-            .with_fp_registry(self.fp_registry.clone());
+            let dispatcher =
+                MessageDispatcher::new(handler, rx.clone(), self.clock.clone(), token.clone())
+                    .with_fp_registry(self.fp_registry.clone());
             let future = dispatcher.run_lifecycle(
                 name.clone(),
                 self.closed_result.clone(),
@@ -912,7 +898,7 @@ mod test {
         tickers: Vec<(Duration, u8)>,
         clock: Arc<dyn SystemClock>,
         clock_schedule: VecDeque<Duration>,
-        jitter: Option<f64>,
+        jitter: Option<(f64, Arc<DbRand>)>,
     }
 
     impl TestHandler {
@@ -943,8 +929,8 @@ mod test {
             self
         }
 
-        fn with_jitter(mut self, spread: f64) -> Self {
-            self.jitter = Some(spread);
+        fn with_jitter(mut self, spread: f64, rand: Arc<DbRand>) -> Self {
+            self.jitter = Some((spread, rand));
             self
         }
     }
@@ -957,7 +943,7 @@ mod test {
                 let id = *id as i32;
                 let mut def =
                     MessageTickerDef::new(*interval, Box::new(move || TestMessage::Tick(id)));
-                def.jitter = self.jitter;
+                def.jitter = self.jitter.clone();
                 tickers.push(def);
             }
             tickers
@@ -1010,14 +996,13 @@ mod test {
         // its wait and can only fire once the clock advances.
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(100), 1)
-            .with_jitter(0.5);
+            .with_jitter(0.5, Arc::new(DbRand::new(0)));
         let cancellation_token = CancellationToken::new();
         let fp = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
-            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp.clone());
@@ -1085,7 +1070,6 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
-            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp.clone());
@@ -1142,12 +1126,8 @@ mod test {
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
         let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let task_executor = MessageHandlerExecutor::new(
-            closed_result.clone(),
-            clock.clone(),
-            Arc::new(DbRand::new(0)),
-        )
-        .with_fp_registry(fp_registry.clone());
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
+            .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
         task_executor
@@ -1215,7 +1195,6 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
-            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1287,7 +1266,6 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
-            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1363,7 +1341,6 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
-            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1439,7 +1416,6 @@ mod test {
             Box::new(handler),
             rx,
             clock.clone(),
-            Arc::new(DbRand::new(0)),
             cancellation_token.clone(),
         )
         .with_fp_registry(fp_registry.clone());
@@ -1516,11 +1492,7 @@ mod test {
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(
-            closed_result.clone(),
-            clock.clone(),
-            Arc::new(DbRand::new(0)),
-        );
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
 
         // Spawn the panic task
         task_executor
@@ -1573,12 +1545,8 @@ mod test {
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
         let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let task_executor = MessageHandlerExecutor::new(
-            closed_result.clone(),
-            clock.clone(),
-            Arc::new(DbRand::new(0)),
-        )
-        .with_fp_registry(fp_registry.clone());
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
+            .with_fp_registry(fp_registry.clone());
 
         fail_parallel::cfg(
             fp_registry.clone(),
@@ -1741,8 +1709,7 @@ mod test {
             .with_block_on(block2.clone());
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor =
-            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)));
+        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -1794,8 +1761,7 @@ mod test {
             .add_ticker(Duration::from_millis(1), 20);
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor =
-            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)));
+        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -1851,8 +1817,7 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), cleanup2).with_error_after(1);
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor =
-            MessageHandlerExecutor::new(closed_result.clone(), clock, Arc::new(DbRand::new(0)));
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock);
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -1910,11 +1875,7 @@ mod test {
             .with_block_on(block2.clone());
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor = Arc::new(MessageHandlerExecutor::new(
-            closed_result,
-            clock,
-            Arc::new(DbRand::new(0)),
-        ));
+        let task_executor = Arc::new(MessageHandlerExecutor::new(closed_result, clock));
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -1968,8 +1929,7 @@ mod test {
 
         let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor =
-            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)))
-                .with_fp_registry(fp_registry.clone());
+            MessageHandlerExecutor::new(closed_result, clock).with_fp_registry(fp_registry.clone());
         // Pause the run loop so messages queue up
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         task_executor
@@ -2028,8 +1988,7 @@ mod test {
         );
 
         let closed_result = Arc::new(WatchableOnceCell::new());
-        let task_executor =
-            MessageHandlerExecutor::new(closed_result, clock, Arc::new(DbRand::new(0)));
+        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -2161,13 +2120,8 @@ mod test {
         };
 
         let cancellation_token = CancellationToken::new();
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(handler),
-            rx,
-            clock,
-            Arc::new(DbRand::new(0)),
-            cancellation_token.clone(),
-        );
+        let mut dispatcher =
+            MessageDispatcher::new(Box::new(handler), rx, clock, cancellation_token.clone());
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Send work that requires watermark >= 5.

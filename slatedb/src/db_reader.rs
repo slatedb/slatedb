@@ -750,11 +750,8 @@ impl DbReader {
             manifest.db_state().last_l0_seq,
             VersionedManifest::from_manifest(manifest.id(), manifest.manifest().clone()),
         );
-        let task_executor = MessageHandlerExecutor::new(
-            Arc::new(status_manager.clone()),
-            system_clock.clone(),
-            rand.clone(),
-        );
+        let task_executor =
+            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let inner = Arc::new(
             DbReaderInner::new(
                 manifest_store,

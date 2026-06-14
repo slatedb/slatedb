@@ -418,7 +418,6 @@ mod tests {
         let executor = Arc::new(crate::dispatcher::MessageHandlerExecutor::new(
             Arc::new(closed_result.clone()),
             system_clock,
-            Arc::new(slatedb_common::DbRand::new(0)),
         ));
         let uploader = Uploader::start(
             Arc::clone(db),
