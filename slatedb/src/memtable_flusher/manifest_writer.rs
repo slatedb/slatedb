@@ -214,13 +214,8 @@ struct ManifestWriterHandler {
 
 #[async_trait]
 impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
-    fn tickers(
-        &mut self,
-    ) -> Vec<(
-        Duration,
-        Box<crate::dispatcher::MessageFactory<ManifestWriterCommand>>,
-    )> {
-        vec![(
+    fn tickers(&mut self) -> Vec<crate::dispatcher::MessageTickerDef<ManifestWriterCommand>> {
+        vec![crate::dispatcher::MessageTickerDef::new(
             self.manifest_poll_interval,
             Box::new(|| ManifestWriterCommand::PollManifest { done: None }),
         )]
