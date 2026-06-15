@@ -479,8 +479,6 @@ pub enum SsTableId {
 /// Metadata describing an object in object storage.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ObjectMetadata {
-    /// Parsed object identifier.
-    pub id: String,
     /// Last-modified timestamp seconds component.
     pub last_modified_seconds: i64,
     /// Last-modified timestamp nanoseconds component.
@@ -495,13 +493,9 @@ pub struct ObjectMetadata {
     pub version: Option<String>,
 }
 
-impl<Id> From<slatedb::ObjectMetadata<Id>> for ObjectMetadata
-where
-    Id: ToString,
-{
-    fn from(metadata: slatedb::ObjectMetadata<Id>) -> Self {
+impl From<slatedb::ObjectMetadata> for ObjectMetadata {
+    fn from(metadata: slatedb::ObjectMetadata) -> Self {
         Self {
-            id: metadata.id.to_string(),
             last_modified_seconds: metadata.last_modified.timestamp(),
             last_modified_nanos: metadata.last_modified.timestamp_subsec_nanos(),
             size: metadata.size,

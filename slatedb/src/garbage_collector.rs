@@ -478,9 +478,9 @@ mod tests {
         // Verify that the manifests are there as expected
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].id, 1);
-        assert_eq!(manifests[1].id, 2);
-        assert_eq!(manifests[0].last_modified, now_minus_24h);
+        assert_eq!(manifests[0].0, 1);
+        assert_eq!(manifests[1].0, 2);
+        assert_eq!(manifests[0].1.last_modified, now_minus_24h);
 
         // Start the garbage collector
         run_gc_once(
@@ -494,7 +494,7 @@ mod tests {
         // Verify that the first manifest was deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].id, 2);
+        assert_eq!(manifests[0].0, 2);
     }
 
     #[tokio::test]
@@ -519,8 +519,8 @@ mod tests {
         // Verify that the manifests are there as expected
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].id, 1);
-        assert_eq!(manifests[1].id, 2);
+        assert_eq!(manifests[0].0, 1);
+        assert_eq!(manifests[1].0, 2);
 
         // Start the garbage collector
         run_gc_once(
@@ -534,8 +534,8 @@ mod tests {
         // Verify that no manifests were deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].id, 1);
-        assert_eq!(manifests[1].id, 2);
+        assert_eq!(manifests[0].0, 1);
+        assert_eq!(manifests[1].0, 2);
     }
 
     #[tokio::test]
@@ -590,7 +590,7 @@ mod tests {
 
         let compactions = compactions_store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 1);
-        assert_eq!(compactions[0].id, 3);
+        assert_eq!(compactions[0].0, 3);
     }
 
     #[tokio::test]
@@ -641,8 +641,8 @@ mod tests {
         // Verify that no compaction files were deleted
         let compactions = compactions_store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 2);
-        assert_eq!(compactions[0].id, 1);
-        assert_eq!(compactions[1].id, 2);
+        assert_eq!(compactions[0].0, 1);
+        assert_eq!(compactions[1].0, 2);
     }
 
     fn new_checkpoint(manifest_id: u64, expire_time: Option<DateTime<Utc>>) -> Checkpoint {
@@ -751,8 +751,8 @@ mod tests {
         // should be retained.
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].id, 2);
-        assert_eq!(manifests[1].id, 4);
+        assert_eq!(manifests[0].0, 2);
+        assert_eq!(manifests[1].0, 4);
     }
 
     #[tokio::test]
@@ -817,8 +817,8 @@ mod tests {
         // checkpoint should be retained. The rest should be deleted.
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].id, 1);
-        assert_eq!(manifests[1].id, 4);
+        assert_eq!(manifests[0].0, 1);
+        assert_eq!(manifests[1].0, 4);
     }
 
     #[tokio::test]
@@ -855,10 +855,10 @@ mod tests {
         // Verify that the manifests are there as expected
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].id, 1);
-        assert_eq!(manifests[1].id, 2);
-        assert_eq!(manifests[0].last_modified, now_minus_24h_1);
-        assert_eq!(manifests[1].last_modified, now_minus_24h_2);
+        assert_eq!(manifests[0].0, 1);
+        assert_eq!(manifests[1].0, 2);
+        assert_eq!(manifests[0].1.last_modified, now_minus_24h_1);
+        assert_eq!(manifests[1].1.last_modified, now_minus_24h_2);
 
         // Start the garbage collector
         run_gc_once(
@@ -872,7 +872,7 @@ mod tests {
         // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].id, 2);
+        assert_eq!(manifests[0].0, 2);
     }
 
     async fn write_sst(
@@ -919,9 +919,9 @@ mod tests {
         // Verify that the WAL SST is there as expected
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 2);
-        assert_eq!(wal_ssts[0].id, id1);
-        assert_eq!(wal_ssts[1].id, id2);
-        assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
+        assert_eq!(wal_ssts[0].0, id1);
+        assert_eq!(wal_ssts[1].0, id2);
+        assert_eq!(wal_ssts[0].1.last_modified, now_minus_24h);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
@@ -942,7 +942,7 @@ mod tests {
         // Verify that the first WAL was deleted and the second is kept
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
-        assert_eq!(wal_ssts[0].id, id2);
+        assert_eq!(wal_ssts[0].0, id2);
     }
 
     #[tokio::test]
@@ -1002,8 +1002,8 @@ mod tests {
         // but the reference in the checkpoint is still active.
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 2);
-        assert_eq!(wal_ssts[0].id, id2);
-        assert_eq!(wal_ssts[1].id, id3);
+        assert_eq!(wal_ssts[0].0, id2);
+        assert_eq!(wal_ssts[1].0, id3);
     }
 
     #[tokio::test]
@@ -1055,10 +1055,10 @@ mod tests {
         // Verify that the WAL SST is there as expected
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 2);
-        assert_eq!(wal_ssts[0].id, id1);
-        assert_eq!(wal_ssts[1].id, id2);
-        assert_eq!(wal_ssts[0].last_modified, now_minus_24h_1);
-        assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
+        assert_eq!(wal_ssts[0].0, id1);
+        assert_eq!(wal_ssts[1].0, id2);
+        assert_eq!(wal_ssts[0].1.last_modified, now_minus_24h_1);
+        assert_eq!(wal_ssts[1].1.last_modified, now_minus_24h_2);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
@@ -1079,7 +1079,7 @@ mod tests {
         // Verify that the first WAL was deleted and the second is kept even though it's expired
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
-        assert_eq!(wal_ssts[0].id, id2);
+        assert_eq!(wal_ssts[0].0, id2);
     }
 
     #[tokio::test]
@@ -1140,8 +1140,8 @@ mod tests {
 
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
-        assert_eq!(wal_ssts[0].id, fence_id);
-        assert_eq!(wal_ssts[0].size, 0);
+        assert_eq!(wal_ssts[0].0, fence_id);
+        assert_eq!(wal_ssts[0].1.size, 0);
     }
 
     #[tokio::test]
@@ -1206,9 +1206,9 @@ mod tests {
         gc.run_gc_once().await;
 
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
-        let wal_ids = wal_ssts.iter().map(|sst| sst.id).collect::<Vec<_>>();
+        let wal_ids = wal_ssts.iter().map(|(id, _)| *id).collect::<Vec<_>>();
         assert_eq!(wal_ids, vec![regular_wal_id]);
-        assert!(wal_ssts[0].size > 0);
+        assert!(wal_ssts[0].1.size > 0);
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
@@ -1346,8 +1346,8 @@ mod tests {
 
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
-        assert_eq!(wal_ssts[0].id, regular_wal_id_2);
-        assert!(wal_ssts[0].size > 0);
+        assert_eq!(wal_ssts[0].0, regular_wal_id_2);
+        assert!(wal_ssts[0].1.size > 0);
     }
 
     /// This test creates eight compacted SSTs:
@@ -1411,7 +1411,7 @@ mod tests {
         // Verify that the compacted SSTs are there as expected
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 8);
-        let ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
+        let ids: HashSet<_> = compacted_ssts.iter().map(|(id, _)| *id).collect();
         for expected in [
             l0_sst_handle.id,
             active_expired_l0_sst_handle.id,
@@ -1448,7 +1448,7 @@ mod tests {
         // Verify that only inactive, expired SSTs were deleted.
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 6);
-        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
+        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|(id, _)| *id).collect();
         // Still-present SSTs
         for expected in [
             l0_sst_handle.id,
@@ -1552,7 +1552,7 @@ mod tests {
         // Verify that the active tables are still there
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 4);
-        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
+        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|(id, _)| *id).collect();
         assert!(remaining_ids.contains(&active_l0_sst_handle.id));
         assert!(remaining_ids.contains(&active_checkpoint_l0_sst_handle.id));
         assert!(remaining_ids.contains(&active_sst_handle.id));
@@ -1576,7 +1576,7 @@ mod tests {
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         // After dropping the checkpoint, the L0 and SST that were only kept alive by
         // the checkpoint can be collected.
-        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
+        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|(id, _)| *id).collect();
         eprintln!("remaining_ids: {:#?}", remaining_ids);
         assert_eq!(remaining_ids.len(), 2);
         assert!(remaining_ids.contains(&active_l0_sst_handle.id));
@@ -1675,14 +1675,14 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|sst| sst.id)
+            .map(|(id, _)| *id)
             .collect::<HashSet<SsTableId>>();
         let compacted_ssts = table_store
             .list_compacted_ssts(..)
             .await
             .unwrap()
             .iter()
-            .map(|sst| sst.id)
+            .map(|(id, _)| *id)
             .collect::<HashSet<SsTableId>>();
 
         for manifest in manifests.values() {
@@ -2178,7 +2178,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|s| s.id)
+            .map(|(id, _)| *id)
             .collect();
         assert!(!remaining.contains(&inactive_expired_handle.id));
         assert_eq!(
@@ -2327,7 +2327,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|metadata| metadata.id)
+            .map(|(id, _)| id)
             .collect::<Vec<_>>();
         for id in &compaction_ids {
             set_modified(
@@ -2372,7 +2372,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|metadata| metadata.id)
+            .map(|(id, _)| id)
             .collect::<HashSet<_>>();
         assert!(wal_ids.contains(&old_wal_id));
         assert!(wal_ids.contains(&recent_wal_id));
@@ -2383,7 +2383,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|metadata| metadata.id)
+            .map(|(id, _)| id)
             .collect::<HashSet<_>>();
         assert!(compacted_ids.contains(&inactive_expired_handle.id));
 

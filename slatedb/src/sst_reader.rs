@@ -165,13 +165,12 @@ impl SstFile {
     ///
     /// Returns an error if the SST file does not exist or if there is an
     /// issue reading from object storage.
-    pub async fn metadata(&self) -> Result<ObjectMetadata<Ulid>, crate::Error> {
+    pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
         Ok(self
             .table_store
             .metadata(&self.handle.id)
             .await
-            .map_err(crate::Error::from)?
-            .with_id(self.id))
+            .map_err(crate::Error::from)?)
     }
 
     /// Reads the stats block from object storage.
@@ -255,6 +254,7 @@ impl SstFile {
 mod tests {
     use super::*;
     use crate::config::{FlushOptions, FlushType, PutOptions, SstBlockSize, WriteOptions};
+    use crate::paths::PathResolver;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
     use crate::Db;
@@ -485,7 +485,10 @@ mod tests {
         let metadata = sst_file.metadata().await.unwrap();
 
         assert!(metadata.size > 0);
-        assert_eq!(metadata.id, sst_file.id());
+        assert_eq!(
+            metadata.location,
+            PathResolver::new(path).table_path(&view.sst.id)
+        );
     }
 
     #[tokio::test]

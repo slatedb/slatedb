@@ -223,7 +223,7 @@ impl CompactionsStore {
     pub(crate) async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<ObjectMetadata<u64>>, SlateDBError> {
+    ) -> Result<Vec<(u64, ObjectMetadata)>, SlateDBError> {
         let compactions = self
             .inner
             .list(
@@ -232,10 +232,7 @@ impl CompactionsStore {
             )
             .await?
             .into_iter()
-            .map(|f| {
-                let id = f.id.into();
-                f.with_id(id)
-            })
+            .map(|(id, metadata)| (id.into(), metadata))
             .collect::<Vec<_>>();
         Ok(compactions)
     }
@@ -450,23 +447,23 @@ mod tests {
         // Check unbounded
         let compactions = store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 2);
-        assert_eq!(compactions[0].id, 1);
-        assert_eq!(compactions[1].id, 2);
+        assert_eq!(compactions[0].0, 1);
+        assert_eq!(compactions[1].0, 2);
 
         // Check bounded
         let compactions = store.list_compactions(1..2).await.unwrap();
         assert_eq!(compactions.len(), 1);
-        assert_eq!(compactions[0].id, 1);
+        assert_eq!(compactions[0].0, 1);
 
         // Check left bounded
         let compactions = store.list_compactions(2..).await.unwrap();
         assert_eq!(compactions.len(), 1);
-        assert_eq!(compactions[0].id, 2);
+        assert_eq!(compactions[0].0, 2);
 
         // Check right bounded
         let compactions = store.list_compactions(..2).await.unwrap();
         assert_eq!(compactions.len(), 1);
-        assert_eq!(compactions[0].id, 1);
+        assert_eq!(compactions[0].0, 1);
     }
 
     #[tokio::test]
@@ -481,7 +478,7 @@ mod tests {
         store.delete_compactions(1).await.unwrap();
         let compactions = store.list_compactions(..).await.unwrap();
         assert_eq!(compactions.len(), 1);
-        assert_eq!(compactions[0].id, 2);
+        assert_eq!(compactions[0].0, 2);
     }
 
     #[tokio::test]

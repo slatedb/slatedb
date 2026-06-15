@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1966,9 +1965,6 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		}
 		if metadata.Location == "" {
 			t.Fatalf("WalFile.Metadata() for file %d: Location is empty", i)
-		}
-		if metadata.Id != strconv.FormatUint(file.Id(), 10) {
-			t.Fatalf("WalFile.Metadata() for file %d: Id = %q, want %d", i, metadata.Id, file.Id())
 		}
 
 		iter, err := file.Iterator()
