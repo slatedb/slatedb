@@ -122,39 +122,6 @@ impl From<slatedb::WriteHandle> for WriteHandle {
     }
 }
 
-/// Metadata describing an object in object storage.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct ObjectMetadata {
-    /// Parsed object identifier.
-    pub id: u64,
-    /// Last-modified timestamp seconds component.
-    pub last_modified_seconds: i64,
-    /// Last-modified timestamp nanoseconds component.
-    pub last_modified_nanos: u32,
-    /// Object size in bytes.
-    pub size: u64,
-    /// Object-store location.
-    pub location: String,
-    /// The object's ETag, when the object store provides one.
-    pub e_tag: Option<String>,
-    /// The object version, when the object store provides one.
-    pub version: Option<String>,
-}
-
-impl From<slatedb::ObjectMetadata<u64>> for ObjectMetadata {
-    fn from(metadata: slatedb::ObjectMetadata<u64>) -> Self {
-        Self {
-            id: metadata.id,
-            last_modified_seconds: metadata.last_modified.timestamp(),
-            last_modified_nanos: metadata.last_modified.timestamp_subsec_nanos(),
-            size: metadata.size,
-            location: metadata.location.to_string(),
-            e_tag: metadata.e_tag,
-            version: metadata.version,
-        }
-    }
-}
-
 /// Snapshot of the current database lifecycle and durability state.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct DbStatus {
@@ -507,6 +474,42 @@ pub enum SsTableId {
     Wal(u64),
     /// Compacted SST identified by ULID string.
     Compacted(String),
+}
+
+/// Metadata describing an object in object storage.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ObjectMetadata {
+    /// Parsed object identifier.
+    pub id: String,
+    /// Last-modified timestamp seconds component.
+    pub last_modified_seconds: i64,
+    /// Last-modified timestamp nanoseconds component.
+    pub last_modified_nanos: u32,
+    /// Object size in bytes.
+    pub size: u64,
+    /// Object-store location.
+    pub location: String,
+    /// The object's ETag, when the object store provides one.
+    pub e_tag: Option<String>,
+    /// The object version, when the object store provides one.
+    pub version: Option<String>,
+}
+
+impl<Id> From<slatedb::ObjectMetadata<Id>> for ObjectMetadata
+where
+    Id: ToString,
+{
+    fn from(metadata: slatedb::ObjectMetadata<Id>) -> Self {
+        Self {
+            id: metadata.id.to_string(),
+            last_modified_seconds: metadata.last_modified.timestamp(),
+            last_modified_nanos: metadata.last_modified.timestamp_subsec_nanos(),
+            size: metadata.size,
+            location: metadata.location.to_string(),
+            e_tag: metadata.e_tag,
+            version: metadata.version,
+        }
+    }
 }
 
 impl From<&CoreSsTableId> for SsTableId {

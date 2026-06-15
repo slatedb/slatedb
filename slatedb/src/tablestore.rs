@@ -439,10 +439,7 @@ impl TableStore {
     ) -> Result<ObjectMetadata<SsTableId>, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        Ok(ObjectMetadata::new(
-            *id,
-            object_store.head(&path).await?,
-        ))
+        Ok(ObjectMetadata::new(*id, object_store.head(&path).await?))
     }
 
     /// List all SSTables in the compacted directory.
@@ -468,10 +465,7 @@ impl TableStore {
             match table_id {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
-                        sst_list.push(ObjectMetadata::new(
-                            SsTableId::Compacted(id),
-                            file,
-                        ));
+                        sst_list.push(ObjectMetadata::new(SsTableId::Compacted(id), file));
                     }
                 }
                 Err(e) => {

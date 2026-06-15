@@ -66,7 +66,7 @@ test("wal reader metadata and row decoding", async (t) => {
   for (const walFile of files) {
     const metadata = await walFile.metadata();
     assert.notEqual(metadata.location, "");
-    assert.equal(BigInt(metadata.id), BigInt(walFile.id()));
+    assert.equal(metadata.id, BigInt(walFile.id()).toString());
 
     const iterator = cleanup.track(await walFile.iterator());
     const rows = await drainWalIterator(iterator);
