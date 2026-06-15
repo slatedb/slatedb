@@ -51,7 +51,7 @@ impl GcTask for ManifestGcTask {
         // Remove the last element so we never delete the latest manifest
         let latest_manifest = if let Some(manifest_metadata) = manifest_metadata_list.pop() {
             self.manifest_store
-                .read_manifest(manifest_metadata.id)
+                .read_manifest(manifest_metadata.0)
                 .await?
         } else {
             return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
@@ -69,9 +69,9 @@ impl GcTask for ManifestGcTask {
         if let Some(boundary) = manifest_metadata_list
             .iter()
             .filter(|manifest_metadata| {
-                utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+                utc_now.signed_duration_since(manifest_metadata.1.last_modified) > min_age
             })
-            .map(|manifest_metadata| manifest_metadata.id)
+            .map(|manifest_metadata| manifest_metadata.0)
             .max()
         {
             self.manifest_store.advance_boundary(boundary).await?;
@@ -81,9 +81,9 @@ impl GcTask for ManifestGcTask {
         let manifests_to_delete = manifest_metadata_list
             .into_iter()
             .filter(|manifest_metadata| {
-                let is_active = active_manifest_ids.contains(&manifest_metadata.id);
+                let is_active = active_manifest_ids.contains(&manifest_metadata.0);
                 !is_active
-                    && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+                    && utc_now.signed_duration_since(manifest_metadata.1.last_modified) > min_age
             })
             .collect::<Vec<_>>();
         if self.manifest_options.dry_run && !manifests_to_delete.is_empty() {
@@ -96,18 +96,18 @@ impl GcTask for ManifestGcTask {
             if self.manifest_options.dry_run {
                 log::debug!(
                     "dry run: would delete manifest but skipped [id={:?}]",
-                    manifest_metadata.id
+                    manifest_metadata.0
                 );
                 continue;
             }
             if let Err(e) = self
                 .manifest_store
-                .delete_manifest_unchecked(manifest_metadata.id)
+                .delete_manifest_unchecked(manifest_metadata.0)
                 .await
             {
                 error!(
                     "error deleting manifest [id={:?}, error={}]",
-                    manifest_metadata.id, e
+                    manifest_metadata.0, e
                 );
             } else {
                 self.stats.gc_manifest_count.increment(1);
@@ -186,7 +186,7 @@ mod tests {
             vec![3],
             manifests
                 .iter()
-                .map(|manifest| manifest.id)
+                .map(|(id, _metadata)| *id)
                 .collect::<Vec<_>>()
         );
     }

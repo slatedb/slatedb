@@ -103,12 +103,12 @@ impl Admin {
             .await
             .map_err(crate::Error::from)?;
         let mut manifests = Vec::with_capacity(manifest_metadata.len());
-        for metadata in manifest_metadata {
+        for (id, _metadata) in manifest_metadata {
             let manifest = manifest_store
-                .read_manifest(metadata.id)
+                .read_manifest(id)
                 .await
                 .map_err(crate::Error::from)?;
-            manifests.push(VersionedManifest::from_manifest(metadata.id, manifest));
+            manifests.push(VersionedManifest::from_manifest(id, manifest));
         }
         Ok(manifests)
     }
@@ -224,13 +224,13 @@ impl Admin {
             .await
             .map_err(crate::Error::from)?;
         let mut compactions = Vec::with_capacity(compactions_metadata.len());
-        for metadata in compactions_metadata {
+        for (id, _metadata) in compactions_metadata {
             let stored_compactions = compactions_store
-                .read_compactions(metadata.id)
+                .read_compactions(id)
                 .await
                 .map_err(crate::Error::from)?;
             compactions.push(VersionedCompactions::from_compactions(
-                metadata.id,
+                id,
                 stored_compactions,
             ));
         }

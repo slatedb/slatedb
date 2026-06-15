@@ -66,16 +66,15 @@ pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
-pub use slatedb_common::DbRand;
+pub use slatedb_common::{DbRand, ObjectMetadata};
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
 pub use sst_reader::{SstFile, SstReader};
 pub use sst_stats::{BlockStats, SstStats};
-pub use tablestore::SstFileMetadata;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 pub use types::{RowEntry, ValueDeletable};
-pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
+pub use wal_reader::{WalFile, WalFileIterator, WalReader};
 
 pub mod admin;
 pub mod cached_object_store;

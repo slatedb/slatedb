@@ -50,6 +50,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use slatedb_common::ObjectMetadata;
 use ulid::Ulid;
 
 use crate::block_iterator::DataBlockIterator;
@@ -59,7 +60,7 @@ use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::object_stores::ObjectStores;
 use crate::sst_stats::SstStats;
-use crate::tablestore::{SstFileMetadata, TableStore};
+use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 
 /// Opens compacted SST files for read-only inspection.
@@ -164,7 +165,7 @@ impl SstFile {
     ///
     /// Returns an error if the SST file does not exist or if there is an
     /// issue reading from object storage.
-    pub async fn metadata(&self) -> Result<SstFileMetadata, crate::Error> {
+    pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
         self.table_store
             .metadata(&self.handle.id)
             .await
@@ -482,7 +483,10 @@ mod tests {
         let metadata = sst_file.metadata().await.unwrap();
 
         assert!(metadata.size > 0);
-        assert!(matches!(metadata.id, SsTableId::Compacted(_)));
+        assert!(metadata
+            .location
+            .to_string()
+            .contains(&sst_file.id().to_string()));
     }
 
     #[tokio::test]

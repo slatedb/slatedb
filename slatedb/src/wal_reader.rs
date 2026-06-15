@@ -5,7 +5,7 @@
 //!
 //! - [`WalReader`]: opens a WAL namespace and lists WAL files.
 //! - [`WalFile`]: one WAL file (`id`) plus accessors for metadata and contents.
-//! - [`WalFileMetadata`]: metadata for one WAL file (`last_modified_dt`, `size_bytes`).
+//! - [`ObjectMetadata`]: object-store metadata for one WAL file.
 //! - [`WalFileIterator`]: entry-level iterator over a WAL file.
 //!
 //! WAL files returned by [`WalReader::list`] are ordered by WAL ID in ascending
@@ -68,9 +68,9 @@
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use object_store::path::Path;
 use object_store::ObjectStore;
+use slatedb_common::ObjectMetadata;
 
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
@@ -99,18 +99,6 @@ impl WalFileIterator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WalFileMetadata {
-    /// The time this WAL file was last written to object storage.
-    pub last_modified_dt: DateTime<Utc>,
-
-    /// The size of this WAL file in bytes.
-    pub size_bytes: u64,
-
-    /// The path of this WAL file in object storage.
-    pub location: Path,
-}
-
 /// Represents a single WAL file stored in object storage and provides methods
 /// to inspect and read its contents.
 pub struct WalFile {
@@ -131,13 +119,11 @@ impl WalFile {
     /// object store. If the file is missing, a [`crate::Error`] with
     /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
-    pub async fn metadata(&self) -> Result<WalFileMetadata, crate::Error> {
-        let metadata = self.table_store.metadata(&SsTableId::Wal(self.id)).await?;
-        Ok(WalFileMetadata {
-            last_modified_dt: metadata.last_modified,
-            size_bytes: metadata.size,
-            location: metadata.location,
-        })
+    pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
+        self.table_store
+            .metadata(&SsTableId::Wal(self.id))
+            .await
+            .map_err(Into::into)
     }
 
     /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the
@@ -221,8 +207,8 @@ impl WalReader {
         let result = self.table_store.list_wal_ssts(range).await;
         Ok(result?
             .into_iter()
-            .map(|wal_file| WalFile {
-                id: wal_file.id.unwrap_wal_id(),
+            .map(|(id, _metadata)| WalFile {
+                id: id.unwrap_wal_id(),
                 table_store: Arc::clone(&self.table_store),
             })
             .collect())
@@ -379,8 +365,8 @@ mod tests {
         for wal_file in wal_files {
             let wal_metadata = wal_file.metadata().await.unwrap();
             let object_metadata = main_store.head(&wal_metadata.location).await.unwrap();
-            assert_eq!(wal_metadata.last_modified_dt, object_metadata.last_modified);
-            assert_eq!(wal_metadata.size_bytes, object_metadata.size);
+            assert_eq!(wal_metadata.last_modified, object_metadata.last_modified);
+            assert_eq!(wal_metadata.size, object_metadata.size);
             assert_eq!(wal_metadata.location, object_metadata.location);
         }
     }
@@ -397,7 +383,7 @@ mod tests {
         assert_eq!(wal_files[0].id, 1);
 
         let wal_metadata = wal_files[0].metadata().await.unwrap();
-        assert_eq!(wal_metadata.size_bytes, 0);
+        assert_eq!(wal_metadata.size, 0);
 
         let mut iter = wal_files[0].iterator().await.unwrap();
         assert!(iter.next().await.unwrap().is_none());

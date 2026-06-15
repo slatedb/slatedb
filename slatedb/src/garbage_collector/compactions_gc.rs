@@ -76,9 +76,9 @@ impl GcTask for CompactionsGcTask {
         if let Some(boundary) = compactions_metadata_list
             .iter()
             .filter(|compactions_metadata| {
-                utc_now.signed_duration_since(compactions_metadata.last_modified) > min_age
+                utc_now.signed_duration_since(compactions_metadata.1.last_modified) > min_age
             })
-            .map(|compactions_metadata| compactions_metadata.id)
+            .map(|compactions_metadata| compactions_metadata.0)
             .max()
         {
             self.compactions_store.advance_boundary(boundary).await?;
@@ -88,7 +88,7 @@ impl GcTask for CompactionsGcTask {
         let compactions_to_delete = compactions_metadata_list
             .into_iter()
             .filter(|compactions_metadata| {
-                utc_now.signed_duration_since(compactions_metadata.last_modified) > min_age
+                utc_now.signed_duration_since(compactions_metadata.1.last_modified) > min_age
             })
             .collect::<Vec<_>>();
         if self.compactions_options.dry_run && !compactions_to_delete.is_empty() {
@@ -101,18 +101,18 @@ impl GcTask for CompactionsGcTask {
             if self.compactions_options.dry_run {
                 log::debug!(
                     "dry run: would delete compactions but skipped [id={:?}]",
-                    compactions_metadata.id
+                    compactions_metadata.0
                 );
                 continue;
             }
             if let Err(e) = self
                 .compactions_store
-                .delete_compactions_unchecked(compactions_metadata.id)
+                .delete_compactions_unchecked(compactions_metadata.0)
                 .await
             {
                 error!(
                     "error deleting compactions [id={:?}, error={}]",
-                    compactions_metadata.id, e
+                    compactions_metadata.0, e
                 );
             } else {
                 self.stats.gc_compactions_count.increment(1);
@@ -183,7 +183,7 @@ mod tests {
             vec![3],
             compactions
                 .iter()
-                .map(|compactions| compactions.id)
+                .map(|(id, _metadata)| *id)
                 .collect::<Vec<_>>()
         );
     }

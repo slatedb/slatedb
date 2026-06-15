@@ -69,7 +69,7 @@ test("wal reader metadata and row decoding", async (t) => {
 
     const iterator = cleanup.track(await walFile.iterator());
     const rows = await drainWalIterator(iterator);
-    if (BigInt(metadata.size_bytes) === 0n) {
+    if (BigInt(metadata.size) === 0n) {
       assert.deepEqual(rows, []);
       continue;
     }

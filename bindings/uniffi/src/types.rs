@@ -122,6 +122,36 @@ impl From<slatedb::WriteHandle> for WriteHandle {
     }
 }
 
+/// Metadata describing an object in object storage.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ObjectMetadata {
+    /// Last-modified timestamp seconds component.
+    pub last_modified_seconds: i64,
+    /// Last-modified timestamp nanoseconds component.
+    pub last_modified_nanos: u32,
+    /// Object size in bytes.
+    pub size: u64,
+    /// Object-store location.
+    pub location: String,
+    /// The object's ETag, when the object store provides one.
+    pub e_tag: Option<String>,
+    /// The object version, when the object store provides one.
+    pub version: Option<String>,
+}
+
+impl From<slatedb::ObjectMetadata> for ObjectMetadata {
+    fn from(metadata: slatedb::ObjectMetadata) -> Self {
+        Self {
+            last_modified_seconds: metadata.last_modified.timestamp(),
+            last_modified_nanos: metadata.last_modified.timestamp_subsec_nanos(),
+            size: metadata.size,
+            location: metadata.location.to_string(),
+            e_tag: metadata.e_tag,
+            version: metadata.version,
+        }
+    }
+}
+
 /// Snapshot of the current database lifecycle and durability state.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct DbStatus {

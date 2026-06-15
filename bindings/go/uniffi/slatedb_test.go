@@ -1974,7 +1974,7 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		t.Cleanup(iter.Destroy)
 
 		rows := drainWalIterator(t, iter)
-		if metadata.SizeBytes == 0 {
+		if metadata.Size == 0 {
 			if len(rows) != 0 {
 				t.Fatalf("zero-byte WAL file %d returned %d rows, want 0", i, len(rows))
 			}

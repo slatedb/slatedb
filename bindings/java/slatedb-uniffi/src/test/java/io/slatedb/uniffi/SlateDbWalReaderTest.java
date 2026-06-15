@@ -84,13 +84,13 @@ class SlateDbWalReaderTest {
                     List<RowEntry> allRows = new ArrayList<>();
                     int nonEmptyFiles = 0;
                     for (WalFile file : files) {
-                        WalFileMetadata metadata = TestSupport.await(file.metadata());
+                        ObjectMetadata metadata = TestSupport.await(file.metadata());
                         assertNotNull(metadata);
                         assertFalse(metadata.location().isEmpty());
 
                         try (WalFileIterator iterator = TestSupport.await(file.iterator())) {
                             List<RowEntry> rows = TestSupport.drainWalIterator(iterator);
-                            if (metadata.sizeBytes() == 0) {
+                            if (metadata.size() == 0) {
                                 assertTrue(rows.isEmpty());
                                 continue;
                             }

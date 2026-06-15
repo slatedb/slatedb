@@ -1,7 +1,6 @@
 use crate::TransactionalObjectError::CallbackError;
 use crate::{
-    BoundaryObject, GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
-    TransactionalObjectError,
+    BoundaryObject, MonotonicId, ObjectCodec, SequencedStorageProtocol, TransactionalObjectError,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -12,6 +11,7 @@ use object_store::{
     Error, GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
 use parking_lot::Mutex;
+use slatedb_common::ObjectMetadata;
 use std::collections::Bound;
 use std::collections::Bound::Unbounded;
 use std::ops::RangeBounds;
@@ -346,17 +346,18 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         loop {
             let files = self.list(Unbounded, Unbounded).await?;
             if let Some(file) = files.last() {
+                let id = file.0;
                 let result = self
-                    .try_read_unchecked(file.id)
+                    .try_read_unchecked(id)
                     .await
-                    .map(|opt| opt.map(|v| (file.id, v)));
+                    .map(|opt| opt.map(|v| (id, v)));
                 match result {
                     // File listed but not found. Probably deleted by GC. Retry list/read.
                     // See https://github.com/slatedb/slatedb/issues/1215 for more details.
                     Ok(None) => {
                         warn!(
                             "listed file missing on read, retrying [location={}]",
-                            file.location,
+                            file.1.location,
                         );
                     }
                     _ => return result,
@@ -391,7 +392,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         &self,
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
-    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
+    ) -> Result<Vec<(MonotonicId, ObjectMetadata)>, TransactionalObjectError> {
         let mut files_stream = self.object_store.list(Some(&self.dir_path));
         let mut items = Vec::new();
         let id_range = (from, to);
@@ -401,12 +402,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         } {
             match self.parse_id(&file.location) {
                 Ok(id) if id_range.contains(&id) => {
-                    items.push(GenericObjectMetadata {
-                        id,
-                        location: file.location,
-                        last_modified: file.last_modified,
-                        size: file.size as u32,
-                    });
+                    items.push((id, file.into()));
                 }
                 Err(e) => warn!(
                     "unknown file in directory [base={}, location={}, object_store={}, error={:?}]",
@@ -415,7 +411,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                 _ => {}
             }
         }
-        items.sort_by_key(|m| m.id);
+        items.sort_by_key(|m| m.0);
         Ok(items)
     }
 
@@ -863,25 +859,25 @@ mod tests {
 
         let all = store.list(Unbounded, Unbounded).await.unwrap();
         assert_eq!(4, all.len());
-        assert!(all.windows(2).all(|w| w[0].id < w[1].id));
+        assert!(all.windows(2).all(|w| w[0].0 < w[1].0));
         assert_eq!(
             Path::from("/root/test/00000000000000000001.val"),
-            all[0].location
+            all[0].1.location
         );
         assert_eq!(
             Path::from("/root/test/00000000000000000004.val"),
-            all[3].location
+            all[3].1.location
         );
 
         let right_bounded = store.list(Unbounded, Excluded(3.into())).await.unwrap();
         assert_eq!(2, right_bounded.len());
-        assert_eq!(1, right_bounded[0].id);
-        assert_eq!(2, right_bounded[1].id);
+        assert_eq!(1, right_bounded[0].0);
+        assert_eq!(2, right_bounded[1].0);
 
         let left_bounded = store.list(Included(3.into()), Unbounded).await.unwrap();
         assert_eq!(2, left_bounded.len());
-        assert_eq!(3, left_bounded[0].id);
-        assert_eq!(4, left_bounded[1].id);
+        assert_eq!(3, left_bounded[0].0);
+        assert_eq!(4, left_bounded[1].0);
     }
 
     #[tokio::test]
