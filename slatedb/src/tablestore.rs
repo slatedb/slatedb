@@ -62,8 +62,6 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 }
 
-type SsTableObjectMetadata = ObjectMetadata<SsTableId>;
-
 impl TableStore {
     pub(crate) fn new<P: Into<Path>>(
         object_stores: ObjectStores,
@@ -226,12 +224,12 @@ impl TableStore {
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<SsTableObjectMetadata>, SlateDBError> {
+    ) -> Result<Vec<ObjectMetadata<SsTableId>>, SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "list-wal-ssts", |_| {
             Err(SlateDBError::from(std::io::Error::other("oops")))
         });
 
-        let mut wal_list: Vec<SsTableObjectMetadata> = Vec::new();
+        let mut wal_list: Vec<ObjectMetadata<SsTableId>> = Vec::new();
         let wal_path = &self.path_resolver.wal_path();
         let mut files_stream = self
             .object_stores
@@ -451,8 +449,8 @@ impl TableStore {
     pub(crate) async fn list_compacted_ssts<R: RangeBounds<Ulid>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<SsTableObjectMetadata>, SlateDBError> {
-        let mut sst_list: Vec<SsTableObjectMetadata> = Vec::new();
+    ) -> Result<Vec<ObjectMetadata<SsTableId>>, SlateDBError> {
+        let mut sst_list: Vec<ObjectMetadata<SsTableId>> = Vec::new();
         let compacted_path = self.path_resolver.compacted_path();
         let mut files_stream = self
             .object_stores
