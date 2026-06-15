@@ -276,6 +276,34 @@ impl CompactionStatus {
     fn finished(self) -> bool {
         matches!(self, CompactionStatus::Completed | CompactionStatus::Failed)
     }
+
+    /// State transitions made by CompactionWorker that should be accepted into local state
+    /// during [`CompactorState::merge_remote_compactions`]
+    ///
+    // For known compactions (Occupied), accept these remote transitions:
+    //   - `Compacted`: the worker's signal that execution finished; the
+    //     coordinator must commit the output SSTs to the manifest.
+    //   - `Scheduled → Running`: a worker has claimed the job; adopt the
+    //     Running entry so the coordinator's local copy carries the worker
+    //     claim. Without this, write_compactions_safely() would overwrite
+    //     the claim with a stale Scheduled/no-worker copy, causing the
+    //     worker to discard its result and potentially re-run the job.
+    //   - `Running → Scheduled`: a worker released its claim (execution
+    //     failed, post-claim validation rejected the job, or graceful
+    //     shutdown). Adopt the release so the job can be re-claimed;
+    //     otherwise the coordinator's stale Running/claimed copy would be
+    //     written back and no worker would ever pick the job up again.
+    //   - `Running -> Running`: should accept heartbeat updates when heartbeats
+    //     land for a job that is already in local state
+    // All other remote updates are ignored.
+    fn should_adopt_state_transition(&self, updated_status: CompactionStatus) -> bool {
+        match (self, updated_status) {
+            (_, CompactionStatus::Compacted) => true,
+            (Self::Scheduled, CompactionStatus::Running) => true,
+            (Self::Running, CompactionStatus::Scheduled | CompactionStatus::Running) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Identity and liveness for the worker currently executing a compaction.
@@ -750,7 +778,10 @@ impl CompactorState {
                     v.insert(compaction.clone());
                 }
                 Entry::Occupied(mut o) => {
-                    if Self::should_adopt_state_transition(o.get().clone(), compaction.clone()) {
+                    if o.get()
+                        .status
+                        .should_adopt_state_transition(compaction.status)
+                    {
                         o.insert(compaction.clone());
                     } else {
                         debug!(
@@ -771,35 +802,6 @@ impl CompactorState {
         merged_compactions.retain_active_and_last_finished();
         remote_compactions.value = merged_compactions;
         self.set_compactions(remote_compactions);
-    }
-
-    /// State transitions made by CompactionWorker that should be accepted into local state
-    /// during [`CompactorState::merge_remote_compactions`]
-    ///
-    // For known compactions (Occupied), accept these remote transitions:
-    //   - `Compacted`: the worker's signal that execution finished; the
-    //     coordinator must commit the output SSTs to the manifest.
-    //   - `Scheduled → Running`: a worker has claimed the job; adopt the
-    //     Running entry so the coordinator's local copy carries the worker
-    //     claim. Without this, write_compactions_safely() would overwrite
-    //     the claim with a stale Scheduled/no-worker copy, causing the
-    //     worker to discard its result and potentially re-run the job.
-    //   - `Running → Scheduled`: a worker released its claim (execution
-    //     failed, post-claim validation rejected the job, or graceful
-    //     shutdown). Adopt the release so the job can be re-claimed;
-    //     otherwise the coordinator's stale Running/claimed copy would be
-    //     written back and no worker would ever pick the job up again.
-    //   - `Running -> Running`: should accept heartbeat updates when heartbeats
-    //     land for a job that is already in local state
-    // All other remote updates are ignored.
-    fn should_adopt_state_transition(occupied: Compaction, updated: Compaction) -> bool {
-        (matches!(updated.status(), CompactionStatus::Compacted)
-            || (matches!(occupied.status(), CompactionStatus::Scheduled)
-                && matches!(updated.status(), CompactionStatus::Running))
-            || (matches!(occupied.status(), CompactionStatus::Running)
-                && matches!(updated.status(), CompactionStatus::Scheduled)
-                || (matches!(occupied.status(), CompactionStatus::Running)
-                    && matches!(updated.status(), CompactionStatus::Running))))
     }
 
     /// Merges the remote (writer) manifest view into the compactor's local state.
