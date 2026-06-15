@@ -16,12 +16,14 @@ use crate::checkpoint::Checkpoint;
 use crate::compactions_store::CompactionsStore;
 use crate::config::GarbageCollectorOptions;
 pub use crate::db::builder::GarbageCollectorBuilder;
-use crate::dispatcher::{MessageHandler, MessageTickerDef};
+use crate::db_status::ClosedResultWriter;
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::tablestore::TableStore;
+use crate::utils::WatchableOnceCell;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -36,6 +38,7 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 use tracing::instrument;
 use wal_gc::{WalGcMode, WalGcTask};
 
@@ -75,17 +78,19 @@ pub(crate) enum GcMessage {
 ///
 /// The garbage collector can run in two modes:
 ///
-/// - As an async task with [`run_async_task`](GarbageCollector::run_async_task)
+/// - As an async task with [`run`](GarbageCollector::run)
 /// - As a one-time operation with [`run_gc_once`](GarbageCollector::run_gc_once)
 ///
 /// The garbage collector uses configurable intervals and minimum age thresholds for each
 /// type of data to ensure that recently created data isn't immediately deleted, which
 /// helps prevent removing files that might still be referenced by in-flight operations.
+#[derive(Clone)]
 pub struct GarbageCollector {
     manifest_store: Arc<ManifestStore>,
     options: GarbageCollectorOptions,
     stats: Arc<GcStats>,
     system_clock: Arc<dyn SystemClock>,
+    task_executor: Arc<MessageHandlerExecutor>,
     manifest_gc_task: Option<ManifestGcTask>,
     wal_gc_task: Option<WalGcTask>,
     wal_fence_gc_task: Option<WalGcTask>,
@@ -207,7 +212,6 @@ impl GarbageCollector {
     /// * `options` - Configuration options for the garbage collector.
     /// * `stat_registry` - Registry for tracking garbage collection metrics.
     /// * `system_clock` - Clock implementation for time-based decisions.
-    /// * `cancellation_token` - Token used to signal cancellation of garbage collection tasks.
     ///
     /// # Returns
     ///
@@ -222,6 +226,13 @@ impl GarbageCollector {
         system_clock: Arc<dyn SystemClock>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(recorder));
+        // The standalone GC lifecycle does not surface a closed result yet, so the
+        // task executor uses a throwaway sink.
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            closed_result,
+            system_clock.clone(),
+        ));
         let wal_gc_task = options.wal_options.map(|wal_options| {
             WalGcTask::new(
                 manifest_store.clone(),
@@ -273,6 +284,7 @@ impl GarbageCollector {
             options,
             stats,
             system_clock,
+            task_executor,
             manifest_gc_task,
             wal_gc_task,
             wal_fence_gc_task,
@@ -280,6 +292,48 @@ impl GarbageCollector {
             compactions_gc_task,
             detach_gc_task,
         }
+    }
+
+    /// Starts the garbage collector. This method runs the recurring garbage
+    /// collection event loop until [`GarbageCollector::stop`] is called.
+    ///
+    /// ## Returns
+    /// - `Ok(())` when the garbage collector exits cleanly, or [`SlateDBError`] on failure.
+    pub async fn run(&self) -> Result<(), crate::Error> {
+        self.start()?;
+        self.join().await
+    }
+
+    pub(crate) fn start(&self) -> Result<(), crate::Error> {
+        let (_, rx) = async_channel::unbounded();
+        self.task_executor
+            .add_handler(
+                GC_TASK_NAME.to_string(),
+                Box::new(self.clone()),
+                rx,
+                &Handle::current(),
+            )
+            .map_err(crate::Error::from)?;
+        self.task_executor.monitor_on(&Handle::current())?;
+        Ok(())
+    }
+
+    pub(crate) async fn join(&self) -> Result<(), crate::Error> {
+        self.task_executor
+            .join_task(GC_TASK_NAME)
+            .await
+            .map_err(crate::Error::from)
+    }
+
+    /// Gracefully stops the garbage collector task and waits for it to finish.
+    ///
+    /// ## Returns
+    /// - `Ok(())` once the task has shut down, or [`SlateDBError`] if shutdown fails.
+    pub async fn stop(&self) -> Result<(), crate::Error> {
+        self.task_executor
+            .shutdown_task(GC_TASK_NAME)
+            .await
+            .map_err(crate::Error::from)
     }
 
     /// Run the garbage collector once.
@@ -369,14 +423,12 @@ mod tests {
 
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
-    use tokio::runtime::Handle;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
     use crate::compactions_store::StoredCompactions;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
-    use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -386,9 +438,7 @@ mod tests {
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
     };
 
-    use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SsTableFormat;
-    use crate::utils::WatchableOnceCell;
     use crate::{
         db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView},
         manifest::{
@@ -1987,25 +2037,8 @@ mod tests {
             &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
-        let (_, rx) = async_channel::unbounded();
-        let clock = Arc::new(DefaultSystemClock::default());
-        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-        let executor = MessageHandlerExecutor::new(closed_result, clock);
-        executor
-            .add_handler(
-                "garbage_collector".to_string(),
-                Box::new(gc),
-                rx,
-                &Handle::current(),
-            )
-            .expect("failed to spawn task");
-        let jh = executor
-            .monitor_on(&Handle::current())
-            .expect("failed to start monitor task");
-        executor.cancel_task(GC_TASK_NAME);
-        let result = executor.join_task(GC_TASK_NAME).await;
-        assert!(matches!(result, Ok(())));
-        jh.await.expect("failed to join task");
+        gc.start().expect("failed to start garbage collector");
+        gc.stop().await.expect("failed to stop garbage collector");
     }
 
     #[tokio::test]

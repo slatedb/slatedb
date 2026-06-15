@@ -8,18 +8,14 @@ use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
-use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
-use crate::utils::WatchableOnceCell;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use object_store::path::Path;
@@ -31,7 +27,6 @@ use std::env::VarError;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -303,15 +298,26 @@ impl Admin {
         Ok(())
     }
 
-    /// Run the garbage collector in the background.
+    /// Run the garbage collector in the foreground until the provided cancellation token is cancelled.
     ///
-    /// This function runs the garbage collector in a Tokio background task.
+    /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
+    /// graceful shutdown and waits for the garbage collector to stop.
     ///
     /// # Arguments
     ///
-    /// * `gc_opts`: The garbage collector options.
+    /// * `cancellation_token`: Token used to request garbage collector shutdown.
     ///
-    pub async fn run_gc(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
+    pub async fn run_gc(&self, cancellation_token: CancellationToken) -> Result<(), crate::Error> {
+        self.run_gc_with_options(cancellation_token, GarbageCollectorOptions::default())
+            .await
+    }
+
+    /// Like [`Admin::run_gc`] but accepts explicit [`GarbageCollectorOptions`].
+    pub async fn run_gc_with_options(
+        &self,
+        cancellation_token: CancellationToken,
+        gc_opts: GarbageCollectorOptions,
+    ) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -322,23 +328,14 @@ impl Admin {
         .with_seed(self.rand.rng().next_u64())
         .build();
 
-        let (_, rx) = async_channel::unbounded();
-        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
-        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
+        gc.start()?;
 
-        task_executor
-            .add_handler(
-                GC_TASK_NAME.to_string(),
-                Box::new(gc),
-                rx,
-                &Handle::current(),
-            )
-            .map_err(Into::<crate::Error>::into)?;
-
-        task_executor
-            .join_task(GC_TASK_NAME)
-            .await
-            .map_err(Into::<crate::Error>::into)
+        tokio::select! {
+            result = gc.join() => result,
+            _ = cancellation_token.cancelled() => {
+                gc.stop().await
+            }
+        }
     }
 
     /// Run the compactor in the foreground until the provided cancellation token is cancelled.
@@ -384,24 +381,71 @@ impl Admin {
 
         let compactor = builder.build();
 
-        let mut run_task = tokio::spawn({
-            let compactor = compactor.clone();
-            async move { compactor.run().await }
-        });
+        compactor.start().await?;
 
         tokio::select! {
-            result = &mut run_task => {
-                return match result {
-                    Ok(inner) => inner,
-                    Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string()).with_source(Box::new(join_err))),
-                };
-            }
+            result = compactor.join() => result,
             _ = cancellation_token.cancelled() => {
-                // fall through to shutdown logic
+                compactor.stop().await
             }
         }
+    }
 
-        compactor.stop().await
+    /// Run a standalone compaction worker in the foreground until the provided cancellation token
+    /// is cancelled.
+    ///
+    /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
+    /// graceful shutdown and waits for the worker to stop, resetting any compactions it claimed
+    /// back to `Scheduled` so other workers can pick them up.
+    ///
+    /// To use compaction filters with the standalone worker, configure the `AdminBuilder` with
+    /// [`AdminBuilder::with_compaction_filter_supplier`] before building.
+    ///
+    /// # Arguments
+    ///
+    /// * `cancellation_token`: Token used to request worker shutdown.
+    pub async fn run_compaction_worker(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), crate::Error> {
+        self.run_compaction_worker_with_options(
+            cancellation_token,
+            crate::config::CompactionWorkerOptions::default(),
+        )
+        .await
+    }
+
+    /// Like [`Admin::run_compaction_worker`] but accepts explicit
+    /// [`crate::config::CompactionWorkerOptions`].
+    pub async fn run_compaction_worker_with_options(
+        &self,
+        cancellation_token: CancellationToken,
+        options: crate::config::CompactionWorkerOptions,
+    ) -> Result<(), crate::Error> {
+        #[allow(unused_mut)]
+        let mut builder = crate::CompactionWorkerBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_options(options)
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.rng().next_u64());
+
+        #[cfg(feature = "compaction_filters")]
+        if let Some(supplier) = &self.compaction_filter_supplier {
+            builder = builder.with_compaction_filter_supplier(supplier.clone());
+        }
+
+        let worker = builder.build().await?;
+
+        worker.start()?;
+
+        tokio::select! {
+            result = worker.join() => result,
+            _ = cancellation_token.cancelled() => {
+                worker.stop().await
+            }
+        }
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
@@ -818,6 +862,7 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
+    use crate::config::{CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions};
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::test_utils::FlakyObjectStore;
@@ -827,6 +872,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
     use ulid::Ulid;
 
     #[test]
@@ -935,6 +981,66 @@ mod tests {
         assert_eq!(first.manifest.compactor_epoch, 0);
         assert_eq!(first.manifest.core.next_wal_sst_id, 1);
         assert_eq!(first.manifest.core.last_l0_seq, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admin_run_gc_with_options_stops_on_cancellation() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_run_gc_with_options_stops_on_cancellation");
+        let admin = AdminBuilder::new(path, object_store).build();
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let result = admin
+            .run_gc_with_options(cancellation_token, GarbageCollectorOptions::default())
+            .await;
+        assert!(matches!(result, Ok(())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admin_run_compactor_with_options_stops_on_cancellation() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_run_compactor_with_options_stops_on_cancellation");
+        StoredManifest::create_new_db(
+            Arc::new(ManifestStore::new(&path, object_store.clone())),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let admin = AdminBuilder::new(path, object_store).build();
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let result = admin
+            .run_compactor_with_options(
+                cancellation_token,
+                CompactorOptions {
+                    worker: None,
+                    ..CompactorOptions::default()
+                },
+            )
+            .await;
+        assert!(matches!(result, Ok(())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admin_run_compaction_worker_with_options_stops_on_cancellation() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path =
+            Path::from("/tmp/test_admin_run_compaction_worker_with_options_stops_on_cancellation");
+        let admin = AdminBuilder::new(path, object_store).build();
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let result = admin
+            .run_compaction_worker_with_options(
+                cancellation_token,
+                CompactionWorkerOptions::default(),
+            )
+            .await;
+        assert!(matches!(result, Ok(())));
     }
 
     #[tokio::test]
