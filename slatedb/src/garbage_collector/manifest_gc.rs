@@ -174,7 +174,9 @@ mod tests {
             .unwrap();
 
         let raw_boundary = object_store
-            .get(&Path::from("/root/gc/manifest.boundary"))
+            .get(&Path::from(
+                "/root/gc/manifest/00000000000000000002.boundary",
+            ))
             .await
             .unwrap()
             .bytes()

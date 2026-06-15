@@ -170,7 +170,9 @@ mod tests {
             .unwrap();
 
         let raw_boundary = object_store
-            .get(&Path::from("/root/gc/compactions.boundary"))
+            .get(&Path::from(
+                "/root/gc/compactions/00000000000000000002.boundary",
+            ))
             .await
             .unwrap()
             .bytes()
