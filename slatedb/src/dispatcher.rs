@@ -989,43 +989,46 @@ mod test {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let (tx, rx) = async_channel::unbounded();
         let clock = Arc::new(MockSystemClock::new());
-        // With spread 0.5 on a 100ms interval, each tick waits a random duration
-        // in [50ms, 150ms]. The clock starts at t=0, so the first tick parks on
-        // its wait and can only fire once the clock advances.
+        // With spread 0.5 on a 100ms interval, every tick *after the first* waits
+        // a random duration in [50ms, 150ms]. The first tick is always immediate
+        // (it mirrors Tokio's `Interval`), so it fires right away; the dispatcher's
+        // next tick future then waits a jittered [50ms, 150ms] that can't elapse
+        // until the clock is advanced in the second phase.
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(100), 1)
             .with_jitter(0.5, Arc::new(DbRand::new(0)));
         let cancellation_token = CancellationToken::new();
-        let fp = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-        )
-        .with_fp_registry(fp.clone());
-
-        // Hold the loop while we queue messages so they're ready when it starts.
-        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "pause").unwrap();
+        );
         let join = tokio::spawn(async move { dispatcher.run().await });
+        wait_for_message_count(log.clone(), 1).await;
+        assert_eq!(
+            log.lock().unwrap()[0],
+            (Phase::Pre, TestMessage::Tick(1)),
+            "the first tick should fire immediately"
+        );
         tx.try_send(TestMessage::Channel(7)).unwrap();
         tx.try_send(TestMessage::Channel(8)).unwrap();
         tx.try_send(TestMessage::Channel(9)).unwrap();
-        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "off").unwrap();
+        wait_for_message_count(log.clone(), 4).await;
 
         // All three channel messages are processed even though the first tick is
         // parked on its randomized wait the entire time (the clock never
         // advanced, so the jittered tick cannot fire). This is the non-blocking
         // property.
-        wait_for_message_count(log.clone(), 3).await;
         assert_eq!(
             log.lock().unwrap().clone(),
             vec![
+                (Phase::Pre, TestMessage::Tick(1)),
                 (Phase::Pre, TestMessage::Channel(7)),
                 (Phase::Pre, TestMessage::Channel(8)),
                 (Phase::Pre, TestMessage::Channel(9)),
             ],
-            "no tick should fire until the clock advances past the jittered wait"
+            "no tick but the first immediate one should fire until the clock advances past the jittered wait"
         );
 
         // Releasing the clock lets the jittered tick fire. The mock clock fixes
@@ -1033,7 +1036,7 @@ mod test {
         // first polled, which races with this advance, so step the clock forward
         // repeatedly until the tick lands rather than advancing exactly once.
         timeout(Duration::from_secs(30), async {
-            while log.lock().unwrap().len() < 4 {
+            while log.lock().unwrap().len() < 5 {
                 clock.advance(Duration::from_secs(1)).await;
                 yield_now().await;
             }
@@ -1041,7 +1044,7 @@ mod test {
         .await
         .expect("jittered tick did not fire after advancing the clock");
         assert_eq!(
-            log.lock().unwrap()[3],
+            log.lock().unwrap()[4],
             (Phase::Pre, TestMessage::Tick(1)),
             "the jittered tick should fire once the clock passes the jitter delay"
         );
