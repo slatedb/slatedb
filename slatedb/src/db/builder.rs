@@ -101,7 +101,7 @@
 //! }
 //! ```
 //!
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
@@ -574,9 +574,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
-        let status_manager = DbStatusManager::new_with_manifest(
+        let status_manager = DbStatusManager::new_with_initial_values(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),
+            BTreeSet::new(),
         );
 
         // Setup communication channels wired to the shared closed state.

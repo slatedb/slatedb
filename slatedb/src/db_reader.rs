@@ -146,9 +146,10 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
-        let status_manager = DbStatusManager::new_with_manifest(
+        let status_manager = DbStatusManager::new_with_initial_values(
             initial_durable_seq,
             VersionedManifest::from(initial_state.as_ref()),
+            collect_touched_segments(initial_state.as_ref()),
         );
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
@@ -180,9 +181,6 @@ impl DbReaderInner {
             rand,
             recorder,
         };
-        inner
-            .status_manager
-            .report_memtable_segments(collect_touched_segments(inner.state.read().as_ref()));
         Ok(inner)
     }
 
