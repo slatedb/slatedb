@@ -367,7 +367,7 @@ impl CompactionWorkerHandler {
                     self.job_progress.insert(
                         compaction.id(),
                         JobProgressState {
-                            last_hb_sst_count: 0,
+                            last_hb_sst_count: compaction.output_ssts().len(),
                             last_hb_bytes: 0,
                             last_hb_ms: self.clock.now().timestamp_millis() as u64,
                         },
@@ -390,21 +390,21 @@ impl CompactionWorkerHandler {
 
     /// Writes a heartbeat for `compaction_id`, updating `last_heartbeat_ms`
     /// and (when provided) the `output_ssts` list. Only writes if this worker
-    /// still owns the entry; silently returns otherwise.
+    /// still owns the entry.
     ///
     /// Returns `Ok(true)` iff a heartbeat was actually persisted. Callers use
     /// this to avoid advancing their in-memory progress bookkeeping when the
-    /// write was skipped (entry gone, ownership lost, or `.compactions` not yet
-    /// loaded) — otherwise they would mark progress as heartbeated that was
-    /// never durably recorded.
+    /// write was skipped (entry gone or ownership lost returns `Ok(false)`) —
+    /// otherwise they would mark progress as heartbeated that was never durably recorded.
+    ///
+    /// We only ever heartbeat a compaction this worker has already claimed, and
+    /// claiming requires `.compactions` to be loaded, so `self.stored` is
+    /// guaranteed to be `Some` here (expected via `EXPECT_LOADED` below).
     async fn write_heartbeat(
         &mut self,
         compaction_id: Ulid,
         output_ssts: Option<Vec<crate::db_state::SsTableHandle>>,
     ) -> Result<bool, SlateDBError> {
-        if !self.ensure_loaded().await? {
-            return Ok(false);
-        }
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
