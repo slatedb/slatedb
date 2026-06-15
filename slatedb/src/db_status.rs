@@ -82,23 +82,25 @@ impl DbStatusManager {
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
         use crate::manifest::Manifest;
         use crate::manifest::ManifestCore;
-        Self::new_with_manifest(
+        Self::new_with_initial_values(
             initial_durable_seq,
             VersionedManifest {
                 id: 1,
                 manifest: Manifest::initial(ManifestCore::new()),
             },
+            BTreeSet::new(),
         )
     }
 
-    pub(crate) fn new_with_manifest(
+    pub(crate) fn new_with_initial_values(
         initial_durable_seq: u64,
         initial_manifest: VersionedManifest,
+        initial_memtable_segments: BTreeSet<Bytes>,
     ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
             current_manifest: initial_manifest,
-            memtable_segments: BTreeSet::new(),
+            memtable_segments: initial_memtable_segments,
             close_reason: None,
         });
         Self {
@@ -287,7 +289,8 @@ mod tests {
     #[test]
     fn should_initialize_with_no_segments_from_empty_manifest() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(1));
+        let mgr =
+            DbStatusManager::new_with_initial_values(0, versioned_manifest(1), BTreeSet::new());
 
         // when
         let status = mgr.status();
@@ -299,7 +302,11 @@ mod tests {
     #[test]
     fn should_initialize_with_segments_from_manifest() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]));
+        let mgr = DbStatusManager::new_with_initial_values(
+            0,
+            manifest_with_segments(1, &[b"a", b"b"]),
+            BTreeSet::new(),
+        );
 
         // when
         let status = mgr.status();
@@ -314,11 +321,11 @@ mod tests {
     #[test]
     fn should_union_and_dedup_segments() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a", b"b"]));
-        mgr.report_memtable_segments(BTreeSet::from([
-            Bytes::from_static(b"b"),
-            Bytes::from_static(b"c"),
-        ]));
+        let mgr = DbStatusManager::new_with_initial_values(
+            0,
+            manifest_with_segments(1, &[b"a", b"b"]),
+            BTreeSet::from([Bytes::from_static(b"b"), Bytes::from_static(b"c")]),
+        );
 
         // when
         let segments = mgr.status().list_segments();
@@ -337,11 +344,11 @@ mod tests {
     #[test]
     fn should_return_sorted_segments() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"d", b"b"]));
-        mgr.report_memtable_segments(BTreeSet::from([
-            Bytes::from_static(b"c"),
-            Bytes::from_static(b"a"),
-        ]));
+        let mgr = DbStatusManager::new_with_initial_values(
+            0,
+            manifest_with_segments(1, &[b"d", b"b"]),
+            BTreeSet::from([Bytes::from_static(b"c"), Bytes::from_static(b"a")]),
+        );
 
         // when
         let segments = mgr.status().list_segments();
@@ -462,7 +469,7 @@ mod tests {
     fn should_not_notify_on_same_manifest() {
         // given
         let initial = versioned_manifest(1);
-        let mgr = DbStatusManager::new_with_manifest(0, initial.clone());
+        let mgr = DbStatusManager::new_with_initial_values(0, initial.clone(), BTreeSet::new());
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 
@@ -476,7 +483,8 @@ mod tests {
     #[test]
     fn should_not_notify_on_older_manifest() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(5));
+        let mgr =
+            DbStatusManager::new_with_initial_values(0, versioned_manifest(5), BTreeSet::new());
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 
@@ -491,11 +499,11 @@ mod tests {
     fn should_update_manifest_and_segments_atomically() {
         // given: manifest has no segments yet, and "a"/"b" are touched in the
         // memtables.
-        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[]));
-        mgr.report_memtable_segments(BTreeSet::from([
-            Bytes::from_static(b"a"),
-            Bytes::from_static(b"b"),
-        ]));
+        let mgr = DbStatusManager::new_with_initial_values(
+            0,
+            manifest_with_segments(1, &[]),
+            BTreeSet::from([Bytes::from_static(b"a"), Bytes::from_static(b"b")]),
+        );
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 
@@ -527,8 +535,11 @@ mod tests {
     #[test]
     fn should_not_notify_when_manifest_and_segments_unchanged() {
         // given
-        let mgr = DbStatusManager::new_with_manifest(0, manifest_with_segments(1, &[b"a"]));
-        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"b")]));
+        let mgr = DbStatusManager::new_with_initial_values(
+            0,
+            manifest_with_segments(1, &[b"a"]),
+            BTreeSet::from([Bytes::from_static(b"b")]),
+        );
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 

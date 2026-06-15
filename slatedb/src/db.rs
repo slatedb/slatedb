@@ -51,6 +51,7 @@ use crate::config::{
     FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
     WriteOptions,
 };
+use crate::db_common::extract_segment_prefix;
 use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{collect_touched_segments, DbState, SsTableId};
@@ -566,14 +567,8 @@ impl DbInner {
                     std::collections::BTreeSet::new();
                 let mut iter = replayed_table.table.table().iter();
                 while let Some(entry) = iter.next_sync() {
-                    match extractor.prefix_len(&crate::PrefixTarget::Point(entry.key.clone())) {
-                        Some(0) | None => {
-                            return Err(SlateDBError::EmptySegmentPrefix { key: entry.key });
-                        }
-                        Some(n) => {
-                            touched_segments.insert(entry.key.slice(0..n));
-                        }
-                    }
+                    touched_segments
+                        .insert(extract_segment_prefix(extractor.as_ref(), &entry.key)?);
                 }
                 replayed_table
                     .table
@@ -10636,6 +10631,7 @@ mod tests {
         db.close().await.unwrap();
 
         let reader = DbReaderBuilder::new(path, object_store)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
             .build()
             .await
             .unwrap();

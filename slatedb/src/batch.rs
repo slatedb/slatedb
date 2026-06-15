@@ -5,10 +5,11 @@
 //! atomically to the database.
 
 use crate::config::{MergeOptions, PutOptions};
+use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
-use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
+use crate::prefix_extractor::PrefixExtractor;
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -353,16 +354,7 @@ impl WriteBatch {
                 _ => {}
             }
             if let Some(ext) = extractor {
-                match ext.prefix_len(&PrefixTarget::Point(entry.key.clone())) {
-                    Some(0) | None => {
-                        return Err(SlateDBError::EmptySegmentPrefix {
-                            key: entry.key.clone(),
-                        });
-                    }
-                    Some(n) => {
-                        touched_segments.insert(entry.key.slice(0..n));
-                    }
-                }
+                touched_segments.insert(extract_segment_prefix(ext, &entry.key)?);
             }
             entries_bytes += (entry.key.len() + entry.value.len()) as u64;
             entries.push(entry);
