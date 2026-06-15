@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_resets_running_to_submitted_and_preserves_submitted() {
+    async fn test_new_resets_scheduled_to_submitted_and_preserves_submitted() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
@@ -536,7 +536,7 @@ mod tests {
         let submitted_id = Ulid::from_parts(1, 0);
         let failed_old_id = Ulid::from_parts(2, 0);
         let completed_old_id = Ulid::from_parts(3, 0);
-        let running_id = Ulid::from_parts(4, 0);
+        let scheduled_id = Ulid::from_parts(4, 0);
         let mut dirty = stored_compactions.prepare_dirty().unwrap();
         dirty.value.insert(Compaction::new(
             submitted_id,
@@ -551,12 +551,12 @@ mod tests {
                 .with_status(CompactionStatus::Completed),
         );
         dirty.value.insert(
-            Compaction::new(running_id, CompactionSpec::new(vec![], 0))
-                .with_status(CompactionStatus::Running),
+            Compaction::new(scheduled_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Scheduled),
         );
         stored_compactions.update(dirty).await.unwrap();
 
-        // Initialize a new writer (restart) which should flip Running -> Submitted and trim.
+        // Initialize a new writer (restart) which should flip Scheduled -> Submitted and trim.
         let options = CompactorOptions::default();
         let rand = Arc::new(DbRand::new(7));
 
@@ -570,7 +570,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Submitted should remain; Running should become Submitted; older finished should be trimmed.
+        // Submitted should remain; Scheduled should become Submitted; older finished should be trimmed.
         let compactions = &writer.state.compactions().value;
         assert_eq!(
             compactions
@@ -581,8 +581,8 @@ mod tests {
         );
         assert_eq!(
             compactions
-                .get(&running_id)
-                .expect("missing running compaction")
+                .get(&scheduled_id)
+                .expect("missing scheduled compaction")
                 .status(),
             CompactionStatus::Submitted
         );
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_resets_running_to_submitted_and_preserves_output_ssts() {
+    async fn test_new_preserves_running_output_ssts() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
@@ -661,16 +661,20 @@ mod tests {
             .value
             .get(&running_id)
             .expect("missing running compaction");
-        assert_eq!(compaction.status(), CompactionStatus::Submitted);
+        // new() leaves Running entries untouched and preserves their output_ssts
+        // through the load; reclaiming stale ones is the ticker's job.
+        assert_eq!(compaction.status(), CompactionStatus::Running);
         assert_eq!(compaction.output_ssts(), &output_ssts);
     }
 
-    /// On restart, a `Running` compaction whose worker is still heartbeating
-    /// (fresh `last_heartbeat_ms`) must be left in `Running` so the live worker
-    /// can finish, while a `Running` compaction with a stale heartbeat is reset
-    /// to `Submitted` for another worker to claim.
+    /// `CompactorStateWriter::new` no longer reclaims stale `Running`
+    /// compactions on restart — that moved to `reclaim_stale_workers`, which
+    /// runs on the first tick (covered by `test_reclaim_stale_running_compaction`
+    /// and `test_does_not_reclaim_fresh_running_compaction` in compactor.rs). So
+    /// `new` must leave every `Running` compaction untouched, stale or fresh, and
+    /// only reset `Scheduled` entries.
     #[tokio::test]
-    async fn test_new_only_resets_stale_running_compactions() {
+    async fn test_new_preserves_running_compactions() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
@@ -735,7 +739,7 @@ mod tests {
 
         let compactions = &writer.state.compactions().value;
 
-        // Live worker is left undisturbed.
+        // new() leaves the live worker undisturbed.
         let fresh = compactions
             .get(&fresh_id)
             .expect("missing fresh compaction");
@@ -745,12 +749,16 @@ mod tests {
             Some("worker-fresh")
         );
 
-        // Stale worker is reclaimed.
+        // new() also leaves the stale worker in Running; reclaiming it is the
+        // ticker's job (reclaim_stale_workers), not the writer's at startup.
         let stale = compactions
             .get(&stale_id)
             .expect("missing stale compaction");
-        assert_eq!(stale.status(), CompactionStatus::Submitted);
-        assert!(stale.worker().is_none());
+        assert_eq!(stale.status(), CompactionStatus::Running);
+        assert_eq!(
+            stale.worker().map(|w| w.worker_id.as_str()),
+            Some("worker-stale")
+        );
     }
 
     #[tokio::test]

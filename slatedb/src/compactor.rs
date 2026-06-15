@@ -698,8 +698,9 @@ impl CompactorEventHandler {
     }
 
     /// Reclaims `Running` compactions whose workers have not emitted a heartbeat
-    /// within [`CompactorOptions::worker_heartbeat_timeout`]. Reclaimed compactions
-    /// are reset to `Submitted` (with no worker) so they can be picked up again.
+    /// within [`CompactorOptions::worker_heartbeat_timeout`], as well as any
+    /// `Running` entry with no worker at all. Reclaimed compactions are reset to
+    /// `Submitted` (with no worker) so they can be picked up again.
     ///
     /// This is the coordinator-side half of the failure-detection protocol described
     /// in RFC-0025. The worker side emits heartbeats (updating `last_heartbeat_ms`)
@@ -708,16 +709,23 @@ impl CompactorEventHandler {
         let now_ms = self.system_clock.now().timestamp_millis() as u64;
         let timeout_ms = self.options.worker_heartbeat_timeout.as_millis() as u64;
 
-        // Capture the owning worker id alongside the compaction id so the log
-        // below doesn't have to re-look-up the entry (a Running compaction
-        // always has a worker, so the filter guarantees one is present).
+        // A Running compaction is stale if its worker's heartbeat has aged past
+        // the timeout, or if it has no worker at all — the protocol shouldn't
+        // produce the latter, but it would otherwise be stuck in Running forever.
+        // Capture the owning worker id for the log ("<none>" when absent).
         let stale: Vec<(Ulid, String)> = self
             .state()
             .compactions_with_status(&[CompactionStatus::Running])
-            .filter_map(|c| {
-                c.worker()
-                    .filter(|w| now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms)
-                    .map(|w| (c.id(), w.worker_id.clone()))
+            .filter(|c| match c.worker() {
+                Some(w) => now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms,
+                None => true,
+            })
+            .map(|c| {
+                let worker_id = c
+                    .worker()
+                    .map(|w| w.worker_id.clone())
+                    .unwrap_or_else(|| "<none>".to_string());
+                (c.id(), worker_id)
             })
             .collect();
 
@@ -5987,5 +5995,62 @@ mod tests {
             "should NOT be reclaimed"
         );
         assert!(c.worker().is_some(), "worker should still be set");
+    }
+
+    /// A Running compaction with no worker at all must also be reclaimed to
+    /// Submitted — the claim protocol shouldn't produce this state, but if it
+    /// somehow arises the entry would otherwise be stuck in Running forever.
+    #[tokio::test]
+    async fn test_reclaim_worker_less_running_compaction() {
+        let system_clock = Arc::new(MockSystemClock::new());
+        let options = Arc::new(CompactorOptions {
+            worker_heartbeat_timeout: Duration::from_secs(30),
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            system_clock.clone() as Arc<dyn SystemClock>,
+            options,
+        )
+        .await;
+
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        // Seed a Running compaction with no worker set.
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(compaction_id, CompactionSpec::new(vec![], 0))
+            .with_status(CompactionStatus::Running);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(compaction);
+        fixture
+            .handler
+            .state_writer
+            .write_compactions_safely()
+            .await
+            .expect("failed to persist seeded compaction");
+
+        // when: reclaim should treat the worker-less entry as stale regardless
+        // of how much time has (not) passed.
+        fixture
+            .handler
+            .reclaim_stale_workers()
+            .await
+            .expect("reclaim_stale_workers failed");
+
+        // then: the compaction is now Submitted with no worker.
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        let c = stored.get(&compaction_id).expect("compaction missing");
+        assert_eq!(
+            c.status(),
+            CompactionStatus::Submitted,
+            "should be reclaimed"
+        );
+        assert!(c.worker().is_none(), "worker should remain cleared");
     }
 }
