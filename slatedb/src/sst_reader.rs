@@ -485,10 +485,7 @@ mod tests {
         let metadata = sst_file.metadata().await.unwrap();
 
         assert!(metadata.size > 0);
-        assert!(metadata
-            .location
-            .to_string()
-            .contains(&sst_file.id().to_string()));
+        assert_eq!(metadata.id, sst_file.id());
     }
 
     #[tokio::test]
