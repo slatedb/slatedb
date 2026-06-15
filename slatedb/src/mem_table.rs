@@ -14,8 +14,10 @@ use std::sync::atomic::Ordering::SeqCst;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
+use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::prefix_extractor::PrefixExtractor;
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
@@ -326,26 +328,34 @@ impl ImmutableMemtable {
     /// Returns a new [`ImmutableMemtable`] that only contains entries with sequence
     /// number greater than the given `seq`. [`ImmutableMemtable::recent_flushed_wal_id`]
     /// remains the same.
-    pub(crate) fn filter_after_seq(&self, seq: u64) -> Self {
+    ///
+    /// When `segment_extractor` is `Some`, the surviving entries are run
+    /// through it to rebuild the touched-segment set (RFC-0024) from
+    /// scratch — the same derivation the writer applies in
+    /// [`WriteBatch::extract_entries`], via the shared
+    /// [`extract_segment_prefix`]. Prefixes whose every row was filtered
+    /// out are therefore dropped, and no row's prefix can survive without
+    /// its row. An empty/absent prefix is an `EmptySegmentPrefix` error,
+    /// matching the write and replay paths. When `segment_extractor` is
+    /// `None`, the new table records no segments.
+    pub(crate) fn filter_after_seq(
+        &self,
+        seq: u64,
+        segment_extractor: Option<&dyn PrefixExtractor>,
+    ) -> Result<Self, SlateDBError> {
         let new_table = WritableKVTable::new();
-        let original_segments = self.table.touched_segments();
         let mut surviving_segments = std::collections::BTreeSet::new();
         let mut table_iter = self.table.iter();
         while let Some(entry) = table_iter.next_sync() {
             if entry.seq > seq {
-                if surviving_segments.len() < original_segments.len() {
-                    for prefix in &original_segments {
-                        if entry.key.starts_with(prefix.as_ref()) {
-                            surviving_segments.insert(prefix.clone());
-                            break;
-                        }
-                    }
+                if let Some(extractor) = segment_extractor {
+                    surviving_segments.insert(extract_segment_prefix(extractor, &entry.key)?);
                 }
                 new_table.put(entry);
             }
         }
         new_table.record_touched_segments(surviving_segments);
-        Self::new(new_table, self.recent_flushed_wal_id)
+        Ok(Self::new(new_table, self.recent_flushed_wal_id))
     }
 }
 
@@ -570,6 +580,7 @@ mod tests {
     use super::*;
     use crate::bytes_range::BytesRange;
     use crate::merge_iterator::MergeIterator;
+    use crate::prefix_extractor::PrefixTarget;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
     use crate::{proptest_util, test_utils};
@@ -866,6 +877,23 @@ mod tests {
         prefixes.iter().map(|p| Bytes::copy_from_slice(p)).collect()
     }
 
+    /// Extracts a single-byte segment prefix, matching the 1-byte
+    /// prefixes used by the `filter_after_seq` tests.
+    #[derive(Debug)]
+    struct SingleByteExtractor;
+
+    impl PrefixExtractor for SingleByteExtractor {
+        fn name(&self) -> &str {
+            "single-byte-test-only"
+        }
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+            let len = match target {
+                PrefixTarget::Point(b) | PrefixTarget::Prefix(b) => b.len(),
+            };
+            (len >= 1).then_some(1)
+        }
+    }
+
     fn assert_invalid_segment_prefix(err: SlateDBError, prefix: &[u8], conflict: &[u8]) {
         match err {
             SlateDBError::InvalidSegmentPrefix {
@@ -978,7 +1006,7 @@ mod tests {
         let imm = ImmutableMemtable::new(table, 0);
 
         // when
-        let filtered = imm.filter_after_seq(2);
+        let filtered = imm.filter_after_seq(2, Some(&SingleByteExtractor)).unwrap();
 
         // then
         assert_eq!(filtered.table().touched_segments(), touched(&[b"b"]));
@@ -998,7 +1026,7 @@ mod tests {
         let imm = ImmutableMemtable::new(table, 0);
 
         // when
-        let filtered = imm.filter_after_seq(0);
+        let filtered = imm.filter_after_seq(0, Some(&SingleByteExtractor)).unwrap();
 
         // then
         assert_eq!(filtered.table().touched_segments(), touched(&[b"a", b"b"]));
@@ -1014,7 +1042,9 @@ mod tests {
         let imm = ImmutableMemtable::new(table, 0);
 
         // when
-        let filtered = imm.filter_after_seq(10);
+        let filtered = imm
+            .filter_after_seq(10, Some(&SingleByteExtractor))
+            .unwrap();
 
         // then
         assert!(filtered.table().touched_segments().is_empty());
@@ -1030,7 +1060,7 @@ mod tests {
         let imm = ImmutableMemtable::new(table, 0);
 
         // when
-        let filtered = imm.filter_after_seq(1);
+        let filtered = imm.filter_after_seq(1, None).unwrap();
 
         // then
         assert!(filtered.table().touched_segments().is_empty());
