@@ -297,11 +297,13 @@ impl CompactionStatus {
     //     land for a job that is already in local state
     // All other remote updates are ignored.
     fn should_adopt_state_transition(&self, updated_status: CompactionStatus) -> bool {
-        match (self, updated_status) {
-            (_, CompactionStatus::Compacted) => true,
-            (Self::Scheduled, CompactionStatus::Running) => true,
-            (Self::Running, CompactionStatus::Scheduled | CompactionStatus::Running) => true,
-            _ => false,
+        match self {
+            Self::Scheduled => matches!(updated_status, Self::Running | Self::Compacted),
+            Self::Running => matches!(
+                updated_status,
+                Self::Scheduled | Self::Running | Self::Compacted
+            ),
+            _ => matches!(updated_status, Self::Compacted),
         }
     }
 }
