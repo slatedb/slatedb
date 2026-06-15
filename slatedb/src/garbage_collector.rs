@@ -23,6 +23,7 @@ use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::tablestore::TableStore;
+use crate::utils::WatchableOnceCell;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -211,7 +212,6 @@ impl GarbageCollector {
     /// * `options` - Configuration options for the garbage collector.
     /// * `stat_registry` - Registry for tracking garbage collection metrics.
     /// * `system_clock` - Clock implementation for time-based decisions.
-    /// * `closed_result` - Result sink for the standalone garbage collector lifecycle.
     ///
     /// # Returns
     ///
@@ -224,9 +224,11 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
-        closed_result: Arc<dyn ClosedResultWriter>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(recorder));
+        // The standalone GC lifecycle does not surface a closed result yet, so the
+        // task executor uses a throwaway sink.
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             closed_result,
             system_clock.clone(),
@@ -431,7 +433,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
-    use crate::utils::WatchableOnceCell;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
@@ -1133,7 +1134,6 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1201,7 +1201,6 @@ mod tests {
             gc_opts,
             &helper,
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1264,7 +1263,6 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1342,7 +1340,6 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1796,7 +1793,6 @@ mod tests {
             gc_opts,
             recorder,
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
@@ -1871,7 +1867,6 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         // Send a WAL GC message. Correct behavior: only WAL GC runs.
@@ -1941,7 +1936,6 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
         gc.run_gc_once().await;
 
@@ -1990,7 +1984,6 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         let intervals: Vec<_> = gc.tickers().into_iter().map(|def| def.interval).collect();
@@ -2043,7 +2036,6 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
         gc.start().expect("failed to start garbage collector");
         gc.stop().await.expect("failed to stop garbage collector");
@@ -2368,7 +2360,6 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(WatchableOnceCell::new()),
         );
 
         gc.run_gc_once().await;
