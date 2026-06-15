@@ -38,7 +38,7 @@ pub struct DbStatus {
     /// handle's memtables but not yet flushed to the manifest. Empty when no
     /// segment extractor is configured. Read it via
     /// [`DbStatus::list_segments`], which merges in the segments in the manifest.
-    memtable_segments: Vec<SegmentPrefix>,
+    memtable_segments: BTreeSet<Bytes>,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
 }
@@ -57,7 +57,7 @@ impl DbStatus {
             .iter()
             .map(|segment| segment.prefix().clone())
             .collect();
-        set.extend(self.memtable_segments.iter().map(|s| s.prefix.clone()));
+        set.extend(self.memtable_segments.iter().cloned());
         set.into_iter()
             .map(|prefix| SegmentPrefix { prefix })
             .collect()
@@ -98,7 +98,7 @@ impl DbStatusManager {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
             current_manifest: initial_manifest,
-            memtable_segments: Vec::new(),
+            memtable_segments: BTreeSet::new(),
             close_reason: None,
         });
         Self {
@@ -130,20 +130,14 @@ impl DbStatusManager {
     }
 
     /// Replace the published set of memtable segment prefixes (RFC-0024) with
-    /// the union over the handle's currently live memtables. This is the path
-    /// that lets the set *shrink*: it is called when establishing the set (open
-    /// / WAL replay / checkpoint refresh) and right after a flush pops a memtable
-    /// and folds its prefixes into the manifest, so a prefix held only by the
-    /// flushed memtable drops out. Notifies subscribers only when the sorted set
-    /// actually changes.
+    /// `prefixes`, the union over the handle's currently live memtables. Unlike
+    /// [`Self::add_memtable_segments`], this can *shrink* the set, so it is the
+    /// path used whenever a recomputed union may have dropped a prefix.
+    /// Notifies subscribers only when the set actually changes.
     pub(crate) fn report_memtable_segments(&self, prefixes: BTreeSet<Bytes>) {
-        let segments: Vec<SegmentPrefix> = prefixes
-            .into_iter()
-            .map(|prefix| SegmentPrefix { prefix })
-            .collect();
         self.tx.send_if_modified(|s| {
-            if s.memtable_segments != segments {
-                s.memtable_segments = segments;
+            if s.memtable_segments != prefixes {
+                s.memtable_segments = prefixes;
                 true
             } else {
                 false
@@ -163,32 +157,25 @@ impl DbStatusManager {
         versioned: VersionedManifest,
         prefixes: BTreeSet<Bytes>,
     ) {
-        let segments: Vec<SegmentPrefix> = prefixes
-            .into_iter()
-            .map(|prefix| SegmentPrefix { prefix })
-            .collect();
         self.tx.send_if_modified(|s| {
             let mut changed = false;
             if versioned.id >= s.current_manifest.id && s.current_manifest != versioned {
                 s.current_manifest = versioned;
                 changed = true;
             }
-            if s.memtable_segments != segments {
-                s.memtable_segments = segments;
+            if s.memtable_segments != prefixes {
+                s.memtable_segments = prefixes;
                 changed = true;
             }
             changed
         });
     }
 
-    /// Add newly touched memtable segment prefixes (RFC-0024) to the published
-    /// set. This is the write-path counterpart to
-    /// [`Self::report_memtable_segments`]: a write can only *grow* the set, so
-    /// rather than recomputing the full union over all live memtables on the hot
-    /// path, we insert just the prefixes this write touched and notify only when
-    /// at least one was not already published. Prefixes leave the set via
-    /// [`Self::report_memtable_segments`] when their memtable is flushed. Keeps
-    /// `segments` sorted ascending.
+    /// Add the touched memtable segment prefixes (RFC-0024) in `prefixes` to the
+    /// published set. This only ever *grows* the set, so it avoids recomputing
+    /// the full union over all live memtables: it inserts just the given
+    /// prefixes and notifies only when at least one was not already published.
+    /// Use [`Self::report_memtable_segments`] when the set may need to shrink.
     pub(crate) fn add_memtable_segments(&self, prefixes: &BTreeSet<Bytes>) {
         if prefixes.is_empty() {
             return;
@@ -196,18 +183,7 @@ impl DbStatusManager {
         self.tx.send_if_modified(|s| {
             let mut changed = false;
             for prefix in prefixes {
-                if let Err(idx) = s
-                    .memtable_segments
-                    .binary_search_by(|sp| sp.prefix.cmp(prefix))
-                {
-                    s.memtable_segments.insert(
-                        idx,
-                        SegmentPrefix {
-                            prefix: prefix.clone(),
-                        },
-                    );
-                    changed = true;
-                }
+                changed = changed || s.memtable_segments.insert(prefix.clone());
             }
             changed
         });
@@ -299,7 +275,13 @@ mod tests {
     /// The published memtable segments as an order-independent set (ordering is
     /// a property of `list_segments`, not of the raw field).
     fn segment_set(status: &DbStatus) -> BTreeSet<SegmentPrefix> {
-        status.memtable_segments.iter().cloned().collect()
+        status
+            .memtable_segments
+            .iter()
+            .map(|prefix| SegmentPrefix {
+                prefix: prefix.clone(),
+            })
+            .collect()
     }
 
     #[test]
@@ -390,7 +372,7 @@ mod tests {
         assert!(rx.has_changed().unwrap());
         assert_eq!(
             rx.borrow_and_update().memtable_segments,
-            vec![segment_prefix(b"x")]
+            BTreeSet::from([Bytes::from_static(b"x")])
         );
     }
 
@@ -529,7 +511,10 @@ mod tests {
         assert!(rx.has_changed().unwrap());
         let status = rx.borrow_and_update();
         assert_eq!(status.current_manifest.id, 2);
-        assert_eq!(status.memtable_segments, vec![segment_prefix(b"b")]);
+        assert_eq!(
+            status.memtable_segments,
+            BTreeSet::from([Bytes::from_static(b"b")])
+        );
         assert_eq!(
             status.list_segments(),
             vec![segment_prefix(b"a"), segment_prefix(b"b")]
