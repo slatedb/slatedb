@@ -21,7 +21,6 @@ use object_store::Extensions;
 /// multipart upload initiation). A wrapper can use the [`CompactedSstWriteKind`] to
 /// decide admission per kind, for example admitting flushes while skipping
 /// bulk compaction outputs.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WriteIntent {
     /// The kind of write being performed.
@@ -29,7 +28,6 @@ pub struct WriteIntent {
 }
 
 /// The kind of write being performed.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompactedSstWriteKind {
     /// A memtable flush producing an L0 SST.
@@ -74,7 +72,6 @@ impl WriteIntent {
 /// wrapper can use the [`CompactedSstReadKind`] to apply different policies to foreground
 /// queries and compaction-input scans, and use [`ReadIntent::retry`] to
 /// detect a reissued read after a validation failure.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadIntent {
     /// The kind of read being performed.
@@ -91,7 +88,6 @@ pub struct ReadIntent {
 }
 
 /// The kind of read being performed.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompactedSstReadKind {
     /// A read on the caller's critical path (point reads and scans). Cache
@@ -141,7 +137,6 @@ impl ReadIntent {
 }
 
 /// Why a read is being reissued after a validation failure.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetryReason {
     /// The previous response failed an SST checksum validation.

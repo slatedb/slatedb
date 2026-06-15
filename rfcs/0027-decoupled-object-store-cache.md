@@ -15,8 +15,8 @@ Table of Contents:
    - [The intent protocol](#the-intent-protocol)
    - [Choice of interface](#choice-of-interface)
    - [SlateDB core: protocol contract](#slatedb-core-protocol-contract)
+   - [TableStore builder and per-store intents](#tablestore-builder-and-per-store-intents)
    - [SlateDB core: supporting plumbing](#slatedb-core-supporting-plumbing)
-   - [Where the cache will live](#where-the-cache-will-live)
    - [Builder layering](#builder-layering)
    - [The cache as a wrapper](#the-cache-as-a-wrapper)
    - [Cache wrapper behavior](#cache-wrapper-behavior)
@@ -27,11 +27,10 @@ Table of Contents:
    - [Performance and Cost](#performance-and-cost)
    - [Observability](#observability)
    - [Compatibility](#compatibility)
-- [Rollout](#rollout)
+- [Future Evolution](#future-evolution)
 - [Alternatives](#alternatives)
 - [Open Questions](#open-questions)
 - [References](#references)
-- [Updates](#updates)
 
 <!-- TOC end -->
 
@@ -55,12 +54,16 @@ are treated the same way.
 
 This RFC proposes two changes:
 
-1. **Intent protocol.** Every `ObjectStore` call SlateDB issues will carry a
-   typed intent describing the caller's purpose: write kind (WAL, memtable
-   flush, compaction output, manifest), read kind (foreground, compaction input,
-   warmup), and an optional retry reason (CRC mismatch, block decode error,
-   decompression error). A cache wrapper reads the intent and applies its own
-   policy.
+1. **Intent protocol.** SlateDB tags the calls the object store cache cares
+   about, compacted SST reads and writes, with a typed intent describing the
+   caller's purpose: write kind (memtable flush, compaction output), read kind
+   (foreground, compaction input), and an optional retry reason (CRC mismatch,
+   block decode error, decompression error). All other calls (WAL, manifests,
+   compactions state, the GC boundary file, list, delete) carry no intent. A
+   cache wrapper reads the intent and applies its own policy, treating untagged
+   calls as not-cacheable. Tagging only compacted SSTs covers the cache's real
+   decision, keeps the change small, and leaves the WAL and manifest code paths
+   untouched.
 2. **Pluggable cache placement.** `CachedObjectStore` will no longer be
    explicitly created inside SlateDB. The user passes the innermost backend to
    `Db::builder` and, optionally, a cache as an `ObjectStoreWrapper`: the bundled
@@ -161,8 +164,8 @@ back. Backends that do not know about the metadata (S3, GCS, Azure) ignore it.
 
 ## Goals
 
-- Define a typed protocol so a cache wrapper knows what each `ObjectStore` call
-  is for.
+- Define a typed protocol so a cache wrapper knows the purpose of each compacted
+  SST call.
 - Allow the user to plug in their own `ObjectStore` (cache or otherwise) without
   SlateDB knowing it is there.
 - Keep the bundled `CachedObjectStore` available as one such wrapper, with
@@ -175,6 +178,8 @@ back. Backends that do not know about the metadata (S3, GCS, Azure) ignore it.
   job.
 - Building automatic warmup or eviction. Warmup stays caller-driven via the
   existing `DbCacheManagerOps::warm_sst` API.
+- Tagging non-SST traffic (WAL, manifests, compactions state). See [Future
+  Evolution](#future-evolution).
 - Splitting the object store cache into its own crate. Discussed in the [Open
   Questions](#open-questions).
 
@@ -182,28 +187,25 @@ back. Backends that do not know about the metadata (S3, GCS, Azure) ignore it.
 
 ### The intent protocol
 
-The protocol is a small set of types. SlateDB will insert one of them into
-`extensions` on every read or write:
+The protocol is a small set of types. SlateDB inserts one of them into
+`extensions` on every compacted SST read or write:
 
 ```rust
-pub struct WriteIntent { pub kind: WriteKind }
+pub struct WriteIntent { pub kind: CompactedSstWriteKind }
 
-pub enum WriteKind {
+pub enum CompactedSstWriteKind {
     Flush,
     CompactionOutput,
-    Manifest,
-    Wal,
 }
 
 pub struct ReadIntent {
-    pub kind: ReadKind,
+    pub kind: CompactedSstReadKind,
     pub retry: Option<RetryReason>,
 }
 
-pub enum ReadKind {
+pub enum CompactedSstReadKind {
     Foreground,
     CompactionInput,
-    Warmup,
 }
 
 pub enum RetryReason {
@@ -216,12 +218,11 @@ pub enum RetryReason {
 The protocol covers three things the wrapper needs to know:
 
 1. **What kind of write is this?** (`WriteIntent`) Lets the wrapper decide
-   admission per kind. A typical policy keeps data-bearing writes (`Flush`) and
-   skips short-lived or tiny ones (`Wal`, `Manifest`) and bulk ones
-   (`CompactionOutput`), but the policy is the wrapper's choice.
+   admission per kind, for example admitting memtable flushes (`Flush`) while
+   skipping bulk compaction outputs (`CompactionOutput`). The policy is the
+   wrapper's choice.
 2. **What kind of read is this?** (`ReadIntent`) Lets the wrapper apply
-   different policies to foreground queries, compaction-input scans, and
-   warmups.
+   different policies to foreground queries and compaction-input scans.
 3. **Is this a retry after a bad cache hit?** (`ReadIntent.retry`) SlateDB will
    set this when an SST decode fails (CRC, block decode, decompression). The
    wrapper decides how to respond; a common action is to evict the local cache
@@ -233,9 +234,9 @@ The protocol covers three things the wrapper needs to know:
 
 This RFC proposes carrying intent via `object_store::Extensions`. SlateDB
 inserts a typed intent (`WriteIntent` or `ReadIntent`) into the `extensions`
-field on every `GetOptions`, `PutOptions`, and `PutMultipartOptions` it builds;
-a wrapper reads it with `extensions.get::<ReadIntent>()` or
-`get::<WriteIntent>()`. No new public trait, and the protocol composes directly
+field of the `GetOptions`, `PutOptions`, and `PutMultipartOptions` it builds for
+compacted SST reads and writes; a wrapper reads it with
+`extensions.get::<ReadIntent>()` or `get::<WriteIntent>()`. No new public trait, and the protocol composes directly
 with any generic `ObjectStore` wrapper at any level of the chain.
 
 Cost: a small per-call heap allocation overhead, described in
@@ -253,30 +254,69 @@ path. See [Caveats](#caveats) and we need to fix it upstream.
 
 ### SlateDB core: protocol contract
 
-SlateDB will support tagging every call to ObjectStore as much as possible:
+SlateDB tags the object store calls the cache cares about, compacted SST reads
+and writes, and leaves everything else untagged:
 
-1. **Tag every write with `WriteIntent`.** Every opts-capable write
-   (`put_opts` and multipart upload init) will set a `WriteIntent`. WAL writers
-   use `Wal`. Memtable flush outputs use `Flush`. Compaction outputs use
-   `CompactionOutput`. Manifest and compactions-state writes use `Manifest`.
-   Aside from documented upstream/API gaps, opts-capable writes from SlateDB
-   core are tagged.
-2. **Tag every read with `ReadIntent`.** Every opts-capable `get_opts` will set a
-   `ReadIntent`. Foreground user queries use `Foreground`. Compaction inputs use
-   `CompactionInput`. The `DbCacheManagerOps::warm_sst` path uses `Warmup`.
-   Aside from documented upstream/API gaps, opts-capable reads from SlateDB core
-   are tagged.
-3. **Retry on validation failure with a retry tag.** If decoding an SST fails
-   with a recoverable error (CRC mismatch, bad block, bad decompression),
-   SlateDB will reissue the read with `retry = Some(reason)`. SlateDB may retry
-   up to a bounded number of times before surfacing the failure. The retry tag
-   tells the wrapper to drop the cached file rather than return the same corrupt
-   bytes again.
+1. **Tag compacted SST writes with `WriteIntent`.** Memtable flush outputs use
+   `Flush` and compaction outputs use `CompactionOutput`, attached on
+   `put_opts` and multipart upload init. WAL writes and fences, manifest
+   writes, and compactions-state writes carry no intent.
+2. **Tag compacted SST reads with `ReadIntent`.** Foreground user queries use
+   `Foreground` and compaction inputs use `CompactionInput`, attached on
+   `get_opts`. Cache warmup reads issued via `DbCacheManagerOps::warm_sst` are
+   foreground reads and carry `Foreground`. WAL reads and metadata reads carry
+   no intent.
+3. **Retry on validation failure with a retry tag.** If decoding a compacted
+   SST fails with a recoverable error (CRC mismatch, bad block, bad
+   decompression), SlateDB reissues the read with `retry = Some(reason)`, up to
+   a bounded number of times before surfacing the failure. The retry tag tells
+   the wrapper to drop the cached file rather than return the same corrupt bytes
+   again.
 
-Untagged calls flow through the wrapper unchanged and the wrapper applies its
-default behavior. The bundled `CachedObjectStore` treats untagged writes
-according to its existing `cache_puts` policy, preserving pre-protocol behavior
-for known gaps such as `object_store::buffered::BufWriter`.
+Every untagged call flows through the wrapper, which treats it as not-cacheable
+and serves it from upstream. This covers WAL segments and fences, manifests,
+compactions state, the GC boundary file, and the opts-less `delete`, `list`,
+and `head` calls. Tagging only compacted SSTs keeps the change non-invasive:
+the WAL, manifest, and `slatedb-txn-obj` code paths are untouched.
+
+### TableStore builder and per-store intents
+
+The compacted SST kinds are a property of the component issuing the traffic,
+not of an individual call: a foreground read and a compaction-input read of the
+same SST are identical on the wire, and only the component that owns the
+operation knows which it is. SlateDB already reflects this by running two
+`TableStore` instances, one for foreground work and one for compaction. The
+foreground store is the Db's; the compaction store is shared by the compactor
+and GC and is also cacheless so background scans do not evict the foreground
+block cache. WAL reading uses its own store.
+
+The intent kinds attach to that existing split. `TableStore` is constructed
+through a builder whose required inputs are the object stores, SST format, and
+root path, and whose optional inputs include the two kinds:
+
+```rust
+let table_store = TableStore::builder(object_stores, sst_format, root_path)
+    .with_compacted_sst_read_kind(CompactedSstReadKind::Foreground)
+    .with_compacted_sst_write_kind(CompactedSstWriteKind::Flush)
+    .build();
+```
+
+A store records its kinds once at construction and derives the per-call intent
+from the SST id: a compacted SST carries the store's kind, a WAL SST carries
+none. The Db's store uses `Foreground` and `Flush`; the compaction store uses
+`CompactionInput` and `CompactionOutput`; the WAL reader's store sets no kinds.
+
+This is a deliberate choice over tagging each call. The compacted SST kind is
+not known at the leaf read and write sites: methods like `read_index` and
+`read_blocks` are reached through shared, component-agnostic plumbing
+(`SstIterator`, `SortedRunIterator`, the cache loaders) that serves every
+component alike. A per-call parameter would have to be threaded from each
+component down through all of that plumbing and every one of its callers, making
+those call sites intent-aware too. That is invasive and easy to get wrong: one
+missed or mistyped call site silently mistags its traffic. Declaring the kind
+once per store, where the component is composed, confines the decision to a
+single place per component, and because the per-component store split already
+exists, it costs no new wiring.
 
 ### SlateDB core: supporting plumbing
 
@@ -293,32 +333,6 @@ separate hook:
 - `head(path)` (convenience form) flows through and can be served from
   cached metadata. Paths that need intent on a head request can use
   `get_opts` with `head` set to true instead.
-
-### Where the cache will live
-
-SlateDB talks to object storage through `Arc<dyn ObjectStore>`. The user passes
-the innermost backend to `Db::builder(path, backend)`. That backend is a raw
-store (S3, GCS, Azure, `InMemory`, `LocalFileSystem`).
-
-A cache (or any other wrapper) is supplied separately as an `ObjectStoreWrapper`
-through `.with_object_store_wrapper(..)`. SlateDB keeps its instrumentation and
-retry on the backend, exactly as today, and applies the wrapper on top of them.
-The wrapper can be:
-
-- The bundled `CachedObjectStore`, exposed as a wrapper.
-- Any other intent-aware wrapper the user wrote.
-
-If the user supplies no wrapper, the protocol is a no-op for caching purposes:
-SlateDB still attaches intents on every call, but nothing reads them.
-
-If the user supplies a wrapper, every read and write flows through it with a
-typed intent on the extensions.
-
-This keeps the physical layering identical to what SlateDB ships today. The
-only change is that the cache is constructed from a user-supplied wrapper rather
-than from `Settings`. See [Builder layering](#builder-layering) for the exact
-order and [The cache as a wrapper](#the-cache-as-a-wrapper) for how the bundled and
-custom caches both plug in.
 
 ### Builder layering
 
@@ -348,6 +362,12 @@ Layers 2 and 3 are SlateDB-managed and sit directly on the backend, the same
 order SlateDB ships today. Layer 4 is whatever cache wrapper the user supplied,
 applied on top. SlateDB core will not construct a cache on the user's behalf;
 the bundled `CachedObjectStore` is one of several wrappers the user may supply.
+
+If the user supplies no wrapper, the protocol is a no-op for caching purposes:
+SlateDB still attaches intents on its compacted SST calls, but nothing reads
+them. If a wrapper is supplied, every read and write flows through it, with
+compacted SST calls carrying a typed intent on the extensions and all other
+calls carrying none.
 
 Instrumentation and retry stay on the backend for two reasons. The metrics on
 layer 2 count only requests that reach the backend, so a cache hit served by
@@ -400,11 +420,10 @@ Two consequences worth calling out:
   backend; they will not apply a cache wrapper. Users who want compactor reads
   or GC operations to go through their own cache supply the wrapper to those
   builders.
-- Manifest writes and compactions metadata writes will flow through the cache
-  wrapper (because there is only one main store handle). They will still skip
-  the cache because they carry `WriteIntent::manifest()` and the bundled wrapper
-  short-circuits that intent. See [Cache wrapper
-  behavior](#cache-wrapper-behavior).
+- Manifest writes, compactions state writes, and WAL traffic will flow through
+  the cache wrapper (because there is only one main store handle) but carry no
+  intent. The bundled wrapper treats untagged calls as not-cacheable, so they
+  are served from upstream. See [Cache wrapper behavior](#cache-wrapper-behavior).
 
 ### The cache as a wrapper
 
@@ -491,14 +510,14 @@ isolated wrapper change, and each can land as its own follow-up:
 
 | intent | Wrapper change |
 |-------------------------------------------|----------------|
-| `WriteIntent::wal()` on PUT with `cache_puts`| Skip the local write; forward to upstream only. |
-| `WriteIntent::manifest()` on PUT with `cache_puts`| Skip the local write; forward to upstream only. |
+| Untagged PUT (WAL, manifest, compactions state) | Skip the local write; forward to upstream only. |
 | `WriteIntent::compaction_output()` on PUT | Add option to cache on compaction |
 | `ReadIntent::compaction_input()` on GET | Add option to skip cache lookup and skip miss-admit; forward to upstream. |
 | `ReadIntent.retry = Some(_)` on GET | Delete the cache entry for `path`, then run the usual cache-aware fetch. Closes [problem 3](#the-problem-today); lets the fsync workaround be removed. |
 
 Each future change is local to the wrapper. SlateDB core's contract
-(tag every call with intent) does not move.
+(tag compacted SST reads and writes with intent, leave everything else
+untagged) does not move.
 
 Concrete policy choices (admission per kind, part sizes, prefetch shape,
 on-disk layout, eviction strategy) are owned by the wrapper. Users who want
@@ -577,11 +596,11 @@ A future optimization, if allocations come to matter, is to switch to
   `bufwriter_large_payload_carries_write_intent`) and act as regression catches
   for when the upstream fix lands.
 
-  Practical effect: in production, small SST writes (memtable flushes that fit
-  in 10 MB, occasional small compaction outputs) may reach the wrapper
+  Practical effect: in production, small compacted SST writes (memtable flushes
+  that fit in 10 MB, occasional small compaction outputs) may reach the wrapper
   untagged. Since the bundled `CachedObjectStore` initially keeps its current
-  policy, those writes follow the pre-protocol behavior. WAL and Manifest writes
-  do not go through BufWriter and so will always carry their intent correctly.
+  policy, those writes follow the pre-protocol behavior. WAL and manifest
+  writes carry no intent regardless, so they are unaffected.
 
 - **Multipart-part-level intent on the wire.** `WriteIntent` attaches at
   `put_multipart_opts` init, not on individual `put_part` calls. A cache wrapper
@@ -614,8 +633,8 @@ A future optimization, if allocations come to matter, is to switch to
 
 ### Metadata, Coordination, and Lifecycles
 
-- [x] Manifest format: unchanged. Manifest writes will carry
-  `WriteIntent::manifest()` via the `slatedb-txn-obj` constructor.
+- [x] Manifest format: unchanged. Manifest writes carry no intent (untagged)
+  and flow through the wrapper, which serves them from upstream.
 - [ ] Checkpoints
 - [ ] Clones
 - [x] Garbage collection: GC deletes will flow through the wrapper, triggering
@@ -626,8 +645,8 @@ A future optimization, if allocations come to matter, is to switch to
 
 ### Compaction
 
-- [x] Compaction state persistence: writes will carry `WriteIntent::manifest()`
-  via the `compactions_store` constructor.
+- [x] Compaction state persistence: writes carry no intent (untagged); the
+  `compactions_store` path is unchanged.
 - [ ] Compaction filters
 - [ ] Compaction strategies
 - [ ] Distributed compaction
@@ -637,8 +656,8 @@ A future optimization, if allocations come to matter, is to switch to
 
 ### Storage Engine Internals
 
-- [x] Write-ahead log (WAL): WAL writes will carry `WriteIntent::wal()` so
-  wrappers can skip admitting them.
+- [x] Write-ahead log (WAL): WAL reads and writes carry no intent (untagged), so
+  a wrapper that treats untagged calls as not-cacheable does not admit them.
 - [x] Block cache: unchanged; the in-process block cache continues to operate
   independently.
 - [x] Object store cache: today's `CachedObjectStore` will be decoupled from
@@ -673,8 +692,9 @@ because the bundled wrapper keeps its current behavior (see
 [Cache wrapper behavior](#cache-wrapper-behavior)). They can evolve as the
 follow-ups in that section land:
 
-- Skipping WAL / manifest / compaction-output write-through reduces local
-  disk writes when `cache_puts: true` and leaves more room for hot data.
+- Skipping write-through for untagged writes (WAL, manifest, compactions
+  state) and for compaction outputs reduces local disk writes when
+  `cache_puts: true` and leaves more room for hot data.
 - Bypassing compaction-input reads keeps one-shot bulk reads out of the
   cache, trading cache-hit savings on compactor reads for a smaller
   working set on foreground reads.
@@ -703,12 +723,22 @@ follow-ups in that section land:
 - **Wrappers and backends that ignore the protocol.** Unaffected.
 
 
-## Rollout
 
-The work spans two crates: `slatedb-txn-obj` and `slatedb`. `slatedb` depends
-on `slatedb-txn-obj`, so the Extensions support on the `slatedb-txn-obj`
-protocol and boundary objects lands first; the SlateDB-side changes that use
-it follow.
+
+## Future Evolution
+
+This RFC tags only compacted SSTs because that is what the cache needs. A
+natural follow-up is to tag every object store call: WAL segments and fences,
+manifests, compactions state, and the GC boundary file. That would let a
+wrapper apply per-kind policy to all traffic (for example skipping WAL
+write-through explicitly rather than by absence of a tag) and observe every
+call by purpose.
+
+It is deferred because the cache does not need it and it is more invasive.
+Manifest and compactions traffic flows through `slatedb-txn-obj`, whose
+protocol and boundary objects would have to carry caller-supplied extensions,
+and WAL reads and writes would each need tagging. Taking it on would also add
+kinds to the intent enums (`Wal`, `Manifest`, `Warmup`, and so on).
 
 ## Alternatives
 

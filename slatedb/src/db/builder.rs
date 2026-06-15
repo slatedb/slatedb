@@ -625,9 +625,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             write_rx,
             &tokio_handle,
         )?;
-        // The compactor and GC get their own table store: no block cache (so
-        // background reads do not pollute it), and reads/writes tagged with
-        // compaction intents.
+        // SST reads and writes for this table store are mainly by compaction,
+        // so tag them as compaction intent kinds to allow caching layers to
+        // differentiate from foreground read/write traffic.
         let uncached_table_store = Arc::new(
             TableStore::builder(
                 ObjectStores::new(
