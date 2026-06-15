@@ -101,6 +101,31 @@ Options:
 slatedb --path <PATH> list-checkpoints
 ```
 
+#### Scan
+
+Dumps the key/value pairs of the database to stdout:
+
+```bash
+slatedb --path <PATH> scan [OPTIONS]
+```
+
+The database is opened as a non-fencing reader, so `scan` is safe to point at a database that a service is actively writing. Output is one entry per line as `<key>\t<value>`.
+
+Options:
+- `--prefix <K>`: Restrict the scan to keys starting with these bytes. Conflicts with `--from`/`--to`.
+- `--from <K>`: Inclusive lower bound of the scanned key range.
+- `--to <K>`: Exclusive upper bound of the scanned key range.
+- `--key <auto|hex|utf8>`: How keys are rendered, and how `--prefix`/`--from`/`--to` are parsed. Default `auto`.
+- `--value <auto|hex|utf8|len|none>`: How values are rendered. `none` prints keys only. Default `auto`.
+- `--max-keys <N>`: Stop after emitting `N` entries.
+- `--count`: Print only `<N> entries, <B> bytes` instead of the entries themselves. When combined with `--max-keys`, only the entries up to the cap are counted.
+- `--checkpoint <UUID>`: Scan an existing checkpoint for a point-in-time scan that needs only read access to the store. Without it, the reader writes a transient checkpoint, so it needs write access to the store.
+
+Encoding rules:
+- `--key`/`--value` control both how the bound arguments are parsed and how keys/values are rendered. In `hex`, bound arguments are hex digits with an optional `0x` prefix. In `utf8`, they are taken literally. In `auto`, a bound is hex-decoded when it starts with `0x`/`0X` and taken literally otherwise.
+- In `auto`, a key is rendered as bare text only when it is clean UTF-8 (no control characters) and does not itself start with `0x`; otherwise it is rendered as `0x`-prefixed lowercase hex. For example a key `user/42` prints as `user/42`, while a key with bytes `00 42` prints as `0x0042`.
+- For values in `auto`, clean text is shown as-is and anything else as `<binary N bytes>`; switch to `--value hex` to see the raw bytes.
+
 #### Garbage Collection
 
 SlateDB provides garbage collection functionality for various resources:
@@ -144,6 +169,18 @@ slatedb --path my-database list-manifests
 
 ```bash
 slatedb --path my-database create-checkpoint --lifetime "7days"
+```
+
+### Scanning the Key/Value Pairs
+
+```bash
+slatedb --path my-database scan --prefix user --value utf8
+```
+
+Count the entries under a binary key prefix without printing them:
+
+```bash
+slatedb --path my-database scan --prefix 0x40 --count
 ```
 
 ### Running Garbage Collection on WAL Files
