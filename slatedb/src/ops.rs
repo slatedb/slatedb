@@ -12,7 +12,6 @@ use crate::db_cache_manager::CacheTarget;
 use crate::db_state::SsTableId;
 use crate::db_status::DbStatus;
 use crate::manifest::VersionedManifest;
-use crate::subrange::SubrangeBounds;
 use crate::transaction_manager::IsolationLevel;
 use crate::types::KeyValue;
 use crate::DbIterator;
@@ -173,10 +172,14 @@ pub trait DbReadOps {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    async fn scan_prefix<P, T>(&self, prefix: P, subrange: T) -> Result<DbIterator, crate::Error>
+    async fn scan_prefix<'a, P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+    ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: SubrangeBounds + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -194,7 +197,7 @@ pub trait DbReadOps {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    async fn scan_prefix_with_options<P, T>(
+    async fn scan_prefix_with_options<'a, P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -202,7 +205,7 @@ pub trait DbReadOps {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: SubrangeBounds + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
         self.scan_with_options(range, options).await

@@ -48,7 +48,7 @@ If your access pattern is "all keys that start with this prefix," use `scan_pref
 
 ```rust
 let mut iter = db.scan_prefix(b"test_key", ..).await?;   // all keys with the prefix
-let mut iter = db.scan_prefix(b"test_key", b"2"..).await?; // test_key2 onward
+let mut iter = db.scan_prefix(b"test_key", b"2".as_slice()..).await?; // test_key2 onward
 ```
 
 ## Complete example

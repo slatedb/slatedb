@@ -14,7 +14,6 @@ use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::reader::ScanContext;
-use crate::subrange::SubrangeBounds;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
 use crate::{DbReadOps, DbTransactionOps};
@@ -246,14 +245,14 @@ impl DbTransaction {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix<P, T>(
+    pub async fn scan_prefix<'a, P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: SubrangeBounds + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -272,7 +271,7 @@ impl DbTransaction {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix_with_options<P, T>(
+    pub async fn scan_prefix_with_options<'a, P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -280,7 +279,7 @@ impl DbTransaction {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: SubrangeBounds + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
@@ -663,7 +662,7 @@ impl DbReadOps for DbTransaction {
         DbTransaction::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<P, T>(
+    async fn scan_prefix_with_options<'a, P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -671,7 +670,7 @@ impl DbReadOps for DbTransaction {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: SubrangeBounds + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
         DbTransaction::scan_prefix_with_options(self, prefix, subrange, options).await
     }
@@ -1146,7 +1145,10 @@ mod tests {
             .await
             .unwrap();
         {
-            let mut iter = txn1.scan_prefix(b"users/", b"m"..).await.unwrap();
+            let mut iter = txn1
+                .scan_prefix(b"users/", b"m".as_slice()..)
+                .await
+                .unwrap();
             let kv = iter.next().await.unwrap().expect("mallory in subrange");
             assert_eq!(kv.key.as_ref(), b"users/m_mallory");
             assert!(iter.next().await.unwrap().is_none());
@@ -1164,7 +1166,10 @@ mod tests {
             .await
             .unwrap();
         {
-            let mut iter = txn2.scan_prefix(b"users/", b"m"..).await.unwrap();
+            let mut iter = txn2
+                .scan_prefix(b"users/", b"m".as_slice()..)
+                .await
+                .unwrap();
             let kv = iter.next().await.unwrap().expect("mallory in subrange");
             assert_eq!(kv.key.as_ref(), b"users/m_mallory");
             assert!(iter.next().await.unwrap().is_none());
