@@ -186,7 +186,7 @@ mod tests {
             vec![3],
             manifests
                 .iter()
-                .map(|metadata| metadata.id)
+                .map(|manifest| manifest.id)
                 .collect::<Vec<_>>()
         );
     }

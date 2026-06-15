@@ -346,11 +346,10 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         loop {
             let files = self.list(Unbounded, Unbounded).await?;
             if let Some(file) = files.last() {
-                let id = file.id;
                 let result = self
-                    .try_read_unchecked(id)
+                    .try_read_unchecked(file.id)
                     .await
-                    .map(|opt| opt.map(|v| (id, v)));
+                    .map(|opt| opt.map(|v| (file.id, v)));
                 match result {
                     // File listed but not found. Probably deleted by GC. Retry list/read.
                     // See https://github.com/slatedb/slatedb/issues/1215 for more details.

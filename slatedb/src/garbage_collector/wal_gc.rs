@@ -119,7 +119,7 @@ impl GcTask for WalGcTask {
                     &active_manifests,
                 )
             })
-            .map(|metadata| metadata.id)
+            .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
         if self.wal_options.dry_run && !sst_ids_to_delete.is_empty() {

@@ -328,7 +328,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|metadata| metadata.size > 0)
+                .filter(|w| w.size > 0)
                 .collect();
             assert!(
                 remaining.is_empty(),
@@ -373,7 +373,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|metadata| metadata.id.unwrap_wal_id())
+                .map(|w| w.id.unwrap_wal_id())
                 .collect();
             for (i, id) in wal_ids.iter().enumerate() {
                 let expected = replay_after_wal_id + 1 + i as u64;

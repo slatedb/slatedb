@@ -239,8 +239,7 @@ impl TableStore {
             .list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            let table_id = self.path_resolver.parse_table_id(&file.location);
-            match table_id {
+            match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Wal(id))) => {
                     if id_range.contains(&id) {
                         wal_list.push(ObjectMetadata::new(SsTableId::Wal(id), file));
@@ -461,8 +460,7 @@ impl TableStore {
             .list(Some(&compacted_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            let table_id = self.path_resolver.parse_table_id(&file.location);
-            match table_id {
+            match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
                         sst_list.push(ObjectMetadata::new(SsTableId::Compacted(id), file));

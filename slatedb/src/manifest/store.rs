@@ -506,9 +506,9 @@ impl ManifestStore {
             )
             .await?
             .into_iter()
-            .map(|metadata| {
-                let id = metadata.id.into();
-                metadata.with_id(id)
+            .map(|f| {
+                let id = f.id.into();
+                f.with_id(id)
             })
             .collect::<Vec<_>>();
         Ok(manifests)

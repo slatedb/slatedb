@@ -183,7 +183,7 @@ mod tests {
             vec![3],
             compactions
                 .iter()
-                .map(|metadata| metadata.id)
+                .map(|compactions| compactions.id)
                 .collect::<Vec<_>>()
         );
     }
