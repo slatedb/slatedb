@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use super::{GcStats, GcTask};
 
+#[derive(Clone)]
 pub(crate) struct CompactionsGcTask {
     compactions_store: Arc<CompactionsStore>,
     stats: Arc<GcStats>,

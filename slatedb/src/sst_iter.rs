@@ -34,6 +34,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
     pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
+    pub(crate) cache_metadata: bool,
     pub(crate) eager_spawn: bool,
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
@@ -46,6 +47,7 @@ impl Default for SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 1,
             cache_blocks: true,
+            cache_metadata: true,
             eager_spawn: false,
             order: IterationOrder::Ascending,
             prefix: None,
@@ -541,7 +543,7 @@ impl<'a> InternalSstIterator<'a> {
         if self.index.is_none() {
             let index = self
                 .table_store
-                .read_index(&self.view.table_as_ref().sst, self.options.cache_blocks)
+                .read_index(&self.view.table_as_ref().sst, self.options.cache_metadata)
                 .await?;
             let block_idx_range = partitioned_keyspace::partitions_covering_range(
                 &index.borrow(),
@@ -789,7 +791,7 @@ impl RowEntryIterator for FilterIterator<'_> {
                 .table_store()
                 .read_filters(
                     &self.inner.view().table_as_ref().sst,
-                    self.inner.options.cache_blocks,
+                    self.inner.options.cache_metadata,
                 )
                 .await?;
             self.filter.evaluate(&filters).await;
@@ -1332,7 +1334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bloom_filter_iterator_honors_cache_blocks() {
+    async fn test_bloom_filter_iterator_caches_filter_regardless_of_cache_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1377,49 +1379,128 @@ mod tests {
             Some(cache),
         ));
 
-        let no_cache_options = SstIteratorOptions {
-            cache_blocks: false,
+        let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
+
+        for cache_blocks in [false, true] {
+            meta_cache.remove(&filter_key).await;
+
+            let options = SstIteratorOptions {
+                cache_blocks,
+                ..Default::default()
+            };
+            let mut iter = SstIterator::for_key_with_stats_initialized(
+                &handle,
+                b"key1",
+                reader.clone(),
+                options,
+                None,
+            )
+            .await
+            .expect("iterator construction should succeed")
+            .expect("expected iterator for present key");
+            let _ = iter.next().await.unwrap();
+
+            assert!(meta_cache.get_filter(&filter_key).await.unwrap().is_some());
+        }
+
+        meta_cache.remove(&filter_key).await;
+        let options = SstIteratorOptions {
+            cache_metadata: false,
             ..Default::default()
         };
-        let mut iter = SstIterator::for_key_with_stats_initialized(
-            &handle,
-            b"key1",
-            reader.clone(),
-            no_cache_options,
-            None,
-        )
-        .await
-        .expect("iterator construction should succeed")
-        .expect("expected iterator for present key");
+        let mut iter =
+            SstIterator::for_key_with_stats_initialized(&handle, b"key1", reader, options, None)
+                .await
+                .expect("iterator construction should succeed")
+                .expect("expected iterator for present key");
         let _ = iter.next().await.unwrap();
 
-        assert!(meta_cache
-            .get_filter(&(handle.sst.id, handle.sst.info.filter_offset).into())
-            .await
-            .unwrap()
-            .is_none());
+        assert!(meta_cache.get_filter(&filter_key).await.unwrap().is_none());
+    }
 
-        let cache_options = SstIteratorOptions {
-            cache_blocks: true,
+    #[tokio::test]
+    async fn test_sst_iterator_caches_index_regardless_of_cache_blocks() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            format.clone(),
+            root_path.clone(),
+            None,
+        );
+        let mut builder = writer.table_builder();
+        builder
+            .add_value(b"key1", b"value1", Some(1), None)
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", Some(2), None)
+            .await
+            .unwrap();
+        let sst = writer
+            .write_sst(
+                &SsTableId::Compacted(ulid::Ulid::new()),
+                &builder.build().await.unwrap(),
+                false,
+            )
+            .await
+            .unwrap();
+        let handle = SsTableView::identity(sst);
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            Some(cache),
+        ));
+
+        let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
+
+        for cache_blocks in [false, true] {
+            meta_cache.remove(&index_key).await;
+
+            let options = SstIteratorOptions {
+                cache_blocks,
+                ..Default::default()
+            };
+            let mut iter = SstIterator::for_key_with_stats_initialized(
+                &handle,
+                b"key1",
+                reader.clone(),
+                options,
+                None,
+            )
+            .await
+            .expect("iterator construction should succeed")
+            .expect("expected iterator for present key");
+            let _ = iter.next().await.unwrap();
+
+            assert!(meta_cache.get_index(&index_key).await.unwrap().is_some());
+        }
+
+        meta_cache.remove(&index_key).await;
+        let options = SstIteratorOptions {
+            cache_metadata: false,
             ..Default::default()
         };
-        let mut iter = SstIterator::for_key_with_stats_initialized(
-            &handle,
-            b"key1",
-            reader,
-            cache_options,
-            None,
-        )
-        .await
-        .expect("iterator construction should succeed")
-        .expect("expected iterator for present key");
+        let mut iter =
+            SstIterator::for_key_with_stats_initialized(&handle, b"key1", reader, options, None)
+                .await
+                .expect("iterator construction should succeed")
+                .expect("expected iterator for present key");
         let _ = iter.next().await.unwrap();
 
-        assert!(meta_cache
-            .get_filter(&(handle.sst.id, handle.sst.info.filter_offset).into())
-            .await
-            .unwrap()
-            .is_some());
+        assert!(meta_cache.get_index(&index_key).await.unwrap().is_none());
     }
 
     fn bloom_filter_enabled_table_store(filter_bits_per_key: u32) -> Arc<TableStore> {
@@ -1773,6 +1854,7 @@ mod tests {
                 max_fetch_tasks: 32,
                 blocks_to_fetch: 256,
                 cache_blocks: true,
+                cache_metadata: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
@@ -1791,6 +1873,7 @@ mod tests {
                 max_fetch_tasks: 1,
                 blocks_to_fetch: 1,
                 cache_blocks: true,
+                cache_metadata: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
@@ -2364,6 +2447,7 @@ mod tests {
             max_fetch_tasks: 3,
             blocks_to_fetch: 3,
             cache_blocks: true,
+            cache_metadata: true,
             eager_spawn: false,
             order,
             prefix: None,
@@ -2650,6 +2734,7 @@ mod tests {
                 max_fetch_tasks: 1,
                 blocks_to_fetch: 1,
                 cache_blocks: true,
+                cache_metadata: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,

@@ -185,7 +185,7 @@ pub struct CompactionWorkerOptions {
 
 - `max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
-- `compactions_poll_interval` is used for polling frequency. Each poll sleeps for `compactions_poll_interval + random(0, compactions_poll_interval * 0.1)` to prevent workers from synchronizing on `.compactions` reads. This jitter is applied on every poll and requires no configuration.
+- `compactions_poll_interval` is used for polling frequency. To prevent workers from synchronizing on `.compactions` reads, the poll ticker jitters each wait: instead of waiting exactly `compactions_poll_interval`, each tick waits a random duration picked uniformly between `compactions_poll_interval/2` and `3 * compactions_poll_interval/2` (the interval plus or minus half). Because the range is centered on `compactions_poll_interval`, each worker still polls once per `compactions_poll_interval` on average. Jitter is a feature of the shared task dispatcher (defaulting to off) that the worker enables for its poll ticker; the randomized wait happens inside the ticker rather than in the message handler, so waiting on it never blocks the worker from processing job-progress or job-finished messages. It requires no user configuration.
 
 - `heartbeat_bytes` is used to tie heartbeats to compaction progress and gives the coordinator a liveness guarantee. A worker that falls behind this rate will be reclaimed and its job handed off, regardless of whether its event loop is still alive.
 
@@ -490,8 +490,8 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ## Operations
 
 ### Performance & Cost
+- **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to the upper end of the poll ticker's randomized wait (`3 * compactions_poll_interval_ms / 2`). Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `compactions_poll_interval_ms`.
 
-- **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to `compactions_poll_interval`. Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `compactions_poll_interval`.
 - **Throughput**: Scales roughly linearly with worker count, bounded by per-worker object store bandwidth.
 - **Object-store requests**: ~1 GET per poll interval + ~1 PUT per claim + ~1 PUT per output SST. At N=10 workers polling every 5s: ~120 GETs/min overhead.
 - **Space/write/read amplification**: Unchanged.
@@ -593,7 +593,7 @@ Some SlateDB users run thousands of DBs. A single worker process today is bound 
 **Resolved:** Exponential backoff does not make sense for `compactions_poll_interval` because GETs to object storage are cheap and it is critical that L0 compactions are started as soon as possible. A reasonable default is one second (e.g. `compactions_poll_interval="1s"`).
 
 2. ~~Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?~~
-**Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. Each poll also adds a small random jitter to `compactions_poll_interval`, spreading poll timing across workers without any additional configuration.
+**Resolved:** Claim contention is naturally low because compaction jobs run far longer than the claim operation itself. The poll ticker also randomizes each wait around `compactions_poll_interval_ms` (see `compactions_poll_interval` above), spreading poll timing across workers without any additional configuration.
 
 3. ~~How should existing per-compaction metrics (`bytes_processed`, `ssts_written`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?~~
 **Resolved:** Workers should have the same metrics infrastructure introduced by the metrics RFC and users can wire in reporting as they'd like. The worker tags the metrics with the worker id.

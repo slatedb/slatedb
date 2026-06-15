@@ -6,7 +6,7 @@ use crate::db_cache_manager::{self, CacheTarget};
 use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -15,7 +15,6 @@ use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::MergeOperatorType;
 use crate::oracle::DbReaderOracle;
 use crate::paths::PathResolver;
-use crate::rand::DbRand;
 use crate::reader::{DbStateReader, Reader, ScanContext};
 use crate::sst_iter::SstIteratorOptions;
 use crate::store_provider::StoreProvider;
@@ -33,11 +32,11 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::time::Duration;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
@@ -479,6 +478,7 @@ impl DbReaderInner {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
             cache_blocks: true,
+            cache_metadata: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
@@ -577,8 +577,8 @@ struct ManifestPoller {
 
 #[async_trait]
 impl MessageHandler<DbReaderMessage> for ManifestPoller {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<DbReaderMessage>>)> {
-        vec![(
+    fn tickers(&mut self) -> Vec<MessageTickerDef<DbReaderMessage>> {
+        vec![MessageTickerDef::new(
             self.inner.options.manifest_poll_interval,
             Box::new(|| DbReaderMessage::PollManifest),
         )]
@@ -1252,7 +1252,6 @@ mod tests {
     use crate::paths::PathResolver;
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
-    use crate::rand::DbRand;
     use crate::reader::Reader;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
@@ -1265,6 +1264,7 @@ mod tests {
     use object_store::ObjectStore;
     use rstest::rstest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::DbRand;
     use slatedb_common::MockSystemClock;
     use std::collections::{BTreeMap, VecDeque};
     use std::ops::RangeFull;

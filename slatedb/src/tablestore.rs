@@ -1105,7 +1105,6 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
-    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
@@ -1114,6 +1113,7 @@ mod tests {
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::DbRand;
 
     const ROOT: &str = "/root";
 
@@ -1858,6 +1858,63 @@ mod tests {
         let _ = reader.read_filters(&handle, true).await.unwrap();
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_read_stats_honors_cache_blocks() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let writer = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_tombstone(b"key2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
+        assert!(handle.info.stats_len > 0);
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        );
+        assert_eq!(meta_cache.entry_count(), 0);
+
+        let stats = reader.read_stats(&handle, false).await.unwrap();
+        assert!(stats.is_some());
+        assert!(meta_cache
+            .get_stats(&(handle.id, handle.info.stats_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let _ = reader.read_stats(&handle, true).await.unwrap();
+        assert!(meta_cache
+            .get_stats(&(handle.id, handle.info.stats_offset).into())
             .await
             .unwrap()
             .is_some());

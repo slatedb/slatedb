@@ -20,7 +20,7 @@
 //! }
 //! ```
 
-pub use crate::db_status::DbStatus;
+pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache_manager::{self, CacheTarget};
 use std::ops::{Range, RangeBounds};
@@ -53,7 +53,7 @@ use crate::config::{
 };
 use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
-use crate::db_state::{DbState, SsTableId};
+use crate::db_state::{collect_touched_segments, DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -63,7 +63,6 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
-use crate::rand::DbRand;
 use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
@@ -76,6 +75,7 @@ use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -285,6 +285,7 @@ impl DbInner {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
+        txn: Option<DbTransaction>,
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
         self.db_stats.write_ops.increment(batch.op_count() as u64);
@@ -298,6 +299,7 @@ impl DbInner {
             batch,
             options: options.clone(),
             done: tx,
+            txn,
         };
 
         self.maybe_apply_backpressure().await?;
@@ -493,6 +495,7 @@ impl DbInner {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
             cache_blocks: false,
+            cache_metadata: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
             prefix: None,
@@ -571,6 +574,10 @@ impl DbInner {
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
+
+        let guard = self.state.read();
+        self.status_manager
+            .report_memtable_segments(collect_touched_segments(&guard.view()));
 
         Ok(())
     }
@@ -1724,7 +1731,7 @@ impl Db {
         options: &WriteOptions,
     ) -> Result<WriteHandle, crate::Error> {
         self.inner
-            .write_with_options(batch, options)
+            .write_with_options(batch, options, None)
             .await
             .map_err(Into::into)
     }
@@ -2098,7 +2105,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
-    use crate::rand::DbRand;
     use crate::seq_tracker::FindOption;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
@@ -2111,7 +2117,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
-    use futures::{future, future::join_all, StreamExt};
+    use futures::{future, future::join_all, FutureExt, StreamExt};
     use object_store::memory::InMemory;
     use object_store::{ObjectStore, ObjectStoreExt};
     use proptest::test_runner::{TestRng, TestRunner};
@@ -2121,6 +2127,7 @@ mod tests {
         lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricValue,
         MetricsRecorderHelper,
     };
+    use slatedb_common::DbRand;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2268,7 +2275,8 @@ mod tests {
             .with_settings(test_db_options(0, 1024, None))
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())
-                    .with_scheduler_supplier(compaction_scheduler),
+                    .with_scheduler_supplier(compaction_scheduler)
+                    .with_options(fast_compactor_options()),
             )
             .build()
             .await
@@ -2796,7 +2804,8 @@ mod tests {
             .with_settings(test_db_options(0, 64 * 1024, None))
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())
-                    .with_scheduler_supplier(scheduler),
+                    .with_scheduler_supplier(scheduler)
+                    .with_options(fast_compactor_options()),
             )
             .build()
             .await
@@ -5513,7 +5522,8 @@ mod tests {
             .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())
-                    .with_scheduler_supplier(compaction_scheduler.clone()),
+                    .with_scheduler_supplier(compaction_scheduler.clone())
+                    .with_options(fast_compactor_options()),
             )
             .build()
             .await
@@ -7054,6 +7064,21 @@ mod tests {
         test_db_options_with_ttl(min_filter_keys, l0_sst_size_bytes, compactor_options, None)
     }
 
+    /// Compactor options with fast poll intervals. With the defaults (5s
+    /// coordinator poll + 5s worker claim poll, jittered up to 1.5x), a
+    /// compaction can take longer to land in the manifest than the 10s the
+    /// tests using this helper wait for one.
+    fn fast_compactor_options() -> CompactorOptions {
+        CompactorOptions {
+            poll_interval: Duration::from_millis(100),
+            worker: Some(CompactionWorkerOptions {
+                compactions_poll_interval: Duration::from_millis(100),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     fn test_db_options_with_ttl(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
@@ -7960,6 +7985,7 @@ mod tests {
                     await_durable: false,
                     ..Default::default()
                 },
+                None,
             )
             .await
             .unwrap_err();
@@ -8063,6 +8089,251 @@ mod tests {
         );
 
         db.close().await.unwrap();
+    }
+
+    /// Regression test: cancelling a commit future after the write batch has been
+    /// sent to the writer (but before it is processed) drops the DbTransaction,
+    /// which removes it from active_txns. The writer then:
+    ///   1. Skips conflict detection (check_has_conflict returns false for
+    ///      missing txn_ids)
+    ///   2. Skips tracking the committed state (track_recent_committed_txn
+    ///      silently no-ops)
+    ///
+    /// This allows a second transaction writing the same key to commit without
+    /// detecting a write-write conflict — a lost update anomaly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_commit_future_cancel_bypasses_conflict_detection() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_commit_future_cancel_bypasses_conflict_detection",
+            object_store,
+        )
+        .with_fp_registry(fp_registry.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // Write initial data.
+        db.put(b"x", b"v0").await.unwrap();
+        let initial_last_seq = db.inner.oracle.last_seq();
+
+        // Start txn1 and buffer a write to key "x".
+        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1_started_seq = txn1.seqnum();
+        txn1.put(b"x", b"txn1_value").unwrap();
+
+        // Pause the writer *before* it tracks the committed transaction state.
+        // At the pause point the WAL + memtable writes have already happened,
+        // but track_recent_committed_txn has not been called yet.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "pause").unwrap();
+
+        // Commit txn1 in a background task. It will send the batch to the
+        // writer, which will process it up to the pause point and block.
+        let txn1_commit = tokio::spawn(async move { txn1.commit().await });
+
+        // Wait until the writer has started processing txn1's batch.
+        // oracle.last_seq() advances at the very start of write_batch. No
+        // further synchronization is needed: the failpoint guarantees the
+        // writer cannot advance past pre-commit before we cancel below.
+        let reached = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.oracle.last_seq() <= initial_last_seq {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(reached.is_ok(), "writer did not start processing txn1");
+
+        // Cancel txn1's commit future. The DbTransaction was moved into the
+        // writer's queue message at commit time, so cancelling the future does
+        // NOT drop it on the caller side and therefore cannot call drop_txn.
+        txn1_commit.abort();
+        let _ = txn1_commit.await;
+
+        // txn1 stays in active_txns (the writer now owns it, not the caller).
+        assert!(
+            db.inner.txn_manager.min_active_seq().is_some(),
+            "txn1 should still be in active_txns (writer owns the in-flight txn)"
+        );
+
+        // Start txn2 while the writer is still paused (committed_seq has not
+        // been advanced yet), so txn2 starts at the same snapshot as txn1.
+        let txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert_eq!(
+            txn2.seqnum(),
+            txn1_started_seq,
+            "txn2 should start at the same seq as txn1 (committed_seq not yet advanced)"
+        );
+        txn2.put(b"x", b"txn2_value").unwrap();
+
+        // Un-pause the writer. It will track txn1's committed state properly
+        // because txn1 is still in active_txns.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
+
+        // Commit txn2. Its batch is enqueued behind txn1's, so the writer
+        // finishes tracking txn1's committed state before it runs conflict
+        // detection for txn2.
+        // Both txn1 and txn2 wrote key "x" from the same snapshot.
+        // A correct implementation detects a write-write conflict here.
+        let result = txn2.commit().await;
+        assert!(
+            result.is_err(),
+            "txn2 should detect a WW conflict with txn1"
+        );
+
+        db.close().await.unwrap();
+    }
+
+    /// Verify that the writer cleans up active_txns when a cancelled commit's
+    /// batch fails (e.g., TransactionConflict). Because commit moves the
+    /// DbTransaction into the writer's queue message, cancelling the future does
+    /// not drop it caller-side; the writer owns it and drops it (running drop_txn)
+    /// when it finishes processing the message. Without that ownership transfer
+    /// the txn would leak in active_txns, pinning min_active_seq and blocking
+    /// compaction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cancelled_commit_writer_error_cleans_up_active_txn() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_cancelled_commit_writer_error_cleans_up_active_txn",
+            object_store,
+        )
+        .with_fp_registry(fp_registry.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // Start txn_a and txn_b at the same snapshot. Both write the same key,
+        // so txn_b will hit a WW conflict once txn_a's commit is tracked.
+        let txn_a = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_b = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn_a.put(b"y", b"txn_a_value").unwrap();
+        txn_b.put(b"y", b"txn_b_value").unwrap();
+
+        // Commit txn_a fully so its committed state is tracked. From here on,
+        // txn_b is the only active transaction.
+        txn_a.commit().await.expect("txn_a commit should succeed");
+        let seq_after_a = db.inner.oracle.last_seq();
+
+        // Park the writer on a filler write: pause at post-commit and wait for
+        // the filler's processing to start (oracle.last_seq() advances at the
+        // very start of write_batch). With the writer held, txn_b's commit
+        // below cannot complete before we cancel it.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "pause").unwrap();
+        let filler_db = db.clone();
+        let filler = tokio::spawn(async move { filler_db.put(b"z", b"filler_value").await });
+        let reached = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.oracle.last_seq() <= seq_after_a {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "writer did not start processing the filler"
+        );
+        let seq_after_filler = db.inner.oracle.last_seq();
+
+        // Start committing txn_b, then cancel the commit. The first poll of the
+        // commit future enqueues the batch — moving the DbTransaction into the
+        // queued message — and then parks waiting on the (paused) writer, so
+        // now_or_never() drops the future exactly like a cancelled in-flight
+        // commit.
+        assert!(
+            txn_b.commit().now_or_never().is_none(),
+            "commit should be pending while the writer is paused"
+        );
+
+        // txn_b should still be in active_txns: ownership moved to the writer
+        // at enqueue, so cancelling the future must not run drop_txn.
+        assert!(
+            db.inner.txn_manager.min_active_seq().is_some(),
+            "txn_b should still be in active_txns (writer owns the in-flight txn)"
+        );
+
+        // Un-pause the writer. It finishes the filler, then processes txn_b's
+        // batch, which is rejected with a WW conflict; dropping the rejected
+        // message drops the owned DbTransaction, which runs drop_txn.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "off").unwrap();
+        filler
+            .await
+            .expect("failed to join filler task")
+            .expect("filler write should succeed");
+
+        // The writer picks up txn_b's batch (last_seq advances at the start of
+        // write_batch, before conflict detection rejects it)...
+        let processed = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.oracle.last_seq() <= seq_after_filler {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(processed.is_ok(), "writer did not start processing txn_b");
+
+        // ...and cleans it up from active_txns.
+        let cleaned = tokio::time::timeout(Duration::from_secs(30), async {
+            while db.inner.txn_manager.min_active_seq().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            cleaned.is_ok(),
+            "txn_b should have been cleaned up from active_txns by the writer"
+        );
+
+        // txn_b was rejected, so its write must not be visible.
+        assert_eq!(
+            db.get(b"y").await.unwrap(),
+            Some(Bytes::from_static(b"txn_a_value"))
+        );
+
+        db.close().await.unwrap();
+    }
+
+    /// When the commit's enqueue fails (e.g. the writer channel is closed), the
+    /// DbTransaction was moved into `enqueue_write_batch` but never made it onto
+    /// the queue. Ownership therefore stays on the caller side: the moved-in txn
+    /// drops inside the failing enqueue and runs drop_txn, so the txn must not
+    /// leak in active_txns and commit must surface the error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_commit_enqueue_failure_cleans_up_active_txn() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(
+            "/tmp/test_commit_enqueue_failure_cleans_up_active_txn",
+            object_store,
+        )
+        .build()
+        .await
+        .unwrap();
+
+        // Capture a handle to the txn manager before closing the db so we can
+        // assert on active_txns afterwards.
+        let txn_manager = db.inner.txn_manager.clone();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.put(b"k", b"v").unwrap();
+        assert!(
+            txn_manager.min_active_seq().is_some(),
+            "txn should be registered in active_txns before commit"
+        );
+
+        // Close the db, shutting down the writer and its channel. The txn keeps
+        // its own Arc<DbInner>, so it remains usable for the commit attempt.
+        db.close().await.unwrap();
+
+        // Commit now fails to enqueue. The moved-in DbTransaction drops on the
+        // caller side and cleans itself up.
+        let result = txn.commit().await;
+        assert!(
+            result.is_err(),
+            "commit should fail once the writer is closed"
+        );
+        assert!(
+            txn_manager.min_active_seq().is_none(),
+            "txn must be cleaned up on the caller side when enqueue fails"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9635,6 +9906,165 @@ mod tests {
             err.to_string().contains("empty prefix"),
             "expected empty-prefix error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn should_report_new_memtable_segments_in_subscription() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_subscribe_reports_memtable_segments";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        assert!(rx.borrow_and_update().list_segments().is_empty());
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+
+        // when
+        db.put_with_options(b"abc-1", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .iter()
+                .any(|seg| seg.prefix.as_ref() == b"abc")
+        })
+        .await
+        .unwrap();
+
+        // when
+        db.put_with_options(b"xyz-1", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .into_iter()
+                .map(|seg| seg.prefix)
+                .collect::<Vec<_>>()
+                == vec![Bytes::from_static(b"abc"), Bytes::from_static(b"xyz")]
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_report_segments_in_manifest_after_flush() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_report_segments_in_manifest_after_flush";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        db.put_with_options(
+            b"abc-1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .iter()
+                .any(|seg| seg.prefix.as_ref() == b"abc")
+        })
+        .await
+        .unwrap();
+
+        // when
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // then
+        rx.wait_for(|s| {
+            s.list_segments()
+                .into_iter()
+                .map(|seg| seg.prefix)
+                .collect::<Vec<_>>()
+                == vec![Bytes::from_static(b"abc")]
+        })
+        .await
+        .unwrap();
+
+        // when
+        // the segments are deleted from the manifest (as a full compaction would)
+        db.inner
+            .state
+            .write()
+            .modify(|m| m.state.manifest.value.core.segments.clear());
+        let manifest = db.inner.state.read().state().manifest.clone();
+        db.inner.status_manager.report_manifest(manifest.into());
+
+        // then
+        assert!(db.status().list_segments().is_empty());
+    }
+
+    #[tokio::test]
+    async fn should_not_report_segments_without_extractor() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_no_segments_without_extractor";
+        let mut settings = test_db_options(0, 16 * 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        let mut rx = db.subscribe();
+        assert!(rx.borrow_and_update().list_segments().is_empty());
+
+        // when
+        db.put_with_options(
+            b"abc-1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // the flush drains the write path and folds the memtable into the
+        // manifest, so both reporting paths have run by the time it returns.
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // then
+        assert!(db.status().list_segments().is_empty());
     }
 
     #[derive(Clone, Copy, Debug)]

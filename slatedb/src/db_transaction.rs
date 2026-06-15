@@ -86,7 +86,7 @@ impl DbTransaction {
             txn_id,
             started_seq: seq,
             txn_manager,
-            write_batch: RwLock::new(WriteBatch::new().with_txn_id(txn_id)),
+            write_batch: RwLock::new(WriteBatch::new()),
             db_inner,
             isolation_level,
             range_trackers: Mutex::new(Vec::new()),
@@ -581,10 +581,8 @@ impl DbTransaction {
         // If the WriteBatch is empty, it's a no-op or read-only batch.
         if write_batch.is_empty() {
             // Check for read conflicts before returning Ok(None).
-            if let Some(txn_id) = write_batch.txn_id.as_ref() {
-                if self.txn_manager.check_has_conflict(txn_id) {
-                    return Err(SlateDBError::TransactionConflict.into());
-                }
+            if self.txn_manager.check_has_conflict(&self.txn_id) {
+                return Err(SlateDBError::TransactionConflict.into());
             }
             return Ok(None);
         }
@@ -605,8 +603,9 @@ impl DbTransaction {
         // dedicated background task (in batch_write.rs) that processes all WriteBatches
         // sequentially, ensuring no concurrent writes. Both conflict checking & persisting
         // are handled there.
-        self.db_inner
-            .write_with_options(write_batch, options)
+        let db_inner = Arc::clone(&self.db_inner);
+        db_inner
+            .write_with_options(write_batch, options, Some(self))
             .await
             .map(Some)
             .map_err(Into::into)

@@ -19,17 +19,19 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::SsTableView;
+use crate::db_state::{collect_touched_segments, DbState, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
+use crate::VersionedManifest;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use parking_lot::RwLockWriteGuard;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -214,13 +216,8 @@ struct ManifestWriterHandler {
 
 #[async_trait]
 impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
-    fn tickers(
-        &mut self,
-    ) -> Vec<(
-        Duration,
-        Box<crate::dispatcher::MessageFactory<ManifestWriterCommand>>,
-    )> {
-        vec![(
+    fn tickers(&mut self) -> Vec<crate::dispatcher::MessageTickerDef<ManifestWriterCommand>> {
+        vec![crate::dispatcher::MessageTickerDef::new(
             self.manifest_poll_interval,
             Box::new(|| ManifestWriterCommand::PollManifest { done: None }),
         )]
@@ -546,9 +543,32 @@ impl ManifestWriterHandler {
             Ok(modifier.state.manifest.clone())
         })?;
 
-        drop(guard);
-        self.db.status_manager.report_manifest(manifest.into());
+        self.report_to_status_manager(&guard, manifest.into());
         Ok(())
+    }
+
+    /// Reports manifest and memtable updates to the status manager to notify subscriptions
+    /// (i.e., `Db::subscribe()`) about the changes.
+    ///
+    /// `report_manifest_and_memtable_segments()` needs to be synchronized with the write path.
+    ///  Otherwise, the following might happen:
+    ///  ```ascii
+    ///  T1: collect_touched_segments() collects touched segments from the memtables.
+    ///  T2: A new segment is added to the active memtable and reported to the status manager
+    ///  on the write path.
+    ///  T3: The segments collected in T1 are reported to the status manager and overwrite the
+    ///  change from T2 -> new segment in the active memtable would not be part of
+    ///  the result of DbStatus::list_segments() until the active memtable is flushed.
+    ///  ```
+    fn report_to_status_manager(
+        &self,
+        guarded_db_state: &RwLockWriteGuard<DbState>,
+        manifest: VersionedManifest,
+    ) {
+        let segments = collect_touched_segments(&guarded_db_state.view());
+        self.db
+            .status_manager
+            .report_manifest_and_memtable_segments(manifest, segments);
     }
 
     async fn write_manifest_update_safely(
@@ -857,7 +877,6 @@ mod tests {
     use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
-    use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
@@ -869,6 +888,7 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;

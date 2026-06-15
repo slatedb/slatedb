@@ -175,11 +175,10 @@ async fn populate(db: &Db) {
 }
 
 async fn warmup_meta_cache(db: &Db) {
-    // Use cache_blocks=true here so filter and index blocks get inserted into
-    // the meta cache; the bench itself runs with cache_blocks=false so each
-    // surviving SST still pays the throttled GET cost for its data blocks.
+    // Scans cache filter and index blocks independently of data-block caching,
+    // so this warms metadata without warming data blocks.
     let warmup_opts = ScanOptions {
-        cache_blocks: true,
+        cache_blocks: false,
         durability_filter: DurabilityLevel::Remote,
         ..ScanOptions::default()
     };

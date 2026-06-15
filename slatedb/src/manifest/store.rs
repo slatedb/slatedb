@@ -608,13 +608,13 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
-    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::DbRand;
     use slatedb_txn_obj::object_store::ObjectStoreBoundaryObject;
     use slatedb_txn_obj::{BoundaryObject, MonotonicId, TransactionalObject};
     use std::sync::Arc;
@@ -1000,6 +1000,18 @@ mod tests {
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
+        assert_eq!(
+            Path::from(ROOT)
+                .join("manifest")
+                .join("00000000000000000001.manifest"),
+            manifests[0].location
+        );
+        assert_eq!(
+            Path::from(ROOT)
+                .join("manifest")
+                .join("00000000000000000002.manifest"),
+            manifests[1].location
+        );
 
         // Check bounded
         let manifests = ms.list_manifests(1..2).await.unwrap();

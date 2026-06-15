@@ -13,7 +13,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -29,7 +28,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionStatus, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
@@ -38,8 +37,8 @@ use crate::tablestore::TableStore;
 use crate::utils::IdGenerator;
 #[cfg(feature = "compaction_filters")]
 use crate::CompactionFilterSupplier;
-use crate::DbRand;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::DbRand;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
@@ -86,7 +85,25 @@ impl CompactionWorker {
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
     /// executes them, and writes `Compacted` back to `.compactions`.
     pub async fn run(&self) -> Result<(), crate::Error> {
+        self.start()?;
+        self.join().await
+    }
+
+    /// Starts the worker's event loop monitor on the current runtime.
+    ///
+    /// Callers that interleave shutdown with a cancellation signal should call
+    /// this before racing [`CompactionWorker::join`] against that signal, so the
+    /// task is registered before [`CompactionWorker::stop`] can run. Otherwise a
+    /// cancellation that wins the race would invoke `stop` on a worker that was
+    /// never started, silently dropping the unstarted event loop. See
+    /// [`crate::admin::Admin::run_compaction_worker`].
+    pub(crate) fn start(&self) -> Result<(), crate::Error> {
         self.task_executor.monitor_on(&Handle::current())?;
+        Ok(())
+    }
+
+    /// Waits for the worker's event loop to finish.
+    pub(crate) async fn join(&self) -> Result<(), crate::Error> {
         self.task_executor
             .join_task(COMPACTION_WORKER_TASK_NAME)
             .await
@@ -122,6 +139,7 @@ pub(crate) struct CompactionWorkerHandler {
     /// coordinator creates the file on first run; the worker tolerates its
     /// absence on early ticks.
     stored: Option<StoredCompactions>,
+    rand: Arc<DbRand>,
 }
 
 impl CompactionWorkerHandler {
@@ -132,6 +150,7 @@ impl CompactionWorkerHandler {
         manifest_store: Arc<ManifestStore>,
         executor: Arc<dyn CompactionExecutor + Send + Sync>,
         clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             worker_id,
@@ -142,6 +161,7 @@ impl CompactionWorkerHandler {
             clock,
             active_jobs: BTreeSet::new(),
             stored: None,
+            rand,
         }
     }
 
@@ -197,6 +217,7 @@ impl CompactionWorkerHandler {
             manifest_store.clone(),
             executor,
             system_clock.clone(),
+            rand.clone(),
         );
         (handler, rx)
     }
@@ -500,11 +521,16 @@ impl CompactionWorkerHandler {
 
 #[async_trait]
 impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<WorkerMessage>>)> {
-        vec![(
+    fn tickers(&mut self) -> Vec<MessageTickerDef<WorkerMessage>> {
+        // RFC-0025: spread `.compactions` polls across workers so they don't
+        // synchronize on the same read cadence. Each poll waits a random
+        // duration centered on `compactions_poll_interval` (the interval plus or
+        // minus half), so the mean poll rate is unchanged.
+        vec![MessageTickerDef::new(
             self.options.compactions_poll_interval,
             Box::new(|| WorkerMessage::PollCompactions),
-        )]
+        )
+        .with_jitter(0.5, self.rand.clone())]
     }
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
@@ -647,6 +673,7 @@ mod tests {
                 manifest_store.clone(),
                 executor.clone(),
                 clock,
+                Arc::new(DbRand::new(0)),
             );
             // `handle()` lazily loads `.compactions` on the first message; the
             // tests below drive the child fns (poll_and_claim, handle_finished,
@@ -849,5 +876,24 @@ mod tests {
         assert!(fx.handler.active_jobs.is_empty());
         // No job was dispatched to the executor either.
         assert!(fx.executor.jobs().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_start_then_stop() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(ROOT);
+        let worker = crate::db::builder::CompactionWorkerBuilder::new(path, object_store)
+            .build()
+            .await
+            .expect("failed to build compaction worker");
+
+        // Mirrors the standalone-worker lifecycle: register the event loop with
+        // `start`, then shut it down. `stop` must succeed against the task that
+        // `start` registered, rather than silently no-op on an unstarted worker.
+        worker.start().expect("failed to start compaction worker");
+        worker
+            .stop()
+            .await
+            .expect("failed to stop compaction worker");
     }
 }

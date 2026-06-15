@@ -76,16 +76,16 @@ use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableView};
 use crate::db_status::ClosedResultWriter;
-use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
 use crate::manifest::{LsmTreeState, ManifestCore};
 use crate::merge_operator::MergeOperatorType;
-use crate::rand::DbRand;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::DbRand;
 
 pub use crate::compactor_state::{
     Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
@@ -367,6 +367,11 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
+        self.start().await?;
+        self.join().await
+    }
+
+    pub(crate) async fn start(&self) -> Result<(), crate::Error> {
         // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
@@ -388,7 +393,7 @@ impl Compactor {
                 rx,
                 &Handle::current(),
             )
-            .expect("failed to spawn compactor task");
+            .map_err(crate::Error::from)?;
 
         // Spawn an in-process worker if configured. The worker runs under its
         // own cancellation token; Compactor::stop and run() are responsible for
@@ -414,10 +419,14 @@ impl Compactor {
                     worker_rx,
                     &Handle::current(),
                 )
-                .expect("failed to spawn embedded compaction worker task");
+                .map_err(crate::Error::from)?;
         }
 
         self.task_executor.monitor_on(&Handle::current())?;
+        Ok(())
+    }
+
+    pub(crate) async fn join(&self) -> Result<(), crate::Error> {
         self.task_executor
             .join_task(COMPACTOR_TASK_NAME)
             .await
@@ -500,17 +509,17 @@ pub(crate) struct CompactorEventHandler {
 
 #[async_trait]
 impl MessageHandler<CompactorMessage> for CompactorEventHandler {
-    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<CompactorMessage>>)> {
+    fn tickers(&mut self) -> Vec<MessageTickerDef<CompactorMessage>> {
         vec![
-            (
+            MessageTickerDef::new(
                 self.options.poll_interval,
                 Box::new(|| CompactorMessage::PollManifest),
             ),
-            (
+            MessageTickerDef::new(
                 Duration::from_secs(10),
                 Box::new(|| CompactorMessage::LogStats),
             ),
-            (
+            MessageTickerDef::new(
                 self.options.commit_compacted_interval,
                 Box::new(|| CompactorMessage::CommitCompacted),
             ),
