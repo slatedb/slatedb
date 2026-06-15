@@ -189,7 +189,7 @@ impl DbStatusManager {
     /// at least one was not already published. Prefixes leave the set via
     /// [`Self::report_memtable_segments`] when their memtable is flushed. Keeps
     /// `segments` sorted ascending.
-    pub(crate) fn add_memtable_segments(&self, prefixes: BTreeSet<Bytes>) {
+    pub(crate) fn add_memtable_segments(&self, prefixes: &BTreeSet<Bytes>) {
         if prefixes.is_empty() {
             return;
         }
@@ -198,9 +198,14 @@ impl DbStatusManager {
             for prefix in prefixes {
                 if let Err(idx) = s
                     .memtable_segments
-                    .binary_search_by(|sp| sp.prefix.cmp(&prefix))
+                    .binary_search_by(|sp| sp.prefix.cmp(prefix))
                 {
-                    s.memtable_segments.insert(idx, SegmentPrefix { prefix });
+                    s.memtable_segments.insert(
+                        idx,
+                        SegmentPrefix {
+                            prefix: prefix.clone(),
+                        },
+                    );
                     changed = true;
                 }
             }
@@ -397,7 +402,7 @@ mod tests {
         rx.borrow_and_update();
 
         // when
-        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"m")]));
+        mgr.add_memtable_segments(&BTreeSet::from([Bytes::from_static(b"m")]));
 
         // then
         assert!(rx.has_changed().unwrap());
@@ -407,7 +412,7 @@ mod tests {
         );
 
         // when
-        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"a")]));
+        mgr.add_memtable_segments(&BTreeSet::from([Bytes::from_static(b"a")]));
 
         // then
         assert!(rx.has_changed().unwrap());
@@ -421,18 +426,18 @@ mod tests {
     fn should_not_notify_when_adding_a_known_segment() {
         // given
         let mgr = DbStatusManager::new(0);
-        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
+        mgr.add_memtable_segments(&BTreeSet::from([Bytes::from_static(b"x")]));
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 
         // when
-        mgr.add_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
+        mgr.add_memtable_segments(&BTreeSet::from([Bytes::from_static(b"x")]));
 
         // then
         assert!(!rx.has_changed().unwrap());
 
         // when
-        mgr.add_memtable_segments(BTreeSet::from([
+        mgr.add_memtable_segments(&BTreeSet::from([
             Bytes::from_static(b"x"),
             Bytes::from_static(b"y"),
         ]));
@@ -449,7 +454,7 @@ mod tests {
         rx.borrow_and_update();
 
         // when
-        mgr.add_memtable_segments(BTreeSet::new());
+        mgr.add_memtable_segments(&BTreeSet::new());
 
         // then
         assert!(!rx.has_changed().unwrap());
