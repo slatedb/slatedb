@@ -120,11 +120,11 @@ impl WalFile {
     /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
     pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
-        Ok(self
+        self
             .table_store
             .metadata(&SsTableId::Wal(self.id))
             .await
-            .map_err(crate::Error::from)?)
+            .map_err(crate::Error::from)
     }
 
     /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the

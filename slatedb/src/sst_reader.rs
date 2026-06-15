@@ -166,11 +166,11 @@ impl SstFile {
     /// Returns an error if the SST file does not exist or if there is an
     /// issue reading from object storage.
     pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
-        Ok(self
+        self
             .table_store
             .metadata(&self.handle.id)
             .await
-            .map_err(crate::Error::from)?)
+            .map_err(crate::Error::from)
     }
 
     /// Reads the stats block from object storage.
