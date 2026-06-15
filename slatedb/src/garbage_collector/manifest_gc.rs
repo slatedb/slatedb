@@ -64,11 +64,14 @@ impl GcTask for ManifestGcTask {
             .map(|checkpoint| checkpoint.manifest_id)
             .collect();
 
-        // Advance the boundary to the latest manifest that is older than min_age
+        // Advance the boundary to the latest manifest that is older than min_age and not referenced
+        // by an active checkpoint.
+        let min_active_id = active_manifest_ids.iter().copied().min();
         if let Some(boundary) = manifest_metadata_list
             .iter()
             .filter(|manifest_metadata| {
                 utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+                    && min_active_id.is_none_or(|min_active| min_active > manifest_metadata.id)
             })
             .map(|manifest_metadata| manifest_metadata.id)
             .max()
@@ -124,6 +127,7 @@ impl GcTask for ManifestGcTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CheckpointOptions;
     use crate::manifest::{
         store::{ManifestStore, StoredManifest},
         ManifestCore,
@@ -133,6 +137,7 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
     use std::time::Duration;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_collect_advances_boundary_for_old_manifest_files() {
@@ -187,6 +192,97 @@ mod tests {
                 .iter()
                 .map(|manifest| manifest.id)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_does_not_advance_boundary_past_active_checkpoint() {
+        let object_store = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from("/root"),
+            object_store.clone(),
+        ));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        // Create a checkpoint that pins an early manifest, then write newer
+        // manifests on top of it so the checkpoint's manifest is neither the
+        // latest nor the highest old manifest.
+        let checkpoint = stored_manifest
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
+            .await
+            .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        // Sanity check: the checkpoint pins a manifest below the latest, with at
+        // least one older non-active manifest above it.
+        let all_ids = manifest_store
+            .list_manifests(..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>();
+        let latest_id = *all_ids.last().unwrap();
+        assert!(checkpoint.manifest_id < latest_id);
+        assert!(all_ids
+            .iter()
+            .any(|&id| id > checkpoint.manifest_id && id < latest_id));
+
+        let recorder = MetricsRecorderHelper::noop();
+        let task = ManifestGcTask::new(
+            manifest_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(1),
+                interval: None,
+                dry_run: false,
+            },
+        );
+        task.collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap();
+
+        // The boundary must stay strictly below the active checkpoint's manifest,
+        // so it is never fenced even when older manifests above it are deleted.
+        let raw_boundary = object_store
+            .get(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let boundary: u64 = std::str::from_utf8(&raw_boundary).unwrap().parse().unwrap();
+        assert!(
+            boundary < checkpoint.manifest_id,
+            "boundary {boundary} advanced past active checkpoint manifest {}",
+            checkpoint.manifest_id
+        );
+
+        // The checkpoint's manifest file must be retained.
+        let remaining = manifest_store
+            .list_manifests(..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>();
+        assert!(
+            remaining.contains(&checkpoint.manifest_id),
+            "active checkpoint manifest {} was deleted; remaining={remaining:?}",
+            checkpoint.manifest_id
         );
     }
 }
