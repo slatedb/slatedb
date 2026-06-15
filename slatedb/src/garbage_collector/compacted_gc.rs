@@ -212,7 +212,7 @@ impl GcTask for CompactedGcTask {
             .list_compacted_ssts(..)
             .await?
             .into_iter()
-            .map(|(id, _metadata)| id)
+            .map(|metadata| metadata.id)
             // Filter out SSTs that were more recently created than the cutoff_dt
             .filter(|id| DateTime::<Utc>::from(id.unwrap_compacted_id().datetime()) < cutoff_dt)
             // Filter out SSTs that are active in the manifest (including actively checkpointed SSTs)
@@ -361,7 +361,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|(id, _metadata)| id)
+            .map(|metadata| metadata.id)
             .collect();
 
         assert_eq!(remaining, vec![id_within_min_age, id_active_recent]);
@@ -465,7 +465,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|(id, _metadata)| id)
+            .map(|metadata| metadata.id)
             .collect();
 
         // Only the manifest SST and newer SST should remain; the older,
@@ -567,7 +567,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|(id, _metadata)| id)
+            .map(|metadata| metadata.id)
             .collect();
 
         // Only the barrier and newer SSTs should remain
@@ -659,7 +659,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|(id, _metadata)| id)
+            .map(|metadata| metadata.id)
             .collect();
 
         assert!(

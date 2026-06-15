@@ -1966,6 +1966,9 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		if metadata.Location == "" {
 			t.Fatalf("WalFile.Metadata() for file %d: Location is empty", i)
 		}
+		if metadata.Id != file.Id() {
+			t.Fatalf("WalFile.Metadata() for file %d: Id = %d, want %d", i, metadata.Id, file.Id())
+		}
 
 		iter, err := file.Iterator()
 		if err != nil {

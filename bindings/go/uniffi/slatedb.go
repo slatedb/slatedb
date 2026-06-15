@@ -9479,6 +9479,8 @@ func (_ FfiDestroyerMokaCacheOptions) Destroy(value MokaCacheOptions) {
 
 // Metadata describing an object in object storage.
 type ObjectMetadata struct {
+	// Parsed object identifier.
+	Id uint64
 	// Last-modified timestamp seconds component.
 	LastModifiedSeconds int64
 	// Last-modified timestamp nanoseconds component.
@@ -9494,6 +9496,7 @@ type ObjectMetadata struct {
 }
 
 func (r *ObjectMetadata) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Id)
 	FfiDestroyerInt64{}.Destroy(r.LastModifiedSeconds)
 	FfiDestroyerUint32{}.Destroy(r.LastModifiedNanos)
 	FfiDestroyerUint64{}.Destroy(r.Size)
@@ -9512,6 +9515,7 @@ func (c FfiConverterObjectMetadata) Lift(rb RustBufferI) ObjectMetadata {
 
 func (c FfiConverterObjectMetadata) Read(reader io.Reader) ObjectMetadata {
 	return ObjectMetadata{
+		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterInt64INSTANCE.Read(reader),
 		FfiConverterUint32INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
@@ -9530,6 +9534,7 @@ func (c FfiConverterObjectMetadata) LowerExternal(value ObjectMetadata) External
 }
 
 func (c FfiConverterObjectMetadata) Write(writer io.Writer, value ObjectMetadata) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Id)
 	FfiConverterInt64INSTANCE.Write(writer, value.LastModifiedSeconds)
 	FfiConverterUint32INSTANCE.Write(writer, value.LastModifiedNanos)
 	FfiConverterUint64INSTANCE.Write(writer, value.Size)

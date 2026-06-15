@@ -62,7 +62,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 }
 
-type SsTableObjectMetadata = (SsTableId, ObjectMetadata);
+type SsTableObjectMetadata = ObjectMetadata<SsTableId>;
 
 impl TableStore {
     pub(crate) fn new<P: Into<Path>>(
@@ -243,13 +243,13 @@ impl TableStore {
             match table_id {
                 Ok(Some(SsTableId::Wal(id))) => {
                     if id_range.contains(&id) {
-                        wal_list.push((SsTableId::Wal(id), file.into()));
+                        wal_list.push(ObjectMetadata::new(SsTableId::Wal(id), file));
                     }
                 }
                 _ => continue,
             }
         }
-        wal_list.sort_by_key(|m| m.0.unwrap_wal_id());
+        wal_list.sort_by_key(|m| m.id.unwrap_wal_id());
         Ok(wal_list)
     }
 
@@ -433,10 +433,16 @@ impl TableStore {
     /// - Returns [`SlateDBError`] if the underlying object store `head` request
     ///   fails (for example, if the object does not exist or storage access
     ///   fails).
-    pub(crate) async fn metadata(&self, id: &SsTableId) -> Result<ObjectMetadata, SlateDBError> {
+    pub(crate) async fn metadata(
+        &self,
+        id: &SsTableId,
+    ) -> Result<ObjectMetadata<SsTableId>, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        Ok(object_store.head(&path).await?.into())
+        Ok(ObjectMetadata::new(
+            *id,
+            object_store.head(&path).await?,
+        ))
     }
 
     /// List all SSTables in the compacted directory.
@@ -462,7 +468,10 @@ impl TableStore {
             match table_id {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
-                        sst_list.push((SsTableId::Compacted(id), file.into()));
+                        sst_list.push(ObjectMetadata::new(
+                            SsTableId::Compacted(id),
+                            file,
+                        ));
                     }
                 }
                 Err(e) => {
@@ -480,7 +489,7 @@ impl TableStore {
             }
         }
 
-        sst_list.sort_by_key(|m| m.0.unwrap_compacted_id());
+        sst_list.sort_by_key(|m| m.id.unwrap_compacted_id());
         Ok(sst_list)
     }
 
@@ -2048,32 +2057,32 @@ mod tests {
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 3);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
-        assert_eq!(ssts[2].0, id3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
 
         let ssts = ts
             .list_compacted_ssts(id2.unwrap_compacted_id()..id3.unwrap_compacted_id())
             .await
             .unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         let ssts = ts
             .list_compacted_ssts(id2.unwrap_compacted_id()..)
             .await
             .unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id2);
-        assert_eq!(ssts[1].0, id3);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
 
         let ssts = ts
             .list_compacted_ssts(..id3.unwrap_compacted_id())
             .await
             .unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
     }
 
     #[rstest]
@@ -2125,26 +2134,26 @@ mod tests {
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 3);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
-        assert_eq!(ssts[2].0, id3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
 
         let ssts = ts
             .list_wal_ssts(id2.unwrap_wal_id()..id3.unwrap_wal_id())
             .await
             .unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         let ssts = ts.list_wal_ssts(id2.unwrap_wal_id()..).await.unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id2);
-        assert_eq!(ssts[1].0, id3);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
 
         let ssts = ts.list_wal_ssts(..id3.unwrap_wal_id()).await.unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
 
         if let Some(wal_store) = wal_store {
             assert_eq!(count_ssts_in(&main_store).await, 0);
@@ -2276,7 +2285,7 @@ mod tests {
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         if let Some(wal_store) = wal_store {
             assert_eq!(count_ssts_in(&main_store).await, 1);
@@ -2330,7 +2339,7 @@ mod tests {
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         if let Some(wal_store) = wal_store {
             assert_eq!(count_ssts_in(&main_store).await, 0);

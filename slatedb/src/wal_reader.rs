@@ -119,11 +119,13 @@ impl WalFile {
     /// object store. If the file is missing, a [`crate::Error`] with
     /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
-    pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
-        self.table_store
+    pub async fn metadata(&self) -> Result<ObjectMetadata<u64>, crate::Error> {
+        Ok(self
+            .table_store
             .metadata(&SsTableId::Wal(self.id))
             .await
-            .map_err(Into::into)
+            .map_err(crate::Error::from)?
+            .with_id(self.id))
     }
 
     /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the
@@ -207,8 +209,8 @@ impl WalReader {
         let result = self.table_store.list_wal_ssts(range).await;
         Ok(result?
             .into_iter()
-            .map(|(id, _metadata)| WalFile {
-                id: id.unwrap_wal_id(),
+            .map(|metadata| WalFile {
+                id: metadata.id.unwrap_wal_id(),
                 table_store: Arc::clone(&self.table_store),
             })
             .collect())

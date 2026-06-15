@@ -649,7 +649,7 @@ pub trait SequencedStorageProtocol<T: Send + Sync>:
         // object-safe
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
-    ) -> Result<Vec<(MonotonicId, ObjectMetadata)>, TransactionalObjectError>;
+    ) -> Result<Vec<ObjectMetadata<MonotonicId>>, TransactionalObjectError>;
 
     /// Delete a version without checking it against the durable boundary.
     ///
@@ -917,7 +917,7 @@ mod tests {
             &self,
             _from: std::ops::Bound<MonotonicId>,
             _to: std::ops::Bound<MonotonicId>,
-        ) -> Result<Vec<(MonotonicId, ObjectMetadata)>, TransactionalObjectError> {
+        ) -> Result<Vec<ObjectMetadata<MonotonicId>>, TransactionalObjectError> {
             Err(TransactionalObjectError::InvalidObjectState)
         }
 

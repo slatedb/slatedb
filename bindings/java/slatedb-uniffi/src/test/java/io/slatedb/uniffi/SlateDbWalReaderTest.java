@@ -87,6 +87,7 @@ class SlateDbWalReaderTest {
                         ObjectMetadata metadata = TestSupport.await(file.metadata());
                         assertNotNull(metadata);
                         assertFalse(metadata.location().isEmpty());
+                        assertEquals(file.id(), metadata.id());
 
                         try (WalFileIterator iterator = TestSupport.await(file.iterator())) {
                             List<RowEntry> rows = TestSupport.drainWalIterator(iterator);
