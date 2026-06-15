@@ -391,6 +391,63 @@ impl Admin {
         }
     }
 
+    /// Run a standalone compaction worker in the foreground until the provided cancellation token
+    /// is cancelled.
+    ///
+    /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
+    /// graceful shutdown and waits for the worker to stop, resetting any compactions it claimed
+    /// back to `Scheduled` so other workers can pick them up.
+    ///
+    /// To use compaction filters with the standalone worker, configure the `AdminBuilder` with
+    /// [`AdminBuilder::with_compaction_filter_supplier`] before building.
+    ///
+    /// # Arguments
+    ///
+    /// * `cancellation_token`: Token used to request worker shutdown.
+    pub async fn run_compaction_worker(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), crate::Error> {
+        self.run_compaction_worker_with_options(
+            cancellation_token,
+            crate::config::CompactionWorkerOptions::default(),
+        )
+        .await
+    }
+
+    /// Like [`Admin::run_compaction_worker`] but accepts explicit
+    /// [`crate::config::CompactionWorkerOptions`].
+    pub async fn run_compaction_worker_with_options(
+        &self,
+        cancellation_token: CancellationToken,
+        options: crate::config::CompactionWorkerOptions,
+    ) -> Result<(), crate::Error> {
+        #[allow(unused_mut)]
+        let mut builder = crate::CompactionWorkerBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_options(options)
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.rng().next_u64());
+
+        #[cfg(feature = "compaction_filters")]
+        if let Some(supplier) = &self.compaction_filter_supplier {
+            builder = builder.with_compaction_filter_supplier(supplier.clone());
+        }
+
+        let worker = builder.build().await?;
+
+        worker.start()?;
+
+        tokio::select! {
+            result = worker.join() => result,
+            _ = cancellation_token.cancelled() => {
+                worker.stop().await
+            }
+        }
+    }
+
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
     /// provided options. The checkpoint will reference the current active manifest of the db. This
     /// method does not flush writer memtables or WALs before creating the checkpoint. You will be
@@ -805,7 +862,7 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::config::{CompactorOptions, GarbageCollectorOptions};
+    use crate::config::{CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions};
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::test_utils::FlakyObjectStore;
@@ -963,6 +1020,24 @@ mod tests {
                     worker: None,
                     ..CompactorOptions::default()
                 },
+            )
+            .await;
+        assert!(matches!(result, Ok(())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admin_run_compaction_worker_with_options_stops_on_cancellation() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path =
+            Path::from("/tmp/test_admin_run_compaction_worker_with_options_stops_on_cancellation");
+        let admin = AdminBuilder::new(path, object_store).build();
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+
+        let result = admin
+            .run_compaction_worker_with_options(
+                cancellation_token,
+                CompactionWorkerOptions::default(),
             )
             .await;
         assert!(matches!(result, Ok(())));

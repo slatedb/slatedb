@@ -85,7 +85,25 @@ impl CompactionWorker {
     /// claims up to [`CompactionWorkerOptions::max_concurrent_compactions`] jobs,
     /// executes them, and writes `Compacted` back to `.compactions`.
     pub async fn run(&self) -> Result<(), crate::Error> {
+        self.start()?;
+        self.join().await
+    }
+
+    /// Starts the worker's event loop monitor on the current runtime.
+    ///
+    /// Callers that interleave shutdown with a cancellation signal should call
+    /// this before racing [`CompactionWorker::join`] against that signal, so the
+    /// task is registered before [`CompactionWorker::stop`] can run. Otherwise a
+    /// cancellation that wins the race would invoke `stop` on a worker that was
+    /// never started, silently dropping the unstarted event loop. See
+    /// [`crate::admin::Admin::run_compaction_worker`].
+    pub(crate) fn start(&self) -> Result<(), crate::Error> {
         self.task_executor.monitor_on(&Handle::current())?;
+        Ok(())
+    }
+
+    /// Waits for the worker's event loop to finish.
+    pub(crate) async fn join(&self) -> Result<(), crate::Error> {
         self.task_executor
             .join_task(COMPACTION_WORKER_TASK_NAME)
             .await
@@ -858,5 +876,24 @@ mod tests {
         assert!(fx.handler.active_jobs.is_empty());
         // No job was dispatched to the executor either.
         assert!(fx.executor.jobs().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_start_then_stop() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(ROOT);
+        let worker = crate::db::builder::CompactionWorkerBuilder::new(path, object_store)
+            .build()
+            .await
+            .expect("failed to build compaction worker");
+
+        // Mirrors the standalone-worker lifecycle: register the event loop with
+        // `start`, then shut it down. `stop` must succeed against the task that
+        // `start` registered, rather than silently no-op on an unstarted worker.
+        worker.start().expect("failed to start compaction worker");
+        worker
+            .stop()
+            .await
+            .expect("failed to stop compaction worker");
     }
 }

@@ -10,7 +10,6 @@ use slatedb::config::{
     GarbageCollectorOptions, Settings,
 };
 use slatedb::seq_tracker::FindOption;
-use slatedb::CompactionWorkerBuilder;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -81,7 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 )
                 .await?
         }
-        CliCommands::RunWorker => exec_run_worker(path, object_store, cancellation_token).await?,
+        CliCommands::RunWorker => exec_run_worker(&admin, cancellation_token).await?,
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,
@@ -378,8 +377,7 @@ async fn exec_ts_to_seq(admin: &Admin, ts_secs: i64, round_up: bool) -> Result<(
 }
 
 async fn exec_run_worker(
-    path: Path,
-    object_store: std::sync::Arc<dyn object_store::ObjectStore>,
+    admin: &Admin,
     cancellation_token: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
     let options = match Settings::load() {
@@ -396,20 +394,8 @@ async fn exec_run_worker(
             Default::default()
         }
     };
-    let worker = CompactionWorkerBuilder::new(path, object_store)
-        .with_options(options)
-        .build()
+    admin
+        .run_compaction_worker_with_options(cancellation_token, options)
         .await?;
-
-    tokio::select! {
-        result = worker.run() => {
-            return Ok(result?);
-        }
-        _ = cancellation_token.cancelled() => {
-            // fall through to graceful shutdown
-        }
-    }
-
-    worker.stop().await?;
     Ok(())
 }
