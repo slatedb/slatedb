@@ -311,7 +311,8 @@ impl DbInner {
     ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         let guard = self.state.read();
         let memtable = guard.memtable();
-        memtable.record_touched_segments(touched_segments);
+        self.status_manager.add_memtable_segments(&touched_segments);
+        memtable.record_touched_segments(touched_segments.clone());
         entries.into_iter().for_each(|entry| memtable.put(entry));
         memtable.table().durable_watcher()
     }
