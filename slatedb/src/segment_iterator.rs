@@ -359,14 +359,22 @@ async fn build_l0_range_iters(
     let table_store = ctx.table_store.clone();
     let range = ctx.range.clone();
     let opts = ctx.sst_iter_options.clone();
+    let stats = ctx.db_stats.clone();
     build_concurrent(l0.iter().cloned(), ctx.max_parallel, move |sst| {
         let table_store = table_store.clone();
         let range = range.clone();
         let opts = opts.clone();
+        let stats = stats.clone();
         async move {
-            SstIterator::new_owned_initialized(range, sst, table_store, opts)
-                .await
-                .map(|maybe| maybe.map(|i| Box::new(i) as Box<dyn RowEntryIterator>))
+            SstIterator::new_owned_initialized_with_stats(
+                range,
+                sst,
+                table_store,
+                opts,
+                Some(stats),
+            )
+            .await
+            .map(|maybe| maybe.map(|i| Box::new(i) as Box<dyn RowEntryIterator>))
         }
     })
     .await

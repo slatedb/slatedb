@@ -1075,39 +1075,57 @@ impl DbReader {
             .map_err(Into::into)
     }
 
-    /// Scan all keys that share the provided prefix using the default scan options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// using the default scan options.
+    ///
+    /// The subrange bounds are key *suffixes* interpreted relative to the
+    /// prefix: a bound `s` selects the full key `prefix ++ s`. Pass `..` to
+    /// scan the prefix's entire keyspace.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    pub async fn scan_prefix<'a, P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+    ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
-        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
     }
 
-    /// Scan all keys that share the provided prefix with custom options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// with custom options. See [`Self::scan_prefix`] for the subrange
+    /// semantics.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     /// - `options`: the scan options to use
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    pub async fn scan_prefix_with_options<P>(
+    pub async fn scan_prefix_with_options<'a, P, T>(
         &self,
         prefix: P,
+        subrange: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
-        let range = BytesRange::from_prefix(prefix.as_ref());
+        let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
         self.inner
             .scan_with_options(range, options, Some(prefix))
             .await
@@ -1181,15 +1199,17 @@ impl DbReadOps for DbReader {
         DbReader::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<P>(
+    async fn scan_prefix_with_options<'a, P, T>(
         &self,
         prefix: P,
+        subrange: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: RangeBounds<&'a [u8]> + Send,
     {
-        DbReader::scan_prefix_with_options(self, prefix, options).await
+        DbReader::scan_prefix_with_options(self, prefix, subrange, options).await
     }
 }
 

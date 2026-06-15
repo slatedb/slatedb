@@ -183,7 +183,7 @@ async fn warmup_meta_cache(db: &Db) {
         ..ScanOptions::default()
     };
     let mut iter = db
-        .scan_prefix_with_options(b"pk0000", &warmup_opts)
+        .scan_prefix_with_options(b"pk0000", .., &warmup_opts)
         .await
         .expect("warmup scan_prefix failed");
     while iter
@@ -238,7 +238,7 @@ fn bench_scan_prefix(c: &mut Criterion) {
             b.to_async(&runtime).iter(|| async {
                 let mut iter = bench_db
                     .db
-                    .scan_prefix_with_options(Bytes::from_static(QUERY_PREFIX), &scan_options())
+                    .scan_prefix_with_options(Bytes::from_static(QUERY_PREFIX), .., &scan_options())
                     .await
                     .expect("scan_prefix failed");
                 let entry = iter.next().await.expect("iterator next failed");
@@ -250,7 +250,7 @@ fn bench_scan_prefix(c: &mut Criterion) {
             b.to_async(&runtime).iter(|| async {
                 let mut iter = bench_db
                     .db
-                    .scan_prefix_with_options(Bytes::from_static(QUERY_PREFIX), &scan_options())
+                    .scan_prefix_with_options(Bytes::from_static(QUERY_PREFIX), .., &scan_options())
                     .await
                     .expect("scan_prefix failed");
                 let mut count = 0usize;
