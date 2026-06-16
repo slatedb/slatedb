@@ -5,7 +5,7 @@
 //!
 //! - [`WalReader`]: opens a WAL namespace and lists WAL files.
 //! - [`WalFile`]: one WAL file (`id`) plus accessors for metadata and contents.
-//! - [`ObjectMetadata`]: object-store metadata for one WAL file.
+//! - [`IdentifiedObjectMetadata`]: object-store metadata for one WAL file plus its WAL id.
 //! - [`WalFileIterator`]: entry-level iterator over a WAL file.
 //!
 //! WAL files returned by [`WalReader::list`] are ordered by WAL ID in ascending
@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 use object_store::path::Path;
 use object_store::ObjectStore;
-use slatedb_common::ObjectMetadata;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
@@ -119,11 +119,13 @@ impl WalFile {
     /// object store. If the file is missing, a [`crate::Error`] with
     /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
-    pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
-        self.table_store
+    pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata<u64>, crate::Error> {
+        let metadata = self
+            .table_store
             .metadata(&SsTableId::Wal(self.id))
             .await
-            .map_err(crate::Error::from)
+            .map_err(crate::Error::from)?;
+        Ok(IdentifiedObjectMetadata::new(self.id, metadata))
     }
 
     /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the
@@ -364,10 +366,17 @@ mod tests {
 
         for wal_file in wal_files {
             let wal_metadata = wal_file.metadata().await.unwrap();
-            let object_metadata = main_store.head(&wal_metadata.location).await.unwrap();
-            assert_eq!(wal_metadata.last_modified, object_metadata.last_modified);
-            assert_eq!(wal_metadata.size, object_metadata.size);
-            assert_eq!(wal_metadata.location, object_metadata.location);
+            let object_metadata = main_store
+                .head(&wal_metadata.metadata.location)
+                .await
+                .unwrap();
+            assert_eq!(wal_metadata.id, wal_file.id);
+            assert_eq!(
+                wal_metadata.metadata.last_modified,
+                object_metadata.last_modified
+            );
+            assert_eq!(wal_metadata.metadata.size, object_metadata.size);
+            assert_eq!(wal_metadata.metadata.location, object_metadata.location);
         }
     }
 
@@ -383,7 +392,8 @@ mod tests {
         assert_eq!(wal_files[0].id, 1);
 
         let wal_metadata = wal_files[0].metadata().await.unwrap();
-        assert_eq!(wal_metadata.size, 0);
+        assert_eq!(wal_metadata.id, 1);
+        assert_eq!(wal_metadata.metadata.size, 0);
 
         let mut iter = wal_files[0].iterator().await.unwrap();
         assert!(iter.next().await.unwrap().is_none());
@@ -441,7 +451,10 @@ mod tests {
             .expect("expected at least one WAL file");
         let wal_metadata = wal_file.metadata().await.unwrap();
 
-        main_store.delete(&wal_metadata.location).await.unwrap();
+        main_store
+            .delete(&wal_metadata.metadata.location)
+            .await
+            .unwrap();
         let err = wal_file
             .metadata()
             .await
@@ -479,7 +492,10 @@ mod tests {
             .expect("expected at least one WAL file");
         let wal_metadata = wal_file.metadata().await.unwrap();
 
-        main_store.delete(&wal_metadata.location).await.unwrap();
+        main_store
+            .delete(&wal_metadata.metadata.location)
+            .await
+            .unwrap();
         let err = match wal_file.iterator().await {
             Ok(_) => panic!("expected iterator() to fail after deleting WAL file"),
             Err(err) => err,

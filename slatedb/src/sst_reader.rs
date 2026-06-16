@@ -50,7 +50,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use slatedb_common::ObjectMetadata;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use ulid::Ulid;
 
 use crate::block_iterator::DataBlockIterator;
@@ -165,11 +165,13 @@ impl SstFile {
     ///
     /// Returns an error if the SST file does not exist or if there is an
     /// issue reading from object storage.
-    pub async fn metadata(&self) -> Result<ObjectMetadata, crate::Error> {
-        self.table_store
+    pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata<Ulid>, crate::Error> {
+        let metadata = self
+            .table_store
             .metadata(&self.handle.id)
             .await
-            .map_err(crate::Error::from)
+            .map_err(crate::Error::from)?;
+        Ok(IdentifiedObjectMetadata::new(self.id, metadata))
     }
 
     /// Reads the stats block from object storage.
@@ -483,9 +485,10 @@ mod tests {
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let metadata = sst_file.metadata().await.unwrap();
 
-        assert!(metadata.size > 0);
+        assert_eq!(metadata.id, view.sst.id.unwrap_compacted_id());
+        assert!(metadata.metadata.size > 0);
         assert_eq!(
-            metadata.location,
+            metadata.metadata.location,
             PathResolver::new(path).table_path(&view.sst.id)
         );
     }

@@ -42,7 +42,7 @@ impl WalFile {
     /// Reads object-store metadata for this WAL file.
     pub async fn metadata(&self) -> Result<ObjectMetadata, Error> {
         let metadata = self.inner.metadata().await?;
-        Ok(metadata.into())
+        Ok(metadata.metadata.into())
     }
 
     /// Opens an iterator over raw row entries in this WAL file.
