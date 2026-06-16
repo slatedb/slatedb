@@ -250,7 +250,7 @@ impl TableStore {
                 _ => continue,
             }
         }
-        wal_list.sort_by_key(|file| file.id.unwrap_wal_id());
+        wal_list.sort_by_key(|m| m.id.unwrap_wal_id());
         Ok(wal_list)
     }
 
@@ -483,7 +483,7 @@ impl TableStore {
             }
         }
 
-        sst_list.sort_by_key(|file| file.id.unwrap_compacted_id());
+        sst_list.sort_by_key(|m| m.id.unwrap_compacted_id());
         Ok(sst_list)
     }
 

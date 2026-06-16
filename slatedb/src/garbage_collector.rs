@@ -1206,7 +1206,7 @@ mod tests {
         gc.run_gc_once().await;
 
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
-        let wal_ids = wal_ssts.iter().map(|entry| entry.id).collect::<Vec<_>>();
+        let wal_ids = wal_ssts.iter().map(|sst| sst.id).collect::<Vec<_>>();
         assert_eq!(wal_ids, vec![regular_wal_id]);
         assert!(wal_ssts[0].metadata.size > 0);
         assert_eq!(
@@ -1411,7 +1411,7 @@ mod tests {
         // Verify that the compacted SSTs are there as expected
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 8);
-        let ids: HashSet<_> = compacted_ssts.iter().map(|entry| entry.id).collect();
+        let ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
         for expected in [
             l0_sst_handle.id,
             active_expired_l0_sst_handle.id,
@@ -1448,7 +1448,7 @@ mod tests {
         // Verify that only inactive, expired SSTs were deleted.
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 6);
-        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|entry| entry.id).collect();
+        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
         // Still-present SSTs
         for expected in [
             l0_sst_handle.id,
@@ -1552,7 +1552,7 @@ mod tests {
         // Verify that the active tables are still there
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 4);
-        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|entry| entry.id).collect();
+        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
         assert!(remaining_ids.contains(&active_l0_sst_handle.id));
         assert!(remaining_ids.contains(&active_checkpoint_l0_sst_handle.id));
         assert!(remaining_ids.contains(&active_sst_handle.id));
@@ -1576,7 +1576,7 @@ mod tests {
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         // After dropping the checkpoint, the L0 and SST that were only kept alive by
         // the checkpoint can be collected.
-        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|entry| entry.id).collect();
+        let remaining_ids: HashSet<_> = compacted_ssts.iter().map(|m| m.id).collect();
         eprintln!("remaining_ids: {:#?}", remaining_ids);
         assert_eq!(remaining_ids.len(), 2);
         assert!(remaining_ids.contains(&active_l0_sst_handle.id));
@@ -1675,14 +1675,14 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|entry| entry.id)
+            .map(|sst| sst.id)
             .collect::<HashSet<SsTableId>>();
         let compacted_ssts = table_store
             .list_compacted_ssts(..)
             .await
             .unwrap()
             .iter()
-            .map(|entry| entry.id)
+            .map(|sst| sst.id)
             .collect::<HashSet<SsTableId>>();
 
         for manifest in manifests.values() {
@@ -2178,7 +2178,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|entry| entry.id)
+            .map(|s| s.id)
             .collect();
         assert!(!remaining.contains(&inactive_expired_handle.id));
         assert_eq!(
@@ -2327,7 +2327,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|entry| entry.id)
+            .map(|metadata| metadata.id)
             .collect::<Vec<_>>();
         for id in &compaction_ids {
             set_modified(
@@ -2372,7 +2372,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|entry| entry.id)
+            .map(|metadata| metadata.id)
             .collect::<HashSet<_>>();
         assert!(wal_ids.contains(&old_wal_id));
         assert!(wal_ids.contains(&recent_wal_id));
@@ -2383,7 +2383,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|entry| entry.id)
+            .map(|metadata| metadata.id)
             .collect::<HashSet<_>>();
         assert!(compacted_ids.contains(&inactive_expired_handle.id));
 

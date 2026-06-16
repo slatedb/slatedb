@@ -410,7 +410,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                 _ => {}
             }
         }
-        items.sort_by_key(|file| file.id);
+        items.sort_by_key(|m| m.id);
         Ok(items)
     }
 

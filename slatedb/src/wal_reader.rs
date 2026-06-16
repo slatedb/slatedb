@@ -209,8 +209,8 @@ impl WalReader {
         let result = self.table_store.list_wal_ssts(range).await;
         Ok(result?
             .into_iter()
-            .map(|entry| WalFile {
-                id: entry.id.unwrap_wal_id(),
+            .map(|wal_file| WalFile {
+                id: wal_file.id.unwrap_wal_id(),
                 table_store: Arc::clone(&self.table_store),
             })
             .collect())

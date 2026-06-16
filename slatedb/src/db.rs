@@ -7703,7 +7703,7 @@ mod tests {
             ssts.len(),
             1,
             "expected exactly one L0 SST after GC, but found {:?}",
-            ssts.iter().map(|entry| entry.id).collect::<Vec<_>>()
+            ssts.iter().map(|sst| sst.id).collect::<Vec<_>>()
         );
 
         // Run a manual GC with aggressive settings to delete the L0 SST while
@@ -7757,7 +7757,7 @@ mod tests {
             ssts.len(),
             1,
             "expected exactly one L0 SST after GC, but found {:?}",
-            ssts.iter().map(|entry| entry.id).collect::<Vec<_>>()
+            ssts.iter().map(|sst| sst.id).collect::<Vec<_>>()
         );
 
         // Now allow the memtable flush to resume and persist the manifest referencing the deleted SST.
@@ -7802,7 +7802,7 @@ mod tests {
             .list_compacted_ssts(..)
             .await
             .expect("failed to list compacted ssts");
-        let still_exists = compacted_ssts.iter().any(|entry| entry.id == l0_id);
+        let still_exists = compacted_ssts.iter().any(|m| m.id == l0_id);
         assert!(
             still_exists,
             "manifest references L0 SST {:?} that GC has already deleted",

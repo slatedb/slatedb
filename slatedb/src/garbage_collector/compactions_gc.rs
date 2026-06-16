@@ -75,8 +75,10 @@ impl GcTask for CompactionsGcTask {
         // Advance the boundary to the latest compactions file that is older than min_age
         if let Some(boundary) = compactions_metadata_list
             .iter()
-            .filter(|entry| utc_now.signed_duration_since(entry.metadata.last_modified) > min_age)
-            .map(|entry| entry.id)
+            .filter(|compactions_metadata| {
+                utc_now.signed_duration_since(compactions_metadata.metadata.last_modified) > min_age
+            })
+            .map(|compactions_metadata| compactions_metadata.id)
             .max()
         {
             self.compactions_store.advance_boundary(boundary).await?;
@@ -85,7 +87,9 @@ impl GcTask for CompactionsGcTask {
         // Delete compactions files older than min_age
         let compactions_to_delete = compactions_metadata_list
             .into_iter()
-            .filter(|entry| utc_now.signed_duration_since(entry.metadata.last_modified) > min_age)
+            .filter(|compactions_metadata| {
+                utc_now.signed_duration_since(compactions_metadata.metadata.last_modified) > min_age
+            })
             .collect::<Vec<_>>();
         if self.compactions_options.dry_run && !compactions_to_delete.is_empty() {
             log::info!(
@@ -93,22 +97,22 @@ impl GcTask for CompactionsGcTask {
                 compactions_to_delete.len()
             );
         }
-        for entry in compactions_to_delete {
+        for compactions_metadata in compactions_to_delete {
             if self.compactions_options.dry_run {
                 log::debug!(
                     "dry run: would delete compactions but skipped [id={:?}]",
-                    entry.id
+                    compactions_metadata.id
                 );
                 continue;
             }
             if let Err(e) = self
                 .compactions_store
-                .delete_compactions_unchecked(entry.id)
+                .delete_compactions_unchecked(compactions_metadata.id)
                 .await
             {
                 error!(
                     "error deleting compactions [id={:?}, error={}]",
-                    entry.id, e
+                    compactions_metadata.id, e
                 );
             } else {
                 self.stats.gc_compactions_count.increment(1);
@@ -177,7 +181,10 @@ mod tests {
         let compactions = compactions_store.list_compactions(..).await.unwrap();
         assert_eq!(
             vec![3],
-            compactions.iter().map(|entry| entry.id).collect::<Vec<_>>()
+            compactions
+                .iter()
+                .map(|compactions| compactions.id)
+                .collect::<Vec<_>>()
         );
     }
 }
