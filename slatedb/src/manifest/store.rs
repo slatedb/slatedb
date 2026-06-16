@@ -10,7 +10,7 @@ use log::debug;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
-use slatedb_common::ObjectMetadata;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
@@ -497,7 +497,7 @@ impl ManifestStore {
     pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<(u64, ObjectMetadata)>, SlateDBError> {
+    ) -> Result<Vec<IdentifiedObjectMetadata<u64>>, SlateDBError> {
         let manifests = self
             .inner
             .list(
@@ -506,7 +506,7 @@ impl ManifestStore {
             )
             .await?
             .into_iter()
-            .map(|(id, metadata)| (id.into(), metadata))
+            .map(|metadata| metadata.map_id(u64::from))
             .collect::<Vec<_>>();
         Ok(manifests)
     }
@@ -974,35 +974,35 @@ mod tests {
         // Check unbounded
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].0, 1);
-        assert_eq!(manifests[1].0, 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
         assert_eq!(
             Path::from(ROOT)
                 .join("manifest")
                 .join("00000000000000000001.manifest"),
-            manifests[0].1.location
+            manifests[0].metadata.location
         );
         assert_eq!(
             Path::from(ROOT)
                 .join("manifest")
                 .join("00000000000000000002.manifest"),
-            manifests[1].1.location
+            manifests[1].metadata.location
         );
 
         // Check bounded
         let manifests = ms.list_manifests(1..2).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].0, 1);
+        assert_eq!(manifests[0].id, 1);
 
         // Check left bounded
         let manifests = ms.list_manifests(2..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].0, 2);
+        assert_eq!(manifests[0].id, 2);
 
         // Check right bounded
         let manifests = ms.list_manifests(..2).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].0, 1);
+        assert_eq!(manifests[0].id, 1);
     }
 
     #[tokio::test]
@@ -1019,14 +1019,14 @@ mod tests {
         sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].0, 1);
-        assert_eq!(manifests[1].0, 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
 
         ms.advance_boundary(1).await.unwrap();
         ms.delete_manifest(1).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].0, 2);
+        assert_eq!(manifests[0].id, 2);
     }
 
     #[tokio::test]
@@ -1043,8 +1043,8 @@ mod tests {
         sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
-        assert_eq!(manifests[0].0, 1);
-        assert_eq!(manifests[1].0, 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
 
         let result = ms.delete_manifest(2).await;
         assert!(matches!(result, Err(error::SlateDBError::InvalidDeletion)));

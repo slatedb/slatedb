@@ -9,6 +9,7 @@ use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::ObjectMetadata;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
@@ -224,12 +225,12 @@ impl TableStore {
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<(SsTableId, ObjectMetadata)>, SlateDBError> {
+    ) -> Result<Vec<IdentifiedObjectMetadata<SsTableId>>, SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "list-wal-ssts", |_| {
             Err(SlateDBError::from(std::io::Error::other("oops")))
         });
 
-        let mut wal_list: Vec<(SsTableId, ObjectMetadata)> = Vec::new();
+        let mut wal_list: Vec<IdentifiedObjectMetadata<SsTableId>> = Vec::new();
         let wal_path = &self.path_resolver.wal_path();
         let mut files_stream = self
             .object_stores
@@ -240,13 +241,16 @@ impl TableStore {
             match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Wal(id))) => {
                     if id_range.contains(&id) {
-                        wal_list.push((SsTableId::Wal(id), ObjectMetadata::new(file)));
+                        wal_list.push(IdentifiedObjectMetadata::from_object_meta(
+                            SsTableId::Wal(id),
+                            file,
+                        ));
                     }
                 }
                 _ => continue,
             }
         }
-        wal_list.sort_by_key(|(id, _)| id.unwrap_wal_id());
+        wal_list.sort_by_key(|file| file.id.unwrap_wal_id());
         Ok(wal_list)
     }
 
@@ -446,8 +450,8 @@ impl TableStore {
     pub(crate) async fn list_compacted_ssts<R: RangeBounds<Ulid>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<(SsTableId, ObjectMetadata)>, SlateDBError> {
-        let mut sst_list: Vec<(SsTableId, ObjectMetadata)> = Vec::new();
+    ) -> Result<Vec<IdentifiedObjectMetadata<SsTableId>>, SlateDBError> {
+        let mut sst_list: Vec<IdentifiedObjectMetadata<SsTableId>> = Vec::new();
         let compacted_path = self.path_resolver.compacted_path();
         let mut files_stream = self
             .object_stores
@@ -458,7 +462,10 @@ impl TableStore {
             match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
-                        sst_list.push((SsTableId::Compacted(id), ObjectMetadata::new(file)));
+                        sst_list.push(IdentifiedObjectMetadata::from_object_meta(
+                            SsTableId::Compacted(id),
+                            file,
+                        ));
                     }
                 }
                 Err(e) => {
@@ -476,7 +483,7 @@ impl TableStore {
             }
         }
 
-        sst_list.sort_by_key(|(id, _)| id.unwrap_compacted_id());
+        sst_list.sort_by_key(|file| file.id.unwrap_compacted_id());
         Ok(sst_list)
     }
 
@@ -2044,32 +2051,32 @@ mod tests {
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 3);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
-        assert_eq!(ssts[2].0, id3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
 
         let ssts = ts
             .list_compacted_ssts(id2.unwrap_compacted_id()..id3.unwrap_compacted_id())
             .await
             .unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         let ssts = ts
             .list_compacted_ssts(id2.unwrap_compacted_id()..)
             .await
             .unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id2);
-        assert_eq!(ssts[1].0, id3);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
 
         let ssts = ts
             .list_compacted_ssts(..id3.unwrap_compacted_id())
             .await
             .unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
     }
 
     #[rstest]
@@ -2121,26 +2128,26 @@ mod tests {
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 3);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
-        assert_eq!(ssts[2].0, id3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
 
         let ssts = ts
             .list_wal_ssts(id2.unwrap_wal_id()..id3.unwrap_wal_id())
             .await
             .unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         let ssts = ts.list_wal_ssts(id2.unwrap_wal_id()..).await.unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id2);
-        assert_eq!(ssts[1].0, id3);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
 
         let ssts = ts.list_wal_ssts(..id3.unwrap_wal_id()).await.unwrap();
         assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[0].0, id1);
-        assert_eq!(ssts[1].0, id2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
 
         if let Some(wal_store) = wal_store {
             assert_eq!(count_ssts_in(&main_store).await, 0);
@@ -2272,7 +2279,7 @@ mod tests {
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         if let Some(wal_store) = wal_store {
             assert_eq!(count_ssts_in(&main_store).await, 1);
@@ -2326,7 +2333,7 @@ mod tests {
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].0, id2);
+        assert_eq!(ssts[0].id, id2);
 
         if let Some(wal_store) = wal_store {
             assert_eq!(count_ssts_in(&main_store).await, 0);

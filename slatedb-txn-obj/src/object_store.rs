@@ -11,7 +11,7 @@ use object_store::{
     Error, GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
 use parking_lot::Mutex;
-use slatedb_common::ObjectMetadata;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use std::collections::Bound;
 use std::collections::Bound::Unbounded;
 use std::ops::RangeBounds;
@@ -345,18 +345,18 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
     ) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
         loop {
             let files = self.list(Unbounded, Unbounded).await?;
-            if let Some((id, metadata)) = files.last() {
+            if let Some(file) = files.last() {
                 let result = self
-                    .try_read_unchecked(*id)
+                    .try_read_unchecked(file.id)
                     .await
-                    .map(|opt| opt.map(|v| (*id, v)));
+                    .map(|opt| opt.map(|v| (file.id, v)));
                 match result {
                     // File listed but not found. Probably deleted by GC. Retry list/read.
                     // See https://github.com/slatedb/slatedb/issues/1215 for more details.
                     Ok(None) => {
                         warn!(
                             "listed file missing on read, retrying [location={}]",
-                            metadata.location,
+                            file.metadata.location,
                         );
                     }
                     _ => return result,
@@ -391,7 +391,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         &self,
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
-    ) -> Result<Vec<(MonotonicId, ObjectMetadata)>, TransactionalObjectError> {
+    ) -> Result<Vec<IdentifiedObjectMetadata<MonotonicId>>, TransactionalObjectError> {
         let mut files_stream = self.object_store.list(Some(&self.dir_path));
         let mut items = Vec::new();
         let id_range = (from, to);
@@ -401,7 +401,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         } {
             match self.parse_id(&file.location) {
                 Ok(id) if id_range.contains(&id) => {
-                    items.push((id, ObjectMetadata::new(file)));
+                    items.push(IdentifiedObjectMetadata::from_object_meta(id, file));
                 }
                 Err(e) => warn!(
                     "unknown file in directory [base={}, location={}, object_store={}, error={:?}]",
@@ -410,7 +410,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                 _ => {}
             }
         }
-        items.sort_by_key(|(id, _)| *id);
+        items.sort_by_key(|file| file.id);
         Ok(items)
     }
 
@@ -858,25 +858,25 @@ mod tests {
 
         let all = store.list(Unbounded, Unbounded).await.unwrap();
         assert_eq!(4, all.len());
-        assert!(all.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(all.windows(2).all(|w| w[0].id < w[1].id));
         assert_eq!(
             Path::from("/root/test/00000000000000000001.val"),
-            all[0].1.location
+            all[0].metadata.location
         );
         assert_eq!(
             Path::from("/root/test/00000000000000000004.val"),
-            all[3].1.location
+            all[3].metadata.location
         );
 
         let right_bounded = store.list(Unbounded, Excluded(3.into())).await.unwrap();
         assert_eq!(2, right_bounded.len());
-        assert_eq!(1, right_bounded[0].0);
-        assert_eq!(2, right_bounded[1].0);
+        assert_eq!(1, right_bounded[0].id);
+        assert_eq!(2, right_bounded[1].id);
 
         let left_bounded = store.list(Included(3.into()), Unbounded).await.unwrap();
         assert_eq!(2, left_bounded.len());
-        assert_eq!(3, left_bounded[0].0);
-        assert_eq!(4, left_bounded[1].0);
+        assert_eq!(3, left_bounded[0].id);
+        assert_eq!(4, left_bounded[1].id);
     }
 
     #[tokio::test]

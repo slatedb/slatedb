@@ -6269,7 +6269,7 @@ mod tests {
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
         let wal_ssts = db.inner.table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
-        assert_eq!(wal_ssts[0].1.size, 0);
+        assert_eq!(wal_ssts[0].metadata.size, 0);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())
@@ -7703,7 +7703,7 @@ mod tests {
             ssts.len(),
             1,
             "expected exactly one L0 SST after GC, but found {:?}",
-            ssts.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+            ssts.iter().map(|entry| entry.id).collect::<Vec<_>>()
         );
 
         // Run a manual GC with aggressive settings to delete the L0 SST while
@@ -7757,7 +7757,7 @@ mod tests {
             ssts.len(),
             1,
             "expected exactly one L0 SST after GC, but found {:?}",
-            ssts.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+            ssts.iter().map(|entry| entry.id).collect::<Vec<_>>()
         );
 
         // Now allow the memtable flush to resume and persist the manifest referencing the deleted SST.
@@ -7785,9 +7785,9 @@ mod tests {
         );
         let l0_id = manifest.manifest.core.tree.l0[0].sst.id;
         assert_eq!(
-            l0_id, ssts[0].0,
+            l0_id, ssts[0].id,
             "expected SST {:?} but found SST {:?}",
-            ssts[0].0, l0_id,
+            ssts[0].id, l0_id,
         );
 
         // Build a read-only TableStore sharing the same underlying object store
@@ -7802,7 +7802,7 @@ mod tests {
             .list_compacted_ssts(..)
             .await
             .expect("failed to list compacted ssts");
-        let still_exists = compacted_ssts.iter().any(|(id, _)| *id == l0_id);
+        let still_exists = compacted_ssts.iter().any(|entry| entry.id == l0_id);
         assert!(
             still_exists,
             "manifest references L0 SST {:?} that GC has already deleted",

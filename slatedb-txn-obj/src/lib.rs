@@ -78,8 +78,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use log::warn;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::utils;
-use slatedb_common::ObjectMetadata;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
@@ -649,7 +649,7 @@ pub trait SequencedStorageProtocol<T: Send + Sync>:
         // object-safe
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
-    ) -> Result<Vec<(MonotonicId, ObjectMetadata)>, TransactionalObjectError>;
+    ) -> Result<Vec<IdentifiedObjectMetadata<MonotonicId>>, TransactionalObjectError>;
 
     /// Delete a version without checking it against the durable boundary.
     ///
@@ -735,7 +735,7 @@ mod tests {
     use object_store::path::Path;
     use parking_lot::Mutex;
     use slatedb_common::clock::DefaultSystemClock;
-    use slatedb_common::ObjectMetadata;
+    use slatedb_common::object_metadata::IdentifiedObjectMetadata;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -917,7 +917,7 @@ mod tests {
             &self,
             _from: std::ops::Bound<MonotonicId>,
             _to: std::ops::Bound<MonotonicId>,
-        ) -> Result<Vec<(MonotonicId, ObjectMetadata)>, TransactionalObjectError> {
+        ) -> Result<Vec<IdentifiedObjectMetadata<MonotonicId>>, TransactionalObjectError> {
             Err(TransactionalObjectError::InvalidObjectState)
         }
 
