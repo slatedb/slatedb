@@ -31,6 +31,62 @@ class SlateDbDbTest {
     }
 
     @Test
+    void dbStatusSegmentsWithoutExtractor() throws Exception {
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb handle = TestSupport.openDb(store)) {
+            Db db = handle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("aaa-1"), TestSupport.bytes("value")));
+
+            assertSegments(db.status().segments());
+        }
+    }
+
+    @Test
+    void dbStatusSegmentsWithExtractor() throws Exception {
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb handle =
+                        TestSupport.openDb(
+                                store,
+                                builder ->
+                                        builder.withSegmentExtractor(
+                                                new TestSupport.FixedThreeByteSegmentExtractor()))) {
+            Db db = handle.db();
+
+            assertSegments(db.status().segments());
+
+            TestSupport.await(db.put(TestSupport.bytes("bbb-1"), TestSupport.bytes("value")));
+            TestSupport.await(db.put(TestSupport.bytes("aaa-1"), TestSupport.bytes("value")));
+
+            // Unflushed writes are reported from the memtable, sorted by prefix.
+            assertSegments(db.status().segments(), "aaa", "bbb");
+
+            // Another write in an existing segment must not produce a duplicate.
+            TestSupport.await(db.put(TestSupport.bytes("aaa-2"), TestSupport.bytes("value")));
+            assertSegments(db.status().segments(), "aaa", "bbb");
+
+            // Segments survive the flush from memtable to manifest.
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+            assertSegments(db.status().segments(), "aaa", "bbb");
+
+            // A key the extractor cannot route to a segment is rejected.
+            TestSupport.awaitFailure(
+                    Error.Invalid.class,
+                    db.put(TestSupport.bytes("xy"), TestSupport.bytes("value")));
+        }
+    }
+
+    private static void assertSegments(java.util.List<SegmentPrefix> segments, String... expected) {
+        assertEquals(expected.length, segments.size(), "unexpected segment count: " + segments);
+        for (int i = 0; i < expected.length; i++) {
+            assertArrayEquals(
+                    TestSupport.bytes(expected[i]),
+                    segments.get(i).prefix(),
+                    "unexpected segment at index " + i);
+        }
+    }
+
+    @Test
     void dbCrudAndMetadata() throws Exception {
         try (ObjectStore store = TestSupport.newMemoryStore();
                 TestSupport.ManagedDb handle = TestSupport.openDb(store)) {
