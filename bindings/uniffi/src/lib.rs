@@ -45,8 +45,8 @@ pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,
     CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat, KeyRange, KeyValue,
-    RowEntry, RowEntryKind, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo,
-    SsTableView, SstType, VersionedCompactions, VersionedManifest, WriteHandle,
+    RowEntry, RowEntryKind, SegmentPrefix, SortedRun, SourceId, SsTableHandle, SsTableId,
+    SsTableInfo, SsTableView, SstType, VersionedCompactions, VersionedManifest, WriteHandle,
 };
 pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
 pub use write_batch::WriteBatch;

@@ -26,7 +26,8 @@ impl Db {
 
 #[uniffi::export]
 impl Db {
-    /// Returns the latest database status snapshot.
+    /// Returns the latest database status snapshot, including the segment
+    /// prefixes (RFC-0024) live as of the snapshot (see [`DbStatus::segments`]).
     pub fn status(&self) -> DbStatus {
         self.inner.status().into()
     }
@@ -107,7 +108,7 @@ impl Db {
 
     /// Scans rows whose keys start with `prefix`.
     pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
-        let iter = self.inner.scan_prefix(prefix).await?;
+        let iter = self.inner.scan_prefix(prefix, ..).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -120,7 +121,7 @@ impl Db {
         let options = options.try_into()?;
         let iter = self
             .inner
-            .scan_prefix_with_options(prefix, &options)
+            .scan_prefix_with_options(prefix, .., &options)
             .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }

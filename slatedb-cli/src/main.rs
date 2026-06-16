@@ -20,6 +20,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 
 mod args;
+mod scan;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -27,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-        .with_test_writer()
+        .with_writer(std::io::stderr)
         .init();
 
     let args: CliArgs = parse_args();
@@ -81,6 +82,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .await?
         }
         CliCommands::RunWorker => exec_run_worker(&admin, cancellation_token).await?,
+        CliCommands::Scan {
+            prefix,
+            from,
+            to,
+            key,
+            value,
+            max_keys,
+            count,
+            checkpoint,
+        } => {
+            scan::exec_scan(
+                path.clone(),
+                object_store.clone(),
+                prefix,
+                from,
+                to,
+                key,
+                value,
+                max_keys,
+                count,
+                checkpoint,
+            )
+            .await?
+        }
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,

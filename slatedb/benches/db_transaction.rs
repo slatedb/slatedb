@@ -210,7 +210,7 @@ fn bench_db_transaction(c: &mut Criterion) {
     group.bench_function("scan_prefix_with_options", |b| {
         b.to_async(&runtime).iter(|| async {
             let mut iter = read_txn
-                .scan_prefix_with_options(scan_prefix.clone(), &scan_options)
+                .scan_prefix_with_options(scan_prefix.clone(), .., &scan_options)
                 .await
                 .expect("scan_prefix_with_options failed");
             let mut count = 0usize;

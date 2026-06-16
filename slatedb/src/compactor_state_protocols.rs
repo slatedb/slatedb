@@ -145,16 +145,13 @@ impl CompactorStateWriter {
         let dirty_manifest = manifest.prepare_dirty()?;
         let dirty_compactions = loop {
             let mut dirty_compactions = compactions.prepare_dirty()?;
-            // Move running and scheduled compactions back to submitted so we can resume them
-            // after restart. Re-routing through Submitted forces re-validation against the
-            // post-restart manifest before any worker can claim them again. Submitted
-            // compactions are left intact for future scheduling. Keep only the most recent
-            // finished compaction for GC safety (#1044).
+            // Reset unclaimed scheduled compactions back to submitted on restart.
+            // Scheduled compactions have no worker yet, so they always reset.
+            // Stale Running compactions are left alone here: reclaim_stale_workers
+            // reclaims them on the first tick (and before scheduling), so handling
+            // them at startup too would just duplicate that logic.
             dirty_compactions.value.iter_mut().for_each(|c| {
-                if matches!(
-                    c.status(),
-                    CompactionStatus::Running | CompactionStatus::Scheduled
-                ) {
+                if matches!(c.status(), CompactionStatus::Scheduled) {
                     c.set_status(CompactionStatus::Submitted);
                     c.set_worker(None);
                 }
@@ -340,7 +337,7 @@ mod tests {
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
-        VersionedCompactions,
+        VersionedCompactions, WorkerSpec,
     };
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
@@ -352,6 +349,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::MockSystemClock;
     use slatedb_txn_obj::test_utils::new_dirty_object;
     use std::sync::Arc;
     use ulid::Ulid;
@@ -511,7 +509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_resets_running_to_submitted_and_preserves_submitted() {
+    async fn test_new_resets_scheduled_to_submitted_and_preserves_submitted() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
@@ -538,7 +536,7 @@ mod tests {
         let submitted_id = Ulid::from_parts(1, 0);
         let failed_old_id = Ulid::from_parts(2, 0);
         let completed_old_id = Ulid::from_parts(3, 0);
-        let running_id = Ulid::from_parts(4, 0);
+        let scheduled_id = Ulid::from_parts(4, 0);
         let mut dirty = stored_compactions.prepare_dirty().unwrap();
         dirty.value.insert(Compaction::new(
             submitted_id,
@@ -553,12 +551,12 @@ mod tests {
                 .with_status(CompactionStatus::Completed),
         );
         dirty.value.insert(
-            Compaction::new(running_id, CompactionSpec::new(vec![], 0))
-                .with_status(CompactionStatus::Running),
+            Compaction::new(scheduled_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Scheduled),
         );
         stored_compactions.update(dirty).await.unwrap();
 
-        // Initialize a new writer (restart) which should flip Running -> Submitted and trim.
+        // Initialize a new writer (restart) which should flip Scheduled -> Submitted and trim.
         let options = CompactorOptions::default();
         let rand = Arc::new(DbRand::new(7));
 
@@ -572,7 +570,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Submitted should remain; Running should become Submitted; older finished should be trimmed.
+        // Submitted should remain; Scheduled should become Submitted; older finished should be trimmed.
         let compactions = &writer.state.compactions().value;
         assert_eq!(
             compactions
@@ -583,8 +581,8 @@ mod tests {
         );
         assert_eq!(
             compactions
-                .get(&running_id)
-                .expect("missing running compaction")
+                .get(&scheduled_id)
+                .expect("missing scheduled compaction")
                 .status(),
             CompactionStatus::Submitted
         );
@@ -593,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_resets_running_to_submitted_and_preserves_output_ssts() {
+    async fn test_new_preserves_running_output_ssts() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
@@ -663,8 +661,104 @@ mod tests {
             .value
             .get(&running_id)
             .expect("missing running compaction");
-        assert_eq!(compaction.status(), CompactionStatus::Submitted);
+        // new() leaves Running entries untouched and preserves their output_ssts
+        // through the load; reclaiming stale ones is the ticker's job.
+        assert_eq!(compaction.status(), CompactionStatus::Running);
         assert_eq!(compaction.output_ssts(), &output_ssts);
+    }
+
+    /// `CompactorStateWriter::new` no longer reclaims stale `Running`
+    /// compactions on restart — that moved to `reclaim_stale_workers`, which
+    /// runs on the first tick (covered by `test_reclaim_stale_running_compaction`
+    /// and `test_does_not_reclaim_fresh_running_compaction` in compactor.rs). So
+    /// `new` must leave every `Running` compaction untouched, stale or fresh, and
+    /// only reset `Scheduled` entries.
+    #[tokio::test]
+    async fn test_new_preserves_running_compactions() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+
+        // Fix the clock so heartbeat ages are deterministic.
+        let mock_clock = Arc::new(MockSystemClock::new());
+        let now_ms: u64 = 100_000;
+        mock_clock.set(now_ms as i64);
+        let system_clock: Arc<dyn SystemClock> = mock_clock.clone();
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let options = CompactorOptions::default();
+        let timeout_ms = options.worker_heartbeat_timeout.as_millis() as u64;
+
+        // fresh: heartbeat at "now" (age 0). stale: heartbeat well past timeout.
+        let fresh_id = Ulid::from_parts(1, 0);
+        let stale_id = Ulid::from_parts(2, 0);
+        let stale_hb_ms = now_ms - (timeout_ms * 2);
+
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        let mut dirty = stored_compactions.prepare_dirty().unwrap();
+        dirty.value.insert(
+            Compaction::new(fresh_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Running)
+                .with_worker(Some(WorkerSpec::new("worker-fresh".to_string(), now_ms))),
+        );
+        dirty.value.insert(
+            Compaction::new(stale_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Running)
+                .with_worker(Some(WorkerSpec::new(
+                    "worker-stale".to_string(),
+                    stale_hb_ms,
+                ))),
+        );
+        stored_compactions.update(dirty).await.unwrap();
+
+        let rand = Arc::new(DbRand::new(7));
+        let writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store,
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        let compactions = &writer.state.compactions().value;
+
+        // new() leaves the live worker undisturbed.
+        let fresh = compactions
+            .get(&fresh_id)
+            .expect("missing fresh compaction");
+        assert_eq!(fresh.status(), CompactionStatus::Running);
+        assert_eq!(
+            fresh.worker().map(|w| w.worker_id.as_str()),
+            Some("worker-fresh")
+        );
+
+        // new() also leaves the stale worker in Running; reclaiming it is the
+        // ticker's job (reclaim_stale_workers), not the writer's at startup.
+        let stale = compactions
+            .get(&stale_id)
+            .expect("missing stale compaction");
+        assert_eq!(stale.status(), CompactionStatus::Running);
+        assert_eq!(
+            stale.worker().map(|w| w.worker_id.as_str()),
+            Some("worker-stale")
+        );
     }
 
     #[tokio::test]

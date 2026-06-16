@@ -106,6 +106,23 @@ final class TestSupport {
         }
     }
 
+    static final class FixedThreeByteSegmentExtractor implements PrefixExtractor {
+        @Override
+        public String name() {
+            return "fixed_three_byte";
+        }
+
+        @Override
+        public Long prefixLen(PrefixTarget target) {
+            byte[] key =
+                    switch (target) {
+                        case PrefixTarget.Point point -> point.key();
+                        case PrefixTarget.Prefix prefix -> prefix.prefix();
+                    };
+            return key.length < 3 ? null : 3L;
+        }
+    }
+
     static final class LogCollector implements LogCallback {
         private final List<LogRecord> records = new ArrayList<>();
 

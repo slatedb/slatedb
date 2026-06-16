@@ -1290,7 +1290,7 @@ mod tests {
         prefix_lo: &'static [u8],
         prefix_hi: &'static [u8],
     ) {
-        let mut iter = db.scan_prefix(prefix_lo).await.unwrap();
+        let mut iter = db.scan_prefix(prefix_lo, ..).await.unwrap();
         test_utils::assert_ranged_db_scan(
             expected,
             Bytes::from_static(prefix_lo)..Bytes::from_static(prefix_hi),

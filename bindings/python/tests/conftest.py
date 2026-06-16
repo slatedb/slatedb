@@ -20,6 +20,8 @@ from slatedb.uniffi import (
     MergeOperator,
     MergeOptions,
     ObjectStore,
+    PrefixExtractor,
+    PrefixTarget,
     PutOptions,
     ReadOptions,
     ReaderOptions,
@@ -181,6 +183,15 @@ class ConcatMergeOperator(MergeOperator):
     def merge(self, key: bytes, existing_value: bytes | None, operand: bytes) -> bytes:
         del key
         return (existing_value or b"") + operand
+
+
+class FixedThreeByteSegmentExtractor(PrefixExtractor):
+    def name(self) -> str:
+        return "fixed_three_byte"
+
+    def prefix_len(self, target: PrefixTarget) -> int | None:
+        key = target.key if target.is_point() else target.prefix
+        return None if len(key) < 3 else 3
 
 
 def clone_log_record(record: LogRecord) -> LogRecord:

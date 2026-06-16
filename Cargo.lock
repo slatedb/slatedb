@@ -3320,6 +3320,7 @@ dependencies = [
  "rstest",
  "serde_json",
  "slatedb",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

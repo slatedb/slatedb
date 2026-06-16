@@ -86,7 +86,7 @@ impl DbSnapshot {
 
     /// Scans rows whose keys start with `prefix` as of this snapshot.
     pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
-        let iter = self.inner.scan_prefix(prefix).await?;
+        let iter = self.inner.scan_prefix(prefix, ..).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -99,7 +99,7 @@ impl DbSnapshot {
         let options = options.try_into()?;
         let iter = self
             .inner
-            .scan_prefix_with_options(prefix, &options)
+            .scan_prefix_with_options(prefix, .., &options)
             .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
