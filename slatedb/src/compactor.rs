@@ -805,22 +805,28 @@ impl CompactorEventHandler {
         // gauges for workers that no longer do so the map stays bounded by the
         // current worker count rather than every worker id ever seen.
         let recorder = self.recorder.clone();
-        let mut active_workers: HashSet<String> = HashSet::new();
+        let mut last_heartbeat_per_worker: HashMap<String, u64> = HashMap::new();
         for (_, w) in &claimed {
+            last_heartbeat_per_worker
+                .entry(w.worker_id.clone())
+                .and_modify(|last| *last = (*last).max(w.last_heartbeat_ms))
+                .or_insert(w.last_heartbeat_ms);
+        }
+
+        for (id, last_heartbeat_ms) in &last_heartbeat_per_worker {
             let gauge = self
                 .worker_heartbeat_gauges
-                .entry(w.worker_id.clone())
+                .entry(id.clone())
                 .or_insert_with(|| {
                     recorder
                         .gauge(WORKER_LAST_HEARTBEAT_MS)
-                        .labels(&[(WORKER_ID_LABEL, w.worker_id.as_str())])
+                        .labels(&[(WORKER_ID_LABEL, id.as_str())])
                         .register()
                 });
-            gauge.set(w.last_heartbeat_ms as i64);
-            active_workers.insert(w.worker_id.clone());
+            gauge.set(*last_heartbeat_ms as i64);
         }
         self.worker_heartbeat_gauges
-            .retain(|worker_id, _| active_workers.contains(worker_id));
+            .retain(|id, _| last_heartbeat_per_worker.contains_key(id));
     }
 
     /// Commits any compactions in the `Compacted` state to the manifest.
