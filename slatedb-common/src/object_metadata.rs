@@ -21,9 +21,8 @@ pub struct ObjectMetadata {
 
 /// Metadata for an object plus the domain identifier parsed from its path.
 ///
-/// This is used by internal storage listings that need both the object-store
-/// metadata and the SlateDB id derived from the object name.
-#[doc(hidden)]
+/// This is returned by public APIs that expose both object-store metadata and
+/// the SlateDB identifier derived from the object name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentifiedObjectMetadata<Id> {
     /// The parsed domain identifier for the object.
@@ -33,14 +32,17 @@ pub struct IdentifiedObjectMetadata<Id> {
 }
 
 impl<Id> IdentifiedObjectMetadata<Id> {
+    /// Creates metadata for an object with the provided identifier.
     pub fn new(id: Id, metadata: ObjectMetadata) -> Self {
         Self { id, metadata }
     }
 
+    /// Creates metadata for an object from an upstream object-store metadata value.
     pub fn from_object_meta(id: Id, meta: ObjectMeta) -> Self {
         Self::new(id, ObjectMetadata::new(meta))
     }
 
+    /// Converts the identifier while preserving the object metadata.
     pub fn map_id<NewId, F>(self, f: F) -> IdentifiedObjectMetadata<NewId>
     where
         F: FnOnce(Id) -> NewId,

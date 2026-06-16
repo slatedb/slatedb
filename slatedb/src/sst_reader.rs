@@ -50,7 +50,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use ulid::Ulid;
 
 use crate::block_iterator::DataBlockIterator;
@@ -62,6 +61,7 @@ use crate::object_stores::ObjectStores;
 use crate::sst_stats::SstStats;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
+use crate::IdentifiedObjectMetadata;
 
 /// Opens compacted SST files for read-only inspection.
 ///

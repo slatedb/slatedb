@@ -70,7 +70,6 @@ use std::sync::Arc;
 
 use object_store::path::Path;
 use object_store::ObjectStore;
-use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
@@ -80,6 +79,7 @@ use crate::object_stores::ObjectStores;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
+use crate::IdentifiedObjectMetadata;
 
 /// Iterator over entries in a WAL file.
 pub struct WalFileIterator {
