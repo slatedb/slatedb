@@ -729,23 +729,17 @@ impl CompactorEventHandler {
         let timeout_ms = self.options.worker_heartbeat_timeout.as_millis() as u64;
 
         // A Running compaction is stale if its worker's heartbeat has aged past
-        // the timeout, or if it has no worker at all — the protocol shouldn't
+        // the timeout, or if it has no worker at all. The protocol shouldn't
         // produce the latter, but it would otherwise be stuck in Running forever.
-        // Capture the owning worker id for the log ("<none>" when absent).
-        let stale: Vec<(Ulid, String)> = self
+        // Capture the owning worker id (None in the no-worker case) for the log.
+        let stale: Vec<(Ulid, Option<String>)> = self
             .state()
             .compactions_with_status(&[CompactionStatus::Running])
             .filter(|c| match c.worker() {
                 Some(w) => now_ms.saturating_sub(w.last_heartbeat_ms) > timeout_ms,
                 None => true,
             })
-            .map(|c| {
-                let worker_id = c
-                    .worker()
-                    .map(|w| w.worker_id.clone())
-                    .unwrap_or_else(|| "<none>".to_string());
-                (c.id(), worker_id)
-            })
+            .map(|c| (c.id(), c.worker().map(|w| w.worker_id.clone())))
             .collect();
 
         if stale.is_empty() {
@@ -753,10 +747,18 @@ impl CompactorEventHandler {
         }
 
         for (id, worker_id) in &stale {
-            info!(
-                "reclaiming stale compaction [worker_id={}, id={}]",
-                worker_id, id
-            );
+            match worker_id {
+                Some(worker_id) => info!(
+                    "reclaiming stale compaction whose worker's heartbeat timed out \
+                     [worker_id={}, id={}]",
+                    worker_id, id
+                ),
+                None => error!(
+                    "reclaiming Running compaction that has no worker; this should \
+                     not happen [id={}]",
+                    id
+                ),
+            }
             self.state_mut().update_compaction(id, |c| {
                 c.set_status(CompactionStatus::Submitted);
                 c.set_worker(None);
