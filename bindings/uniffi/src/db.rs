@@ -26,7 +26,8 @@ impl Db {
 
 #[uniffi::export]
 impl Db {
-    /// Returns the latest database status snapshot.
+    /// Returns the latest database status snapshot, including the segment
+    /// prefixes (RFC-0024) live as of the snapshot (see [`DbStatus::segments`]).
     pub fn status(&self) -> DbStatus {
         self.inner.status().into()
     }

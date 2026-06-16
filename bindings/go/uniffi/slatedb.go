@@ -635,6 +635,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_segment_extractor()
+		})
+		if checksum != 14261 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_segment_extractor: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings()
 		})
 		if checksum != 64263 {
@@ -712,6 +721,15 @@ func uniffiCheckChecksums() {
 		if checksum != 46155 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_segment_extractor()
+		})
+		if checksum != 2822 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_segment_extractor: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -907,7 +925,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_status()
 		})
-		if checksum != 33776 {
+		if checksum != 51988 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_status: UniFFI API checksum mismatch")
 		}
@@ -3043,7 +3061,8 @@ type DbInterface interface {
 	Shutdown() error
 	// Creates a read-only snapshot representing a consistent point in time.
 	Snapshot() (*DbSnapshot, error)
-	// Returns the latest database status snapshot.
+	// Returns the latest database status snapshot, including the segment
+	// prefixes (RFC-0024) live as of the snapshot (see [`DbStatus::segments`]).
 	Status() DbStatus
 	// Warms selected cache content for one SST.
 	//
@@ -3763,7 +3782,8 @@ func (_self *Db) Snapshot() (*DbSnapshot, error) {
 	return res, err
 }
 
-// Returns the latest database status snapshot.
+// Returns the latest database status snapshot, including the segment
+// prefixes (RFC-0024) live as of the snapshot (see [`DbStatus::segments`]).
 func (_self *Db) Status() DbStatus {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
@@ -3963,6 +3983,11 @@ type DbBuilderInterface interface {
 	WithMetricsRecorder(metricsRecorder MetricsRecorder) error
 	// Sets the seed used for SlateDB's internal random number generation.
 	WithSeed(seed uint64) error
+	// Sets the segment extractor (RFC-0024). When configured, every write is
+	// routed through the extractor and the database tracks per-segment LSM
+	// state. The extractor must be configured at database creation time and
+	// cannot be changed thereafter.
+	WithSegmentExtractor(extractor PrefixExtractor) error
 	// Applies a [`crate::Settings`] object to the builder.
 	WithSettings(settings *Settings) error
 	// Sets the SSTable block size used for newly written tables.
@@ -4089,6 +4114,21 @@ func (_self *DbBuilder) WithSeed(seed uint64) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_seed(
 			_pointer, FfiConverterUint64INSTANCE.Lower(seed), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the segment extractor (RFC-0024). When configured, every write is
+// routed through the extractor and the database tracks per-segment LSM
+// state. The extractor must be configured at database creation time and
+// cannot be changed thereafter.
+func (_self *DbBuilder) WithSegmentExtractor(extractor PrefixExtractor) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_segment_extractor(
+			_pointer, FfiConverterPrefixExtractorINSTANCE.Lower(extractor), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -4933,6 +4973,10 @@ type DbReaderBuilderInterface interface {
 	WithMetricsRecorder(metricsRecorder MetricsRecorder) error
 	// Applies custom reader options.
 	WithOptions(options ReaderOptions) error
+	// Sets the segment extractor (RFC-0024). A reader opening a segmented
+	// database must configure an extractor matching the one the database
+	// was created with.
+	WithSegmentExtractor(extractor PrefixExtractor) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -5044,6 +5088,20 @@ func (_self *DbReaderBuilder) WithOptions(options ReaderOptions) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options(
 			_pointer, FfiConverterReaderOptionsINSTANCE.Lower(options), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the segment extractor (RFC-0024). A reader opening a segmented
+// database must configure an extractor matching the one the database
+// was created with.
+func (_self *DbReaderBuilder) WithSegmentExtractor(extractor PrefixExtractor) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_segment_extractor(
+			_pointer, FfiConverterPrefixExtractorINSTANCE.Lower(extractor), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -8844,11 +8902,17 @@ type DbStatus struct {
 	DurableSeq uint64
 	// Present once the handle has been closed.
 	CloseReason *CloseReason
+	// All segment prefixes (RFC-0024) as of this snapshot: those in the
+	// current manifest unioned with those touched in this handle's memtables
+	// but not yet flushed. Sorted ascending by prefix and deduplicated; empty
+	// when no segment extractor is configured.
+	Segments []SegmentPrefix
 }
 
 func (r *DbStatus) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.DurableSeq)
 	FfiDestroyerOptionalCloseReason{}.Destroy(r.CloseReason)
+	FfiDestroyerSequenceSegmentPrefix{}.Destroy(r.Segments)
 }
 
 type FfiConverterDbStatus struct{}
@@ -8863,6 +8927,7 @@ func (c FfiConverterDbStatus) Read(reader io.Reader) DbStatus {
 	return DbStatus{
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterOptionalCloseReasonINSTANCE.Read(reader),
+		FfiConverterSequenceSegmentPrefixINSTANCE.Read(reader),
 	}
 }
 
@@ -8877,6 +8942,7 @@ func (c FfiConverterDbStatus) LowerExternal(value DbStatus) ExternalCRustBuffer 
 func (c FfiConverterDbStatus) Write(writer io.Writer, value DbStatus) {
 	FfiConverterUint64INSTANCE.Write(writer, value.DurableSeq)
 	FfiConverterOptionalCloseReasonINSTANCE.Write(writer, value.CloseReason)
+	FfiConverterSequenceSegmentPrefixINSTANCE.Write(writer, value.Segments)
 }
 
 type FfiDestroyerDbStatus struct{}
@@ -9840,6 +9906,49 @@ func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
 type FfiDestroyerScanOptions struct{}
 
 func (_ FfiDestroyerScanOptions) Destroy(value ScanOptions) {
+	value.Destroy()
+}
+
+// A segment (RFC-0024), identified by the key prefix it owns; the segment
+// spans the key interval `[prefix, prefix++)`.
+type SegmentPrefix struct {
+	// The key prefix owned by the segment.
+	Prefix []byte
+}
+
+func (r *SegmentPrefix) Destroy() {
+	FfiDestroyerBytes{}.Destroy(r.Prefix)
+}
+
+type FfiConverterSegmentPrefix struct{}
+
+var FfiConverterSegmentPrefixINSTANCE = FfiConverterSegmentPrefix{}
+
+func (c FfiConverterSegmentPrefix) Lift(rb RustBufferI) SegmentPrefix {
+	return LiftFromRustBuffer[SegmentPrefix](c, rb)
+}
+
+func (c FfiConverterSegmentPrefix) Read(reader io.Reader) SegmentPrefix {
+	return SegmentPrefix{
+		FfiConverterBytesINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSegmentPrefix) Lower(value SegmentPrefix) C.RustBuffer {
+	return LowerIntoRustBuffer[SegmentPrefix](c, value)
+}
+
+func (c FfiConverterSegmentPrefix) LowerExternal(value SegmentPrefix) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SegmentPrefix](c, value))
+}
+
+func (c FfiConverterSegmentPrefix) Write(writer io.Writer, value SegmentPrefix) {
+	FfiConverterBytesINSTANCE.Write(writer, value.Prefix)
+}
+
+type FfiDestroyerSegmentPrefix struct{}
+
+func (_ FfiDestroyerSegmentPrefix) Destroy(value SegmentPrefix) {
 	value.Destroy()
 }
 
@@ -13094,6 +13203,53 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSegmentPrefix struct{}
+
+var FfiConverterSequenceSegmentPrefixINSTANCE = FfiConverterSequenceSegmentPrefix{}
+
+func (c FfiConverterSequenceSegmentPrefix) Lift(rb RustBufferI) []SegmentPrefix {
+	return LiftFromRustBuffer[[]SegmentPrefix](c, rb)
+}
+
+func (c FfiConverterSequenceSegmentPrefix) Read(reader io.Reader) []SegmentPrefix {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]SegmentPrefix, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSegmentPrefixINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSegmentPrefix) Lower(value []SegmentPrefix) C.RustBuffer {
+	return LowerIntoRustBuffer[[]SegmentPrefix](c, value)
+}
+
+func (c FfiConverterSequenceSegmentPrefix) LowerExternal(value []SegmentPrefix) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]SegmentPrefix](c, value))
+}
+
+func (c FfiConverterSequenceSegmentPrefix) Write(writer io.Writer, value []SegmentPrefix) {
+	if len(value) > math.MaxInt32 {
+		panic("[]SegmentPrefix is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSegmentPrefixINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSegmentPrefix struct{}
+
+func (FfiDestroyerSequenceSegmentPrefix) Destroy(sequence []SegmentPrefix) {
+	for _, value := range sequence {
+		FfiDestroyerSegmentPrefix{}.Destroy(value)
 	}
 }
 

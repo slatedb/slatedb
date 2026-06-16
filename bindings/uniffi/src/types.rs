@@ -122,6 +122,22 @@ impl From<slatedb::WriteHandle> for WriteHandle {
     }
 }
 
+/// A segment (RFC-0024), identified by the key prefix it owns; the segment
+/// spans the key interval `[prefix, prefix++)`.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SegmentPrefix {
+    /// The key prefix owned by the segment.
+    pub prefix: Vec<u8>,
+}
+
+impl From<slatedb::SegmentPrefix> for SegmentPrefix {
+    fn from(value: slatedb::SegmentPrefix) -> Self {
+        Self {
+            prefix: value.prefix.to_vec(),
+        }
+    }
+}
+
 /// Snapshot of the current database lifecycle and durability state.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct DbStatus {
@@ -129,13 +145,20 @@ pub struct DbStatus {
     pub durable_seq: u64,
     /// Present once the handle has been closed.
     pub close_reason: Option<CloseReason>,
+    /// All segment prefixes (RFC-0024) as of this snapshot: those in the
+    /// current manifest unioned with those touched in this handle's memtables
+    /// but not yet flushed. Sorted ascending by prefix and deduplicated; empty
+    /// when no segment extractor is configured.
+    pub segments: Vec<SegmentPrefix>,
 }
 
 impl From<slatedb::DbStatus> for DbStatus {
     fn from(value: slatedb::DbStatus) -> Self {
+        let segments = value.list_segments().into_iter().map(Into::into).collect();
         Self {
             durable_seq: value.durable_seq,
             close_reason: value.close_reason.map(Into::into),
+            segments,
         }
     }
 }

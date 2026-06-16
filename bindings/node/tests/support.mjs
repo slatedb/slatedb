@@ -283,6 +283,17 @@ export async function waitUntil(check, { timeoutMs = WAIT_TIMEOUT_MS, stepMs = W
   });
 }
 
+export class FixedThreeByteSegmentExtractor {
+  name() {
+    return "fixed_three_byte";
+  }
+
+  prefix_len(target) {
+    const key = target.tag === "Point" ? target.key : target.prefix;
+    return key.length < 3 ? undefined : 3;
+  }
+}
+
 export class ConcatMergeOperator {
   merge(_key, existing_value, operand) {
     const parts = [];
