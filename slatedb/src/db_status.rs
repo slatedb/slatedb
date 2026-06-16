@@ -185,7 +185,7 @@ impl DbStatusManager {
         self.tx.send_if_modified(|s| {
             let mut changed = false;
             for prefix in prefixes {
-                changed = changed || s.memtable_segments.insert(prefix.clone());
+                changed |= s.memtable_segments.insert(prefix.clone());
             }
             changed
         });
@@ -274,8 +274,6 @@ mod tests {
         }
     }
 
-    /// The published memtable segments as an order-independent set (ordering is
-    /// a property of `list_segments`, not of the raw field).
     fn segment_set(status: &DbStatus) -> BTreeSet<SegmentPrefix> {
         status
             .memtable_segments
@@ -384,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn should_notify_when_adding_a_new_segment() {
+    fn should_notify_when_adding_new_segments() {
         // given
         let mgr = DbStatusManager::new(0);
         let mut rx = mgr.subscribe();
@@ -401,21 +399,31 @@ mod tests {
         );
 
         // when
-        mgr.add_memtable_segments(&BTreeSet::from([Bytes::from_static(b"a")]));
+        mgr.add_memtable_segments(&BTreeSet::from([
+            Bytes::from_static(b"a"),
+            Bytes::from_static(b"z"),
+        ]));
 
         // then
         assert!(rx.has_changed().unwrap());
         assert_eq!(
             segment_set(&rx.borrow_and_update()),
-            BTreeSet::from([segment_prefix(b"a"), segment_prefix(b"m")])
+            BTreeSet::from([
+                segment_prefix(b"a"),
+                segment_prefix(b"m"),
+                segment_prefix(b"z")
+            ])
         );
     }
 
     #[test]
     fn should_not_notify_when_adding_a_known_segment() {
         // given
-        let mgr = DbStatusManager::new(0);
-        mgr.add_memtable_segments(&BTreeSet::from([Bytes::from_static(b"x")]));
+        let mgr = DbStatusManager::new_with_initial_values(
+            0,
+            manifest_with_segments(1, &[b"a", b"b"]),
+            BTreeSet::from([Bytes::from_static(b"x"), Bytes::from_static(b"y")]),
+        );
         let mut rx = mgr.subscribe();
         rx.borrow_and_update();
 
@@ -429,6 +437,16 @@ mod tests {
         mgr.add_memtable_segments(&BTreeSet::from([
             Bytes::from_static(b"x"),
             Bytes::from_static(b"y"),
+        ]));
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+
+        // when
+        mgr.add_memtable_segments(&BTreeSet::from([
+            Bytes::from_static(b"x"),
+            Bytes::from_static(b"y"),
+            Bytes::from_static(b"z"),
         ]));
 
         // then
@@ -448,21 +466,6 @@ mod tests {
         // then
         assert!(!rx.has_changed().unwrap());
         assert!(rx.borrow_and_update().list_segments().is_empty());
-    }
-
-    #[test]
-    fn should_not_notify_when_reported_segments_unchanged() {
-        // given
-        let mgr = DbStatusManager::new(0);
-        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
-        let mut rx = mgr.subscribe();
-        rx.borrow_and_update();
-
-        // when
-        mgr.report_memtable_segments(BTreeSet::from([Bytes::from_static(b"x")]));
-
-        // then
-        assert!(!rx.has_changed().unwrap());
     }
 
     #[test]
