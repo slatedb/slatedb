@@ -12,12 +12,12 @@
 //! Workers run in one of two modes:
 //!
 //! 1. **Embedded** a single worker is spawned inside the compaction coordinator's process. (
-//!     The coordinator must have `worker: Some(CompactionWorkerOptions))` in its
-//!     [`crate::config::CompactorOptions`]. This is the default.
+//!    The coordinator must have `worker: Some(CompactionWorkerOptions))` in its
+//!    [`crate::config::CompactorOptions`]. This is the default.
 //!
 //! 2. **Standalone**: The compaction coordinator runs without an embedded worker and one or
-//!     more separate worker processes each run a [`CompactionWorker`]. The coordinator must
-//!     have `worker: None` in its [`crate::config::CompactorOptions`].
+//!    more separate worker processes each run a [`CompactionWorker`]. The coordinator must
+//!    have `worker: None` in its [`crate::config::CompactorOptions`].
 //!
 //! # Heartbeat and failure detection
 //!
