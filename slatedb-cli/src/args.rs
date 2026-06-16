@@ -1,3 +1,4 @@
+use crate::scan::{KeyMode, ValueMode};
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use slatedb::compactor::CompactionRequest;
 use slatedb::seq_tracker::FindOption;
@@ -134,6 +135,54 @@ pub(crate) enum CliCommands {
         /// all checkpoints will be returned.
         #[arg(short, long)]
         name: Option<String>,
+    },
+
+    /// Dumps the key/value pairs of the database to stdout, in the spirit of RocksDB's
+    /// `ldb scan`.
+    ///
+    /// Output is one entry per line as `<key>\t<value>` (or `<key>` with
+    /// `--value none`). Logs go to stderr, so stdout is exactly the scan output.
+    ///
+    /// Opens the database as a non-fencing reader, so it is safe to run against a
+    /// database that a service is actively writing.
+    Scan {
+        /// Restrict the scan to keys starting with these bytes. Parsed according to
+        /// `--key`. Conflicts with `--from`/`--to`.
+        #[arg(long, conflicts_with_all = ["from", "to"])]
+        prefix: Option<String>,
+
+        /// Inclusive lower bound of the scanned key range. Parsed according to `--key`.
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Exclusive upper bound of the scanned key range. Parsed according to `--key`.
+        #[arg(long)]
+        to: Option<String>,
+
+        /// How keys are rendered, and how `--prefix`/`--from`/`--to` are parsed.
+        #[arg(long, value_enum, default_value = "auto")]
+        key: KeyMode,
+
+        /// How each value is rendered.
+        #[arg(long, value_enum, default_value = "auto")]
+        value: ValueMode,
+
+        /// Stop after emitting this many entries.
+        #[arg(long)]
+        max_keys: Option<u64>,
+
+        /// Print only the number of matching entries and their total byte size, not the
+        /// entries themselves. When combined with `--max-keys`, only the entries up to
+        /// that cap are counted.
+        #[arg(long)]
+        count: bool,
+
+        /// Scan an existing checkpoint by its UUID, rather than the database's current
+        /// state. This needs only read access to the store; without it the reader writes
+        /// a transient checkpoint and so needs write access.
+        #[arg(long)]
+        #[clap(value_parser = uuid::Uuid::parse_str)]
+        checkpoint: Option<Uuid>,
     },
 
     /// Runs a garbage collection for a specific resource type once
@@ -330,6 +379,7 @@ fn parse_find_option(s: &str) -> Result<FindOption, String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_gc_schedule, CliArgs, CliCommands, GcResource};
+    use crate::scan::{KeyMode, ValueMode};
     use clap::Parser;
     use rstest::rstest;
     use std::time::Duration;
@@ -410,6 +460,91 @@ mod tests {
             }
             command => panic!("unexpected command: {command:?}"),
         }
+    }
+
+    #[test]
+    fn parses_scan_defaults() {
+        let args = CliArgs::try_parse_from(["slatedb", "--path", "/tmp/slatedb", "scan"]).unwrap();
+
+        match args.command {
+            CliCommands::Scan {
+                prefix,
+                from,
+                to,
+                key,
+                value,
+                max_keys,
+                count,
+                checkpoint,
+            } => {
+                assert!(prefix.is_none());
+                assert!(from.is_none());
+                assert!(to.is_none());
+                assert_eq!(key, KeyMode::Auto);
+                assert_eq!(value, ValueMode::Auto);
+                assert!(max_keys.is_none());
+                assert!(!count);
+                assert!(checkpoint.is_none());
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scan_flags() {
+        let args = CliArgs::try_parse_from([
+            "slatedb",
+            "--path",
+            "/tmp/slatedb",
+            "scan",
+            "--from",
+            "00",
+            "--to",
+            "ff",
+            "--key",
+            "hex",
+            "--value",
+            "len",
+            "--max-keys",
+            "10",
+            "--count",
+        ])
+        .unwrap();
+
+        match args.command {
+            CliCommands::Scan {
+                from,
+                to,
+                key,
+                value,
+                max_keys,
+                count,
+                ..
+            } => {
+                assert_eq!(from.as_deref(), Some("00"));
+                assert_eq!(to.as_deref(), Some("ff"));
+                assert_eq!(key, KeyMode::Hex);
+                assert_eq!(value, ValueMode::Len);
+                assert_eq!(max_keys, Some(10));
+                assert!(count);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_prefix_conflicts_with_bounds() {
+        let result = CliArgs::try_parse_from([
+            "slatedb",
+            "--path",
+            "/tmp/slatedb",
+            "scan",
+            "--prefix",
+            "40",
+            "--from",
+            "00",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
