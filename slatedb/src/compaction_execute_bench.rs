@@ -28,7 +28,7 @@ use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
-use crate::tablestore::TableStore;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
 use crate::utils::IdGenerator;
@@ -73,11 +73,12 @@ impl CompactionExecuteBench {
             compression_codec,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
+        let table_store = Arc::new(TableStore::new_with_kind(
             ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
@@ -324,11 +325,12 @@ impl CompactionExecuteBench {
             compression_codec,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
+        let table_store = Arc::new(TableStore::new_with_kind(
             ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
             None,
+            TableStoreKind::Compactor,
         ));
         let (tx, rx) = async_channel::unbounded();
         let worker_options = CompactionWorkerOptions::default();

@@ -1393,3 +1393,151 @@ mod tests {
         thread2.join().unwrap();
     }
 }
+
+/// One object store call observed by [`RecordingObjectStore`], with the
+/// `TableStoreKind` / `RetryReason` tags it carried.
+#[derive(Clone, Debug)]
+pub(crate) enum RecordedCall {
+    Get {
+        head: bool,
+        kind: Option<crate::tablestore::TableStoreKind>,
+        retry: Option<crate::tablestore::RetryReason>,
+    },
+    Put {
+        kind: Option<crate::tablestore::TableStoreKind>,
+    },
+    PutMultipart {
+        kind: Option<crate::tablestore::TableStoreKind>,
+    },
+}
+
+/// Wraps an object store and records the tags carried by each
+/// get/put/multipart-init call, delegating all I/O to the inner store.
+#[derive(Debug)]
+pub(crate) struct RecordingObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    calls: parking_lot::Mutex<Vec<RecordedCall>>,
+}
+
+impl RecordingObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            inner,
+            calls: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.calls.lock().clear();
+    }
+
+    pub(crate) fn get_kinds(&self, head: bool) -> Vec<Option<crate::tablestore::TableStoreKind>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Get { head: h, kind, .. } if *h == head => Some(*kind),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn get_retries(&self, head: bool) -> Vec<Option<crate::tablestore::RetryReason>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Get { head: h, retry, .. } if *h == head => Some(*retry),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn write_kinds(&self) -> Vec<Option<crate::tablestore::TableStoreKind>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Put { kind } | RecordedCall::PutMultipart { kind } => Some(*kind),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl fmt::Display for RecordingObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RecordingObjectStore({})", self.inner)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for RecordingObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.calls.lock().push(RecordedCall::Get {
+            head: options.head,
+            kind: crate::tablestore::TableStoreKind::from_extensions(&options.extensions),
+            retry: crate::tablestore::RetryReason::from_extensions(&options.extensions),
+        });
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: OS_PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.calls.lock().push(RecordedCall::Put {
+            kind: crate::tablestore::TableStoreKind::from_extensions(&opts.extensions),
+        });
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.calls.lock().push(RecordedCall::PutMultipart {
+            kind: crate::tablestore::TableStoreKind::from_extensions(&opts.extensions),
+        });
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}

@@ -77,7 +77,7 @@ use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::manifest::SsTableView;
 use crate::object_stores::ObjectStores;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
-use crate::tablestore::TableStore;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
 use crate::IdentifiedObjectMetadata;
 
@@ -194,11 +194,12 @@ impl WalReader {
     /// object store here.
     pub fn new<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
         let sst_format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
+        let table_store = Arc::new(TableStore::new_with_kind(
             ObjectStores::new(object_store, None),
             sst_format,
             path.into(),
             None,
+            TableStoreKind::Reader,
         ));
         Self { table_store }
     }
