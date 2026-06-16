@@ -7,6 +7,20 @@
 //! coordinator separately observes those `Compacted` entries and commits the
 //! manifest update (see [`crate::compactor::CompactorEventHandler::commit_compacted_entries`]).
 //!
+//! # Deployment shapes
+//!
+//! Workers run in one of two modes:
+//!
+//! 1. **Embedded** a single worker is spawned inside the compaction coordinator's process. (
+//!     The coordinator must have `worker: Some(CompactionWorkerOptions))` in its
+//!     [`crate::config::CompactorOptions`]. This is the default.
+//!
+//! 2. **Standalone**: The compaction coordinator runs without an embedded worker and one or
+//!     more separate worker processes each run a [`CompactionWorker`]. The coordinator must
+//!     have `worker: None` in its [`crate::config::CompactorOptions`].
+//!
+//! # Heartbeat and failure detection
+//!
 //! Workers emit heartbeats to prove liveness. A heartbeat is a CAS write that
 //! bumps `last_heartbeat_ms` in the worker's `.compactions` entry. Two triggers:
 //!
@@ -14,7 +28,7 @@
 //!    writing one or more SSTs), the worker writes a heartbeat carrying the
 //!    latest `output_ssts` list.
 //! 2. **Bytes trigger**: when the cumulative bytes processed since the last
-//!    bytes-based heartbeat exceeds `CompactionWorkerOptions::heartbeat_bytes`
+//!    bytes-based heartbeat exceeds [`crate::config::CompactionWorkerOptions::heartbeat_bytes`]
 //!    *and* at least `heartbeat_min_interval` has elapsed since the last such
 //!    write, the worker emits a cheap heartbeat (no output_ssts update).
 //!
@@ -23,7 +37,24 @@
 //! worker, so a stalled job can be handed off to a less-loaded worker.
 //!
 //! The coordinator reclaims stale Running compactions whose
-//! `last_heartbeat_ms` is older than `CompactorOptions::worker_heartbeat_timeout`.
+//! `last_heartbeat_ms` is older than
+//! [`crate::config::CompactorOptions::worker_heartbeat_timeout`].
+//! Reclaimed jobs resume from their last checkpoint (`output_ssts`) when the
+//! next worker picks them up.
+//!
+//! # Metrics
+//!
+//! Workers emit the following per-worker metrics tagged `{worker_id=<id>}`:
+//!
+//! | Metric | Description |
+//! |---|---|
+//! | `slatedb.compactor.bytes_compacted` | Bytes merged by this worker |
+//! | `slatedb.compactor.running_compactions` | Jobs currently in-flight |
+//! | `slatedb.compactor.ssts_written` | Output SSTs produced |
+//!
+//! Supply a recorder via [`CompactionWorkerBuilder::with_metrics_recorder`].
+//! The coordinator emits complementary metrics (`jobs_claimed`, `jobs_reclaimed`,
+//! `worker_last_heartbeat_ms`) on its own recorder.
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -36,7 +67,7 @@ use tokio::runtime::Handle;
 use ulid::Ulid;
 
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
-use crate::compactor::stats::CompactionStats;
+use crate::compactor::stats::{CompactionStats, WorkerStats};
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
@@ -53,6 +84,7 @@ use crate::utils::IdGenerator;
 #[cfg(feature = "compaction_filters")]
 use crate::CompactionFilterSupplier;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::DbRand;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
@@ -209,6 +241,7 @@ impl CompactionWorkerHandler {
         worker_runtime: Handle,
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
+        recorder: MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
@@ -219,6 +252,18 @@ impl CompactionWorkerHandler {
         async_channel::Receiver<WorkerMessage>,
     ) {
         let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
+        info!(
+        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
+        worker_id,
+        options.max_concurrent_compactions,
+        options.compactions_poll_interval,
+    );
+
+        // Per-worker throughput metrics are emitted by the executor, tagged with
+        // this worker's id (see [`WorkerStats`]). The coordinator's `stats` carry
+        // no per-worker throughput, so the two never collide on a shared backend.
+        let worker_stats = WorkerStats::new(&recorder, &worker_id);
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
                 handle: worker_runtime.clone(),
@@ -227,6 +272,7 @@ impl CompactionWorkerHandler {
                 table_store: table_store.clone(),
                 rand: rand.clone(),
                 stats: stats.clone(),
+                worker_stats,
                 clock: system_clock.clone(),
                 manifest_store: manifest_store.clone(),
                 merge_operator: merge_operator.clone(),
@@ -234,14 +280,6 @@ impl CompactionWorkerHandler {
                 compaction_filter_supplier: compaction_filter_supplier.clone(),
             },
         ));
-
-        let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
-        info!(
-        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
-        worker_id,
-        options.max_concurrent_compactions,
-        options.compactions_poll_interval,
-    );
 
         let handler = CompactionWorkerHandler::new(
             worker_id,
@@ -760,10 +798,11 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
     ) -> Result<(), SlateDBError> {
         // Stop accepting new work, then release any active claims so other
         // workers can pick them up immediately rather than waiting for the
-        // heartbeat-timeout reclamation path.
+        // heartbeat-timeout reclamation path. Stopping the executor runs each
+        // in-flight task's cleanup, which decrements `running_compactions`.
         self.executor.stop();
         self.job_progress.clear();
-        let claimed = self.active_jobs.clone().into_iter();
+        let claimed = std::mem::take(&mut self.active_jobs);
         for id in claimed {
             if let Err(e) = self.release_claim(id).await {
                 error!(

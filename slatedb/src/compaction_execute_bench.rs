@@ -16,7 +16,7 @@ use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
 use crate::compaction_worker::WorkerMessage;
-use crate::compactor::stats::CompactionStats;
+use crate::compactor::stats::{CompactionStats, WorkerStats};
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
@@ -345,6 +345,7 @@ impl CompactionExecuteBench {
             table_store: table_store.clone(),
             rand: self.rand.clone(),
             stats: stats.clone(),
+            worker_stats: WorkerStats::new(&recorder, "bench"),
             clock: self.system_clock.clone(),
             manifest_store: manifest_store.clone(),
             merge_operator: None,
