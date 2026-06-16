@@ -68,8 +68,6 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) sst_views: Vec<SsTableView>,
     /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
-    /// Output SSTs already written for this compaction when resuming.
-    pub(crate) output_ssts: Vec<SsTableHandle>,
     /// The clock tick representing the time the compaction occurs. This is used
     /// to make decisions about retention of expiring records.
     pub(crate) compaction_clock_tick: i64,
@@ -79,7 +77,8 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) retention_min_seq: Option<u64>,
     /// Subcompactions persisted for this compaction when resuming (RFC-0028).
     /// Empty when the compaction has no persisted subcompaction plan; the
-    /// executor then plans one itself (or runs a single merge).
+    /// executor then plans one itself (collapsing to a single unbounded range
+    /// when subcompactions are disabled or not worthwhile).
     pub(crate) subcompactions: Vec<Subcompaction>,
 }
 
@@ -91,7 +90,6 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("destination", &self.destination)
             .field("ssts", &self.sst_views)
             .field("sorted_runs", &self.sorted_runs)
-            .field("output_ssts", &self.output_ssts)
             .field("compaction_clock_tick", &self.compaction_clock_tick)
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("retention_min_seq", &self.retention_min_seq)
@@ -474,7 +472,9 @@ impl TokioCompactionExecutorInner {
     /// Executes a single compaction job and returns the resulting [`SortedRun`].
     ///
     /// ## Steps
-    /// - Splits the job into subcompactions when enabled and worthwhile (RFC-0028)
+    /// - Plans the job's subcompactions — a single unbounded range when
+    ///   subcompactions are disabled or no worthwhile split exists — and runs
+    ///   the ranges concurrently (RFC-0028)
     /// - Streams and merges input keys across all sources (per range)
     /// - Applies merge and retention policies
     /// - Writes output SSTs up to `max_sst_size`, reporting periodic progress
@@ -493,70 +493,43 @@ impl TokioCompactionExecutorInner {
             StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
         let sequence_tracker = Arc::new(stored_manifest.db_state().sequence_tracker.clone());
 
-        if let Some(subcompactions) = self.plan_or_resume_subcompactions(&args) {
-            return self
-                .execute_subcompactions(args, subcompactions, sequence_tracker)
-                .await;
-        }
-
-        let initial_output_ssts = args.output_ssts.clone();
-        let progress = |bytes_processed: u64, output_ssts: &[SsTableHandle]| {
-            self.send_compaction_progress(args.id, bytes_processed, output_ssts, Vec::new());
-        };
-        let output_ssts = self
-            .run_subcompaction_merge(
-                &args,
-                &BytesRange::unbounded(),
-                initial_output_ssts,
-                sequence_tracker,
-                &progress,
-            )
-            .await?;
-
-        Ok(SortedRun {
-            id: args.destination,
-            sst_views: output_ssts
-                .into_iter()
-                .map(|sst| {
-                    let id = self.rand.rng().gen_ulid(self.clock.as_ref());
-                    SsTableView::new(id, sst)
-                })
-                .collect(),
-        })
+        // Every compaction runs through the subcompaction path; a disabled or
+        // not-worthwhile split is just a single unbounded-range subcompaction.
+        let subcompactions = self.plan_subcompactions(&args);
+        self.execute_subcompactions(args, subcompactions, sequence_tracker)
+            .await
     }
 
-    /// Determines whether a job should run with subcompactions (RFC-0028).
+    /// Determines the subcompaction plan for a job (RFC-0028). Every compaction
+    /// runs through the subcompaction path; subcompactions being disabled
+    /// (`max_subcompactions <= 1`) or not worthwhile simply collapses to a
+    /// single unbounded-range subcompaction.
     ///
     /// ## Returns
-    /// - `Some` with the persisted subcompactions when the job is resuming a
-    ///   subcompaction plan. The persisted plan is reused verbatim — never
-    ///   re-planned — so output SSTs recorded against its ranges stay valid.
-    /// - `Some` with a freshly planned set of subcompactions when the job is
-    ///   starting fresh, subcompactions are enabled, and the planner finds a
-    ///   worthwhile split.
-    /// - `None` when the job should run as a single merge over the full
-    ///   keyspace. This includes resuming a job whose previous attempt ran
-    ///   (and persisted output) without subcompactions.
-    fn plan_or_resume_subcompactions(
-        &self,
-        args: &StartCompactionJobArgs,
-    ) -> Option<Vec<Subcompaction>> {
+    /// - The persisted subcompactions when the job is resuming a plan. The plan
+    ///   is reused verbatim — never re-planned — so output SSTs already recorded
+    ///   against its ranges stay valid.
+    /// - Otherwise a freshly planned set of ranges, each starting empty: a
+    ///   single unbounded range when subcompactions are disabled or the planner
+    ///   finds no worthwhile split, and the split ranges otherwise.
+    ///
+    /// A job whose previous attempt persisted output only at the parent level
+    /// (the pre-RFC-0028 format, i.e. `output_ssts` set with no `subcompactions`)
+    /// is re-planned from scratch rather than resumed; such in-flight jobs do
+    /// not survive an upgrade.
+    fn plan_subcompactions(&self, args: &StartCompactionJobArgs) -> Vec<Subcompaction> {
         if !args.subcompactions.is_empty() {
-            return Some(args.subcompactions.clone());
+            return args.subcompactions.clone();
         }
-        if self.options.max_subcompactions <= 1 || !args.output_ssts.is_empty() {
-            return None;
-        }
-        let ranges = plan_subcompaction_ranges(
+        plan_subcompaction_ranges(
             &args.sst_views,
             &args.sorted_runs,
             self.options.max_subcompactions,
             self.options.min_subcompaction_input_bytes as u64,
-        );
-        if ranges.len() <= 1 {
-            return None;
-        }
-        Some(ranges.into_iter().map(Subcompaction::new).collect())
+        )
+        .into_iter()
+        .map(Subcompaction::new)
+        .collect()
     }
 
     /// Executes a compaction job that is split into subcompactions (RFC-0028),
@@ -1491,7 +1464,6 @@ mod tests {
             destination: 0,
             sst_views: l0_sst_views,
             sorted_runs,
-            output_ssts,
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq,
@@ -1510,12 +1482,7 @@ mod tests {
         };
         let mut iter = executor
             .inner
-            .load_iterators(
-                &job_args,
-                &full_range,
-                &job_args.output_ssts,
-                sequence_tracker,
-            )
+            .load_iterators(&job_args, &full_range, &output_ssts, sequence_tracker)
             .await
             .unwrap();
         let mut resumed_entries = Vec::new();
@@ -1677,7 +1644,6 @@ mod tests {
                         destination: 0,
                         sst_views: l0_ssts.clone(),
                         sorted_runs: sorted_runs.clone(),
-                        output_ssts: Vec::new(),
                         compaction_clock_tick: 0,
                         is_dest_last_run: false,
                         retention_min_seq,
@@ -1723,11 +1689,16 @@ mod tests {
                             destination: 0,
                             sst_views: l0_ssts.clone(),
                             sorted_runs: sorted_runs.clone(),
-                            output_ssts,
                             compaction_clock_tick: 0,
                             is_dest_last_run: false,
                             retention_min_seq,
-                            subcompactions: vec![],
+                            // Resume is expressed as a persisted single
+                            // unbounded-range subcompaction carrying the partial
+                            // output, rather than parent-level output_ssts
+                            // (RFC-0028).
+                            subcompactions: vec![Subcompaction::new(BytesRange::unbounded())
+                                .with_status(CompactionStatus::Running)
+                                .with_output_ssts(output_ssts)],
                         })
                         .await
                         .unwrap();
@@ -1876,7 +1847,6 @@ mod tests {
             destination: 0,
             sst_views: sst_views.clone(),
             sorted_runs: sorted_runs.clone(),
-            output_ssts: vec![],
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
@@ -2068,7 +2038,6 @@ mod tests {
                     destination: 0,
                     sst_views: vec![],
                     sorted_runs,
-                    output_ssts: vec![],
                     compaction_clock_tick: 0,
                     is_dest_last_run: false,
                     retention_min_seq: Some(0),
@@ -2089,31 +2058,25 @@ mod tests {
     /// `output_ssts` but no subcompaction plan) must stay on the single-merge
     /// path: splitting now would invalidate the existing resume point.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_should_not_plan_subcompactions_when_resuming_single_merge() {
+    async fn test_plan_subcompactions_resumes_or_falls_back_to_single_range() {
         let ctx = TestContextBuilder::new("testdb-no-replan").build().await;
-        let resume_output_sst = SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
-            1,
-            crate::db_state::SsTableInfo::default(),
-        );
         let args = StartCompactionJobArgs {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
             destination: 0,
             sst_views: vec![],
             sorted_runs: vec![],
-            output_ssts: vec![resume_output_sst],
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
             subcompactions: vec![],
         };
 
-        assert!(ctx
-            .executor
-            .inner
-            .plan_or_resume_subcompactions(&args)
-            .is_none());
+        // With no worthwhile split the planner falls back to a single
+        // unbounded-range subcompaction rather than a multi-range plan.
+        let planned = ctx.executor.inner.plan_subcompactions(&args);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].range(), &BytesRange::unbounded());
 
         // A persisted plan, by contrast, is always resumed verbatim.
         let persisted = vec![
@@ -2121,14 +2084,10 @@ mod tests {
             Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..)),
         ];
         let args = StartCompactionJobArgs {
-            output_ssts: vec![],
             subcompactions: persisted.clone(),
             ..args
         };
-        assert_eq!(
-            ctx.executor.inner.plan_or_resume_subcompactions(&args),
-            Some(persisted)
-        );
+        assert_eq!(ctx.executor.inner.plan_subcompactions(&args), persisted);
     }
 
     /// A blocked SST `close()` (the object-store flush of a finished output SST)
@@ -2212,7 +2171,6 @@ mod tests {
             destination: 0,
             sst_views,
             sorted_runs: vec![],
-            output_ssts: vec![],
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
@@ -2386,7 +2344,6 @@ mod tests {
                 destination: 0,
                 sst_views: ssts.into_iter().map(SsTableView::identity).collect(),
                 sorted_runs: vec![],
-                output_ssts: vec![],
                 compaction_clock_tick: 0,
                 is_dest_last_run,
                 retention_min_seq,

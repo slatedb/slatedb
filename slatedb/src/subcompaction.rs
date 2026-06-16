@@ -76,8 +76,10 @@ pub(crate) fn plan_subcompaction_ranges(
 
     // Weight each candidate interval by the size of every input SST that
     // overlaps it. SSTs spanning multiple intervals contribute their full
-    // size to each, per the RFC heuristic.
-    let intervals: Vec<(BytesRange, u64)> = candidates
+    // size to each, per the RFC heuristic. We only need the interval's end
+    // key (the boundary it can emit), so keep that alongside the weight
+    // rather than the full range.
+    let intervals: Vec<(Bytes, u64)> = candidates
         .windows(2)
         .filter_map(|pair| {
             let interval =
@@ -91,7 +93,7 @@ pub(crate) fn plan_subcompaction_ranges(
                 })
                 .map(|view| view.estimate_size())
                 .sum();
-            Some((interval, weight))
+            Some((pair[1].clone(), weight))
         })
         .collect();
 
@@ -101,22 +103,19 @@ pub(crate) fn plan_subcompaction_ranges(
         return vec![BytesRange::unbounded()];
     }
 
-    // Accumulate interval weights in key order and emit a boundary at the
-    // interval's end each time the accumulated weight reaches the target.
-    // The final interval never emits a boundary: its end is the global max
-    // key, which must remain inside the last range.
+    // Accumulate interval weights in key order and emit the interval's end
+    // boundary each time the accumulated weight reaches the target. The final
+    // interval never emits a boundary: its end is the global max key, which
+    // must remain inside the last range.
     let mut boundaries: Vec<Bytes> = Vec::new();
     let mut accumulated = 0u64;
-    for (interval, weight) in intervals.iter().take(intervals.len() - 1) {
+    for (boundary, weight) in intervals.iter().take(intervals.len() - 1) {
         if boundaries.len() + 1 >= desired {
             break;
         }
         accumulated += weight;
         if accumulated >= target {
-            let Excluded(end) = interval.end_bound() else {
-                unreachable!("candidate intervals always have excluded end bounds")
-            };
-            boundaries.push(end.clone());
+            boundaries.push(boundary.clone());
             accumulated = 0;
         }
     }

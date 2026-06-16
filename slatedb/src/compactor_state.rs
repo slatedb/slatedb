@@ -426,9 +426,16 @@ pub struct Compaction {
     ///
     /// This is tracked only in memory at the moment.
     status: CompactionStatus,
-    /// Output SSTs produced by this compaction, if any. Empty while the
-    /// compaction runs subcompactions; per-range output is tracked in
-    /// `subcompactions` instead (RFC-0028).
+    /// Output SSTs produced by this compaction, if any.
+    ///
+    /// **Deprecated — remove on the next major version bump** (together with
+    /// `Compaction.output_ssts` in `schemas/compactor.fbs`). This parent-level
+    /// list is how pre-RFC-0028 compactions recorded progress. Compactions now
+    /// run subcompactions and track per-range output in `subcompactions`, so
+    /// this stays empty for new compactions and the executor no longer resumes
+    /// from it. It is retained only so compaction plans written by older
+    /// versions still deserialize; such in-flight jobs are re-planned rather
+    /// than resumed after an upgrade.
     output_ssts: Vec<SsTableHandle>,
     /// The worker that has claimed this compaction. `None` means the
     /// compaction is unclaimed (only valid when `status == Submitted`).

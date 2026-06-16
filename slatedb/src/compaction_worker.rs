@@ -628,7 +628,6 @@ impl CompactionWorkerHandler {
             destination,
             sst_views,
             sorted_runs,
-            output_ssts: compaction.output_ssts().clone(),
             compaction_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,

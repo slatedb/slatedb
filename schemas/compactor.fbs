@@ -87,9 +87,14 @@ table Compaction {
     // Current lifecycle status for this compaction
     status: CompactionStatus;
 
-    // Output SSTs already produced by this compaction. Empty while the
-    // compaction is running subcompactions; per-range output is tracked in
-    // `subcompactions` instead (RFC-0028).
+    // Output SSTs already produced by this compaction.
+    //
+    // Deprecated — add the `(deprecated)` attribute on the next major version
+    // bump (keep the field slot so vtable offsets stay stable). This
+    // parent-level list is how pre-RFC-0028 compactions recorded progress;
+    // compactions now run subcompactions and track per-range output in
+    // `subcompactions`, so this stays empty for new compactions. Retained only
+    // so compaction plans written by older versions still deserialize.
     output_ssts: [CompactedSsTable];
 
     // Spec of the worker that has claimed this compaction. null = unclaimed
