@@ -425,7 +425,6 @@ impl TokioCompactionExecutorInner {
         &self,
         id: Ulid,
         bytes_processed: u64,
-        output_ssts: &[SsTableHandle],
         subcompactions: Vec<Subcompaction>,
     ) {
         // Allow send() because we are treating the executor like an external
@@ -437,7 +436,6 @@ impl TokioCompactionExecutorInner {
             .try_send(WorkerMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
-                output_ssts: output_ssts.to_vec(),
                 subcompactions,
             })
         {
@@ -579,7 +577,6 @@ impl TokioCompactionExecutorInner {
         self.send_compaction_progress(
             args.id,
             bytes_processed_by_sub.iter().sum(),
-            &[],
             subcompactions.clone(),
         );
 
@@ -668,24 +665,14 @@ impl TokioCompactionExecutorInner {
                     bytes_processed_by_sub[index] = bytes_processed;
                     subcompactions[index].set_output_ssts(output_ssts);
                     let total_bytes = bytes_processed_by_sub.iter().sum();
-                    self.send_compaction_progress(
-                        args.id,
-                        total_bytes,
-                        &[],
-                        subcompactions.clone(),
-                    );
+                    self.send_compaction_progress(args.id, total_bytes, subcompactions.clone());
                 }
                 SubcompactionEvent::Finished { index, result } => match result {
                     Ok(output_ssts) => {
                         subcompactions[index].set_output_ssts(output_ssts);
                         subcompactions[index].set_status(CompactionStatus::Completed);
                         let total_bytes = bytes_processed_by_sub.iter().sum();
-                        self.send_compaction_progress(
-                            args.id,
-                            total_bytes,
-                            &[],
-                            subcompactions.clone(),
-                        );
+                        self.send_compaction_progress(args.id, total_bytes, subcompactions.clone());
                     }
                     Err(e) => {
                         subcompactions[index].set_status(CompactionStatus::Failed);
