@@ -435,6 +435,16 @@ impl TokioCompactionExecutorInner {
             estimate_bytes_before_key(args.sorted_runs.as_slice(), k)
         });
 
+        // Cadence for the time-based progress send below. Caps sends at 1s (the
+        // pre-distributed-compaction default), but never coarser than the
+        // worker's `heartbeat_min_interval`, since the worker can only heartbeat
+        // when the executor sends (see `handle_progress`).
+        let progress_interval = TimeDelta::from_std(
+            self.options
+                .heartbeat_min_interval
+                .min(std::time::Duration::from_secs(1)),
+        );
+
         // At most one SST close runs in the background at a time (depth-1
         // pipeline). While a finished SST flushes to the object store we keep
         // merging input and filling the next SST, instead of stalling the loop
@@ -458,7 +468,7 @@ impl TokioCompactionExecutorInner {
 
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
-            if duration_since_last_report > TimeDelta::seconds(1) {
+            if duration_since_last_report > progress_interval {
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 self.send_compaction_progress(args.id, total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
