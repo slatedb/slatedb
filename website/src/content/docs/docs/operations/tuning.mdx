@@ -3,39 +3,44 @@ title: Tuning
 description: Learn about SlateDB's performance characteristics and tuning
 ---
 
-SlateDB's performance characteristics are primarily determined by the object store being used. This page provides guidance on expected performance and how to tune SlateDB for your use case.
+SlateDB's performance depends heavily on the object store, the local caches, and the shape of the keys you read. Treat the numbers below as starting points for capacity planning, then measure with your own object-store region, network path, and value sizes.
 
 ## Latency
 
-SlateDB's write latency is dominated by object store PUT operations. The following table shows expected latencies for different object stores:
+Write latency is usually bounded by object-store `PUT` latency because SlateDB writes WAL SSTs and data SSTs to remote storage. The following table gives rough single-request expectations:
 
-| Object Store | Expected Write Latency | Notes |
-|--------------|----------------------|-------|
+| Object store | Expected write latency | Notes |
+|--------------|------------------------|-------|
 | S3 Standard | 50-100ms | Network latency dominates |
 | S3 Express One Zone | 5-10ms | Single-digit millisecond latency |
 | Google Cloud Storage | 50-100ms | Network latency dominates |
 | Azure Blob Storage | 50-100ms | Network latency dominates |
 | MinIO | 5-20ms | Depends on network and disk |
 
-Read latency dominated by the database's working set size and read pattern:
+Read latency depends on the working set and read pattern:
 
-1. Working sets that fit in local (memorya and disk) caches will respond very quickly (< 1ms).
-2. Read patterns that do sequential reads will respond very quickly (&lt;1ms) since SST blocks are pre-fetched sequentially and cached locally.
-3. Read patterns that access keys that are (lexicographically) close to each other will respond very quickly (< 1ms) since blocks are cached locally after the first read.
-4. Reads that access data across the keyspace, and whose dataset is larger than a single machine's memory or disk will, are more likely to see latency spikes similar to object storage latency levels (50-100ms for S3 standard). Such workloads can still work well, but require more tuning, partitioning, and so on.
+- Working sets that fit in local memory or disk cache can serve reads in under a millisecond.
+- Sequential scans are fast when read-ahead and cache locality keep SST blocks local.
+- Point reads against lexicographically nearby keys often hit cached blocks after the first lookup.
+- Random reads across a working set larger than local memory or disk will see object-store latency on cache misses. Those workloads can still work, but they need enough request concurrency, cache capacity, and key layout work to hide remote reads.
 
 ## Throughput
 
 SlateDB's write throughput is limited by:
 
-1. **Object store PUT rate limits**: Most object stores limit PUT operations to 3,500 requests per second per prefix.
-2. **Network bandwidth**: The time it takes to upload SSTs to object storage.
+| Limit | Effect |
+|-------|--------|
+| Object-store write limits | Remote stores can throttle writes by prefix, bucket, account, region, or project. Check the provider-specific limit instead of assuming one global number. |
+| Network bandwidth | Larger WAL and SST flushes spend more time uploading bytes. |
+| Compaction lag | If L0 files accumulate faster than the compactor can drain them, SlateDB can stall memtable flushes. |
 
 Read throughput is limited by:
 
-1. **Object store GET rate limits**: Most object stores limit GET operations to 5,500 requests per second per prefix.
-2. **Network bandwidth**: The time it takes to download SSTs from object storage.
-3. **Disk I/O**: The time it takes to read SSTs from disk when object store caching or [Foyer hybrid caching](https://foyer.rs/docs/tutorial/hybrid-cache) are enabled.
+| Limit | Effect |
+|-------|--------|
+| Object-store read limits | Cache misses become remote `GET` or range `GET` requests, so provider throttling shows up as read latency. |
+| Network bandwidth | Large scans and cold point reads can spend most of their time downloading SST ranges. |
+| Local disk I/O | The object-store cache and [Foyer hybrid cache](https://foyer.rs/docs/tutorial/hybrid-cache) trade remote reads for local disk reads. Slow local disks can become the next bottleneck. |
 
 ## Tuning
 
@@ -43,19 +48,24 @@ SlateDB provides several configuration options to tune performance. See [slatedb
 
 ### Write Performance
 
-* **`flush_interval`**: How long SlateDB waits before flushing the mutable WAL to object storage. Lower values reduce durable write latency but increase object-store PUT frequency.
-* **`l0_sst_size_bytes`**: The size of L0 SSTs. Larger SSTs provide better compression but take longer to upload.
-* **`max_unflushed_bytes`**: The total amount of unflushed WAL and memtable data allowed in memory before SlateDB applies backpressure to writers.
-* **`l0_max_ssts`**: The maximum number of L0 SSTs SlateDB allows before it stops flushing memtables and waits for compaction to catch up.
+| Knob | Use |
+|------|-----|
+| `flush_interval` | Controls how long SlateDB waits before flushing the mutable WAL to object storage. Lower values reduce durable write latency and increase object-store `PUT` frequency. |
+| `l0_sst_size_bytes` | Sets the target size of L0 SSTs. Larger SSTs usually compress better and reduce file count, but they take longer to upload. |
+| `max_unflushed_bytes` | Bounds the total unflushed WAL and memtable bytes allowed in memory before SlateDB applies writer backpressure. |
+| `l0_max_ssts` | Caps the number of L0 SSTs before SlateDB stops flushing memtables and waits for compaction to catch up. |
 
 ### Read Performance
 
-* **`min_filter_keys`**: SlateDB only builds filters for SSTs with at least this many keys. Raising it avoids filter overhead on small SSTs.
-* **`DbBuilder::with_filter_policies(...)`**: Configures the filter policies used for SST construction and evaluation. Defaults to a single bloom filter with 10 bits per key. Pass `BloomFilterPolicy::new(bits_per_key)` to tune bloom filter density (higher values reduce false positives but increase filter size), or supply a custom `FilterPolicy` (e.g., prefix bloom). See the `with_filter_policies` docs on `DbBuilder`, `CompactorBuilder`, and `DbReaderBuilder`.
-* **`object_store_cache_options.root_folder`**: Enables the local disk cache for object-store data when set.
-* **`object_store_cache_options.part_size_bytes`** and **`object_store_cache_options.preload_disk_cache_on_startup`**: Tune how the disk cache is chunked and optionally warmed on startup.
-* **`DbBuilder::with_sst_block_size(...)`**: Sets SST block size. Smaller blocks can help point lookups; larger blocks usually favor scans and compression.
+| Knob | Use |
+|------|-----|
+| `min_filter_keys` | Builds filters only for SSTs with at least this many keys. Raising it avoids filter overhead on small SSTs. |
+| `DbBuilder::with_filter_policies(...)` | Configures filter policies for SST construction and evaluation. SlateDB defaults to a Bloom filter with 10 bits per key. Higher `BloomFilterPolicy::new(bits_per_key)` values reduce false positives and increase filter size. |
+| `object_store_cache_options.root_folder` | Enables the local disk cache for raw object-store bytes when set. |
+| `object_store_cache_options.part_size_bytes` | Controls the chunk size used by the object-store cache. Larger parts reduce metadata overhead and can improve scans, but cold point reads may fetch more bytes than needed. |
+| `object_store_cache_options.preload_disk_cache_on_startup` | Warms the object-store cache at startup with recent SSTs or all SSTs, depending on the selected [`PreloadLevel`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html). |
+| `DbBuilder::with_sst_block_size(...)` | Sets the target SST data-block size. Smaller blocks can help point lookups; larger blocks usually favor scans and compression. |
 
 ### Memory Usage
 
-* **`max_unflushed_bytes`**: The primary writer-side memory bound for buffered but not yet flushed data.
+`max_unflushed_bytes` is the main writer-side memory bound for buffered data that has not been flushed yet. Cache settings add separate memory and disk budgets, so size the write buffer, block cache, and object-store cache together instead of treating each knob in isolation.

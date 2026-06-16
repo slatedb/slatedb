@@ -1,20 +1,21 @@
 ---
 title: CLI
+description: Use the SlateDB admin CLI to inspect manifests, manage checkpoints, run compaction, and trigger garbage collection
 ---
 
-The SlateDB Admin CLI provides an interface for managing and maintaining SlateDB databases. It enables direct interaction with SlateDB manifests, checkpoints, and garbage collector.
+The SlateDB CLI is an admin tool for databases that already live in an object store. It can inspect manifests and compaction state, manage checkpoints, run compaction, trigger garbage collection, and query the manifest's sequence-number tracker.
 
 ## Installation
 
-You can install the SlateDB CLI using Cargo. Run:
+Install the published CLI with Cargo:
 
-```
+```bash
 cargo install --locked slatedb-cli
 ```
 
-Alternatively, build from source by cloning the repository and compiling the CLI:
+Or build it from this repository:
 
-```
+```bash
 git clone https://github.com/slatedb/slatedb.git
 cd slatedb
 cargo build --release -p slatedb-cli
@@ -22,25 +23,76 @@ cargo build --release -p slatedb-cli
 
 The resulting binary will be available at `target/release/slatedb`.
 
-## Setup
+## Object Store Setup
 
-The CLI requires environment variables to configure access to your object store. You can set these variables in your shell environment or provide them via a `.env` file using the `--env-file` option. The required variables depend on your object store provider. See [admin.rs](https://github.com/slatedb/slatedb/blob/main/slatedb/src/admin.rs) for details.
+Every command needs two pieces of storage configuration:
 
-Every command requires the `--path` option, which specifies the root directory in your object store.
+- `--path <PATH>`: the database root inside the configured object store.
+- `CLOUD_PROVIDER`: the object-store loader to use.
 
-## Usage
+You can set environment variables in the shell or pass a `.env` file with `--env-file`. Supported `CLOUD_PROVIDER` values are `local`, `memory`, `aws`, `azure`, and `opendal`, depending on the features compiled into the CLI.
 
-Run the CLI with `slatedb --help` to see a list of available commands and options.
+For a local object store:
+
+```bash
+cat > .env <<'EOF'
+CLOUD_PROVIDER=local
+LOCAL_PATH=/tmp/slatedb-cli-data
+EOF
+
+slatedb --env-file .env --path my-db read-manifest
+```
+
+For AWS S3, the CLI uses the same environment variables as `object_store`'s `AmazonS3Builder::from_env`, such as `AWS_BUCKET`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`.
+
+## Inspect State
+
+Use these commands when you need to see what SlateDB has persisted:
+
+```bash
+slatedb --env-file .env --path my-db read-manifest
+slatedb --env-file .env --path my-db list-manifests --start 10 --end 20
+slatedb --env-file .env --path my-db read-compactions
+slatedb --env-file .env --path my-db list-compactions
+```
+
+The manifest commands print JSON serialized from SlateDB's typed manifest structures. The compaction commands do the same for `.compactions` state.
+
+To inspect one compaction entry by ULID:
+
+```bash
+slatedb --env-file .env --path my-db read-compaction --id 01J00000000000000000000000
+```
+
+## Checkpoints
+
+The CLI can create, refresh, delete, and list checkpoints:
+
+```bash
+slatedb --env-file .env --path my-db create-checkpoint --lifetime "7days" --name backup
+slatedb --env-file .env --path my-db list-checkpoints --name backup
+slatedb --env-file .env --path my-db refresh-checkpoint --id <uuid> --lifetime "14days"
+slatedb --env-file .env --path my-db delete-checkpoint --id <uuid>
+```
+
+`create-checkpoint` creates a detached checkpoint from the latest manifest. It does not flush an active writer's in-memory state first. If you need a checkpoint that includes an open writer's current MemTable and WAL state, create it from that writer with `Db::create_checkpoint`.
 
 ## Run the standalone compactor
 
-Run compaction as a standalone process (instead of inside your `Db` clients):
+`run-compactor` starts the compaction coordinator. By default it also starts an embedded worker in the same process:
 
 ```bash
 slatedb --env-file .env --path <db-path> run-compactor
 ```
 
-The compactor runs until interrupted (Ctrl-C), then shuts down gracefully.
+Pass `--no-embedded-worker` when you want one coordinator process and separate worker processes:
+
+```bash
+slatedb --env-file .env --path <db-path> run-compactor --no-embedded-worker
+slatedb --env-file .env --path <db-path> run-worker
+```
+
+You can run multiple workers against the same database. Each worker polls `.compactions`, claims scheduled jobs through SlateDB's optimistic protocol, executes the job, and writes completion state for the coordinator to commit.
 
 :::note
 
@@ -49,3 +101,34 @@ The compactor expects the database to already exist (a manifest must be present)
 :::
 
 See [Run a Standalone Compactor](/docs/tutorials/standalone-compactor/) for how to disable the embedded compactor in your database clients.
+
+## Garbage Collection
+
+Run one GC pass for a specific resource:
+
+```bash
+slatedb --env-file .env --path my-db run-garbage-collection --resource wal --min-age "24h"
+```
+
+Valid resources are `manifest`, `wal`, `wal-fence`, `compacted`, and `compactions`.
+
+To run GC on a schedule until interrupted:
+
+```bash
+slatedb --env-file .env --path my-db schedule-garbage-collection \
+  --manifest "min_age=7days,period=1day" \
+  --wal "min_age=24h,period=6h"
+```
+
+Only schedule GC after you know your checkpoint, reader, clone, and CDC retention requirements. GC deletes old objects once SlateDB decides they are no longer protected.
+
+## Sequence and Time Lookup
+
+SlateDB stores a bounded mapping between sequence numbers and wall-clock timestamps in the manifest. The CLI exposes that mapping:
+
+```bash
+slatedb --env-file .env --path my-db seq-to-ts 1000 --round down
+slatedb --env-file .env --path my-db ts-to-seq 1710000000 --round up
+```
+
+Use `--round up` or `--round down` when the exact sequence number or timestamp is not present in the tracker.

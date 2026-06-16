@@ -10,22 +10,24 @@ SlateDB is an embedded storage engine built as a [log-structured merge-tree](htt
 Object storage is an amazing technology. It provides highly-durable, highly-scalable, highly-available storage at a great cost. And recent advancements have made it even more attractive:
 
 * Google Cloud Storage supports multi-region and dual-region buckets for high availability.
-* All object stores support compare-and-swap (CAS) operations.
-* Amazon Web Service's S3 Express One Zone has single-digit millisecond latency.
+* Major object stores support conditional writes that SlateDB can use for fencing.
+* Amazon S3 Express One Zone has single-digit millisecond latency.
 
-We believe that the future of object storage are multi-region, low latency buckets that support atomic CAS operations. Inspired by [The Cloud Storage Triad: Latency, Cost, Durability](https://materializedview.io/p/cloud-storage-triad-latency-cost-durability), we set out to build a storage engine built for the cloud. SlateDB is that storage engine.
+We believe the future of object storage is multi-region, low-latency buckets that support atomic CAS operations. Inspired by [The Cloud Storage Triad: Latency, Cost, Durability](https://materializedview.io/p/cloud-storage-triad-latency-cost-durability), we set out to build a storage engine for the cloud. SlateDB is that storage engine.
 
 ## Features
 
-* **Zero-Disk architecture**: SlateDB is easy to operate. It can run as an in-process storage engine with no local state, no control plane, and no replication protocol.
-* **Single-writer**: SlateDB is designed for a single writer. Partitioning can easily be built on top of SlateDB since fencing is supported.
-* **Multiple-readers**: Multiple readers on different nodes can all read the same SlateDB database.
-* **Read caching**: SlateDB supports in-memory and (optional) on-disk read caching to reduce latency and API cost.
-* **Snapshot isolation**: SlateDB supports snapshot isolation, which allows readers and writers to see a consistent view of the database.
-* **Transactions**: Transactional writes are supported.
-* **Object store persistence**: SlateDB writes all data to object storage, which means SlateDB has the same durability, scalability, and availability as your object store.
-* **Writer fencing**: SlateDB enforces writer fencing. Zombie writer processes are detected and prevented from writing to the database.
-* **Pluggable compaction**: SlateDB supports pluggable compaction, so you can use the compaction strategy that fits your needs.
+| Feature | What it means |
+|---------|---------------|
+| Zero-disk architecture | SlateDB can run as an in-process storage engine with no local state, no control plane, and no replication protocol. |
+| Single writer | SlateDB is designed for one writer per database. Partitioning can be built above SlateDB, and writer fencing protects the object-store state. |
+| Multiple readers | Readers on different nodes can read the same SlateDB database. |
+| Read caching | In-memory and optional on-disk caches reduce latency and object-store API cost. |
+| Snapshot isolation | Readers and writers can work against a consistent database view. |
+| Transactions | Transactional writes are supported. |
+| Object-store persistence | SlateDB writes data to object storage, so durability, scalability, and availability come from the configured object store. |
+| Writer fencing | SlateDB detects zombie writer processes and prevents them from writing to the database. |
+| Pluggable compaction | You can choose the compaction strategy that fits the workload. |
 
 ## Use Cases
 

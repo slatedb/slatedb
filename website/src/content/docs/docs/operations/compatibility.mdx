@@ -7,8 +7,39 @@ SlateDB follows Semantic Versioning and guarantees forward and backward compatib
 
 Shared deployments should move one release at a time. If several processes read and write the same database path, keep them within one release step of each other until the rollout is complete.
 
+SlateDB aims to release about every two months. Treat that as a planning guideline, not a promise about exact dates.
+
 ## Stored Data
 
 A single database can contain a mix of older and newer SST files during normal operation. Readers and compactors must understand every format already present in the bucket. SlateDB version-checks its persistent formats and fails fast when it sees a version it does not understand.
 
 Compression is part of compatibility too. A process can only read compressed SSTs for codecs that were compiled into that binary. If one deployment writes Zstd-compressed SSTs, every reader and compactor that touches that database needs the `zstd` feature enabled. [Compression](/docs/design/compression) covers the codec feature flags.
+
+## Rolling Upgrades
+
+For a shared database path, upgrade in this order:
+
+1. Stop or drain background admin jobs that can rewrite state, such as standalone compactors and garbage collectors.
+2. Upgrade readers and passive admin tools.
+3. Upgrade the writer.
+4. Upgrade compactors, workers, and garbage collectors.
+5. Re-enable background jobs once every process that can touch the path is on the target release.
+
+This keeps older binaries from encountering files written by a much newer binary. Adjacent versions are the supported compatibility window.
+
+## API Compatibility
+
+The Rust API can change between minor releases. Pin `slatedb` in applications, read release notes before upgrading, and run your own build and integration tests against the target version.
+
+The language bindings are generated from the same Rust core and should be treated the same way. A storage-compatible release does not imply that every binding API keeps the same method signatures.
+
+## Feature Compatibility
+
+Some persisted data depends on build features or process configuration:
+
+- Compression codecs must be compiled into every process that reads the files.
+- Block transforms must be configured consistently for writers, readers, compactors, and direct SST readers.
+- Compaction filters must be available to standalone compaction processes if writers rely on them.
+- Separate WAL object stores and clone support have their own constraints. See [Configuration](/docs/operations/configuration/) and [Clones](/docs/design/clones/).
+
+Object-store provider changes are safe only when the new configuration points at the same underlying data, or after you have copied all required directories. Reconfiguring the provider does not migrate data for you.

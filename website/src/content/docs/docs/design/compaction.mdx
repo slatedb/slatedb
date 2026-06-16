@@ -1,30 +1,58 @@
 ---
 title: Compaction
+description: How SlateDB schedules, executes, and commits compactions
 ---
 
-The compactor is responsible for taking groups of sorted runs (this doc uses the term
-sorted run to refer to both sorted runs and l0 ssts) and compacting them together to
-reduce space amplification (by removing old versions of rows that have been updated/deleted)
-and read amplification (by reducing the number of sorted runs that need to be searched on
-a read). It's made up of a few different components:
+Compaction rewrites many read sources into fewer read sources. It reduces read amplification by shrinking the number of L0 SSTs and sorted runs a read has to search. It reduces space amplification by dropping overwritten values, tombstones that are no longer needed, expired rows, and merge operands that can be resolved safely.
 
-- [`Compactor`]: The main event loop that orchestrates the compaction process.
-- [`CompactorEventHandler`]: The event handler that handles events from the compactor.
-- [`CompactionScheduler`]: The scheduler that discovers compactions that should be performed.
-- [`CompactionExecutor`]: The executor that runs the compaction tasks.
+SlateDB splits compaction into two roles:
 
-The main event loop listens on the manifest poll ticker to react to manifest poll ticks, the
-executor worker channel to react to updates about running compactions, and the shutdown
-channel to discover when it should terminate. It doesn't actually implement the logic for
-reacting to these events. This is implemented by [`CompactorEventHandler`].
+- The compaction coordinator watches manifest state, asks a scheduler for compaction specs, records scheduled jobs in `.compactions`, and commits completed jobs back into the manifest.
+- The compaction worker claims scheduled jobs from `.compactions`, reads the input SSTs, writes output SSTs, and marks the job compacted.
 
-The Scheduler is responsible for deciding what sorted runs should be compacted together.
-It implements the [`CompactionScheduler`] trait. The implementation is specified by providing
-an implementation of [`CompactionSchedulerSupplier`] so different scheduling
-policies can be plugged into slatedb. Currently, the only implemented policy is the size-tiered
-scheduler supplied by [`SizeTieredCompactionSchedulerSupplier`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/size_tiered_compaction.rs).
+By default, a `Db` starts a compactor with an embedded worker in the same process. You can disable that and run compaction as separate processes. See [Run a Standalone Compactor](/docs/tutorials/standalone-compactor/) and the [CLI](/docs/operations/cli/#run-the-standalone-compactor) for the operational commands.
 
-The Executor does the actual work of compacting sorted runs by sort-merging them into a new
-sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
-is the [`TokioCompactionExecutor`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/compactor_executor.rs),
-which runs compaction on a local tokio runtime.
+## Sources and Outputs
+
+The compactor works on the read sources recorded in the manifest:
+
+- L0 SSTs are recently flushed files. They can overlap arbitrary key ranges and are searched newest-first.
+- Sorted runs are compacted sets of SSTs. Within a sorted run, SSTs are range-partitioned.
+
+A compaction job chooses consecutive sources from one tree, merge-sorts their rows, and writes a new sorted run. Newer rows win over older rows with the same key when snapshot, checkpoint, and retention rules allow the older version to be dropped.
+
+Compaction does not update the manifest by listing object storage and guessing what changed. The worker writes output files first, records the completed job in `.compactions`, and the coordinator later commits the new manifest state. That separation lets standalone workers run without owning the manifest commit loop.
+
+## Scheduler
+
+Schedulers implement the `CompactionScheduler` trait. A `CompactionSchedulerSupplier` plugs a scheduler into `CompactorBuilder`.
+
+SlateDB currently ships the size-tiered scheduler. It looks for groups of similarly sized sources and emits compaction specs up to the configured source limits. The scheduler also respects in-flight jobs so two compactions do not claim the same source.
+
+The main knobs live under `CompactorOptions`:
+
+- `poll_interval`: how often the coordinator checks for new manifest state.
+- `max_concurrent_compactions`: how many compactions the coordinator may keep active.
+- `scheduler_options`: string key/value options for the configured scheduler.
+- `worker`: embedded worker settings. `None` means the coordinator expects external workers.
+- `commit_compacted_interval`: how often the coordinator checks for worker-completed jobs to commit.
+
+## Worker
+
+A worker polls `.compactions` for scheduled jobs, claims jobs with SlateDB's optimistic update protocol, and executes them on a Tokio runtime. Multiple workers can run against the same database. Each claimed job records a worker id and heartbeat so other processes can see that it is in progress.
+
+`CompactionWorkerOptions` controls worker-side behavior:
+
+- `max_concurrent_compactions`: how many jobs one worker may hold at once.
+- `compactions_poll_interval`: how often the worker checks `.compactions`.
+- `heartbeat_bytes` and `heartbeat_min_interval`: how often the worker writes progress.
+- `max_sst_size`: the target size before rolling to another output SST.
+- `max_fetch_tasks` and `bytes_to_fetch`: read-ahead concurrency and range size while reading inputs.
+
+If a worker shuts down cleanly or a job fails, it releases its claim so another worker can retry the job. If a worker disappears without cleanup, operational recovery depends on later coordination and the persisted `.compactions` state.
+
+## Compaction Filters and Merge Operators
+
+Compaction is one of the places SlateDB can apply merge operators and compaction filters. Reads can resolve merge operands on demand, but compaction and memtable flushes can rewrite that state into fewer rows. The compactor must preserve rows that are still visible to snapshots, checkpoints, readers, clones, or retention boundaries.
+
+If you run a standalone compactor or worker and use compaction filters, configure the same filter supplier on the `AdminBuilder` or `CompactorBuilder` path that starts those processes. Otherwise the background compaction process will not have the same rewrite rules as the writer.

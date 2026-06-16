@@ -50,6 +50,32 @@ If your access pattern is "all keys that start with this prefix," use `scan_pref
 let mut iter = db.scan_prefix(b"test_key").await?;
 ```
 
+## Tune scan options
+
+Use `scan_with_options` or `scan_prefix_with_options` when the default scan behavior is not what you want. `ScanOptions` controls durability filtering, block caching, read-ahead size, fetch concurrency, and iteration order.
+
+Scans default to ascending order and `cache_blocks = false`. That default avoids filling the block cache with data from long sequential scans. If the scan walks a hot range repeatedly, enable block caching for that scan.
+
+```rust
+use slatedb::config::ScanOptions;
+use slatedb::IterationOrder;
+
+let options = ScanOptions::default()
+    .with_order(IterationOrder::Descending)
+    .with_cache_blocks(true)
+    .with_max_fetch_tasks(4);
+
+let mut iter = db
+    .scan_with_options(b"test_key1".to_vec()..b"test_key9".to_vec(), &options)
+    .await?;
+```
+
+Use `DurabilityLevel::Remote` when a scan should ignore data that has not reached object storage yet.
+
+## Seek limits
+
+`DbIterator::seek` stays inside the range used to create the iterator. It also cannot move to a key less than or equal to the last key already returned. Create a new scan if you need to move backward or restart from an earlier key.
+
 ## Complete example
 
 <Code code={rangeScans} lang="rust" title="main.rs" />

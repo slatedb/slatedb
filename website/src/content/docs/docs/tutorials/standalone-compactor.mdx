@@ -7,13 +7,15 @@ import { Code } from '@astrojs/starlight/components';
 import dbWithoutCompactor from '/../examples/src/db_without_compactor.rs?raw';
 import standaloneCompactor from '/../examples/src/standalone_compactor.rs?raw';
 
-By default, SlateDB starts a background compactor inside each `Db` instance.
-If you want to run compaction as a separate service (for example, on dedicated compute), you can:
+By default, SlateDB starts a compactor inside each `Db` instance. That compactor includes a coordinator and an embedded worker. If you want compaction on separate compute, disable the embedded compactor in the writer and run compaction from another process.
 
-1. Open the `Db` with compaction disabled.
-2. Start a standalone compactor in a separate process.
+At minimum, you need:
 
-Both processes must use the same `ObjectStore` and database path (the path is the prefix inside your object store).
+1. One writer opened with compaction disabled.
+2. One standalone compactor coordinator.
+3. Either the coordinator's embedded worker, or one or more standalone workers.
+
+All processes must use the same `ObjectStore` and database path (the path is the prefix inside your object store).
 
 ## Create a Db with no compactor
 
@@ -23,13 +25,22 @@ To prevent `Db` from starting the embedded compactor, set `Settings::compactor_o
 
 ## Run a compactor without a Db
 
-You can run the standalone compactor using the SlateDB CLI:
+You can run the standalone coordinator with the SlateDB CLI:
 
 ```bash
 slatedb --env-file .env --path <db-path> run-compactor
 ```
 
-The compactor runs until interrupted (Ctrl-C), then shuts down gracefully.
+This starts a coordinator with an embedded worker. It runs until interrupted with Ctrl-C, then shuts down gracefully.
+
+If you want separate coordinator and worker processes, disable the embedded worker:
+
+```bash
+slatedb --env-file .env --path <db-path> run-compactor --no-embedded-worker
+slatedb --env-file .env --path <db-path> run-worker
+```
+
+You can run multiple workers against the same database. They claim different jobs through the `.compactions` state file.
 
 Alternatively, you can embed the compactor in your own process using `CompactorBuilder` and call `run`:
 
@@ -41,3 +52,11 @@ The standalone compactor expects the database to already exist (a manifest must 
 If you're creating a new database, open it once (like in the previous section) before starting the compactor.
 
 :::
+
+## Operational Notes
+
+Only one writer should own a SlateDB database path, but compaction can run out of process. Make sure all writers that touch the path have the embedded compactor disabled, or you may end up with more compaction work than expected.
+
+Every compactor and worker must use compatible configuration with the writer. This matters for compression features, block transforms, compaction filters, object-store credentials, and separate WAL object stores.
+
+If the standalone compactor falls behind, reads may fan out across more L0 SSTs and sorted runs. Watch compaction metrics and the `.compactions` state when tuning worker count and `CompactionWorkerOptions`.

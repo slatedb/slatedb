@@ -65,8 +65,7 @@ title RowEntry encoding in a data block
 
 ## Index Blocks
 
-The index stores one entry per data block. Each entry says where that block starts in the file and what boundary 
-SlateDB should use to decide whether to search that block.
+The index stores one entry per data block. Each entry says where that block starts in the file and what boundary SlateDB should use to decide whether to search that block.
 
 In compacted SSTs, the boundary is a key: for the first block it is empty, and for later blocks it is the smallest key that should map to that block. That boundary is often a shortened prefix between the previous block's last key and this block's first key, so SlateDB does not need to store the full first key for every block.
 

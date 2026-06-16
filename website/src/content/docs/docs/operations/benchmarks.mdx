@@ -3,16 +3,68 @@ title: Benchmarks
 description: See nightly performance results and learn how to run your own benchmarks
 ---
 
-SlateDB currently has two benchmarking tools: **bencher** and **microbenchmarks**.
+SlateDB has two layers of benchmark coverage:
 
-- [bencher](https://github.com/slatedb/slatedb/tree/main/slatedb-bencher) is a tool to benchmark put/get operations against an object store. You can configure the tool with a variety of options. See [bencher/README.md](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/README.md) for details. [benchmark-db.sh](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/benchmark-db.sh) also serves as an example.
+- [slatedb-bencher](https://github.com/slatedb/slatedb/tree/main/slatedb-bencher) runs end-to-end workloads against an object store.
+- Criterion microbenchmarks measure narrower Rust code paths inside the `slatedb` crate.
 
-- Microbenchmarks run with [Criterion](https://bheisler.github.io/criterion.rs/). They are located in [benches](https://github.com/slatedb/slatedb/tree/main/slatedb/benches) and run for specific internal SlateDB functions. A comment is left on all PRs when a > 200% slowdown is detected.
+Use `slatedb-bencher` when you care about object-store latency, write durability, cache behavior, transactions, or compaction throughput. Use Criterion when you are changing an internal iterator, encoding path, batch path, or other tight loop.
 
-### Nightly Benchmarks
+## End-to-End Benchmarks
 
-We run both **bencher** and **microbenchmarks** nightly. The [results](https://github.com/slatedb/slatedb/actions/workflows/nightly.yaml) are published in the Github action summary.
+The benchmarker has three workload families:
 
-- **Bencher** benchmarks run on [WarpBuild](https://warpbuild.com)'s [warp-ubuntu-latest-x64-16x](https://docs.warpbuild.com/cloud-runners) runners, which use [Hetzner](https://hetzner.com/) machines in Frankfurt. We use [Tigris](https://www.tigrisdata.com/) for object storage with the `auto` region setting, which resolves to Frankfurt as well. Bandwidth between WarpBuild (Hetzner) and Tigris seems to be about 500MiB/s down and 130MiB/s up. We routinely max out the bandwidth in the nightly tests.
+- `db`: mixed `put` and `get` traffic with configurable key generation, value size, concurrency, duration, block cache size, and durable-write behavior.
+- `transaction`: concurrent transactional workloads.
+- `compaction`: load test data, run a compaction, and clear the test data afterward.
 
-- **Microbenchmarks** run on [standard Linux Github action runners](https://docs.github.com/en/actions/using-github-hosted-runners/using-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories) with the [pprof-rs](https://github.com/tikv/pprof-rs) profiler. The resulting profiler protobuf files are published to [pprof.me](https://pprof.me) and links to each microbenchmark are provided in the Github action summary.
+Run the `db` workload from the repository root:
+
+```bash
+cargo run -r --package slatedb-bencher -- db --duration 120
+```
+
+The benchmarker uses the same object-store environment loading as the admin CLI. For S3-compatible stores, set the AWS variables expected by `object_store`, such as `AWS_BUCKET`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`. Add `AWS_ENDPOINT` and `AWS_ALLOW_HTTP=true` when testing against local or S3-compatible endpoints.
+
+The repository also includes shell scripts that run repeatable benchmark suites and write plots, raw data, logs, and `github-action-benchmark` JSON under `target/bencher/results`:
+
+```bash
+./slatedb-bencher/benchmark-db.sh
+./slatedb-bencher/benchmark-transaction.sh
+```
+
+Set `SLATEDB_BENCH_CLEAN=true` if you want those scripts to remove benchmark data from object storage after each run.
+
+## Compaction Benchmarks
+
+A typical compaction benchmark flow loads data, runs compaction, then clears the generated data:
+
+```bash
+cargo run -r --package slatedb-bencher -- compaction load
+cargo run -r --package slatedb-bencher -- compaction run
+cargo run -r --package slatedb-bencher -- compaction clear
+```
+
+You can also run compaction against specific sorted runs:
+
+```bash
+cargo run -r --package slatedb-bencher -- compaction run --compaction-sources="1,2"
+```
+
+## Microbenchmarks
+
+Criterion benchmarks live in [`slatedb/benches`](https://github.com/slatedb/slatedb/tree/main/slatedb/benches). Run them with Cargo:
+
+```bash
+cargo bench -p slatedb
+```
+
+The microbenchmarks use [Criterion](https://bheisler.github.io/criterion.rs/) and, on supported platforms, [pprof-rs](https://github.com/tikv/pprof-rs) for profiles. They are best for comparing a local branch against a baseline on the same machine.
+
+## Nightly Benchmarks
+
+The [nightly workflow](https://github.com/slatedb/slatedb/actions/workflows/nightly.yaml) runs end-to-end benchmarks, transaction benchmarks, microbenchmarks, and profiler generation.
+
+The end-to-end benchmark jobs run on [WarpBuild](https://warpbuild.com) runners backed by Hetzner machines in Frankfurt. SlateDB uses [Tigris](https://www.tigrisdata.com/) object storage with the `auto` region setting for those runs. The workflow publishes results in the GitHub Actions summary and uploads benchmark data through `github-action-benchmark`.
+
+Microbenchmark profiles are uploaded to [pprof.me](https://pprof.me), with links added to the nightly summary. Treat nightly numbers as trend data. For release decisions, reproduce the workload on hardware and object-store placement that match your deployment.

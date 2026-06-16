@@ -37,14 +37,14 @@ TTL is stored as an absolute expiration timestamp, not a relative duration. On c
 
 [`Settings::default_ttl`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.default_ttl) sets a default TTL for puts and merges. [`PutOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.PutOptions.html) and [`MergeOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.MergeOptions.html) can override that per operation:
 
-- [`Ttl::NoExpiry`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.NoExpiry) — store the value without expiration
-- [`Ttl::ExpireAfter(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfter) — expire after a relative duration (clock ticks)
-- [`Ttl::ExpireAt(i64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAt) — expire at a fixed absolute timestamp (clock ticks)
+- [`Ttl::NoExpiry`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.NoExpiry): store the value without expiration
+- [`Ttl::ExpireAfter(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfter): expire after a relative duration (clock ticks)
+- [`Ttl::ExpireAt(i64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAt): expire at a fixed absolute timestamp (clock ticks)
 
 Deletes write tombstones and do not carry TTL.
 
 :::caution
-Batch-local merges requires one effective `expire_ts` per key. `Db::write(...)` and transaction commit return `ErrorKind::Invalid` if a single batch tries to merge the same key across different expiration timestamps. Effective timestamps are computed after applying `Settings::default_ttl`, so `Ttl::Default` can still differ from `Ttl::NoExpiry` or from another explicit TTL.
+Batch-local merges require one effective `expire_ts` per key. `Db::write(...)` and transaction commit return `ErrorKind::Invalid` if a single batch tries to merge the same key across different expiration timestamps. Effective timestamps are computed after applying `Settings::default_ttl`, so `Ttl::Default` can still differ from `Ttl::NoExpiry` or from another explicit TTL.
 :::
 
 :::note

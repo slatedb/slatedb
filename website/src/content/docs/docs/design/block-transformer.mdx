@@ -23,6 +23,8 @@ The trait has two async methods, [`encode`](https://docs.rs/slatedb/latest/slate
 
 SlateDB does not record transformer identity, key ID, or format version in `SsTableInfo`. If you need key rotation or format changes, make the stored block self-describing or keep compatible configuration outside SlateDB.
 
+For encryption, authenticate the ciphertext inside the transformer. SlateDB's CRC32 catches accidental corruption, not malicious modification. The CRC is not a substitute for an AEAD tag or another cryptographic integrity check.
+
 ## Configuration
 
 Every process that reads or writes SST blocks needs compatible transformer logic.
@@ -35,3 +37,9 @@ Every process that reads or writes SST blocks needs compatible transformer logic
 If a writer used a transformer and a reader does not, SlateDB can still open the footer metadata, but reads of the filter, index, stats, or data blocks fail. [Readers](/docs/design/readers) covers the reader-side configuration in more detail.
 
 [`WalReader`](https://docs.rs/slatedb/latest/slatedb/struct.WalReader.html) does not expose a `BlockTransformer` setting today. WAL SSTs written with a custom transformer are not inspectable through that API.
+
+## Rotation
+
+SlateDB does not manage encryption keys or transformer versions. If you rotate keys, the transformer needs enough information in each transformed block to choose the right key during `decode`, or every process must keep old keys available until compaction rewrites all files that used them.
+
+Because compaction rewrites SSTs, a rotation plan usually has two phases: deploy readers and compactors that can read both old and new blocks, then switch writers and compactors to emit the new format. Keep the old decode path until garbage collection has removed files written with the old format.

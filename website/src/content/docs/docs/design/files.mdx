@@ -28,15 +28,17 @@ path/to/db/
    └─ ...
 ```
 
-The directory names are mostly self-explanatory. Let's look at each file type:
+The directory names are mostly self-explanatory:
 
 ## Manifest
 
 The manifest directory contains an ordered list of manifest files in the format `<manifest_id>.manifest`. `<manifest_id>` is a zero-padded, 20 digit unsigned integer. Each manifest file is a complete snapshot of the database state at the time it was written. A manifest file can be updated by the following processes:
 
-- **Writer**: When a new WAL SSTable is created, the manifest is updated to include the new SSTable.
-- **Reader**: When a new checkpoint is created, deleted, or refreshed, the manifest is updated to include the new checkpoint.
-- **Compactor**: When a new sorted run is created, the manifest is updated to include the new sorted run.
+| Process | Manifest update |
+|---------|-----------------|
+| Writer | Adds new WAL SSTables. |
+| Reader | Creates, deletes, or refreshes checkpoints. |
+| Compactor | Adds new sorted runs. |
 
 Each manifest is encoded as a [FlatBuffer](https://flatbuffers.dev). The schema is located in [schemas/manifest.fbs](https://github.com/slatedb/slatedb/blob/main/schemas/manifest.fbs).
 

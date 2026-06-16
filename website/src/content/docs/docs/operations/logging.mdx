@@ -8,8 +8,34 @@ import tracingSubscriber from '/../examples/src/tracing_subscriber.rs?raw'
 
 ## Tracing in SlateDB
 
-SlateDB uses the [`tracing`](https://github.com/tokio-rs/tracing) library for logging and diagnostics. This provides structured, contextual logging that helps debug and monitor your database operations.
+SlateDB emits structured diagnostics through [`tracing`](https://github.com/tokio-rs/tracing). The Rust crate does not install a subscriber for you. If your process does not install one, SlateDB still runs normally, but its logs have nowhere to go.
 
-Here's a basic example showing how to consume tracing logs with `tracing_subscriber` and SlateDB:
+Install logging once near process startup, before opening a `Db`, `DbReader`, compactor, or worker. For a Rust service, `tracing_subscriber` is usually enough:
 
 <Code code={tracingSubscriber} lang="rust" title="main.rs" />
+
+For production, prefer an `EnvFilter` so you can change verbosity without rebuilding:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+```
+
+Then set `RUST_LOG` with the targets you want:
+
+```bash
+RUST_LOG=slatedb=info,object_store=warn
+```
+
+Use `slatedb=debug` when you are investigating compaction, garbage collection, WAL replay, cache behavior, or object-store retries. `trace` can be noisy on hot read and write paths.
+
+Some SlateDB internals and dependencies still emit through the `log` facade. If you want those records in the same tracing stream, install `tracing_log::LogTracer` before setting the tracing subscriber.
+
+## Language Bindings
+
+The Go, Java, Node, and Python bindings expose `init_logging`. Call it once per process before opening SlateDB handles. You can either let SlateDB write formatted logs to standard error, or pass a callback to receive structured `LogRecord` values with the level, target, message, module path, file, and line.
+
+Logging initialization is global. A second call returns an invalid-argument error instead of replacing the subscriber. This mirrors Rust's global tracing subscriber behavior.

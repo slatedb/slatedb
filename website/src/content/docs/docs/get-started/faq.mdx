@@ -33,7 +33,7 @@ Finally, it's unclear how open RocksDB-cloud is to outside contributors. The cod
 
 ## How is this different from RocksDB on EBS?
 
-Amazon Web Services (AWS) elastic block storage (EBS) runs in a single availability zone (AZ). To get SlateDB's durability and availability (when run on S3 standard buckets), you would need to replicate the across three AZs. This complicates the main write path (you would need synchronous replication) and add to cost.
+Amazon Elastic Block Store (EBS) volumes run in a single availability zone (AZ). To match the durability and availability of SlateDB on S3 Standard, you would need to replicate RocksDB across three AZs. That adds synchronous replication to the write path and increases cost.
 
 S3 is inherently much more flexible and elastic. You don't need to overprovision, you don't need to manage volume sizes, and you don't have to worry about transient space amplification from compaction.
 
@@ -47,7 +47,7 @@ Amazon Web Services (AWS) elastic file system (EFS) is very expensive ($0.30/GB-
 
 DynamoDB has a different cost structure and API than SlateDB. In general, SlateDB will be cheaper. DynamoDB charges $0.1/GiB for storage. If you use S3 standard with SlateDB, storage starts at $0.023/GiB (nearly 5 times cheaper).
 
-S3 standard charges $0.005 per-1000 writes (PUT, DELETE, etc.) and $0.0004 per-1000 reads. DynamoDB charges in read and write request units (RRU and WRU, respectively). Writes cost $1.25 per-million write units and $0.25 per-million read units. Depending on consistency and data size, a single request can cost multiple units (see [here](https://aws.amazon.com/dynamodb/pricing/on-demand/) for details). SlateDB batches writes by default, so it's usually going to have a less expensive API bill. If you batch DyanmoDB writes, you might be able to get similar fees.
+S3 Standard charges $0.005 per 1,000 writes (PUT, DELETE, etc.) and $0.0004 per 1,000 reads. DynamoDB charges in read and write request units (RRU and WRU, respectively). Writes cost $1.25 per million write units and $0.25 per million read units. Depending on consistency and data size, a single request can cost multiple units (see [AWS pricing](https://aws.amazon.com/dynamodb/pricing/on-demand/) for details). SlateDB batches writes by default, so it will usually have a lower API bill. If you batch DynamoDB writes, you might be able to get similar fees.
 
 DynamoDB offers 99.999% SLA while an S3 standard bucket offers 99.99%, so DynamoDB is more available.
 

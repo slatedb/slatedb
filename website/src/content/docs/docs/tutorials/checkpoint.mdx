@@ -10,21 +10,43 @@ import deleteCheckpoint from '/../examples/src/delete_checkpoint.rs?raw';
 
 ## Creating a Checkpoint
 
-To create a checkpoint, use the `create_checkpoint` function provided by SlateDB.  
-This operation captures a consistent and durable view of the database state, anchored to a specific manifest version.
+A checkpoint is a durable manifest entry that pins one view of a database. Garbage collection will not remove the manifests and SSTs needed by that view while the checkpoint is live.
+
+There are two ways to create one:
+
+- Use [`Db::create_checkpoint`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.create_checkpoint) from an open writer when you need the checkpoint to include recent in-memory state. `CheckpointScope::All` flushes WALs and freezes the current MemTable before creating the checkpoint.
+- Use [`Admin::create_detached_checkpoint`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html#method.create_detached_checkpoint) when you want an admin process to pin the latest manifest that already exists in object storage. This does not flush an active writer first.
+
+The example below uses the detached admin path after closing the `Db`, so the latest state has already been persisted:
 
 <Code code={createCheckpoint} lang="rust" title="main.rs" />
 
+`CheckpointOptions::lifetime` controls expiry. If you leave it unset, the checkpoint has no expiry and must be deleted explicitly. `CheckpointOptions::name` can attach a label for listing and filtering checkpoints. Names are not unique.
+
 ## Refreshing a Checkpoint
 
-To extend the lifetime of an existing checkpoint, use `Admin::refresh_checkpoint`. 
-This updates the checkpoint’s expiration time, ensuring that the referenced SSTs remain protected from garbage collection for the specified duration.
+To extend or remove the expiry on an existing checkpoint, call `Admin::refresh_checkpoint`. SlateDB stores a new expiry time in the manifest. It does not move the checkpoint to a newer database state.
 
 <Code code={refreshCheckpoint} lang="rust" title="main.rs" />
 
 ## Deleting a Checkpoint
 
-To remove a checkpoint, use `Admin::delete_checkpoint`. 
-This deletes the checkpoint metadata from the manifest, allowing the garbage collector to eventually reclaim any unreferenced SST files associated with that checkpoint.
+To release a checkpoint, call `Admin::delete_checkpoint`. This removes the checkpoint metadata from the manifest. Later garbage collection can reclaim manifests and SSTs that are no longer referenced by the live database or by another checkpoint.
 
 <Code code={deleteCheckpoint} lang="rust" title="main.rs" />
+
+## Reading or Restoring from a Checkpoint
+
+A checkpoint is not a second copy of the data. It points at a manifest version and keeps the files behind that version alive.
+
+Use a checkpoint when you need:
+
+- A long-lived read-only view through `DbReader`.
+- A stable source for a clone.
+- An operational pin before a backup, export, or risky maintenance task.
+
+If you want a new writable database at a checkpointed state, create a clone from that checkpoint. The clone starts with the source checkpoint's state, then writes its own manifest, WAL, and future SSTs under its own path. See [Clones](/docs/design/clones) for the full flow.
+
+:::caution
+Deleting or expiring a checkpoint does not delete data immediately. It only removes the pin. Garbage collection decides what can be physically removed.
+:::

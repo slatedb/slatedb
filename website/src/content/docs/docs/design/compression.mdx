@@ -14,6 +14,23 @@ The available codecs are a build-time choice. The `slatedb` crate exposes Snappy
 
 The selected codec is stored in each SST's metadata. Changing `compression_codec` only affects new WAL and SST files. Existing files keep the codec they were written with, so a database can temporarily contain a mix of uncompressed files and files written with different codecs while flush and compaction rewrite older data.
 
+## Configuration
+
+Set [`Settings::compression_codec`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.compression_codec) before opening the database:
+
+```rust
+use slatedb::config::{CompressionCodec, Settings};
+
+let settings = Settings {
+    compression_codec: Some(CompressionCodec::Zstd),
+    ..Settings::default()
+};
+```
+
+The setting affects new WAL SSTs, new L0 SSTs, and new compacted SSTs. It does not rewrite old files immediately. Compaction eventually rewrites older compacted data with the current writer and compactor configuration.
+
+Every process that reads a database must support every codec present in that database. That includes writers, readers, compactors, workers, `WalReader`, and direct SST inspection tools.
+
 ## Tradeoffs
 
 Compression reduces object-store bytes, network transfer, and cache footprint. That usually helps storage cost and scan-heavy workloads. The cost is CPU on both write and read.
@@ -21,3 +38,5 @@ Compression reduces object-store bytes, network transfer, and cache footprint. T
 Block size changes the tradeoff. Larger blocks usually compress better. Smaller blocks reduce over-read on point lookups. The [Tuning](/docs/operations/tuning) page covers the operational knobs.
 
 Prefix compression has its own tradeoff. It helps most when adjacent sorted keys share long prefixes, because that reduces repeated key bytes inside a block. The cost is extra decode work within each restart region: after seeking to a restart point, SlateDB might need to reconstruct several keys before it reaches the target entry.
+
+If you also use [Block Transforms](/docs/design/block-transformer/), compression runs before the transform on write and after the transform on read. That means an encryption transformer sees compressed bytes.

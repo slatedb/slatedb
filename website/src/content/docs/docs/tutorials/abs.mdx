@@ -3,7 +3,7 @@ title: Connect SlateDB to Azure Blob Storage
 description: Learn how to connect SlateDB to Azure Blob Storage
 ---
 
-This tutorial shows you how to use SlateDB on Azure Blob Storage (ABS). You would need an ABS account to complete the tutorial.
+This tutorial connects SlateDB to Azure Blob Storage (ABS). You need an Azure account to complete it.
 
 ## Setup
 
@@ -11,7 +11,7 @@ This tutorial shows you how to use SlateDB on Azure Blob Storage (ABS). You woul
 
 ## Create Storage account
 
-The following steps creates a storage account and list the keys. This section can be skipped if you already have a storage account created.
+The following commands create a storage account and list its keys. Skip them if you already have a storage account.
 
 ```bash
 # Set storage account names
@@ -37,7 +37,7 @@ az storage account keys list --resource-group $ResourceGroupName --account-name 
 
 ## Create a project
 
-Let's start by creating a new Rust project:
+Create a new Rust project:
 
 ```bash
 cargo init slatedb-abs
@@ -85,7 +85,7 @@ SlateDB uses four top-level directories over time:
 - `compacted`: Contains the compacted SST files (may not appear in short examples).
 - `compactions`: Contains the compaction-state snapshots.
 
-Let's check the `wal` folder. 
+Check the `wal` folder.
 
 ```bash
 az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "tmp/slatedb_azure_blob_storage/wal/" --delimiter "/" --output table
@@ -96,9 +96,6 @@ tmp/slatedb_azure_blob_storage/wal/00000000000000000001.sst  BlockBlob    Hot   
 tmp/slatedb_azure_blob_storage/wal/00000000000000000002.sst  BlockBlob    Hot          138       application/octet-stream  2024-09-07T01:15:49+00:00
 tmp/slatedb_azure_blob_storage/wal/00000000000000000003.sst  BlockBlob    Hot          23388     application/octet-stream  2024-09-07T01:15:49+00:00
 tmp/slatedb_azure_blob_storage/wal/00000000000000000004.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:50+00:00
-
 ```
 
 Each of these SST files is a write-ahead log (WAL) file, and each WAL file can contain many `RowEntry` values. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
-
-```

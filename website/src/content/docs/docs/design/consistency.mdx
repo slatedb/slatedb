@@ -7,20 +7,29 @@ import { Code } from '@astrojs/starlight/components';
 import createSnapshot from '/../examples/src/create_snapshot.rs?raw';
 import scanSnapshot from '/../examples/src/scan_snapshot.rs?raw';
 
-Snapshots provide consistent read-only views over the entire state of the key-value store.
+SlateDB gives readers a consistent view at a sequence number. A `DbSnapshot` is an in-process, read-only handle pinned to the database state at the moment `snapshot()` was called. Later writes can continue on the main `Db`, but the snapshot keeps reading the older view.
 
-Once created, it supports all read operations—`get` or `scan`—giving you a stable, consistent view of the data as it existed at the instant the snapshot was taken.
+Snapshots support the normal read APIs, including `get`, `get_key_value`, and `scan`. They do not support writes, and they are not durable metadata. If you need a view that survives process restart or pins files for another process, use a [checkpoint](/docs/design/checkpoints/) instead.
 
 ## Creating a snapshot
 
-Call `snapshot()` on any SlateDB handle.  
+Call `snapshot()` on an open `Db`.
 
-The call is cheap and non-blocking; it merely pins the current state so it can’t be garbage-collected while the snapshot is alive.
+The call is cheap. SlateDB records the current sequence number and returns a `DbSnapshot` handle. While that handle is alive, reads through it use the pinned sequence number.
 
 <Code code={createSnapshot} lang="rust" title="main.rs" />
 
 ## Reading from a snapshot
 
-Use the returned snapshot handle exactly like a regular `Db`, but every operation sees the same, immutable state.  
+Use the returned snapshot handle like a read-only `Db`. Every operation sees the same immutable state, even if the original database receives more writes.
 
 <Code code={scanSnapshot} lang="rust" title="main.rs" />
+
+## Snapshots vs. checkpoints
+
+Snapshots and checkpoints solve different problems:
+
+- A snapshot is local to one running process. It is cheap and short-lived.
+- A checkpoint is stored in the manifest. It can be used by `DbReader`, clones, backups, and admin workflows.
+
+Holding many old snapshots can force SlateDB to preserve older versions longer than it otherwise would. Drop snapshot handles when the read is done.

@@ -33,9 +33,9 @@ All data in SlateDB is stored sorted by key. The in-memory MemTable uses a skip
 list that maintains key order, and on-disk SSTables store keys in sorted order
 within blocks. This sorted structure enables:
 
-- **Efficient range scans**: Iterating over a key range (e.g., all keys starting with
-  `user:123:`) requires no random access—just sequential reads through sorted data.
-- **Binary search**: Point lookups use binary search to find the right SSTable and 
+- Range scans: Iterating over a key range (e.g., all keys starting with
+  `user:123:`) requires no random access, only sequential reads through sorted data.
+- Binary search: Point lookups use binary search to find the right SSTable and
   block, achieving O(log n) complexity instead of scanning all data.
 
 ### Prefix Compression
@@ -58,12 +58,12 @@ penalty for repeated key prefixes.
 ### Block Caching
 
 SlateDB caches SST blocks in memory. Each block contains multiple adjacent keys.
-When you read one key, the entire block is cached—subsequent reads for nearby
+When you read one key, the entire block is cached. Subsequent reads for nearby
 keys (in sort order) are served from cache without hitting object storage.
 
 **Implication**: Keys that are accessed together should be close together in
 sort order. This is why hierarchical key designs (like `tenant:user:resource`)
-work well—related data shares prefixes and lands in the same blocks.
+work well because related data shares prefixes and lands in the same blocks.
 
 ### Forward-Only Iteration
 
@@ -182,7 +182,7 @@ Two approaches:
    - No escaping needed
    - Doesn't preserve sort order of the content itself (lengths sort first)
 
-**Optimization**: Place variable-length components last when possible—no
+**Optimization**: Place variable-length components last when possible. No
 delimiter is needed for the final component.
 
 ### Fixed-Length Components
@@ -256,9 +256,11 @@ let key = (u64::MAX - timestamp_millis).to_be_bytes();
 
 ### UUIDs
 
-- **UUIDv7**: Time-ordered and naturally lexicographically sortable (recommended for new applications)
-- **UUIDv4**: Random distribution, does not sort meaningfully by time
-- **UUIDv1**: Can be made time-ordered with byte reordering, but UUIDv7 is simpler
+| UUID version | Sort behavior |
+|--------------|---------------|
+| UUIDv7 | Time-ordered and lexicographically sortable. Prefer it for new applications. |
+| UUIDv4 | Random distribution. It does not sort by time. |
+| UUIDv1 | Can be made time-ordered with byte reordering, but UUIDv7 is simpler. |
 
 ### Geospatial Data
 
@@ -269,17 +271,17 @@ components.
 
 ## Key Design Tips
 
-- **Keep keys short**: Shorter keys mean less memory usage, faster comparisons, and better cache efficiency
-- **Design for access patterns**: Structure keys so your most common queries are efficient range scans
-- **Co-locate related data**: Items frequently accessed together should share key prefixes
+- Keep keys short. Shorter keys use less memory, compare faster, and leave more room in cache.
+- Design for access patterns. Structure keys so common queries become range scans.
+- Co-locate related data. Items that are often read together should share key prefixes.
 
 ## Libraries and References
 
 Rather than implementing encodings yourself, consider using a library:
 
-- [storekey](https://github.com/surrealdb/storekey) - Rust crate providing a binary encoding format that ensures lexicographic sort order
+- [storekey](https://github.com/surrealdb/storekey): Rust crate providing a binary encoding format that ensures lexicographic sort order
 
 For more detailed encoding algorithms and patterns:
 
-- [FoundationDB Data Modeling](https://apple.github.io/foundationdb/data-modeling.html) - Comprehensive guide covering tuple encoding, integers, floats, and composite types
-- [DynamoDB Sort Key Best Practices](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-sort-keys.html) - Hierarchical key patterns and version control
+- [FoundationDB Data Modeling](https://apple.github.io/foundationdb/data-modeling.html): Tuple encoding, integers, floats, and composite types
+- [DynamoDB Sort Key Best Practices](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-sort-keys.html): Hierarchical key patterns and version control

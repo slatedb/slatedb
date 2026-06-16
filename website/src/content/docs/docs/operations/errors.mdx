@@ -7,13 +7,29 @@ All public SlateDB APIs return [`slatedb::Error`](https://docs.rs/slatedb/latest
 
 In practice, this means you should branch on the kind of failure, not on the exact text.
 
-- [`ErrorKind::Transaction`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Transaction) means retry the whole transaction.
-- [`ErrorKind::Unavailable`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Unavailable) means a dependency failed and the operation may succeed on retry.
-- [`ErrorKind::Closed`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Closed) means the handle is done, and [`CloseReason`](https://docs.rs/slatedb/latest/slatedb/enum.CloseReason.html) explains why.
-- [`ErrorKind::Invalid`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Invalid), [`ErrorKind::Data`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Data), and [`ErrorKind::Internal`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Internal) usually mean you should stop and investigate instead of retrying blindly.
+| Kind | Meaning | Usual response |
+| ---- | ------- | -------------- |
+| [`Transaction`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Transaction) | A transactional write conflicted. | Retry the whole transaction from the beginning, or drop it. |
+| [`Unavailable`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Unavailable) | Storage, network, or another dependency failed. | Retry with backoff if the operation is idempotent enough for your workload. |
+| [`Closed`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Closed) | The handle is no longer usable. | Open a new handle after checking the [`CloseReason`](https://docs.rs/slatedb/latest/slatedb/enum.CloseReason.html). |
+| [`Invalid`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Invalid) | The request, configuration, method call, or user-supplied plugin was invalid. | Fix the caller or configuration before retrying. |
+| [`Data`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Data) | Persisted data is missing, corrupt, or in a format this process cannot read. | Check compatibility, object-store contents, and recent GC or migration activity. |
+| [`Internal`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Internal) | SlateDB hit a bug or an invariant violation. | Capture the logs and open an issue. |
 
-See the [`slatedb::ErrorKind`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html) rustdoc for a complete explanation of each kind.
+`ErrorKind` is non-exhaustive, so Rust callers should keep a wildcard arm. That matters for long-lived applications: new releases may add a kind instead of forcing unrelated failures into an existing bucket.
+
+## Retry Policy
+
+`Unavailable` is the only kind that usually belongs in a generic retry loop. It covers object-store and I/O failures, Foyer cache errors, and manifest update timeouts. Use bounded retries and keep the operation's semantics in mind. Retrying a failed read is straightforward. Retrying a write is safe only when your caller can tolerate re-submitting that write.
+
+`Transaction` is retryable, but the retry must rerun the transaction logic. Do not replay only the final commit call against old reads.
+
+`Closed` is not retryable on the same handle. A fenced writer, a cleanly closed database, and a handle closed after a background task panic all surface as `Closed`, with different `CloseReason` values.
+
+`Invalid`, `Data`, and `Internal` are investigation paths, not blind retry paths. A common example is an object-store `NotFound`: SlateDB maps it to `Data`, because a missing manifest or SST usually means the persisted database state is not what this process expected.
 
 ## Sources
 
-[`Error`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html) implements the standard source chain. This chain is useful for logs and for narrow diagnostics, such as checking whether a `Data` error came from an underlying `object_store::Error::NotFound`.
+[`Error`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html) implements the standard source chain. Use it for logs and narrow diagnostics, such as checking whether a `Data` error came from an underlying `object_store::Error::NotFound`.
+
+Do not branch on the display string. Messages include implementation detail from the storage backend, manifest layer, or codec, and those strings can change while the public kind stays stable.

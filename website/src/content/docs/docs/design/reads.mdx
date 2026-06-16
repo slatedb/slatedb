@@ -1,16 +1,47 @@
 ---
 title: Reads
+description: How SlateDB resolves point reads and scans across memory, SSTs, and snapshots
 ---
 
-1. A get(), scan(), or similar read call is made on the client.
-2. The read request is routed to the database engine, which determines the current read snapshot (either the latest state or a pinned snapshot if using the snapshot API).
-3. The engine first checks the in-memory MemTable for the requested key or range. If the key is found and not expired, the value is returned immediately.
-4. If the key is not found in the MemTable, the engine searches the immutable MemTable (if present, e.g., during a flush).
-5. If the key is still not found, the engine concurrently creates iterators over all L0 SSTables (uncompacted, recently flushed files) and all compacted sorted runs (lower levels). These iterators are constructed in parallel to maximize throughput and minimize latency, with the degree of concurrency determined by the number of files and system configuration [[source]](https://github.com/slatedb/slatedb/pull/815).
-6. Each SSTable is searched using its block index. A binary search locates the block that may contain the key. If multiple blocks start with the same key, the engine ensures it returns the first such block to avoid stale data and to support multiple versions of a key [[source]](https://github.com/slatedb/slatedb/issues/517).
-7. As iterators are created, SlateDB asynchronously fetches and caches file blocks from object storage.
-8. The engine merges the MemTable, immutable MemTable, L0 SSTable iterators, and sorted run iterators into a single merged iterator. The iterator respects sequence numbers and snapshot visibility, ensuring that only the correct version of each key is visible for the current read or snapshot.
-9. The merged iterator returns the value for the requested key (or the next key in a scan). If the key is not found in any structure, None is returned.
+Reads merge several sources into one visible keyspace. A `get`, `scan`, or snapshot read may need to consult the mutable MemTable, immutable MemTables waiting to flush, L0 SSTs, and compacted sorted runs.
+
+The read result is chosen by sequence number. Newer rows shadow older rows for the same key, unless the newer row is not visible to the read's sequence number. Tombstones hide older values. Expired rows are ignored. Merge operands are resolved through the configured merge operator.
+
+## Visibility
+
+Every read runs at a sequence number:
+
+- A normal `Db` read uses the latest visible database state.
+- A `DbSnapshot` read uses the sequence number pinned when `snapshot()` was called.
+- A `DbReader` read uses the manifest state it opened or refreshed to.
+
+That sequence number decides which row versions are visible. Later writes can continue while a snapshot or reader keeps seeing the older view.
+
+## Point Reads
+
+For a point read, SlateDB checks sources from newest to oldest:
+
+1. The mutable MemTable.
+2. Immutable MemTables, if a flush is in progress.
+3. L0 SSTs, which may overlap arbitrary key ranges.
+4. Sorted runs, where SSTs are range-partitioned.
+
+SST reads use the in-memory file metadata to skip files whose key range cannot contain the requested key. When filters are available, SlateDB can also skip an SST on a definite Bloom-filter miss. For candidate SSTs, SlateDB uses the block index to find the data block that may contain the key, fetches that block, verifies it, decodes it, and checks the row entries.
+
+If the newest visible row is a value, `get` returns it. If it is a tombstone, an expired value, or no visible row exists, `get` returns `None`.
+
+## Scans
+
+Scans create iterators over the same sources and merge them into one ordered stream. L0 SST and sorted-run iterators can be built concurrently, which keeps wide scans from serializing all object-store metadata and block reads.
+
+The merged iterator returns each key once for the chosen visibility point. It handles overlapping L0 files, sorted runs, tombstones, expiration, and merge operands before yielding a `KeyValue`.
+
+`ScanOptions` controls scan-specific behavior:
+
+- `order`: ascending or descending key order.
+- `durability_filter`: whether to include in-memory writes or only remotely durable data.
+- `cache_blocks`: whether fetched data blocks should populate the block cache.
+- `read_ahead_bytes` and `max_fetch_tasks`: how much read-ahead concurrency to use.
 
 Below is a diagram illustrating the high-level flow of a read in SlateDB:
 
@@ -36,8 +67,12 @@ flowchart TD
     K -- No --> L[Return None]
 ```
 
-**Notes:**
-- Iterator creation for L0 SSTables and compacted runs is parallelized for performance.
-- Block cache is populated asynchronously during reads.
-- Reads from snapshots always reflect the state at the time the snapshot was taken, regardless of later modifications.
-- WAL SSTs are not read during normal operations; they are only accessed during recovery [[source]](https://github.com/slatedb/slatedb/issues/499).
+## Caching
+
+Reads consult the block cache before fetching SST blocks from object storage. A block-cache hit avoids both remote I/O and block decoding. If the object-store cache is enabled, a block-cache miss may still be served from local cached object bytes instead of the remote object store. See [Caching](/docs/design/caching/) for the cache layers and [Tuning](/docs/operations/tuning/) for the read knobs.
+
+Scans default to `cache_blocks = false` because long scans can evict hot point-read blocks. Point reads default to caching data blocks.
+
+## WAL Files
+
+SlateDB does not read durable WAL SSTs during normal point reads or scans. WAL SSTs are used for recovery and for WAL-based [Change Data Capture](/docs/design/change-data-capture/). Foreground reads use the in-memory WAL state already reflected in the MemTable and immutable MemTables.

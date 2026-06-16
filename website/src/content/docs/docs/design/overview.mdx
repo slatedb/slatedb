@@ -1,13 +1,13 @@
 ---
 title: Overview
-description: A high-level overview of LSM trees and SlateDB’s design
+description: A high-level overview of LSM trees and SlateDB's design
 ---
 
-SlateDB is a log-structured merge-tree (LSM tree). We must first understand how LSM trees work to understand SlateDB's design. In this page, we'll explore LSMs and see how SlateDB uses them.
+SlateDB is a log-structured merge-tree (LSM tree). Understanding SlateDB's design starts with the basic LSM shape.
 
 ## What is an LSM tree?
 
-LSM trees are an in-memory and on-disk data structure used to store key-value (KV) data. KV storage engines such as [RocksDB](https://github.com/facebook/rocksdb) and [LevelDB](https://github.com/google/leveldb) are based on LSM trees. They are a type of key-value (KV) storage engine. LSMs provide operations common to most KV storage engines:
+LSM trees are an in-memory and on-disk data structure used to store key-value (KV) data. KV storage engines such as [RocksDB](https://github.com/facebook/rocksdb) and [LevelDB](https://github.com/google/leveldb) use LSM trees. LSMs provide operations common to most KV storage engines:
 
 - `put(key, value)`: Insert a key-value pair.
 - `get(key)`: Retrieve a key-value pair.
@@ -17,15 +17,15 @@ LSM trees are an in-memory and on-disk data structure used to store key-value (K
 
 ## LSM tree design
 
-LSM trees are made up of a _write-ahead log (WAL)_, a mutable in-memory map called a _MemTable_, _sorted strings tables (SSTables)_, and a _manifest_. We will discuss each of these components in detail.
+LSM trees are made up of a _write-ahead log (WAL)_, a mutable in-memory map called a _MemTable_, _sorted strings tables (SSTables)_, and a _manifest_.
 
 ### Write-ahead log (WAL)
 
-A put() call writes its data to a write-ahead log (WAL). A WAL is an append-only persistent log. WALs are used to recover data in the event of a crash. When the database restarts, it can replay the WAL to recover its state. WALs are not great for serving reads, though; they're not optimized for random access. Every write is simply an appended to the end of the log. A get() operation must scan the WAL from the last write to the first write until it finds the key-value pair (or until it reaches the beginning of the WAL).
+A `put()` call writes its data to a write-ahead log (WAL). A WAL is an append-only persistent log. When the database restarts after a crash, it can replay the WAL to recover its state. WALs are poor read indexes, though. They are not optimized for random access. Every write is appended to the end of the log, so a `get()` operation would have to scan backward until it finds the key-value pair or reaches the beginning of the WAL.
 
 ### MemTables
 
-LSM trees avoid this linear scan by storing their data in an additional data structure called a MemTable. After a put() call writes its data to the WAL, it inserts its data into a mutable in-memory map called a MemTable. MemTables typically use a sorted map such as a [SkipList](https://en.wikipedia.org/wiki/Skip_list) map so that `scan()` operations work as well.
+LSM trees avoid this linear scan by keeping recent data in a MemTable. After a `put()` call writes to the WAL, it inserts the key and value into a mutable in-memory map. MemTables usually use a sorted map such as a [SkipList](https://en.wikipedia.org/wiki/Skip_list) so that `scan()` operations work too.
 
 ```mermaid
 sequenceDiagram
@@ -39,7 +39,7 @@ sequenceDiagram
   MT-->>C: update OK
 ```
 
-When a get() occurs, the database will search the MemTable for the key-value pair.
+For a `get()`, the database searches the MemTable for the key-value pair.
 
 ```mermaid
 sequenceDiagram
@@ -52,7 +52,7 @@ sequenceDiagram
 
 ### SSTables
 
-But an in-memory MemTable will only allow us to have a database that fits in memory. We must persist our data on disk. We've already seen that the WAL is an inappropriate format for serving reads. LSM trees introduce a third data structure here: a sorted strings table (SSTable). SSTables are files that contain a sequence of key-value pairs sorted by key:
+An in-memory MemTable only holds data that fits in memory. The database still needs durable files that can serve reads efficiently. LSM trees use sorted strings tables (SSTables) for that. SSTables are files that contain key-value pairs sorted by key:
 
 ```
 key1:value1
@@ -61,7 +61,7 @@ key3:value3
 ...
 ```
 
-We've established that MemTables are sorted by key, so LSM trees need only write their MemTable to disk in the same order.
+Since MemTables are already sorted by key, the database can write a MemTable to an SSTable in key order.
 
 ```mermaid
 sequenceDiagram
@@ -79,7 +79,7 @@ sequenceDiagram
   SST-->>C: write OK
 ```
 
-There's a problem with this design, though. The MemTable must be locked while we write to disk. `put()` calls will block until the write is complete. This can cause performance issues if the MemTable is large. To get around this, LSM trees have both a mutable MemTable and one or more immutable MemTables that are being written to disk. When the mutable MemTable reaches a certain size, it is _frozen_ and written to disk in the background. A new mutable MemTable is then created (or pulled from a pool) to receive new writes while the froze MemTable is written in the background.
+This design still has a problem. The MemTable must be locked while the database writes it to disk. `put()` calls block until that write completes, which hurts write latency when the MemTable is large. LSM trees avoid that by keeping one mutable MemTable and one or more immutable MemTables. When the mutable MemTable reaches a target size, the database freezes it and writes it to disk in the background. A new mutable MemTable receives writes while the frozen MemTable is written.
 
 ```mermaid
 sequenceDiagram
@@ -98,7 +98,7 @@ sequenceDiagram
   IMT->>SST: write
 ```
 
-When a get() occurs, the database will search all of the MemTables and SSTables for the key-value pair.
+For a `get()`, the database searches the MemTables and SSTables for the key-value pair.
 
 ```mermaid
 sequenceDiagram
@@ -117,7 +117,7 @@ sequenceDiagram
   SST-->>C: key-value pair (if found)
 ```
 
-Imagine we have 1000s (or millions) of immutable MemTables and SSTables. A read would need to search them sequentially to find the most recent version of a key-value pair (a user might have updated a key multiple times). This is clearly not efficient. LSM trees solve this problem with _compaction_. Compaction is a process where the database merges multiple SSTables into a new sequence of range partitioned SSTables. Consider the following SSTables:
+If a database had thousands or millions of immutable MemTables and SSTables, a read would need to search them sequentially to find the newest version of a key-value pair. LSM trees solve this with _compaction_. Compaction merges multiple SSTables into a new sequence of range-partitioned SSTables. Consider the following SSTables:
 
 ```
 SSTable 1:
@@ -136,7 +136,7 @@ SSTable 3:
   key77:value77
 ```
 
-Each SST in the example above is unpartitioned--it can potentially contain any key-value pair. Compaction will merge these SSTables into a new sequence of range partitioned SSTables. For example, the SSTables above might be compacted into the following SSTables:
+Each SST in the example above is unpartitioned. It can contain any key-value pair. Compaction merges those SSTables into a new sequence of range-partitioned SSTables. For example, the SSTables above might become:
 
 ```
 SSTable 1:
@@ -151,15 +151,15 @@ SSTable 2:
   key99:value99
 ```
 
-Now a read for `key56` will only need to search the first SSTable. Readers need only check the key range of each SSTable (stored in memory) to determine if it might contain the key. The unpartitioned tables, are called _level 0 (L0)_ SSTables. The partitioned tables are called _sorted runs (SRs)_. L0 SSTables are part of the write path, as we saw above. Sorted runs are generated through a background compaction process.
+Now a read for `key56` only needs to search the first SSTable. Readers check each SSTable's in-memory key range to decide whether it might contain the key. The unpartitioned tables are called _level 0 (L0)_ SSTables. The partitioned tables are called _sorted runs (SRs)_. L0 SSTables are part of the write path. Sorted runs are generated through background compaction.
 
-::: note
+:::note
 
-Sorted runs are a logical construct. The files written to disk are the sorted run's SSTables. The manifest (which we'll see in a moment) contains the mapping from a sorted run ID to its SSTables.
+Sorted runs are a logical construct. The files written to disk are the sorted run's SSTables. The manifest contains the mapping from a sorted run ID to its SSTables.
 
 :::
 
-A `get()` will traverse the MemTables, L0 SSTables, and SRs to find the key-value pair.
+A `get()` traverses the MemTables, L0 SSTables, and SRs to find the key-value pair.
 
 ```mermaid
 sequenceDiagram
@@ -188,11 +188,11 @@ Another issue remains: upon restart, the database has no easy way to know what S
 
 LSM tree implementations store their state in a manifest. The manifest is a file (or log of files) that stores the database's state; this includes the location of all SSTables, the WAL recovery starting point, and many other details. The LSM tree reads the manifest on startup to reconstruct its in-memory state. As state changes, the LSM tree writes manifest changes atomically to ensure consistency.
 
-We've now built a basic LSM tree. There are many, many details to be explored (deletion tombstones, consistency, WAL replay, and more). Still, this basic implementation will work. If you're interested in experimenting more with LSMs, we highly recommend checking out [Mini-LSM](https://skyzh.github.io/mini-lsm/).
+This is enough for a basic LSM tree. Real implementations add deletion tombstones, consistency rules, WAL replay, snapshots, checksums, and a long list of operational details. If you want to experiment with a small LSM implementation, [Mini-LSM](https://skyzh.github.io/mini-lsm/) is a good place to start.
 
 ## Tradeoffs
 
-LSM trees are elegant, simple data structures. However, they are not without tradeoffs. LSM trees work very well for high write-throughput workloads. It does so by moving as much work as possible out of the write path. Consequently, the design requires more background work (CPU), more files (storage space), and more variable read/latency (I/O) than other data structures. These tradeoffs are commonly framed in the following terms:
+LSM trees are simple data structures with real tradeoffs. They work well for high write-throughput workloads because they move work out of the write path. The cost is more background CPU, more temporary storage, and more variable read latency. These tradeoffs are commonly framed in the following terms:
 
 * Write amplification: The number of extra bytes written to storage per byte of live user data ingested.
 * Read amplification: The number of extra bytes read from storage per byte of result data returned.
@@ -202,7 +202,7 @@ LSM trees tend to have higher write throughput but worse read locality, more rea
 
 ## SlateDB's LSM design
 
-SlateDB's LSM design diverges very little from the basic LSM tree design we've seen above. SlateDB has a WAL, MemTables, SSTables, sorted runs, and a manifest. The only difference is that all of SlateDB's data is written to object storage instead of a local disk or filesystem:
+SlateDB's LSM design stays close to the basic LSM tree design above. SlateDB has a WAL, MemTables, SSTables, sorted runs, and a manifest. The main difference is that SlateDB writes all durable data to object storage instead of a local disk or filesystem:
 
 ```mermaid
 sequenceDiagram
@@ -223,4 +223,4 @@ sequenceDiagram
   SST-->>SR: compact
 ```
 
-In the next section, we'll look at SlateDB's object store directory structure.
+The [Files](/docs/design/files/) page covers SlateDB's object-store directory structure.

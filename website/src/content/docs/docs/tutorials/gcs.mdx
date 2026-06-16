@@ -3,7 +3,7 @@ title: Connect SlateDB to Google Cloud Storage
 description: Learn how to connect SlateDB to Google Cloud Storage
 ---
 
-This tutorial shows you how to use SlateDB on Google Cloud Storage (GCS). You would need a GCS account to complete the tutorial.
+This tutorial connects SlateDB to Google Cloud Storage (GCS). You need a GCS account to complete it.
 
 ## Setup
 
@@ -11,7 +11,7 @@ This tutorial shows you how to use SlateDB on Google Cloud Storage (GCS). You wo
 
 ## Create Storage bucket and Service Account
 
-The following steps create a storage bucket and generate service account credentials. This section can be skipped if you already have a bucket and service account key.
+The following commands create a storage bucket and generate service account credentials. Skip them if you already have a bucket and service account key.
 
 ```bash
 # Set bucket name and project ID
@@ -46,7 +46,7 @@ Now you have your service account key file ready to use.
 
 ## Create a project
 
-Let's start by creating a new Rust project:
+Create a new Rust project:
 
 ```bash
 cargo init slatedb-gcs
@@ -95,7 +95,7 @@ SlateDB uses four top-level directories over time:
 - `compacted`: Contains the compacted SST files (may not appear in short examples).
 - `compactions`: Contains the compaction-state snapshots.
 
-Let's check the `wal` folder:
+Check the `wal` folder:
 
 ```bash
 gcloud storage ls -l gs://$BucketName/tmp/slatedb_google_cloud_storage/wal/
