@@ -53,9 +53,9 @@ non-overlapping inputs, we move the SST
 In low-overlap situations, we trade reclaiming storage for avoiding work via a
 configurable tradeoff.
 
-It reuses existing `SsTableView`, so the manifest format is unchanged. The only
-new persisted state is the compaction plan in the compactor's job state for
-resumability.
+It reuses existing `SsTableView`, so the manifest format is unchanged. No new
+state is persisted; resumability relies on re-deriving the plan from the frozen
+`CompactionSpec`.
 
 ## Motivation
 
@@ -119,9 +119,10 @@ Except where rewrites are mandatory (e.g., stateful
 ### Example
 
 Consider a DB whose keys are a single letter and whose values are large enough
-that each row is its own block.
+that each row is its own block. We are about to perform lazy compaction on this
+database to produce the `l0` run.
 
-Input to lazy compaction:
+Input to lazy compaction (from oldest to newest):
 
 - `sst0`, with `(A: 0..., B: 0..., C: 0..., D: 0..., E: 0...)`
 - `sst1`: `(E: 1..., F: 1...)`
@@ -162,12 +163,16 @@ Two budgets limit lazy compaction:
   200 MiB).
 - **Manifest bloat budget**: Extra manifest entries from lazy compaction.
   Measured as a fraction of referenced SSTs (default: 10% with a minimum of
-  1000).
+  1000) (see [Read path](#read-path)).
 
 Both quantities are measured database-wide and derived from the manifest. They
 are a target, not a guarantee: concurrent compactions in particular may
 transiently reclaim less space than their budget allows. This is corrected the
 next time a compaction is planned.
+
+The scheduler reads DB-wide budget headroom once at submit and freezes a per-job
+allocation (dead-bytes and extra-views caps) into the immutable
+`CompactionSpec`.
 
 ### Planning
 
@@ -179,19 +184,20 @@ and offsets) to derive exact block liveness by correlating the view's
 dead blocks + blocks superseded by overlays. Dropped records (e.g., bottom-level
 tombstones) are estimated from per-block stats.
 
-To satisfy the space and manifest budgets, the planner rewrites the least
-valuable references (least bytes saved per budget unit consumed).
+The planner reads its budget from the `CompactionSpec` (not from live manifest
+state) and rewrites the least valuable references (least bytes saved per budget
+unit consumed). Planning is then a pure function of these immutable inputs.
 
 ### Read path
 
 The read path is unchanged, leveraging the existing `effective_range` clamp and
-sorted-run routing. Point reads route to at most one view per run before bloom
-consultation, avoiding lookups outside the view's range. Kept views use the
-base's bloom filter (built over all keys, including dead ones). Since filters
-are sized in bits per key, the false-positive rate is unchanged; the larger
-filter block read cost is bounded by budget-enforced rewrites of mostly-dead
-bases. Range scans may cross more, smaller views, increasing index block reads;
-this fragmentation is bounded by the manifest budget.
+sorted-run routing. Point reads cost `O(ln(views))` (binary-search routing to
+one view per run) before bloom consultation, avoiding lookups outside the view's
+range. Kept views use the base's bloom filter (built over all keys, including
+dead ones). Since filters are sized in bits per key, the false-positive rate is
+unchanged; the larger filter block read cost is bounded by budget-enforced
+rewrites of mostly-dead bases. Range scans cost `O(requests)` independently of
+the number of views; this fragmentation is bounded by the manifest budget.
 
 ### Garbage collection
 
@@ -200,11 +206,15 @@ views in manifests and checkpoints, deleting unreferenced ones.
 
 ### TTL (RFC-0003)
 
-TTL reclamation relies on periodic compaction ([RFC-0003](#references)): the
-scheduler rewrites SSTs when their `SsTableInfo#timestamp` exceeds
-`periodic_compaction_interval`. Lazy compaction never defers periodic-triggered
-compactions; these rewrite inputs in full. Without periodic compaction, TTL
-enforcement remains best-effort.
+TTL reclamation relies on periodic/age-triggered compaction
+([RFC-0003](#references)), which would guarantee TTL reclaim but does not exist
+at HEAD (independent of this RFC). Today, reclaim is opportunistic via
+size-tiered compaction, and cold data is best-effort.
+
+To let operators force TTL reclaim, a manual `CompactionRequest` can carry a
+knob to force a non-lazy rewrite. When periodic compaction is implemented, lazy
+compaction will never defer periodic-triggered compactions; these will rewrite
+inputs in full.
 
 ### Merge operators (RFC-0006)
 
@@ -229,22 +239,17 @@ If a filter emits `Delete` while writing an overlay block, it is treated as a
 
 ### Resumable compaction (RFC-0013)
 
-Replanning on resume cannot be guaranteed deterministic. The job state therefore
-persists the plan itself as `lazy_compaction_plan`: the ordered list of output
-decisions (view ranges and overlay key ranges). On resume, the compactor reloads
-the plan, correlates already-written overlays in `output_ssts`, and resumes. If
-`lazy_compaction_plan` is missing, resume falls back to rewriting remaining
-ranges.
+Since planning is deterministic (budgets are part of the frozen
+`CompactionSpec`), resume re-derives the identical plan.
 
-For crash recovery, validation still works: overlays are tracked in
-`output_ssts`, and views are recreated from the plan. A base SST is retained in
-the manifest and storage (via GC) as long as any view references it.
+A base SST is retained in the manifest and storage (via GC) as long as any view
+references it.
 
 ### Per-segment enablement (RFC-0024)
 
-When segments (RFC-0024) are configured, eligibility can be restricted per
-segment to avoid lazy compaction on hot segments up front rather than waiting
-for budget exhaustion.
+When segments (RFC-0024) are configured, the scheduler controls eligibility per
+segment by setting the budget to zero in the `TieredCompactionSpec` submitted
+for a segment.
 
 ## Impact Analysis
 
@@ -281,7 +286,7 @@ SlateDB features and components impacted by this RFC:
 
 ### Compaction
 
-- [x] Compaction state persistence
+- [ ] Compaction state persistence
 - [x] Compaction filters
 - [x] Compaction strategies
 - [ ] Distributed compaction
@@ -344,18 +349,16 @@ SlateDB features and components impacted by this RFC:
 
 - **Existing data on object storage / on-disk formats:** No manifest format
   change; views reuse existing `CompactedSsTableView` and `SortedRunV2`
-  structures. The only new persisted state is `lazy_compaction_plan` (see
-  [Resumable compaction](#resumable-compaction-rfc-0013)). Databases without
-  lazy compaction are byte-identical. The read path
-  [derives block ranges in memory](#read-path), matching `effective_range`
-  behavior.
+  structures. No new state is persisted. Databases without lazy compaction are
+  byte-identical. The read path [derives block ranges in memory](#read-path),
+  matching `effective_range` behavior.
 - **Existing public APIs (including bindings):** Read/write semantics are
   unchanged. Adds configuration: the enable flag, two budgets, per-segment
   opt-in, and the `is_stateless()` / `lazy_compaction_enabled` filter hooks.
 - **Rolling upgrades / mixed-version behavior:** Interoperable. Older compactors
-  perform ordinary rewrites. A newer compactor
-  [resuming a job](#resumable-compaction-rfc-0013) with a missing or untrusted
-  `lazy_compaction_plan` falls back to rewriting remaining ranges.
+  perform ordinary rewrites. A newer compactor resuming a job re-derives the
+  plan from the frozen `CompactionSpec` (see
+  [Resumable compaction](#resumable-compaction-rfc-0013)).
 
 ## Testing
 
@@ -364,9 +367,9 @@ SlateDB features and components impacted by this RFC:
 - **Run disjointness and snapping:** Randomized compactions assert view and
   overlay ranges never overlap, all live keys remain reachable, and no
   superseded version is exposed.
-- **Resume determinism:** Kill/resume tests assert that the persisted
-  `lazy_compaction_plan` is honored, `output_ssts` overlay correlation is
-  stable, and missing plans fall back to full rewrites.
+- **Resume determinism:** Kill/resume tests assert that the plan re-derived from
+  the `CompactionSpec` is identical, `output_ssts` overlay correlation is
+  stable, and failed matches fall back to full rewrites.
 - **Budget convergence:** Concurrent compactions that overshoot a budget
   converge back under it, and small databases respect budget floors.
 - **Filter semantics:** Stateless filters run only on rewritten data; stateful
@@ -410,6 +413,8 @@ TODO
 - On some object store (GCS), we can reclaim space by rewriting objects (e.g.,
   using GCS's Rewrite API) in a way that is cheaper than reading+writing. Is it
   worth mentioning?
+- Should we round the 'one block' minimum overlay size up to be greater than
+  `read_ahead_bytes`?
 
 ## References
 
