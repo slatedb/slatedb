@@ -443,7 +443,8 @@ impl TokioCompactionExecutorInner {
             self.options
                 .heartbeat_min_interval
                 .min(std::time::Duration::from_secs(1)),
-        );
+        )
+        .expect("clamped to <= 1s, which always fits in a TimeDelta");
 
         // At most one SST close runs in the background at a time (depth-1
         // pipeline). While a finished SST flushes to the object store we keep
