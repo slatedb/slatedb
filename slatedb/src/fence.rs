@@ -317,6 +317,7 @@ mod tests {
                 gc_opts,
                 &MetricsRecorderHelper::noop(),
                 Arc::new(DefaultSystemClock::new()),
+                None,
             );
             gc.run_gc_once().await;
             // verify all regular (size > 0) wals up to wal_id are deleted (the wal

@@ -59,7 +59,7 @@ pub use filter_policy::{
 };
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
-pub use garbage_collector::GarbageCollectorBuilder;
+pub use garbage_collector::{GarbageCollectorBuilder, GcFilter};
 pub use instrumented_object_store::stats as instrumented_object_store_stats;
 pub use iter::IterationOrder;
 pub use manifest::VersionedManifest;

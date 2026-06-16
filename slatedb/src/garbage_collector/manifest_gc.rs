@@ -6,13 +6,15 @@ use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask};
+use super::filter::retain_allowed_by_gc_filter;
+use super::{GcFilter, GcStats, GcTask};
 
 #[derive(Clone)]
 pub(crate) struct ManifestGcTask {
     manifest_store: Arc<ManifestStore>,
     stats: Arc<GcStats>,
     manifest_options: GarbageCollectorDirectoryOptions,
+    gc_filter: Option<Arc<dyn GcFilter>>,
 }
 
 impl std::fmt::Debug for ManifestGcTask {
@@ -28,11 +30,13 @@ impl ManifestGcTask {
         manifest_store: Arc<ManifestStore>,
         stats: Arc<GcStats>,
         manifest_options: GarbageCollectorDirectoryOptions,
+        gc_filter: Option<Arc<dyn GcFilter>>,
     ) -> Self {
         ManifestGcTask {
             manifest_store,
             stats,
             manifest_options,
+            gc_filter,
         }
     }
 
@@ -65,18 +69,6 @@ impl GcTask for ManifestGcTask {
             .map(|checkpoint| checkpoint.manifest_id)
             .collect();
 
-        // Advance the boundary to the latest manifest that is older than min_age
-        if let Some(boundary) = manifest_metadata_list
-            .iter()
-            .filter(|manifest_metadata| {
-                utc_now.signed_duration_since(manifest_metadata.metadata.last_modified) > min_age
-            })
-            .map(|manifest_metadata| manifest_metadata.id)
-            .max()
-        {
-            self.manifest_store.advance_boundary(boundary).await?;
-        }
-
         // Delete manifests older than min_age
         let manifests_to_delete = manifest_metadata_list
             .into_iter()
@@ -87,6 +79,17 @@ impl GcTask for ManifestGcTask {
                         > min_age
             })
             .collect::<Vec<_>>();
+        let manifests_to_delete =
+            retain_allowed_by_gc_filter(&self.gc_filter, manifests_to_delete).await;
+
+        // Advance the boundary to the latest manifest that the filter allowed for deletion.
+        if let Some(boundary) = manifests_to_delete
+            .iter()
+            .map(|manifest_metadata| manifest_metadata.id)
+            .max()
+        {
+            self.manifest_store.advance_boundary(boundary).await?;
+        }
         if self.manifest_options.dry_run && !manifests_to_delete.is_empty() {
             log::info!(
                 "dry run: skipping manifest deletion [count={}]",
@@ -168,6 +171,7 @@ mod tests {
                 interval: None,
                 dry_run: false,
             },
+            None,
         );
         task.collect(Utc::now() + TimeDelta::hours(1))
             .await

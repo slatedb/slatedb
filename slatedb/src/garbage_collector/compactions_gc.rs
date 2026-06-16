@@ -26,13 +26,15 @@ use chrono::{DateTime, Utc};
 use log::error;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask};
+use super::filter::retain_allowed_by_gc_filter;
+use super::{GcFilter, GcStats, GcTask};
 
 #[derive(Clone)]
 pub(crate) struct CompactionsGcTask {
     compactions_store: Arc<CompactionsStore>,
     stats: Arc<GcStats>,
     compactions_options: GarbageCollectorDirectoryOptions,
+    gc_filter: Option<Arc<dyn GcFilter>>,
 }
 
 impl std::fmt::Debug for CompactionsGcTask {
@@ -48,11 +50,13 @@ impl CompactionsGcTask {
         compactions_store: Arc<CompactionsStore>,
         stats: Arc<GcStats>,
         compactions_options: GarbageCollectorDirectoryOptions,
+        gc_filter: Option<Arc<dyn GcFilter>>,
     ) -> Self {
         Self {
             compactions_store,
             stats,
             compactions_options,
+            gc_filter,
         }
     }
 
@@ -72,18 +76,6 @@ impl GcTask for CompactionsGcTask {
         // Remove the last element so we never delete the latest compactions file
         compactions_metadata_list.pop();
 
-        // Advance the boundary to the latest compactions file that is older than min_age
-        if let Some(boundary) = compactions_metadata_list
-            .iter()
-            .filter(|compactions_metadata| {
-                utc_now.signed_duration_since(compactions_metadata.metadata.last_modified) > min_age
-            })
-            .map(|compactions_metadata| compactions_metadata.id)
-            .max()
-        {
-            self.compactions_store.advance_boundary(boundary).await?;
-        }
-
         // Delete compactions files older than min_age
         let compactions_to_delete = compactions_metadata_list
             .into_iter()
@@ -91,6 +83,17 @@ impl GcTask for CompactionsGcTask {
                 utc_now.signed_duration_since(compactions_metadata.metadata.last_modified) > min_age
             })
             .collect::<Vec<_>>();
+        let compactions_to_delete =
+            retain_allowed_by_gc_filter(&self.gc_filter, compactions_to_delete).await;
+
+        // Advance the boundary to the latest compactions file that the filter allowed for deletion.
+        if let Some(boundary) = compactions_to_delete
+            .iter()
+            .map(|compactions_metadata| compactions_metadata.id)
+            .max()
+        {
+            self.compactions_store.advance_boundary(boundary).await?;
+        }
         if self.compactions_options.dry_run && !compactions_to_delete.is_empty() {
             log::info!(
                 "dry run: skipping compactions deletion [count={}]",
@@ -164,6 +167,7 @@ mod tests {
                 interval: None,
                 dry_run: false,
             },
+            None,
         );
         task.collect(Utc::now() + TimeDelta::hours(1))
             .await

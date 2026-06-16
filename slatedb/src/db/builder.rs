@@ -146,8 +146,8 @@ use crate::error::SlateDBError;
 use crate::fence::{WriterFenceResult, WriterFencer};
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
 use crate::format::sst::{BlockTransformer, SsTableFormat};
-use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
+use crate::garbage_collector::{GarbageCollector, GcFilter};
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::ManifestCore;
@@ -821,6 +821,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     options: GarbageCollectorOptions,
+    gc_filter: Option<Arc<dyn GcFilter>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -833,6 +834,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             main_object_store,
             wal_object_store: None,
             options: GarbageCollectorOptions::default(),
+            gc_filter: None,
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
@@ -846,6 +848,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             main_object_store: self.main_object_store,
             wal_object_store: self.wal_object_store,
             options: self.options,
+            gc_filter: self.gc_filter,
             metrics_recorder: self.metrics_recorder,
             system_clock: self.system_clock,
             rand: self.rand,
@@ -855,6 +858,15 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Sets the options to use for the garbage collector.
     pub fn with_options(mut self, options: GarbageCollectorOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Sets a garbage-collection filter for deletion candidates.
+    ///
+    /// The filter receives objects that SlateDB has already determined are
+    /// eligible for GC and returns the subset that may be physically deleted.
+    pub fn with_gc_filter(mut self, gc_filter: Arc<dyn GcFilter>) -> Self {
+        self.gc_filter = Some(gc_filter);
         self
     }
 
@@ -902,6 +914,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.options,
             &recorder,
             self.system_clock,
+            self.gc_filter,
         )
     }
 
@@ -955,6 +968,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.options,
             &recorder,
             self.system_clock,
+            self.gc_filter,
         )
     }
 }

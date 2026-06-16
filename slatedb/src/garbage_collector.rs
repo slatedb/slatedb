@@ -45,9 +45,12 @@ use wal_gc::{WalGcMode, WalGcTask};
 mod compacted_gc;
 mod compactions_gc;
 mod detach_gc;
+mod filter;
 mod manifest_gc;
 pub mod stats;
 mod wal_gc;
+
+pub use filter::GcFilter;
 
 pub(crate) const DEFAULT_MIN_AGE: Duration = Duration::from_secs(300);
 pub(crate) const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
@@ -224,6 +227,7 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
+        gc_filter: Option<Arc<dyn GcFilter>>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(recorder));
         // The standalone GC lifecycle does not surface a closed result yet, so the
@@ -240,6 +244,7 @@ impl GarbageCollector {
                 stats.clone(),
                 wal_options,
                 WalGcMode::Regular,
+                gc_filter.clone(),
             )
         });
         let wal_fence_gc_task = options.wal_fence_options.map(|wal_fence_options| {
@@ -249,6 +254,7 @@ impl GarbageCollector {
                 stats.clone(),
                 wal_fence_options,
                 WalGcMode::Fence,
+                gc_filter.clone(),
             )
         });
         let compacted_gc_task = options.compacted_options.map(|compacted_options| {
@@ -258,6 +264,7 @@ impl GarbageCollector {
                 table_store.clone(),
                 stats.clone(),
                 compacted_options,
+                gc_filter.clone(),
             )
         });
         let compactions_gc_task = options.compactions_options.map(|compactions_options| {
@@ -265,10 +272,16 @@ impl GarbageCollector {
                 compactions_store.clone(),
                 stats.clone(),
                 compactions_options,
+                gc_filter.clone(),
             )
         });
         let manifest_gc_task = options.manifest_options.map(|manifest_options| {
-            ManifestGcTask::new(manifest_store.clone(), stats.clone(), manifest_options)
+            ManifestGcTask::new(
+                manifest_store.clone(),
+                stats.clone(),
+                manifest_options,
+                gc_filter.clone(),
+            )
         });
         let detach_gc_task = options.detach_options.map(|detach_options| {
             DetachGcTask::new(
@@ -437,6 +450,7 @@ mod tests {
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
     };
+    use slatedb_common::ObjectMetadata;
 
     use crate::format::sst::SsTableFormat;
     use crate::{
@@ -447,6 +461,20 @@ mod tests {
         },
         tablestore::TableStore,
     };
+
+    struct LocationGcFilter {
+        allowed_locations: HashSet<Path>,
+    }
+
+    #[async_trait]
+    impl GcFilter for LocationGcFilter {
+        async fn filter(&self, candidates: HashSet<ObjectMetadata>) -> HashSet<ObjectMetadata> {
+            candidates
+                .into_iter()
+                .filter(|metadata| self.allowed_locations.contains(&metadata.location))
+                .collect()
+        }
+    }
 
     #[tokio::test]
     async fn test_collect_garbage_manifest() {
@@ -1134,6 +1162,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         gc.run_gc_once().await;
@@ -1201,6 +1230,7 @@ mod tests {
             gc_opts,
             &helper,
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         gc.run_gc_once().await;
@@ -1263,6 +1293,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         gc.run_gc_once().await;
@@ -1340,6 +1371,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         gc.run_gc_once().await;
@@ -1793,6 +1825,7 @@ mod tests {
             gc_opts,
             recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         gc.run_gc_once().await;
@@ -1867,6 +1900,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         // Send a WAL GC message. Correct behavior: only WAL GC runs.
@@ -1936,6 +1970,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
         gc.run_gc_once().await;
 
@@ -1984,6 +2019,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         let intervals: Vec<_> = gc.tickers().into_iter().map(|def| def.interval).collect();
@@ -2036,6 +2072,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
         gc.start().expect("failed to start garbage collector");
         gc.stop().await.expect("failed to stop garbage collector");
@@ -2256,6 +2293,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_gc_filter_can_reject_all_directory_gc_deletes() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+        let now = DefaultSystemClock::default().now();
+        let expired_ms = (now - TimeDelta::seconds(7200)).timestamp_millis() as u64;
+        let unexpired_ms = (now - TimeDelta::seconds(1800)).timestamp_millis() as u64;
+
+        // Create regular WALs and a fence WAL, then age the GC-eligible ones.
+        let old_wal_id = SsTableId::Wal(1);
+        write_sst(table_store.clone(), &old_wal_id).await.unwrap();
+        let recent_wal_id = SsTableId::Wal(2);
+        write_sst(table_store.clone(), &recent_wal_id)
+            .await
+            .unwrap();
+        let old_fence_id = SsTableId::Wal(3);
+        table_store.write_wal_fence(3).await.unwrap();
+
+        set_modified(
+            local_object_store.clone(),
+            &path_resolver.table_path(&old_wal_id),
+            86400,
+        );
+        set_modified(
+            local_object_store.clone(),
+            &path_resolver.table_path(&old_fence_id),
+            86400,
+        );
+
+        // Create one inactive compacted SST that would normally be collected.
+        let inactive_expired_handle = create_sst(table_store.clone(), expired_ms).await;
+        let active_l0_handle = create_sst(table_store.clone(), unexpired_ms).await;
+
+        // Create two manifests so the older manifest is eligible for manifest GC.
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = 4;
+        state.next_wal_sst_id = 5;
+        Arc::make_mut(&mut state.tree)
+            .l0
+            .push_back(SsTableView::identity(active_l0_handle));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("manifest/{:020}.manifest", 1)),
+            86400,
+        );
+
+        // Create compactions files and age all of them so every non-latest file is eligible.
+        let mut stored_compactions = StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+        let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
+        compactions_dirty.value.insert(Compaction::new(
+            ulid::Ulid::from_parts(now.timestamp_millis() as u64, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        ));
+        stored_compactions.update(compactions_dirty).await.unwrap();
+
+        let compaction_ids = compactions_store
+            .list_compactions(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id)
+            .collect::<Vec<_>>();
+        for id in &compaction_ids {
+            set_modified(
+                local_object_store.clone(),
+                &Path::from(format!("compactions/{id:020}.compactions")),
+                86400,
+            );
+        }
+
+        // Use an empty location filter to reject every GC candidate.
+        let options = GarbageCollectorDirectoryOptions {
+            min_age: Duration::from_secs(3600),
+            interval: None,
+            dry_run: false,
+        };
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: Some(options),
+            wal_options: Some(options),
+            wal_fence_options: Some(options),
+            compacted_options: Some(options),
+            compactions_options: Some(options),
+            detach_options: None,
+            metric_level: None,
+        };
+        let recorder = MetricsRecorderHelper::noop();
+        let gc = GarbageCollector::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
+            gc_opts,
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            Some(Arc::new(LocationGcFilter {
+                allowed_locations: HashSet::new(),
+            })),
+        );
+
+        // Run every directory GC task with candidates present for each task type.
+        gc.run_gc_once().await;
+
+        // The filter should prevent manifest deletion.
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+
+        // The filter should prevent both WAL and fence WAL deletion.
+        let wal_ids = table_store
+            .list_wal_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id)
+            .collect::<HashSet<_>>();
+        assert!(wal_ids.contains(&old_wal_id));
+        assert!(wal_ids.contains(&recent_wal_id));
+        assert!(wal_ids.contains(&old_fence_id));
+
+        // The filter should prevent compacted SST deletion.
+        let compacted_ids = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id)
+            .collect::<HashSet<_>>();
+        assert!(compacted_ids.contains(&inactive_expired_handle.id));
+
+        // The filter should prevent compactions file deletion.
+        assert_eq!(
+            compactions_store.list_compactions(..).await.unwrap().len(),
+            compaction_ids.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gc_filter_allows_subset_and_stats_count_successful_deletes() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+
+        // Create three old WALs below the replay boundary so all would be eligible
+        // without a filter. The middle one is the only filter-approved delete.
+        let rejected_before_wal_id = SsTableId::Wal(1);
+        let allowed_wal_id = SsTableId::Wal(2);
+        let rejected_after_wal_id = SsTableId::Wal(3);
+        for id in [
+            rejected_before_wal_id,
+            allowed_wal_id,
+            rejected_after_wal_id,
+        ] {
+            write_sst(table_store.clone(), &id).await.unwrap();
+            set_modified(
+                local_object_store.clone(),
+                &path_resolver.table_path(&id),
+                86400,
+            );
+        }
+
+        // Keep the replay boundary above every test WAL so boundary retention
+        // cannot explain any remaining WAL.
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = 4;
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: None,
+                dry_run: false,
+            }),
+            wal_fence_options: None,
+            compacted_options: None,
+            compactions_options: None,
+            detach_options: None,
+            metric_level: None,
+        };
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
+        let gc = GarbageCollector::new(
+            manifest_store.clone(),
+            compactions_store,
+            table_store.clone(),
+            Arc::new(object_store::memory::InMemory::new()),
+            gc_opts,
+            &helper,
+            Arc::new(DefaultSystemClock::default()),
+            Some(Arc::new(LocationGcFilter {
+                allowed_locations: HashSet::from([path_resolver.table_path(&allowed_wal_id)]),
+            })),
+        );
+
+        // Run WAL GC with a filter that permits only one of the eligible WALs.
+        gc.run_gc_once().await;
+
+        // Only the two filter-rejected WALs should remain, and stats should count one delete.
+        let wal_ids = table_store
+            .list_wal_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.id)
+            .collect::<Vec<_>>();
+        assert_eq!(wal_ids, vec![rejected_before_wal_id, rejected_after_wal_id]);
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                crate::garbage_collector::stats::DELETED_COUNT,
+                &[("resource", "wal")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
     async fn test_dry_run_skips_directory_gc_deletes() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
@@ -2360,6 +2633,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         gc.run_gc_once().await;
