@@ -6269,7 +6269,7 @@ mod tests {
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
         let wal_ssts = db.inner.table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
-        assert_eq!(wal_ssts[0].size, 0);
+        assert_eq!(wal_ssts[0].metadata.size, 0);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())

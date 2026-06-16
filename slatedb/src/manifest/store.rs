@@ -6,12 +6,11 @@ use crate::error::SlateDBError::{
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
-use chrono::Utc;
 use log::debug;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use serde::Serialize;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
@@ -439,24 +438,6 @@ impl StoredManifest {
     }
 }
 
-/// Represents the metadata of a manifest file stored in the object store.
-#[derive(Serialize, Debug)]
-pub(crate) struct ManifestFileMetadata {
-    pub(crate) id: u64,
-    #[serde(serialize_with = "serialize_path")]
-    pub(crate) location: Path,
-    pub(crate) last_modified: chrono::DateTime<Utc>,
-    #[allow(dead_code)]
-    pub(crate) size: u32,
-}
-
-fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(path.as_ref())
-}
-
 pub(crate) struct ManifestStore {
     inner: Arc<dyn SequencedStorageProtocol<Manifest>>,
 }
@@ -516,7 +497,7 @@ impl ManifestStore {
     pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
+    ) -> Result<Vec<IdentifiedObjectMetadata<u64>>, SlateDBError> {
         let manifests = self
             .inner
             .list(
@@ -525,12 +506,7 @@ impl ManifestStore {
             )
             .await?
             .into_iter()
-            .map(|f| ManifestFileMetadata {
-                id: f.id.into(),
-                location: f.location,
-                last_modified: f.last_modified,
-                size: f.size,
-            })
+            .map(|metadata| metadata.map_id(u64::from))
             .collect::<Vec<_>>();
         Ok(manifests)
     }
@@ -1004,13 +980,13 @@ mod tests {
             Path::from(ROOT)
                 .join("manifest")
                 .join("00000000000000000001.manifest"),
-            manifests[0].location
+            manifests[0].metadata.location
         );
         assert_eq!(
             Path::from(ROOT)
                 .join("manifest")
                 .join("00000000000000000002.manifest"),
-            manifests[1].location
+            manifests[1].metadata.location
         );
 
         // Check bounded

@@ -328,7 +328,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|w| w.size > 0)
+                .filter(|w| w.metadata.size > 0)
                 .collect();
             assert!(
                 remaining.is_empty(),
@@ -355,7 +355,7 @@ mod tests {
         async fn assert_fencing_wal(&self) {
             let wals = self.table_store.list_wal_ssts(..).await.unwrap();
             let last = wals.last().expect("wal list is empty");
-            assert_eq!(last.size, 0, "last wal is not a fence wal");
+            assert_eq!(last.metadata.size, 0, "last wal is not a fence wal");
         }
 
         async fn assert_wals_contiguous(&self) {

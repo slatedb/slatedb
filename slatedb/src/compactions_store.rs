@@ -3,12 +3,11 @@ use crate::error::SlateDBError;
 #[allow(dead_code)]
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
 use crate::flatbuffer_types::FlatBufferCompactionsCodec;
-use chrono::Utc;
 use log::debug;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use serde::Serialize;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
@@ -176,26 +175,6 @@ impl FenceableCompactions {
     }
 }
 
-/// Represents the metadata of a compactions file stored in the object store.
-#[derive(Serialize, Debug)]
-#[allow(dead_code)]
-pub(crate) struct CompactionsFileMetadata {
-    pub(crate) id: u64,
-    #[serde(serialize_with = "serialize_path")]
-    pub(crate) location: Path,
-    pub(crate) last_modified: chrono::DateTime<Utc>,
-    #[allow(dead_code)]
-    pub(crate) size: u32,
-}
-
-#[allow(dead_code)]
-fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(path.as_ref())
-}
-
 pub(crate) struct CompactionsStore {
     inner: Arc<dyn SequencedStorageProtocol<Compactions>>,
 }
@@ -244,7 +223,7 @@ impl CompactionsStore {
     pub(crate) async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<CompactionsFileMetadata>, SlateDBError> {
+    ) -> Result<Vec<IdentifiedObjectMetadata<u64>>, SlateDBError> {
         let compactions = self
             .inner
             .list(
@@ -253,12 +232,7 @@ impl CompactionsStore {
             )
             .await?
             .into_iter()
-            .map(|f| CompactionsFileMetadata {
-                id: f.id.into(),
-                location: f.location,
-                last_modified: f.last_modified,
-                size: f.size,
-            })
+            .map(|metadata| metadata.map_id(u64::from))
             .collect::<Vec<_>>();
         Ok(compactions)
     }

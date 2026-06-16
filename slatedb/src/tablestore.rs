@@ -3,13 +3,14 @@ use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
+use slatedb_common::ObjectMetadata;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
@@ -60,18 +61,6 @@ impl ReadOnlyBlob for ReadOnlyObject {
         let bytes = file.bytes().await?;
         Ok(bytes)
     }
-}
-
-/// Represents the metadata of an SST file in the compacted directory.
-pub struct SstFileMetadata {
-    /// The SST identifier (WAL or Compacted).
-    pub id: SsTableId,
-    /// The object store path for this SST file.
-    pub location: Path,
-    /// The time this SST file was last modified.
-    pub last_modified: chrono::DateTime<Utc>,
-    /// The size of this SST file in bytes.
-    pub size: u64,
 }
 
 impl TableStore {
@@ -236,12 +225,12 @@ impl TableStore {
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
+    ) -> Result<Vec<IdentifiedObjectMetadata<SsTableId>>, SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "list-wal-ssts", |_| {
             Err(SlateDBError::from(std::io::Error::other("oops")))
         });
 
-        let mut wal_list: Vec<SstFileMetadata> = Vec::new();
+        let mut wal_list: Vec<IdentifiedObjectMetadata<SsTableId>> = Vec::new();
         let wal_path = &self.path_resolver.wal_path();
         let mut files_stream = self
             .object_stores
@@ -252,12 +241,10 @@ impl TableStore {
             match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Wal(id))) => {
                     if id_range.contains(&id) {
-                        wal_list.push(SstFileMetadata {
-                            id: SsTableId::Wal(id),
-                            location: file.location,
-                            last_modified: file.last_modified,
-                            size: file.size,
-                        });
+                        wal_list.push(IdentifiedObjectMetadata::from_object_meta(
+                            SsTableId::Wal(id),
+                            file,
+                        ));
                     }
                 }
                 _ => continue,
@@ -440,23 +427,17 @@ impl TableStore {
     /// - `id`: The SST identifier to fetch metadata for.
     ///
     /// ## Returns
-    /// - `Ok(SstFileMetadata)` containing the table id, path, creation time,
-    ///   last-modified time, and size in bytes.
+    /// - `Ok(ObjectMetadata)` containing the path, last-modified time,
+    ///   size in bytes, ETag, and version.
     ///
     /// ## Errors
     /// - Returns [`SlateDBError`] if the underlying object store `head` request
     ///   fails (for example, if the object does not exist or storage access
     ///   fails).
-    pub(crate) async fn metadata(&self, id: &SsTableId) -> Result<SstFileMetadata, SlateDBError> {
+    pub(crate) async fn metadata(&self, id: &SsTableId) -> Result<ObjectMetadata, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        let metadata = object_store.head(&path).await?;
-        Ok(SstFileMetadata {
-            id: *id,
-            location: path,
-            last_modified: metadata.last_modified,
-            size: metadata.size,
-        })
+        Ok(ObjectMetadata::new(object_store.head(&path).await?))
     }
 
     /// List all SSTables in the compacted directory.
@@ -469,8 +450,8 @@ impl TableStore {
     pub(crate) async fn list_compacted_ssts<R: RangeBounds<Ulid>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
-        let mut sst_list: Vec<SstFileMetadata> = Vec::new();
+    ) -> Result<Vec<IdentifiedObjectMetadata<SsTableId>>, SlateDBError> {
+        let mut sst_list: Vec<IdentifiedObjectMetadata<SsTableId>> = Vec::new();
         let compacted_path = self.path_resolver.compacted_path();
         let mut files_stream = self
             .object_stores
@@ -481,12 +462,10 @@ impl TableStore {
             match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
-                        sst_list.push(SstFileMetadata {
-                            id: SsTableId::Compacted(id),
-                            location: file.location,
-                            last_modified: file.last_modified,
-                            size: file.size,
-                        });
+                        sst_list.push(IdentifiedObjectMetadata::from_object_meta(
+                            SsTableId::Compacted(id),
+                            file,
+                        ));
                     }
                 }
                 Err(e) => {

@@ -24,11 +24,13 @@
 
 pub mod clock;
 pub mod metrics;
+pub mod object_metadata;
 pub mod rand;
 pub mod utils;
 
 #[cfg(feature = "test-util")]
 pub use clock::MockSystemClock;
 pub use clock::{DefaultSystemClock, SystemClock, SystemClockTicker};
+pub use object_metadata::{IdentifiedObjectMetadata, ObjectMetadata};
 pub use rand::DbRand;
 pub use utils::timeout;

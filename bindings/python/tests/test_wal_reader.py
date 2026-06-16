@@ -56,10 +56,11 @@ async def test_wal_reader_metadata_and_row_decoding() -> None:
     non_empty_files = 0
     for wal_file in files:
         metadata = await wal_file.metadata()
-        assert metadata.location
+        assert metadata.id == wal_file.id()
+        assert metadata.metadata.location
 
         rows = await drain_wal_iterator(await wal_file.iterator())
-        if metadata.size_bytes == 0:
+        if metadata.metadata.size == 0:
             assert rows == []
             continue
 

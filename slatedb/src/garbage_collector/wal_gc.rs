@@ -1,11 +1,11 @@
 use crate::manifest::Manifest;
-use crate::tablestore::SstFileMetadata;
 use crate::{
-    config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
-    tablestore::TableStore,
+    config::GarbageCollectorDirectoryOptions, db_state::SsTableId, error::SlateDBError,
+    manifest::store::ManifestStore, tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
 use log::error;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -66,11 +66,11 @@ impl WalGcTask {
 
     fn is_wal_sst_eligible_for_deletion(
         utc_now: &DateTime<Utc>,
-        wal_sst: &SstFileMetadata,
+        wal_sst: &IdentifiedObjectMetadata<SsTableId>,
         min_age: &chrono::Duration,
         active_manifests: &BTreeMap<u64, Manifest>,
     ) -> bool {
-        if utc_now.signed_duration_since(wal_sst.last_modified) <= *min_age {
+        if utc_now.signed_duration_since(wal_sst.metadata.last_modified) <= *min_age {
             return false;
         }
 
@@ -106,9 +106,9 @@ impl GcTask for WalGcTask {
             .into_iter()
             .filter(|wal_sst| match self.mode {
                 // In regular mode, only consider WAL SSTs with size > 0 for deletion.
-                WalGcMode::Regular => wal_sst.size > 0,
+                WalGcMode::Regular => wal_sst.metadata.size > 0,
                 // In fence mode, only consider zero-byte WAL SSTs for deletion.
-                WalGcMode::Fence => wal_sst.size == 0,
+                WalGcMode::Fence => wal_sst.metadata.size == 0,
             })
             // Respect min_age and any WAL references held by active checkpoint manifests.
             .filter(|wal_sst| {

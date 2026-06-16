@@ -74,12 +74,11 @@
 pub mod object_store;
 
 use crate::TransactionalObjectError::CallbackError;
-use ::object_store::path::Path;
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::Utc;
 use log::warn;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::utils;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -182,16 +181,6 @@ impl From<MonotonicId> for u64 {
     fn from(id: MonotonicId) -> Self {
         id.id
     }
-}
-
-/// Generic file metadata for versioned objects
-#[derive(Debug)]
-pub struct GenericObjectMetadata<Id = MonotonicId> {
-    pub id: Id,
-    pub location: Path,
-    pub last_modified: chrono::DateTime<Utc>,
-    #[allow(dead_code)]
-    pub size: u32,
 }
 
 /// A local view of a transactional object, possibly with local mutations
@@ -660,7 +649,7 @@ pub trait SequencedStorageProtocol<T: Send + Sync>:
         // object-safe
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
-    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError>;
+    ) -> Result<Vec<IdentifiedObjectMetadata<MonotonicId>>, TransactionalObjectError>;
 
     /// Delete a version without checking it against the durable boundary.
     ///
@@ -737,15 +726,16 @@ mod tests {
     use crate::object_store::ObjectStoreSequencedStorageProtocol;
     use crate::TransactionalObjectError;
     use crate::{
-        BoundaryObject, FenceableTransactionalObject, GenericObjectMetadata, Invariant,
-        MonotonicId, ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject,
-        TransactionalObject, TransactionalStorageProtocol,
+        BoundaryObject, FenceableTransactionalObject, Invariant, MonotonicId, ObjectCodec,
+        SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+        TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use parking_lot::Mutex;
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::object_metadata::IdentifiedObjectMetadata;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -927,7 +917,7 @@ mod tests {
             &self,
             _from: std::ops::Bound<MonotonicId>,
             _to: std::ops::Bound<MonotonicId>,
-        ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
+        ) -> Result<Vec<IdentifiedObjectMetadata<MonotonicId>>, TransactionalObjectError> {
             Err(TransactionalObjectError::InvalidObjectState)
         }
 

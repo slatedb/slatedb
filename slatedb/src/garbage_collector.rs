@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
-        assert_eq!(manifests[0].last_modified, now_minus_24h);
+        assert_eq!(manifests[0].metadata.last_modified, now_minus_24h);
 
         // Start the garbage collector
         run_gc_once(
@@ -857,8 +857,8 @@ mod tests {
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
-        assert_eq!(manifests[0].last_modified, now_minus_24h_1);
-        assert_eq!(manifests[1].last_modified, now_minus_24h_2);
+        assert_eq!(manifests[0].metadata.last_modified, now_minus_24h_1);
+        assert_eq!(manifests[1].metadata.last_modified, now_minus_24h_2);
 
         // Start the garbage collector
         run_gc_once(
@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(wal_ssts.len(), 2);
         assert_eq!(wal_ssts[0].id, id1);
         assert_eq!(wal_ssts[1].id, id2);
-        assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
+        assert_eq!(wal_ssts[0].metadata.last_modified, now_minus_24h);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
@@ -1057,8 +1057,8 @@ mod tests {
         assert_eq!(wal_ssts.len(), 2);
         assert_eq!(wal_ssts[0].id, id1);
         assert_eq!(wal_ssts[1].id, id2);
-        assert_eq!(wal_ssts[0].last_modified, now_minus_24h_1);
-        assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
+        assert_eq!(wal_ssts[0].metadata.last_modified, now_minus_24h_1);
+        assert_eq!(wal_ssts[1].metadata.last_modified, now_minus_24h_2);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
@@ -1141,7 +1141,7 @@ mod tests {
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
         assert_eq!(wal_ssts[0].id, fence_id);
-        assert_eq!(wal_ssts[0].size, 0);
+        assert_eq!(wal_ssts[0].metadata.size, 0);
     }
 
     #[tokio::test]
@@ -1208,7 +1208,7 @@ mod tests {
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         let wal_ids = wal_ssts.iter().map(|sst| sst.id).collect::<Vec<_>>();
         assert_eq!(wal_ids, vec![regular_wal_id]);
-        assert!(wal_ssts[0].size > 0);
+        assert!(wal_ssts[0].metadata.size > 0);
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
@@ -1347,7 +1347,7 @@ mod tests {
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
         assert_eq!(wal_ssts[0].id, regular_wal_id_2);
-        assert!(wal_ssts[0].size > 0);
+        assert!(wal_ssts[0].metadata.size > 0);
     }
 
     /// This test creates eight compacted SSTs:

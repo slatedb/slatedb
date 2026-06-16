@@ -69,7 +69,7 @@ impl GcTask for ManifestGcTask {
         if let Some(boundary) = manifest_metadata_list
             .iter()
             .filter(|manifest_metadata| {
-                utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+                utc_now.signed_duration_since(manifest_metadata.metadata.last_modified) > min_age
             })
             .map(|manifest_metadata| manifest_metadata.id)
             .max()
@@ -83,7 +83,8 @@ impl GcTask for ManifestGcTask {
             .filter(|manifest_metadata| {
                 let is_active = active_manifest_ids.contains(&manifest_metadata.id);
                 !is_active
-                    && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+                    && utc_now.signed_duration_since(manifest_metadata.metadata.last_modified)
+                        > min_age
             })
             .collect::<Vec<_>>();
         if self.manifest_options.dry_run && !manifests_to_delete.is_empty() {
