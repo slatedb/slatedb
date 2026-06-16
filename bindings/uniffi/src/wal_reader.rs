@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::error::Error;
 use crate::object_store::ObjectStore;
-use crate::types::{ObjectMetadata, RowEntry};
+use crate::types::{IdentifiedObjectMetadata, RowEntry};
 
 /// Handle for a single WAL file.
 #[derive(uniffi::Object)]
@@ -40,9 +40,9 @@ impl WalFile {
 #[uniffi::export(async_runtime = "tokio")]
 impl WalFile {
     /// Reads object-store metadata for this WAL file.
-    pub async fn metadata(&self) -> Result<ObjectMetadata, Error> {
+    pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata, Error> {
         let metadata = self.inner.metadata().await?;
-        Ok(metadata.metadata.into())
+        Ok(metadata.into())
     }
 
     /// Opens an iterator over raw row entries in this WAL file.

@@ -15,6 +15,7 @@ use slatedb::manifest::{
 use slatedb::CacheTarget as CoreCacheTarget;
 use slatedb::ValueDeletable;
 use slatedb::{Checkpoint as CoreCheckpoint, VersionedCompactions as CoreVersionedCompactions};
+use slatedb_common::object_metadata::IdentifiedObjectMetadata as CoreIdentifiedObjectMetadata;
 use ulid::Ulid;
 
 use uuid::Uuid;
@@ -525,6 +526,24 @@ impl From<slatedb::ObjectMetadata> for ObjectMetadata {
             location: metadata.location.to_string(),
             e_tag: metadata.e_tag,
             version: metadata.version,
+        }
+    }
+}
+
+/// Metadata for an object plus the domain identifier parsed from its path.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct IdentifiedObjectMetadata {
+    /// Parsed domain identifier for the object.
+    pub id: u64,
+    /// Object-store metadata.
+    pub metadata: ObjectMetadata,
+}
+
+impl From<CoreIdentifiedObjectMetadata<u64>> for IdentifiedObjectMetadata {
+    fn from(value: CoreIdentifiedObjectMetadata<u64>) -> Self {
+        Self {
+            id: value.id,
+            metadata: value.metadata.into(),
         }
     }
 }

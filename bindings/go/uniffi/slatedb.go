@@ -1555,7 +1555,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_walfile_metadata()
 		})
-		if checksum != 21792 {
+		if checksum != 45103 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_metadata: UniFFI API checksum mismatch")
 		}
@@ -8019,7 +8019,7 @@ type WalFileInterface interface {
 	// Opens an iterator over raw row entries in this WAL file.
 	Iterator() (*WalFileIterator, error)
 	// Reads object-store metadata for this WAL file.
-	Metadata() (ObjectMetadata, error)
+	Metadata() (IdentifiedObjectMetadata, error)
 	// Returns a handle for the next WAL file ID without checking existence.
 	NextFile() *WalFile
 	// Returns the WAL ID immediately after this file.
@@ -8076,7 +8076,7 @@ func (_self *WalFile) Iterator() (*WalFileIterator, error) {
 }
 
 // Reads object-store metadata for this WAL file.
-func (_self *WalFile) Metadata() (ObjectMetadata, error) {
+func (_self *WalFile) Metadata() (IdentifiedObjectMetadata, error) {
 	_pointer := _self.ffiObject.incrementPointer("*WalFile")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -8089,8 +8089,8 @@ func (_self *WalFile) Metadata() (ObjectMetadata, error) {
 			}
 		},
 		// liftFn
-		func(ffi RustBufferI) ObjectMetadata {
-			return FfiConverterObjectMetadataINSTANCE.Lift(ffi)
+		func(ffi RustBufferI) IdentifiedObjectMetadata {
+			return FfiConverterIdentifiedObjectMetadataINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_walfile_metadata(
 			_pointer),
@@ -9159,6 +9159,53 @@ func (c FfiConverterHistogramMetricValue) Write(writer io.Writer, value Histogra
 type FfiDestroyerHistogramMetricValue struct{}
 
 func (_ FfiDestroyerHistogramMetricValue) Destroy(value HistogramMetricValue) {
+	value.Destroy()
+}
+
+// Metadata for an object plus the domain identifier parsed from its path.
+type IdentifiedObjectMetadata struct {
+	// Parsed domain identifier for the object.
+	Id uint64
+	// Object-store metadata.
+	Metadata ObjectMetadata
+}
+
+func (r *IdentifiedObjectMetadata) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Id)
+	FfiDestroyerObjectMetadata{}.Destroy(r.Metadata)
+}
+
+type FfiConverterIdentifiedObjectMetadata struct{}
+
+var FfiConverterIdentifiedObjectMetadataINSTANCE = FfiConverterIdentifiedObjectMetadata{}
+
+func (c FfiConverterIdentifiedObjectMetadata) Lift(rb RustBufferI) IdentifiedObjectMetadata {
+	return LiftFromRustBuffer[IdentifiedObjectMetadata](c, rb)
+}
+
+func (c FfiConverterIdentifiedObjectMetadata) Read(reader io.Reader) IdentifiedObjectMetadata {
+	return IdentifiedObjectMetadata{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterObjectMetadataINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterIdentifiedObjectMetadata) Lower(value IdentifiedObjectMetadata) C.RustBuffer {
+	return LowerIntoRustBuffer[IdentifiedObjectMetadata](c, value)
+}
+
+func (c FfiConverterIdentifiedObjectMetadata) LowerExternal(value IdentifiedObjectMetadata) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[IdentifiedObjectMetadata](c, value))
+}
+
+func (c FfiConverterIdentifiedObjectMetadata) Write(writer io.Writer, value IdentifiedObjectMetadata) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Id)
+	FfiConverterObjectMetadataINSTANCE.Write(writer, value.Metadata)
+}
+
+type FfiDestroyerIdentifiedObjectMetadata struct{}
+
+func (_ FfiDestroyerIdentifiedObjectMetadata) Destroy(value IdentifiedObjectMetadata) {
 	value.Destroy()
 }
 

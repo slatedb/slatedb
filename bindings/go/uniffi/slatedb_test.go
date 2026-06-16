@@ -2045,7 +2045,10 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("WalFile.Metadata() for file %d: %v", i, err)
 		}
-		if metadata.Location == "" {
+		if metadata.Id != file.Id() {
+			t.Fatalf("WalFile.Metadata() for file %d: Id = %d, want %d", i, metadata.Id, file.Id())
+		}
+		if metadata.Metadata.Location == "" {
 			t.Fatalf("WalFile.Metadata() for file %d: Location is empty", i)
 		}
 
@@ -2056,7 +2059,7 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		t.Cleanup(iter.Destroy)
 
 		rows := drainWalIterator(t, iter)
-		if metadata.Size == 0 {
+		if metadata.Metadata.Size == 0 {
 			if len(rows) != 0 {
 				t.Fatalf("zero-byte WAL file %d returned %d rows, want 0", i, len(rows))
 			}
