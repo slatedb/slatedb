@@ -408,6 +408,11 @@ impl Subcompaction {
     pub(crate) fn is_complete(&self) -> bool {
         self.status == CompactionStatus::Completed
     }
+
+    /// Returns true while this subcompaction is still executing.
+    pub(crate) fn is_running(&self) -> bool {
+        self.status == CompactionStatus::Running
+    }
 }
 
 /// Canonical, internal record of a compaction.

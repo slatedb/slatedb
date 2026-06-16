@@ -654,9 +654,8 @@ impl TokioCompactionExecutorInner {
         }
         drop(sub_tx);
 
-        let mut pending = sub_tasks.len();
         let mut first_error: Option<SlateDBError> = None;
-        while pending > 0 {
+        while subcompactions.iter().any(Subcompaction::is_running) {
             let Some(event) = sub_rx.recv().await else {
                 break;
             };
@@ -676,27 +675,24 @@ impl TokioCompactionExecutorInner {
                         subcompactions.clone(),
                     );
                 }
-                SubcompactionEvent::Finished { index, result } => {
-                    pending -= 1;
-                    match result {
-                        Ok(output_ssts) => {
-                            subcompactions[index].set_output_ssts(output_ssts);
-                            subcompactions[index].set_status(CompactionStatus::Completed);
-                            let total_bytes = bytes_processed_by_sub.iter().sum();
-                            self.send_compaction_progress(
-                                args.id,
-                                total_bytes,
-                                &[],
-                                subcompactions.clone(),
-                            );
-                        }
-                        Err(e) => {
-                            subcompactions[index].set_status(CompactionStatus::Failed);
-                            first_error = Some(e);
-                            break;
-                        }
+                SubcompactionEvent::Finished { index, result } => match result {
+                    Ok(output_ssts) => {
+                        subcompactions[index].set_output_ssts(output_ssts);
+                        subcompactions[index].set_status(CompactionStatus::Completed);
+                        let total_bytes = bytes_processed_by_sub.iter().sum();
+                        self.send_compaction_progress(
+                            args.id,
+                            total_bytes,
+                            &[],
+                            subcompactions.clone(),
+                        );
                     }
-                }
+                    Err(e) => {
+                        subcompactions[index].set_status(CompactionStatus::Failed);
+                        first_error = Some(e);
+                        break;
+                    }
+                },
             }
         }
         // Abort any subcompactions still running after a failure, and wait
