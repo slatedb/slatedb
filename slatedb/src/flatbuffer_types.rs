@@ -601,13 +601,20 @@ impl FlatBufferCompactionsCodec {
         let spec = Self::compaction_spec(compaction, version)?;
         let status = CompactionStatus::from(compaction.status());
         let worker = compaction.worker().and_then(Self::worker_spec);
-        // Produced output lives entirely in `subcompactions` (RFC-0028). The
-        // legacy top-level `output_ssts` field is retained in the schema for
-        // wire conformance but is no longer read.
-        let subcompactions = compaction
-            .subcompactions()
-            .map(|subs| subs.iter().map(Self::subcompaction).collect())
-            .unwrap_or_default();
+        // Pre-RFC-0028 compaction files persisted finished output in the
+        // top-level `output_ssts` field. Preserve that output as the single
+        // unbounded subcompaction so a restarted/upgraded coordinator can
+        // safely commit an already-Compacted entry.
+        let subcompactions = match compaction.subcompactions() {
+            Some(subs) => subs.iter().map(Self::subcompaction).collect(),
+            None => compaction
+                .output_ssts()
+                .map(|ssts| {
+                    vec![CompactorSubcompaction::new(BytesRange::unbounded())
+                        .with_output_ssts(ssts.iter().map(Self::compacted_sst).collect())]
+                })
+                .unwrap_or_default(),
+        };
         Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
             .with_status(status)
             .with_worker(worker)
@@ -2433,7 +2440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_ignore_legacy_top_level_output_ssts() {
+    fn test_should_preserve_legacy_top_level_output_ssts_as_unbounded_subcompaction() {
         // given: manually build a compactions flatbuffer whose output is recorded
         // only in the legacy top-level `output_ssts` field, with no
         // `subcompactions` (a file written by a version predating RFC-0028
@@ -2507,7 +2514,7 @@ mod tests {
                 id: Some(compaction_id),
                 spec_type: FbCompactionSpec::TieredCompactionSpec,
                 spec: Some(spec.as_union_value()),
-                status: FbCompactionStatus::Running,
+                status: FbCompactionStatus::Compacted,
                 output_ssts: Some(output_ssts_vec),
                 worker: None,
                 subcompactions: None,
@@ -2531,11 +2538,23 @@ mod tests {
         let codec = FlatBufferCompactionsCodec {};
         let decoded = codec.decode(&bytes).expect("failed to decode compactions");
 
-        // then: the legacy top-level field is ignored — produced output lives
-        // only in subcompactions now, so the decoded compaction has none.
+        // then: legacy top-level output is wrapped as the single unbounded
+        // subcompaction so already-finished distributed compactions survive
+        // restart/upgrade before the coordinator commits them.
         let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
-        assert!(decoded_compaction.subcompactions().is_empty());
-        assert!(decoded_compaction.output_ssts().is_empty());
+        assert_eq!(decoded_compaction.status(), CompactionStatus::Compacted);
+        assert_eq!(decoded_compaction.subcompactions().len(), 1);
+        assert_eq!(
+            decoded_compaction.subcompactions()[0].range(),
+            &BytesRange::unbounded()
+        );
+        let output_ssts = decoded_compaction.output_ssts();
+        assert_eq!(output_ssts.len(), 1);
+        assert_eq!(output_ssts[0].id, SsTableId::Compacted(sst_ulid));
+        assert_eq!(
+            output_ssts[0].info.first_entry,
+            Some(Bytes::from_static(b"key1"))
+        );
     }
 
     #[test]
