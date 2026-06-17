@@ -116,6 +116,64 @@ pub trait DbReadOps {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error>;
 
+    /// Get multiple values in a single snapshot-consistent batch, using default
+    /// read options.
+    ///
+    /// Results are returned in the same order as `keys`; a `None` entry marks a
+    /// key that is missing, deleted, or expired. Duplicate keys yield duplicate
+    /// (positional) results. The whole batch observes one consistent snapshot of
+    /// the database.
+    ///
+    /// This is equivalent to calling [`get`](Self::get) for each key against the
+    /// same snapshot, but resolves all keys in one pass that visits each SST
+    /// once — avoiding the repeated index/filter loads and per-key object-store
+    /// round trips a `get` loop incurs.
+    ///
+    /// ## Arguments
+    /// - `keys`: the keys to look up
+    ///
+    /// ## Returns
+    /// - `Result<Vec<Option<Bytes>>, Error>`: one slot per input key, in order
+    async fn multi_get<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<Bytes>>, crate::Error> {
+        self.multi_get_with_options(keys, &ReadOptions::default())
+            .await
+    }
+
+    /// Get multiple values in a single snapshot-consistent batch, with custom
+    /// read options. See [`multi_get`](Self::multi_get) for batch semantics.
+    ///
+    /// ## Arguments
+    /// - `keys`: the keys to look up
+    /// - `options`: the read options to use
+    async fn multi_get_with_options<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+        options: &ReadOptions,
+    ) -> Result<Vec<Option<Bytes>>, crate::Error>;
+
+    /// Get multiple key-value pairs in a single snapshot-consistent batch, using
+    /// default read options. Like [`multi_get`](Self::multi_get) but returns
+    /// [`KeyValue`]s with row metadata instead of bare value bytes.
+    async fn multi_get_key_value<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
+        self.multi_get_key_value_with_options(keys, &ReadOptions::default())
+            .await
+    }
+
+    /// Get multiple key-value pairs in a single snapshot-consistent batch, with
+    /// custom read options. See [`multi_get`](Self::multi_get) for batch
+    /// semantics.
+    async fn multi_get_key_value_with_options<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+        options: &ReadOptions,
+    ) -> Result<Vec<Option<KeyValue>>, crate::Error>;
+
     /// Scan a range of keys using the default scan options.
     ///
     /// returns a `DbIterator`

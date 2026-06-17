@@ -159,6 +159,15 @@ enum FilterState {
     Negative,
 }
 
+/// AND across all filters: returns `true` iff every filter thinks `query`
+/// might match. An empty `filters` slice means no filter is configured for the
+/// SST; callers treat that as "might match" (do not skip). Shared by the
+/// single-key [`FilterEvaluator`] and the batched `multi_get` path
+/// ([`crate::multi_sst`]).
+pub(crate) fn all_filters_might_match(filters: &[NamedFilter], query: &FilterQuery) -> bool {
+    filters.iter().all(|nf| nf.filter.might_match(query))
+}
+
 struct FilterEvaluator {
     query: FilterQuery,
     db_stats: Option<DbStats>,
@@ -210,7 +219,7 @@ impl FilterEvaluator {
         // AND logic: if any filter says the key is NOT present, filter it out.
         // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters.iter().all(|nf| nf.filter.might_match(&self.query));
+        let might_match = all_filters_might_match(filters, &self.query);
 
         if might_match {
             if let Some(stats) = &self.db_stats {
