@@ -191,7 +191,7 @@ pub struct DbBuilder<P: Into<Path>> {
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
-    skip_conditional_put_probe: bool,
+    skip_object_store_probe: bool,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -215,20 +215,23 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_policies: default_filter_policies(),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
-            skip_conditional_put_probe: false,
+            skip_object_store_probe: false,
         }
     }
 
-    /// Skip the startup conditional-PUT (`If-Match`) capability probe.
+    /// Skip the startup object-store capability preflight.
     ///
-    /// At `build()` SlateDB probes whether the object store supports conditional
-    /// overwrite, which the garbage collector requires to advance its collection
-    /// boundary; stores that lack it (e.g. DigitalOcean Spaces) otherwise let GC
-    /// silently fail and storage grow without bound. Set this only if you have
-    /// independently confirmed the store supports conditional overwrite, or you
-    /// never run garbage collection against this store.
-    pub fn skip_conditional_put_probe(mut self) -> Self {
-        self.skip_conditional_put_probe = true;
+    /// At `build()` SlateDB probes the configured object store for the
+    /// capabilities it depends on — basic put/get, ranged GET, head, list,
+    /// conditional create (`If-None-Match`), conditional overwrite (`If-Match`),
+    /// and multipart upload — and hard-fails if a required capability is missing.
+    /// Stores that silently diverge can corrupt SlateDB's fencing/manifest
+    /// integrity or let GC fail silently (e.g. DigitalOcean Spaces lacks
+    /// `If-Match`). Set this only if you have independently confirmed the store is
+    /// compatible, or you accept the consequences of running on an unverified
+    /// store.
+    pub fn skip_object_store_probe(mut self) -> Self {
+        self.skip_object_store_probe = true;
         self
     }
 
@@ -426,7 +429,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             ));
         }
 
-        let skip_conditional_put_probe = self.skip_conditional_put_probe;
+        let skip_object_store_probe = self.skip_object_store_probe;
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
@@ -459,14 +462,18 @@ impl<P: Into<Path>> DbBuilder<P> {
                 )
             });
 
-        // Fail fast if the object store cannot perform the conditional overwrite
-        // (HTTP If-Match) that the garbage collector relies on to advance its
-        // collection boundary. Stores that lack it (e.g. DigitalOcean Spaces) let
-        // GC silently fail to advance, growing storage without bound. The probe
-        // runs only on the writer path (DbBuilder), not on DbReaderBuilder.
-        if !skip_conditional_put_probe {
-            crate::object_store_probe::probe_conditional_put(&retrying_main_object_store, &path)
-                .await?;
+        // Fail fast if the object store lacks a capability SlateDB requires
+        // (basic put/get, ranged GET, head, list, conditional create / If-None-Match,
+        // conditional overwrite / If-Match, multipart upload). Stores that silently
+        // diverge can corrupt fencing/manifest integrity or let GC fail silently
+        // (e.g. DigitalOcean Spaces lacks If-Match). Optional capabilities only warn.
+        // The probe runs only on the writer path (DbBuilder), not DbReaderBuilder.
+        if !skip_object_store_probe {
+            crate::object_store_probe::probe_object_store(
+                &path,
+                retrying_main_object_store.as_ref(),
+            )
+            .await?;
         }
 
         // Log the database opening
