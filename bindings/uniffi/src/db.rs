@@ -87,7 +87,7 @@ impl Db {
     /// Scans rows inside `range`.
     pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
-        let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
+        let iter = self.inner.scan(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -99,10 +99,7 @@ impl Db {
     ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let options = options.try_into()?;
-        let iter = self
-            .inner
-            .scan_with_options::<Vec<u8>, _>(range, &options)
-            .await?;
+        let iter = self.inner.scan_with_options(range, &options).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 

@@ -76,11 +76,7 @@ pub(crate) async fn exec_scan(
                 .scan_prefix_with_options(prefix, .., &scan_opts)
                 .await?
         }
-        None => {
-            reader
-                .scan_with_options::<Vec<u8>, _>(range, &scan_opts)
-                .await?
-        }
+        None => reader.scan_with_options(range, &scan_opts).await?,
     };
 
     let mut out = io::BufWriter::new(io::stdout().lock());

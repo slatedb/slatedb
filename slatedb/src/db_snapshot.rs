@@ -1,9 +1,8 @@
 use bytes::Bytes;
-use std::ops::RangeBounds;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
 use crate::types::KeyValue;
@@ -97,10 +96,9 @@ impl DbSnapshot {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
+    pub async fn scan<T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         self.scan_with_options(range, &ScanOptions::default()).await
     }
@@ -113,22 +111,17 @@ impl DbSnapshot {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_with_options<K, T>(
+    pub async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         // TODO: this range conversion logic can be extract to an util
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let start = range.start_bound().map(Bytes::copy_from_slice);
+        let end = range.end_bound().map(Bytes::copy_from_slice);
         let range = BytesRange::from((start, end));
         self.scan_inner(range, options, None).await
     }
@@ -147,14 +140,14 @@ impl DbSnapshot {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix<'a, P, T>(
+    pub async fn scan_prefix<P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -172,7 +165,7 @@ impl DbSnapshot {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix_with_options<'a, P, T>(
+    pub async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -180,7 +173,7 @@ impl DbSnapshot {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
@@ -230,19 +223,18 @@ impl DbReadOps for DbSnapshot {
         DbSnapshot::get_key_value_with_options(self, key, options).await
     }
 
-    async fn scan_with_options<K, T>(
+    async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         DbSnapshot::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<'a, P, T>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -250,7 +242,7 @@ impl DbReadOps for DbSnapshot {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         DbSnapshot::scan_prefix_with_options(self, prefix, subrange, options).await
     }

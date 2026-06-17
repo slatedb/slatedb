@@ -388,7 +388,9 @@ mod prop_test {
     use proptest::prelude::*;
     use slatedb::config::{PutOptions, ScanOptions, Settings, WriteOptions};
     use slatedb::object_store::memory::InMemory;
-    use slatedb::{BloomFilterPolicy, Db, FilterPolicy, PrefixExtractor, PrefixTarget};
+    use slatedb::{
+        BloomFilterPolicy, ByteRangeBounds, Db, FilterPolicy, PrefixExtractor, PrefixTarget,
+    };
     use tokio::runtime::Runtime;
 
     const PREFIX_LEN: usize = 3;
@@ -461,10 +463,10 @@ mod prop_test {
         db.flush().await.expect("flush failed");
     }
 
-    async fn collect_prefix_scan<'a>(
+    async fn collect_prefix_scan(
         db: &Db,
         prefix: &[u8],
-        subrange: impl std::ops::RangeBounds<&'a [u8]> + Send,
+        subrange: impl ByteRangeBounds + Send,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut iter = db
             .scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
