@@ -83,10 +83,9 @@ impl GcTask for CompactionsGcTask {
                 utc_now.signed_duration_since(compactions_metadata.metadata.last_modified) > min_age
             })
             .collect::<Vec<_>>();
-        let compactions_to_delete =
-            retain_allowed_by_gc_filter(&self.gc_filter, compactions_to_delete).await;
 
-        // Advance the boundary to the latest compactions file that the filter allowed for deletion.
+        // Advance the boundary to the latest compactions file selected by the GC model. The
+        // optional GC filter only gates the final deletion pass.
         if let Some(boundary) = compactions_to_delete
             .iter()
             .map(|compactions_metadata| compactions_metadata.id)
@@ -94,6 +93,8 @@ impl GcTask for CompactionsGcTask {
         {
             self.compactions_store.advance_boundary(boundary).await?;
         }
+        let compactions_to_delete =
+            retain_allowed_by_gc_filter(&self.gc_filter, compactions_to_delete).await;
         if self.compactions_options.dry_run && !compactions_to_delete.is_empty() {
             log::info!(
                 "dry run: skipping compactions deletion [count={}]",
@@ -134,10 +135,22 @@ impl GcTask for CompactionsGcTask {
 mod tests {
     use super::*;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
+    use async_trait::async_trait;
     use chrono::TimeDelta;
     use object_store::{memory::InMemory, path::Path, ObjectStoreExt};
     use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::ObjectMetadata;
+    use std::collections::HashSet;
     use std::time::Duration;
+
+    struct DenyAllGcFilter;
+
+    #[async_trait]
+    impl GcFilter for DenyAllGcFilter {
+        async fn filter(&self, _candidates: HashSet<ObjectMetadata>) -> HashSet<ObjectMetadata> {
+            HashSet::new()
+        }
+    }
 
     #[tokio::test]
     async fn test_collect_advances_boundary_for_old_compactions_files() {
@@ -190,5 +203,60 @@ mod tests {
                 .map(|compactions| compactions.id)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn test_collect_advances_boundary_before_filtering_compactions_files() {
+        let object_store = Arc::new(InMemory::new());
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from("/root"),
+            object_store.clone(),
+        ));
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        stored_compactions
+            .update(stored_compactions.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored_compactions
+            .update(stored_compactions.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let recorder = MetricsRecorderHelper::noop();
+        let task = CompactionsGcTask::new(
+            compactions_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(1),
+                interval: None,
+                dry_run: false,
+            },
+            Some(Arc::new(DenyAllGcFilter) as Arc<dyn GcFilter>),
+        );
+        task.collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap();
+
+        let raw_boundary = object_store
+            .get(&Path::from("/root/gc/compactions.boundary"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!("2", std::str::from_utf8(&raw_boundary).unwrap());
+
+        assert!(compactions_store
+            .try_read_compactions(1)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(compactions_store
+            .try_read_compactions(2)
+            .await
+            .unwrap()
+            .is_some());
     }
 }
