@@ -191,6 +191,7 @@ pub struct DbBuilder<P: Into<Path>> {
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    skip_conditional_put_probe: bool,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -214,7 +215,21 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_policies: default_filter_policies(),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
+            skip_conditional_put_probe: false,
         }
+    }
+
+    /// Skip the startup conditional-PUT (`If-Match`) capability probe.
+    ///
+    /// At `build()` SlateDB probes whether the object store supports conditional
+    /// overwrite, which the garbage collector requires to advance its collection
+    /// boundary; stores that lack it (e.g. DigitalOcean Spaces) otherwise let GC
+    /// silently fail and storage grow without bound. Set this only if you have
+    /// independently confirmed the store supports conditional overwrite, or you
+    /// never run garbage collection against this store.
+    pub fn skip_conditional_put_probe(mut self) -> Self {
+        self.skip_conditional_put_probe = true;
+        self
     }
 
     /// Set the segment extractor (RFC-0024). When configured, every
@@ -411,6 +426,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             ));
         }
 
+        let skip_conditional_put_probe = self.skip_conditional_put_probe;
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
@@ -442,6 +458,16 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                 )
             });
+
+        // Fail fast if the object store cannot perform the conditional overwrite
+        // (HTTP If-Match) that the garbage collector relies on to advance its
+        // collection boundary. Stores that lack it (e.g. DigitalOcean Spaces) let
+        // GC silently fail to advance, growing storage without bound. The probe
+        // runs only on the writer path (DbBuilder), not on DbReaderBuilder.
+        if !skip_conditional_put_probe {
+            crate::object_store_probe::probe_conditional_put(&retrying_main_object_store, &path)
+                .await?;
+        }
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
