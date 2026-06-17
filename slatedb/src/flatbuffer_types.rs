@@ -600,18 +600,16 @@ impl FlatBufferCompactionsCodec {
     ) -> Result<CompactorCompaction, SlateDBError> {
         let spec = Self::compaction_spec(compaction, version)?;
         let status = CompactionStatus::from(compaction.status());
-        let output_ssts = compaction
-            .output_ssts()
-            .map(|ssts| ssts.iter().map(Self::compacted_sst).collect())
-            .unwrap_or_default();
         let worker = compaction.worker().and_then(Self::worker_spec);
+        // Produced output lives entirely in `subcompactions` (RFC-0028). The
+        // legacy top-level `output_ssts` field is retained in the schema for
+        // wire conformance but is no longer read.
         let subcompactions = compaction
             .subcompactions()
             .map(|subs| subs.iter().map(Self::subcompaction).collect())
             .unwrap_or_default();
         Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
             .with_status(status)
-            .with_output_ssts(output_ssts)
             .with_worker(worker)
             .with_subcompactions(subcompactions))
     }
@@ -1066,8 +1064,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let id = self.add_ulid(&compaction.id());
         let (spec_type, spec) = self.add_compaction_spec(compaction.spec());
         let status = FbCompactionStatus::from(compaction.status());
-        let output_ssts = (!compaction.output_ssts().is_empty())
-            .then(|| self.add_compacted_ssts(compaction.output_ssts().iter()));
         let worker = compaction.worker().map(|w| self.add_worker_spec(w));
         let subcompactions = (!compaction.subcompactions().is_empty())
             .then(|| self.add_subcompactions(compaction.subcompactions().iter()));
@@ -1078,7 +1074,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 spec_type,
                 spec: Some(spec),
                 status,
-                output_ssts,
+                // Produced output lives in `subcompactions` (RFC-0028); the
+                // legacy top-level field is no longer written.
+                output_ssts: None,
                 worker,
                 subcompactions,
             },
@@ -1956,7 +1954,9 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 11),
         )
         .with_status(CompactionStatus::Running)
-        .with_output_ssts(output_ssts);
+        .with_subcompactions(vec![
+            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output_ssts)
+        ]);
         let compaction_sr = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
@@ -2412,7 +2412,9 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 0),
         )
         .with_status(CompactionStatus::Running)
-        .with_output_ssts(vec![output_sst]);
+        .with_subcompactions(vec![
+            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(vec![output_sst])
+        ]);
         let mut compactions = Compactions::new(1);
         compactions.insert(compaction.clone());
         let codec = FlatBufferCompactionsCodec {};
@@ -2431,9 +2433,11 @@ mod tests {
     }
 
     #[test]
-    fn test_should_decode_compaction_output_sst_with_no_version_set_using_original_version() {
-        // given: manually build a compactions flatbuffer with an output SST
-        // that has no format_version set, simulating a legacy compactions file
+    fn test_should_ignore_legacy_top_level_output_ssts() {
+        // given: manually build a compactions flatbuffer whose output is recorded
+        // only in the legacy top-level `output_ssts` field, with no
+        // `subcompactions` (a file written by a version predating RFC-0028
+        // per-range output)
         use super::root_generated::{
             CompactedSsTable, CompactedSsTableArgs, Compaction as FbCompaction,
             CompactionArgs as FbCompactionArgs, CompactionSpec as FbCompactionSpec,
@@ -2442,7 +2446,6 @@ mod tests {
             TieredCompactionSpecArgs,
         };
         let mut fbb = flatbuffers::FlatBufferBuilder::new();
-        // Build an output SST without format_version
         let first_entry = fbb.create_vector(b"key1");
         let sst_info = FbSsTableInfo::create(
             &mut fbb,
@@ -2528,12 +2531,11 @@ mod tests {
         let codec = FlatBufferCompactionsCodec {};
         let decoded = codec.decode(&bytes).expect("failed to decode compactions");
 
-        // then: format_version should default to ORIGINAL_SST_FORMAT_VERSION
+        // then: the legacy top-level field is ignored — produced output lives
+        // only in subcompactions now, so the decoded compaction has none.
         let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
-        assert_eq!(
-            decoded_compaction.output_ssts()[0].format_version,
-            super::ORIGINAL_SST_FORMAT_VERSION
-        );
+        assert!(decoded_compaction.subcompactions().is_empty());
+        assert!(decoded_compaction.output_ssts().is_empty());
     }
 
     #[test]
