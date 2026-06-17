@@ -361,8 +361,14 @@ impl Reader {
         //    iterator per key; batches are memory-bounded, so the full walk is
         //    cheap even for small key lists.
         if let Some(wb) = write_batch {
-            let mut iter =
-                WriteBatchIterator::new(wb, BytesRange::from(..), IterationOrder::Ascending);
+            let mut iter = WriteBatchIterator::new(
+                wb,
+                BytesRange::from(..),
+                IterationOrder::Ascending,
+                u64::MAX,
+                None,
+                None,
+            );
             iter.init().await?;
             while let Some(entry) = iter.next().await? {
                 if let Some(&u) = index_of.get(entry.key.as_ref()) {
