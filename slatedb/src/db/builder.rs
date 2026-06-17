@@ -529,7 +529,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
-        let table_store = Arc::new(TableStore::new_with_fp_registry_and_kind(
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
@@ -643,7 +643,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 builder = builder.with_merge_operator(operator);
             }
 
-            let compactor_table_store = Arc::new(TableStore::new_with_fp_registry_and_kind(
+            let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
                     retrying_main_object_store.clone(),
                     retrying_wal_object_store.clone(),
@@ -692,7 +692,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .options
                 .metric_level
                 .or(Some(self.settings.metric_level));
-            let gc_table_store = Arc::new(TableStore::new_with_fp_registry_and_kind(
+            let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
                     retrying_main_object_store.clone(),
                     retrying_wal_object_store.clone(),
@@ -951,7 +951,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
-        let table_store = Arc::new(TableStore::new_with_kind(
+        let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
                 retrying_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
@@ -1168,7 +1168,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new_with_kind(
+        let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store, None),
             sst_format,
             path,
@@ -1331,7 +1331,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
             Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new_with_kind(
+        let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.main_object_store, None),
             SsTableFormat::default(),
             path,

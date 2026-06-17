@@ -2102,6 +2102,7 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::seq_tracker::FindOption;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::tablestore::TableStoreKind;
     use crate::test_utils::{
         assert_iterator, lookup_merge_operator_operands, GatedObjectStore,
         OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
@@ -4236,6 +4237,7 @@ mod tests {
             sst_format,
             path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
@@ -4336,6 +4338,7 @@ mod tests {
             sst_format,
             path,
             None,
+            TableStoreKind::Main,
         ));
 
         // Write data a few times such that each loop results in a memtable flush
@@ -4522,6 +4525,7 @@ mod tests {
             sst_format,
             path,
             None,
+            TableStoreKind::Main,
         ));
 
         // Write some data to populate the memtable
@@ -6057,6 +6061,7 @@ mod tests {
             SsTableFormat::default(),
             path,
             None,
+            TableStoreKind::Main,
         ));
 
         // Get the next WAL SST ID based on what's currently in the object store
@@ -6367,6 +6372,7 @@ mod tests {
             SsTableFormat::default(),
             path,
             None,
+            TableStoreKind::Main,
         ));
         let mut w1_paused = false;
         for _ in 0..600 {
@@ -6462,6 +6468,7 @@ mod tests {
             SsTableFormat::default(),
             path,
             None,
+            TableStoreKind::Main,
         );
         wait_for_wal_sst_count(
             &probe_table_store,
@@ -6539,6 +6546,7 @@ mod tests {
             SsTableFormat::default(),
             path,
             None,
+            TableStoreKind::Main,
         );
         wait_for_wal_sst_count(
             &probe_table_store,
@@ -7797,6 +7805,7 @@ mod tests {
             SsTableFormat::default(),
             path.clone(),
             None,
+            TableStoreKind::Main,
         );
         let compacted_ssts = table_store
             .list_compacted_ssts(..)

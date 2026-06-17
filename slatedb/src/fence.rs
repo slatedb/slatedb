@@ -187,7 +187,7 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -226,6 +226,7 @@ mod tests {
                 SsTableFormat::default(),
                 path,
                 None,
+                TableStoreKind::Main,
             ));
             let stored_manifest = StoredManifest::create_new_db(
                 manifest_store.clone(),

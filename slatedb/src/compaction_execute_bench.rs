@@ -73,7 +73,7 @@ impl CompactionExecuteBench {
             compression_codec,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new_with_kind(
+        let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
@@ -325,7 +325,7 @@ impl CompactionExecuteBench {
             compression_codec,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new_with_kind(
+        let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),

@@ -626,7 +626,7 @@ mod tests {
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
@@ -851,6 +851,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from("/root"),
             None,
+            TableStoreKind::Main,
         ));
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));

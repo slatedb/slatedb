@@ -600,6 +600,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::sst_iter::SstView;
+    use crate::tablestore::TableStoreKind;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::test_utils::{build_row_entries, build_sorted_runs, write_ssts, GatedObjectStore};
     use crate::types::{RowEntry, ValueDeletable};
@@ -1052,6 +1053,7 @@ mod tests {
             },
             root_path.clone(),
             None,
+            TableStoreKind::Compactor,
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -1259,8 +1261,7 @@ mod tests {
                         ..SsTableFormat::default()
                     },
                     root_path.clone(),
-                    None,
-                ));
+                    None, TableStoreKind::Compactor));
                 let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
                 StoredManifest::create_new_db(
                     manifest_store.clone(),
@@ -1407,6 +1408,7 @@ mod tests {
             },
             root_path.clone(),
             None,
+            TableStoreKind::Compactor,
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())

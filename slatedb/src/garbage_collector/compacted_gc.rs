@@ -256,6 +256,7 @@ mod tests {
     use crate::manifest::store::StoredManifest;
     use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment};
     use crate::object_stores::ObjectStores;
+    use crate::tablestore::TableStoreKind;
     use crate::test_utils::build_test_sst;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path};
@@ -274,6 +275,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest store and initial manifest
@@ -378,6 +380,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest store and initial manifest
@@ -484,6 +487,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest store with empty DB
@@ -586,6 +590,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest with an L0 newer than the compaction output.

@@ -102,52 +102,14 @@ impl ReadOnlyBlob for ReadOnlyObject {
 }
 
 impl TableStore {
-    // TEMPORARY: kind-less constructors that default to [`TableStoreKind::Main`],
-    // so existing (test) call sites keep compiling. Removed in the next commit,
-    // which makes the kind required and renames the `*_with_kind` constructors
-    // to these names.
-    #[cfg(test)]
     pub(crate) fn new<P: Into<Path>>(
-        object_stores: ObjectStores,
-        sst_format: SsTableFormat,
-        root_path: P,
-        block_cache: Option<Arc<dyn DbCache>>,
-    ) -> Self {
-        Self::new_with_kind(
-            object_stores,
-            sst_format,
-            root_path,
-            block_cache,
-            TableStoreKind::Main,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_fp_registry(
-        object_stores: ObjectStores,
-        sst_format: SsTableFormat,
-        path_resolver: PathResolver,
-        fp_registry: Arc<FailPointRegistry>,
-        cache: Option<Arc<dyn DbCache>>,
-    ) -> Self {
-        Self::new_with_fp_registry_and_kind(
-            object_stores,
-            sst_format,
-            path_resolver,
-            fp_registry,
-            cache,
-            TableStoreKind::Main,
-        )
-    }
-
-    pub(crate) fn new_with_kind<P: Into<Path>>(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
         root_path: P,
         block_cache: Option<Arc<dyn DbCache>>,
         kind: TableStoreKind,
     ) -> Self {
-        Self::new_with_fp_registry_and_kind(
+        Self::new_with_fp_registry(
             object_stores,
             sst_format,
             PathResolver::new(root_path),
@@ -157,7 +119,7 @@ impl TableStore {
         )
     }
 
-    pub(crate) fn new_with_fp_registry_and_kind(
+    pub(crate) fn new_with_fp_registry(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
@@ -1431,7 +1393,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
@@ -1570,6 +1532,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -1643,6 +1606,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Wal(123);
 
@@ -1712,6 +1676,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let wal_id = SsTableId::Wal(1);
 
@@ -1742,6 +1707,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         ts.write_wal_fence(1).await.unwrap();
@@ -1758,6 +1724,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         ts.write_wal_fence(1).await.unwrap();
@@ -1773,6 +1740,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         ts.write_wal_fence(1).await.unwrap();
@@ -1804,6 +1772,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -1847,6 +1816,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let wal_id = SsTableId::Wal(1);
 
@@ -1888,6 +1858,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -1955,6 +1926,7 @@ mod tests {
             format,
             Path::from("/root"),
             Some(wrapper.clone()),
+            TableStoreKind::Main,
         ));
 
         // Create and write SST
@@ -2082,6 +2054,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         );
 
         let mut builder = writer.table_builder();
@@ -2110,6 +2083,7 @@ mod tests {
             format,
             Path::from(ROOT),
             Some(cache),
+            TableStoreKind::Main,
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -2140,6 +2114,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         );
 
         let mut builder = writer.table_builder();
@@ -2168,6 +2143,7 @@ mod tests {
             format,
             Path::from(ROOT),
             Some(cache),
+            TableStoreKind::Main,
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -2196,6 +2172,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         );
 
         let mut builder = writer.table_builder();
@@ -2225,6 +2202,7 @@ mod tests {
             format,
             Path::from(ROOT),
             Some(cache),
+            TableStoreKind::Main,
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -2268,6 +2246,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper.clone()),
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
@@ -2313,6 +2292,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper),
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
@@ -2373,6 +2353,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
@@ -2442,6 +2423,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         let id1 = SsTableId::Wal(1);
@@ -2515,6 +2497,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ))
     }
 
@@ -2571,6 +2554,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         // Build an SST and compute expected bytes
@@ -2608,6 +2592,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         let id1 = SsTableId::Compacted(ulid::Ulid::new());
@@ -2652,6 +2637,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
 
         let id1 = SsTableId::Wal(123);
@@ -2701,6 +2687,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let path = ts.path(&id);
@@ -2725,6 +2712,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         ));
         let id = SsTableId::Wal(42);
         let path = ts.path(&id);
@@ -2749,7 +2737,7 @@ mod tests {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
             let ts = Arc::new(TableStore::new(ObjectStores::new(os, None),
-                format, Path::from(ROOT), None));
+                format, Path::from(ROOT), None, TableStoreKind::Main));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }
@@ -2785,6 +2773,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         );
         let mut builder = writer.table_builder();
         builder
@@ -2819,6 +2808,7 @@ mod tests {
             format,
             Path::from(ROOT),
             Some(cache),
+            TableStoreKind::Main,
         ));
 
         // when: task A starts reading the index; its loader will pause inside the
@@ -2885,6 +2875,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            TableStoreKind::Main,
         );
         let mut builder = writer.table_builder();
         builder
@@ -2924,6 +2915,7 @@ mod tests {
             format,
             Path::from(ROOT),
             Some(cache),
+            TableStoreKind::Main,
         ));
 
         // when: task A starts a single-block read; its loader will pause inside the
@@ -3006,7 +2998,7 @@ mod tests {
 
         fn recording_store(kind: TableStoreKind) -> (Arc<RecordingObjectStore>, Arc<TableStore>) {
             let recording = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
-            let ts = Arc::new(TableStore::new_with_kind(
+            let ts = Arc::new(TableStore::new(
                 ObjectStores::new(recording.clone(), None),
                 format(),
                 Path::from(ROOT),

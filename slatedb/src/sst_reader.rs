@@ -89,7 +89,7 @@ impl SstReader {
             block_transformer,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new_with_kind(
+        let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store, None),
             sst_format,
             root_path.into(),

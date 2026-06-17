@@ -31,7 +31,7 @@ impl StoreProvider for DefaultStoreProvider {
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
-        Arc::new(TableStore::new_with_kind(
+        Arc::new(TableStore::new(
             ObjectStores::new(
                 Arc::clone(&self.object_store),
                 self.wal_object_store.clone(),

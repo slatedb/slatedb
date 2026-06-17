@@ -432,7 +432,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::prefix_extractor::PrefixExtractor;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, build_test_sst};
 
     #[test]
@@ -486,6 +486,7 @@ mod tests {
             format.clone(),
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         );
         let path_resolver = PathResolver::new(root_path);
 
@@ -591,6 +592,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -646,6 +648,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -744,6 +747,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         for k in 1..=8 {
@@ -828,6 +832,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -895,6 +900,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -922,6 +928,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -980,6 +987,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1032,6 +1040,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1100,6 +1109,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1155,6 +1165,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ));
         let mut builder = table_store.table_builder();
         for key in 'a'..='z' {
@@ -1275,6 +1286,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1330,6 +1342,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1417,6 +1430,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store
             .table_builder()
@@ -1483,6 +1497,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         let mut expected = Vec::new();
@@ -1546,6 +1561,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
 
@@ -1653,6 +1669,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1695,6 +1712,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1740,6 +1758,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let mut builder = table_store.table_builder();
         // Block 0: put
@@ -1837,6 +1856,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         );
 
         // Write keys whose 3-byte prefix is "key".
@@ -1893,6 +1913,7 @@ mod tests {
             format_partial,
             root_path,
             None,
+            TableStoreKind::Main,
         );
         let handle_partial = store_partial.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let partial = store_partial
