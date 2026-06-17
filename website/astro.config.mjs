@@ -198,6 +198,10 @@ export default defineConfig({
 					collapsed: true,
 					items: [
 						{
+							label: 'Bindings Runtime',
+							link: '/docs/operations/bindings-runtime/',
+						},
+						{
 							label: 'CLI',
 							link: '/docs/operations/cli/',
 						},

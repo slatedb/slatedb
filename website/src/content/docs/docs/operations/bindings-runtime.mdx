@@ -1,0 +1,151 @@
+---
+title: Bindings Runtime & Threading
+description: Async runtime, threading, and logging caveats when running SlateDB through a language binding
+---
+
+SlateDB is a Rust library that runs all of its work — durable writes, WAL flush,
+memtable-to-L0 flush, compaction, garbage collection, and the manifest poller — as
+asynchronous tasks on a [`tokio`](https://crates.io/crates/tokio) runtime. The
+language bindings (Go, Java, Node.js, Python) are [UniFFI](https://mozilla.github.io/uniffi-rs/)
+wrappers around the same `slatedb_uniffi` shared library, so the way the host
+language drives those async tasks matters a great deal under load.
+
+This page documents runtime and threading caveats observed when running SlateDB
+as a *writer* under sustained, concurrent read + write load through a foreign
+binding. Most users never hit these — they appear under continuous mixed
+`scan` + durable `put` traffic where the binding's async driver is the
+bottleneck, not SlateDB itself.
+
+## How background tasks pick a runtime
+
+When you call `DbBuilder.build()`, SlateDB captures the tokio runtime handle that
+is *current at build time* (`Handle::current()`) and spawns every background task
+onto it for the lifetime of the database. There is no separate, internally-owned
+worker pool that SlateDB starts on its own; the database inherits whatever runtime
+drove `build()`.
+
+In a UniFFI binding, exported `async` functions are driven by a *foreign executor*:
+the host language polls the Rust future to completion. The flavor and thread count
+of the runtime that ends up driving SlateDB therefore depends on the binding's
+async model, not on SlateDB.
+
+:::note
+This is why the same `slatedb_uniffi` library can behave very differently across
+bindings even at the same version. The library is the same; the runtime driving it
+is supplied by the host.
+:::
+
+## Use a multi-threaded runtime under concurrent load
+
+**Recommendation:** drive SlateDB from a multi-threaded tokio runtime when you run
+it as a writer under concurrent `scan` + durable `put` load. A single-threaded
+runtime can serialize — and under the right interleaving, *stall* — SlateDB's
+background tasks behind foreground work.
+
+### Symptoms of a single-threaded stall
+
+Reported by a production deployment running SlateDB `0.13.1` as a single writer
+through the Node.js binding (`@slatedb/uniffi`), under sustained mixed load
+(tens of durable `put`/CAS per second plus prefix `scan`s):
+
+- After some minutes of healthy operation, **every durable `put` and every
+  `scan` hangs indefinitely**, while memtable-only `get` keeps returning in
+  about a millisecond. The database looks alive to a naive health check but
+  accepts no writes.
+- A thread dump shows the runtime's worker thread parked in `futex_wait` at
+  **near-zero CPU** — this is a stall, *not* a throughput limit or CPU
+  saturation. The single thread driving SlateDB is blocked, not busy.
+- Object-store state is frozen for the duration: `next_wal_sst_id`,
+  `last_l0_seq`, and the manifest stop advancing; no new WAL SST objects appear
+  in the bucket.
+
+This was reproducible and recovered only by restarting the process. The same
+SlateDB build and workload running through the **Go binding** — which drives the
+future from a goroutine over the library's own multi-threaded tokio runtime, the
+same `slatedb_uniffi` cdylib — survived 12h+ of identical `scan` + `put` +
+compaction load with low CPU and headroom to spare. The difference was the
+runtime driving the async work, not SlateDB core.
+
+### Why Node.js is the most exposed binding
+
+The Node.js binding's UniFFI async model polls Rust futures from JavaScript and
+runs the future's continuations on the **single JavaScript event-loop thread**.
+Under concurrent load this becomes the single thread that drives all of SlateDB,
+which is exactly the single-threaded-stall scenario above. It is also why a long
+synchronous wait on the event loop (for example `await builder.build()`) can be
+starved by other work competing for the same thread.
+
+### Health checks should exercise a durable write
+
+Because memtable `get` keeps answering during a stall, a readiness probe that
+only does a `get` will report **healthy** throughout the outage. Probe with a
+**durable `put`** (a small sentinel key written with `await_durable`) so the
+probe fails when the WAL flusher is wedged, and let your orchestrator restart the
+process.
+
+## Logging: prefer native stderr over a foreign callback
+
+`init_logging(level, callback)` accepts an optional foreign log callback. If you
+pass a callback, **every** log record is delivered to your host language from
+SlateDB's runtime thread.
+
+:::caution
+On the Node.js binding, passing a JavaScript `LogCallback` to `init_logging` can
+deadlock at startup. The callback re-enters the JavaScript VM for each record from
+the runtime thread, while the main thread is blocked in `await builder.build()`.
+The two wait on each other, `build()` never resolves, and the process silently
+hangs without ever listening. Prefer the native-stderr form — call
+`init_logging(level)` with **no callback** — so records are written to standard
+error from Rust without re-entering the host VM.
+:::
+
+`init_logging` exposes only a single global level (`Off`/`Error`/`Warn`/`Info`/
+`Debug`/`Trace`); it does not accept a per-target filter. To quiet noisy
+dependency logs (for example `hyper`/`reqwest` connection-pool `DEBUG` output),
+run at `Info` or filter at your log viewer rather than at emit time.
+
+## On-disk block cache on a single-threaded runtime
+
+The on-disk block cache (`object_store_cache_options.root_folder`) performs
+filesystem work — directory scans and cache eviction — via tokio's blocking
+thread pool (`spawn_blocking`). On a multi-threaded runtime this is fine. On a
+single-threaded runtime under scan load, the interplay between the cache's
+blocking work and the single async worker can deadlock the database.
+
+:::caution
+If you must run on a single-threaded runtime (for example the Node.js binding
+without a multi-threaded driver), avoid the on-disk block cache. Disable it
+(leave `object_store_cache_options.root_folder` unset) and, if you want caching,
+use an in-memory block cache via `DbBuilder.with_db_cache(...)`, which does not
+use `spawn_blocking`. On a multi-threaded runtime the on-disk cache works as
+intended.
+:::
+
+## In-process maintenance tasks amplify the problem
+
+Garbage collection and compaction run as background tasks on the same captured
+runtime. On a single-threaded runtime they compete with foreground reads and
+writes, and a burst of maintenance work (for example the first GC tick a minute
+after open) is a common trigger for a stall. Disabling in-process GC only delays
+the stall; it does not remove the root cause, which is the single-threaded
+runtime.
+
+If you want maintenance off the critical path entirely, run **out-of-process**
+compaction and garbage collection with the [CLI](/docs/operations/cli/) or a
+[standalone compactor](/docs/tutorials/standalone-compactor/), which run on their
+own multi-threaded runtime.
+
+## Summary
+
+| Concern | Single-threaded runtime (e.g. plain Node.js) | Multi-threaded runtime (e.g. Go, or Node.js with an MT driver) |
+| --- | --- | --- |
+| Concurrent `scan` + durable `put` | Can stall under sustained load | Stable |
+| On-disk block cache | Avoid — can deadlock | Works as intended |
+| In-memory block cache (`with_db_cache`) | Safe | Safe |
+| Foreign log callback at boot | Avoid — can deadlock; use native stderr | Use native stderr |
+| Health check | Must exercise a durable `put` | Same (recommended) |
+
+If you operate SlateDB as a writer under concurrent load, drive it from a
+multi-threaded tokio runtime, log to native stderr, and probe liveness with a
+durable write. These are binding/runtime configuration choices; SlateDB core
+behaves identically across them.
