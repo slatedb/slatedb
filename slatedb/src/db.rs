@@ -1096,6 +1096,7 @@ impl Db {
     ///     assert_eq!(None, iter.next().await?);
     ///
     ///     // Restrict the scan to suffixes from b"a" onward.
+    ///     // Ordinary Rust range syntax works here; `as_slice()` is optional.
     ///     let mut iter = db.scan_prefix(b"ab", b"a".as_slice()..).await?;
     ///     let kv = iter.next().await?.unwrap();
     ///     assert_eq!(kv.key.as_ref(), b"aba");
