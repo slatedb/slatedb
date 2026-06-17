@@ -26,30 +26,21 @@ use bytes::Bytes;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-/// Per-SST batched read result for `multi_get`: `(newest-first rank, [(key
-/// index, that SST's versions of the key, newest-first)])`.
+/// Per-SST batched read result for `multi_get`: `(newest-first rank, [(unique
+/// key index, that SST's versions of the key, newest-first)])`.
 type SstBatchResult = (usize, Vec<(usize, Vec<RowEntry>)>);
 
-/// One unit of concurrent SST work for `multi_get`:
-/// `(rank, view, keys to look up in that view)`.
+/// One unit of concurrent SST work for `multi_get`: `(rank, view, keys to look
+/// up in that view)`. `rank` encodes newest-first precedence among the SSTs of
+/// one LSM tree (L0 by position, then sorted runs in order, then views within
+/// a run by ascending index); trees cover disjoint keys, so tree-local ranks
+/// merge correctly per key in one global sort.
 type SstReadWork = (usize, SsTableView, Arc<Vec<PendingKey>>);
 
-/// Maximum number of SSTs read concurrently within one layer of one tree group
-/// during `multi_get`. Reads are object-store-I/O bound, so a generous buffer
-/// pays off; worst-case in-flight reads ≈ tree groups × this constant.
-const MAX_CONCURRENT_SST_READS: usize = 16;
-
-/// The still-pending `multi_get` keys destined for one LSM tree (segment).
-/// Tree groups are read concurrently, so each group carries the mapping from
-/// its keys' local positions back to the orchestrator's unique-key indexes.
-struct TreeGroup {
-    tree: Arc<LsmTreeState>,
-    /// Local position -> unique-key index.
-    global_idx: Vec<usize>,
-    /// `keys[i].idx == i` (local position), so per-SST results echo local
-    /// positions that are remapped through `global_idx` on merge-back.
-    keys: Vec<PendingKey>,
-}
+/// Maximum number of SSTs read concurrently during `multi_get`. All trees and
+/// layers fan out into one bounded pool; reads are object-store-I/O bound, so
+/// a generous buffer pays off.
+const MAX_CONCURRENT_SST_READS: usize = 32;
 
 pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
@@ -294,15 +285,17 @@ impl Reader {
     /// strategy). Returns one `Option<RowEntry>` per input key, in input order;
     /// duplicate keys yield duplicate results.
     ///
-    /// Setup (snapshot, max-seq) happens once for the whole batch. The layers
-    /// are then walked newest-first — write batch, memtables, then each
-    /// segment's L0 SSTs and sorted runs — shrinking the pending set as keys
-    /// resolve, so a key found in a newer layer is never read from an older
-    /// one. Still-pending keys are grouped by their LSM tree (segment) and the
-    /// tree groups are read concurrently (they cover disjoint keys); within a
-    /// tree, sorted runs are still walked newest-first with early exit. Each
-    /// on-disk SST is visited once for all of its pending keys (see
-    /// [`crate::multi_sst::read_sst_for_keys`]).
+    /// Setup (snapshot, max-seq) happens once for the whole batch. The
+    /// in-memory layers are consulted newest-first — write batch, then
+    /// memtables — resolving keys for free before any I/O. The remaining keys
+    /// then fan out to disk in a single bounded concurrent batch covering every
+    /// SST that might hold them (all trees, L0 and every sorted run at once);
+    /// newest-first precedence is restored at merge time by sorting the per-SST
+    /// results by rank. This trades speculative probes of older runs (their
+    /// index/filter loads, with bloom filters pruning nearly all wasted block
+    /// I/O) for one object-store round trip of latency instead of one per
+    /// sorted run. Each on-disk SST is visited once for all of its pending keys
+    /// (see [`crate::multi_sst::read_sst_for_keys`]).
     ///
     /// A key is "resolved" only when a `Value` or `Tombstone` is found; `Merge`
     /// operands keep it descending to older layers (merge operands legitimately
@@ -373,7 +366,10 @@ impl Reader {
             iter.init().await?;
             while let Some(entry) = iter.next().await? {
                 if let Some(&u) = index_of.get(entry.key.as_ref()) {
-                    append_versions(vec![entry], None, &mut wb_acc[u], &mut resolved[u]);
+                    if !matches!(entry.value, ValueDeletable::Merge(_)) {
+                        resolved[u] = true;
+                    }
+                    wb_acc[u].push(entry);
                 }
             }
         }
@@ -385,61 +381,42 @@ impl Reader {
             read_memtable_layer(&imm.table(), &unique_keys, max_seq, &mut acc, &mut resolved);
         }
 
-        // 3. On-disk: group still-pending keys by their LSM tree (segment),
-        //    then walk every tree's L0 + sorted runs concurrently — groups
-        //    cover disjoint keys, so their results merge without conflicts.
-        //    Unsegmented DBs yield one group.
-        let core = db_state.core();
-        let default_tree = core.default_segment().tree;
-        // Group keys by their LSM tree's identity. The map key is the tree's
-        // Arc pointer cast to `usize` (a raw pointer would make the future
-        // `!Send`).
-        let mut groups: HashMap<usize, TreeGroup> = HashMap::new();
-        for (u, key) in unique_keys.iter().enumerate() {
-            if resolved[u] {
-                continue;
-            }
-            let tree =
-                match core.select_segments(&BytesRange::from_slice(key.as_ref()..=key.as_ref())) {
-                    None => default_tree.clone(),
-                    Some(segments) => match segments.last() {
-                        Some(segment) => segment.tree.clone(),
-                        // Configured but no segment covers this key: no on-disk data.
-                        None => continue,
-                    },
-                };
-            let group = groups
-                .entry(Arc::as_ptr(&tree) as usize)
-                .or_insert_with(|| TreeGroup {
-                    tree,
-                    global_idx: Vec::new(),
-                    keys: Vec::new(),
-                });
-            group.keys.push(PendingKey {
-                idx: group.global_idx.len(),
-                key: key.clone(),
-            });
-            group.global_idx.push(u);
-        }
-        let mut global_idxs = Vec::with_capacity(groups.len());
-        let mut group_futures = Vec::with_capacity(groups.len());
-        for group in groups.into_values() {
-            global_idxs.push(group.global_idx);
-            group_futures.push(self.read_tree_layer(
-                group.tree,
-                Arc::new(group.keys),
-                &sst_options,
-                max_seq,
-            ));
-        }
-        for (global_idx, group_acc) in global_idxs
-            .iter()
-            .zip(futures::future::try_join_all(group_futures).await?)
-        {
-            for (pos, entries) in group_acc.into_iter().enumerate() {
-                // Extend, not assign: memtable merge operands may already be in
-                // the accumulator and must stay first (they are newer).
-                acc[global_idx[pos]].extend(entries);
+        // 3. On-disk: fan out every (SST view, pending keys) pair across all
+        //    trees and layers in one bounded concurrent batch, then restore
+        //    newest-first precedence by applying the per-SST results in rank
+        //    order. Older runs are probed speculatively for keys that turn out
+        //    to live in newer layers, but the latency is one round trip instead
+        //    of one per sorted run. `append_versions` re-filters by max_seq and
+        //    stops each key at its first surviving Value/Tombstone, so older
+        //    ranks' entries are dropped exactly as in the single-key walk.
+        //    Memtable entries are already in `acc` and stay first (they are
+        //    newer than anything on disk).
+        let work = build_sst_work(db_state.core(), &unique_keys, &resolved);
+        if !work.is_empty() {
+            let max_parallel = work.len().clamp(1, MAX_CONCURRENT_SST_READS);
+            let table_store = self.table_store.clone();
+            let opts = sst_options.clone();
+            let stats = self.db_stats.clone();
+            let results = build_concurrent(work, max_parallel, move |(rank, view, keys)| {
+                let table_store = table_store.clone();
+                let opts = opts.clone();
+                let stats = stats.clone();
+                async move {
+                    let per_key =
+                        read_sst_for_keys(&view, &keys[..], &table_store, &opts, Some(&stats))
+                            .await?;
+                    Ok(Some((rank, per_key)))
+                }
+            })
+            .await?;
+            let mut results: Vec<SstBatchResult> = results.into();
+            results.sort_unstable_by_key(|(rank, _)| *rank);
+            for (_rank, per_key) in results {
+                for (u, entries) in per_key {
+                    if !resolved[u] {
+                        append_versions(entries, max_seq, &mut acc[u], &mut resolved[u]);
+                    }
+                }
             }
         }
 
@@ -461,97 +438,6 @@ impl Reader {
             .iter()
             .map(|&u| resolved_values[u].clone())
             .collect())
-    }
-
-    /// Walk one LSM tree (segment) for its group of pending keys: all L0 SSTs in
-    /// parallel (newest-first), then each sorted run newest-first with a shrink
-    /// between runs to preserve early-exit.
-    ///
-    /// Owns its accumulators so tree groups can run concurrently; returns the
-    /// max_seq-filtered versions found for each key, indexed by the key's local
-    /// position (`keys[i].idx == i`).
-    async fn read_tree_layer(
-        &self,
-        tree: Arc<LsmTreeState>,
-        keys: Arc<Vec<PendingKey>>,
-        sst_options: &SstIteratorOptions,
-        max_seq: Option<u64>,
-    ) -> Result<Vec<Vec<RowEntry>>, SlateDBError> {
-        let mut acc: Vec<Vec<RowEntry>> = vec![Vec::new(); keys.len()];
-        let mut resolved: Vec<bool> = vec![false; keys.len()];
-
-        // L0: any L0 SST may hold any key, and no key in the group is resolved
-        // yet, so every L0 SST is read for every key. Rank by position (front =
-        // newest) and apply newest-first so the newest SST wins.
-        if !tree.l0.is_empty() {
-            let work: Vec<SstReadWork> = tree
-                .l0
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(rank, view)| (rank, view, keys.clone()))
-                .collect();
-            let results = self.read_ssts_concurrent(work, sst_options).await?;
-            apply_layer_results(results, max_seq, &mut acc, &mut resolved);
-        }
-
-        // Sorted runs, newest run first. Within a run each key maps (via binary
-        // search) to its covering SST views, so group keys by view index and
-        // read each view once. Shrink between runs.
-        for sr in tree.compacted.iter() {
-            if resolved.iter().all(|r| *r) {
-                break;
-            }
-            // Keyed by view index so iteration is ascending key-range order,
-            // matching the single-key sorted-run point iterators.
-            let mut view_keys: BTreeMap<usize, Vec<PendingKey>> = BTreeMap::new();
-            for pk in keys.iter().filter(|pk| !resolved[pk.idx]) {
-                for vi in sr.point_table_idx_covering_key(pk.key.as_ref()) {
-                    view_keys.entry(vi).or_default().push(pk.clone());
-                }
-            }
-            if view_keys.is_empty() {
-                continue;
-            }
-            let work: Vec<SstReadWork> = view_keys
-                .into_iter()
-                .map(|(rank, keys)| (rank, sr.sst_views[rank].clone(), Arc::new(keys)))
-                .collect();
-            let results = self.read_ssts_concurrent(work, sst_options).await?;
-            apply_layer_results(results, max_seq, &mut acc, &mut resolved);
-        }
-        Ok(acc)
-    }
-
-    /// Read a set of `(rank, view, keys)` work items concurrently (bounded), one
-    /// [`read_sst_for_keys`] call per view, and return the per-view results
-    /// sorted by `rank` so the caller can apply them in precedence order.
-    async fn read_ssts_concurrent(
-        &self,
-        work: Vec<SstReadWork>,
-        sst_options: &SstIteratorOptions,
-    ) -> Result<Vec<SstBatchResult>, SlateDBError> {
-        if work.is_empty() {
-            return Ok(Vec::new());
-        }
-        let max_parallel = work.len().clamp(1, MAX_CONCURRENT_SST_READS);
-        let table_store = self.table_store.clone();
-        let opts = sst_options.clone();
-        let stats = self.db_stats.clone();
-        let results = build_concurrent(work, max_parallel, move |(rank, view, keys)| {
-            let table_store = table_store.clone();
-            let opts = opts.clone();
-            let stats = stats.clone();
-            async move {
-                let per_key =
-                    read_sst_for_keys(&view, &keys[..], &table_store, &opts, Some(&stats)).await?;
-                Ok(Some((rank, per_key)))
-            }
-        })
-        .await?;
-        let mut results: Vec<SstBatchResult> = results.into();
-        results.sort_by_key(|(rank, _)| *rank);
-        Ok(results)
     }
 
     /// Produce the final entry for one key by replaying its accumulated versions
@@ -784,10 +670,85 @@ pub(crate) fn entries_to_key_values(entries: Vec<Option<RowEntry>>) -> Vec<Optio
         .collect()
 }
 
-/// Append versions of one key to its accumulator. Entries with `seq > max_seq`
-/// are dropped (not visible at this snapshot); write-batch callers pass `None`
-/// since their entries are never max_seq filtered. A `Value` or `Tombstone`
-/// marks the key resolved, so older layers are skipped for it.
+/// Build the flat fan-out work list for the still-pending `multi_get` keys:
+/// one work item per (SST view, keys that might live in it) pair, across every
+/// tree's L0 SSTs and sorted-run views.
+///
+/// `rank` encodes newest-first precedence within a key's tree: L0 SSTs by
+/// position (front = newest), then sorted runs in order, then views within a
+/// run by ascending index (a key's versions can span adjacent views, and the
+/// single-key path reads them in ascending view order too). Rank offsets
+/// advance by each run's full view count so two runs never alias. Trees cover
+/// disjoint keys, so tree-local ranks merge correctly per key in one global
+/// sort.
+fn build_sst_work(
+    core: &ManifestCore,
+    unique_keys: &[Bytes],
+    resolved: &[bool],
+) -> Vec<SstReadWork> {
+    // Group pending keys by their LSM tree's identity. The map key is the
+    // tree's Arc pointer cast to `usize` (a raw pointer would make the
+    // enclosing future `!Send`).
+    let default_tree = core.default_segment().tree;
+    let mut trees: HashMap<usize, (Arc<LsmTreeState>, Vec<PendingKey>)> = HashMap::new();
+    for (u, key) in unique_keys.iter().enumerate() {
+        if resolved[u] {
+            continue;
+        }
+        let tree = match core.select_segments(&BytesRange::from_slice(key.as_ref()..=key.as_ref()))
+        {
+            None => default_tree.clone(),
+            Some(segments) => match segments.last() {
+                Some(segment) => segment.tree.clone(),
+                // Configured but no segment covers this key: no on-disk data.
+                None => continue,
+            },
+        };
+        trees
+            .entry(Arc::as_ptr(&tree) as usize)
+            .or_insert_with(|| (tree, Vec::new()))
+            .1
+            .push(PendingKey {
+                idx: u,
+                key: key.clone(),
+            });
+    }
+
+    let mut work = Vec::new();
+    for (tree, keys) in trees.into_values() {
+        // L0: any L0 SST may hold any key, so every L0 SST is read for the
+        // whole group.
+        let keys = Arc::new(keys);
+        for (rank, view) in tree.l0.iter().enumerate() {
+            work.push((rank, view.clone(), keys.clone()));
+        }
+        let mut rank_base = tree.l0.len();
+        // Sorted runs: within a run each key maps (via binary search) to its
+        // covering SST views, so group keys by view index and read each view
+        // once.
+        for sr in tree.compacted.iter() {
+            let mut view_keys: BTreeMap<usize, Vec<PendingKey>> = BTreeMap::new();
+            for pk in keys.iter() {
+                for vi in sr.point_table_idx_covering_key(pk.key.as_ref()) {
+                    view_keys.entry(vi).or_default().push(pk.clone());
+                }
+            }
+            for (vi, keys) in view_keys {
+                work.push((rank_base + vi, sr.sst_views[vi].clone(), Arc::new(keys)));
+            }
+            rank_base += sr.sst_views.len();
+        }
+    }
+    work
+}
+
+/// Append versions of one key to its accumulator, newest-first. Entries with
+/// `seq > max_seq` are dropped (not visible at this snapshot) — the filter runs
+/// *before* the resolve check, so a too-new `Value` must not resolve the key.
+/// The first appended `Value` or `Tombstone` marks the key resolved and stops
+/// the append: everything older is shadowed and would never be read by the
+/// resolution iterators anyway. `Merge` operands keep accumulating (they
+/// legitimately span layers).
 fn append_versions(
     entries: Vec<RowEntry>,
     max_seq: Option<u64>,
@@ -798,27 +759,11 @@ fn append_versions(
         if max_seq.is_some_and(|ms| entry.seq > ms) {
             continue;
         }
-        if !matches!(entry.value, ValueDeletable::Merge(_)) {
-            *resolved = true;
-        }
+        let is_base = !matches!(entry.value, ValueDeletable::Merge(_));
         acc.push(entry);
-    }
-}
-
-/// Apply per-view results (already sorted newest-first by rank) to the per-key
-/// accumulators, skipping keys already resolved by a newer view in this layer.
-fn apply_layer_results(
-    results: Vec<SstBatchResult>,
-    max_seq: Option<u64>,
-    acc: &mut [Vec<RowEntry>],
-    resolved: &mut [bool],
-) {
-    for (_rank, per_key) in results {
-        for (u, entries) in per_key {
-            if resolved[u] {
-                continue;
-            }
-            append_versions(entries, max_seq, &mut acc[u], &mut resolved[u]);
+        if is_base {
+            *resolved = true;
+            return;
         }
     }
 }
@@ -1907,6 +1852,22 @@ mod tests {
         assert_eq!(vals[0].as_deref(), Some(b"abc".as_ref())); // merge("a","b","c")
         assert_eq!(vals[1].as_deref(), Some(b"p".as_ref()));
         assert_eq!(vals[2], None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_merge_base_shadows_older_run() -> Result<(), SlateDBError> {
+        // Merge operand in L0, base value in the newer sorted run, and a stale
+        // value in an older sorted run. The fan-out reads all three SSTs, so
+        // the rank merge must stop at the run-1 base and drop the stale run-0
+        // value. (SortedRun test IDs: 0 = oldest.)
+        let entries = vec![
+            TestEntry::merge(b"acc", b"b", 80).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"acc", b"a", 70).with_location(LayerLocation::SortedRun(1)),
+            TestEntry::value(b"acc", b"stale", 30).with_location(LayerLocation::SortedRun(0)),
+        ];
+        let vals = run_multi_get(entries, &[b"acc"], true, None, None, true).await?;
+        assert_eq!(vals[0].as_deref(), Some(b"ab".as_ref())); // merge("a","b"), no "stale"
         Ok(())
     }
 
