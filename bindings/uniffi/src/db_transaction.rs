@@ -173,7 +173,7 @@ impl DbTransaction {
         let range = range.into_bounds()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan::<Vec<u8>, _>(range).await?;
+        let iter = tx.scan(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -187,7 +187,7 @@ impl DbTransaction {
         let options = options.try_into()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan_with_options::<Vec<u8>, _>(range, &options).await?;
+        let iter = tx.scan_with_options(range, &options).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 

@@ -25,7 +25,7 @@ async fn main() -> Result<(), Error> {
     kv_store.put(b"test_key4", b"test_value4").await?;
 
     // Scan over unbound range
-    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
+    let mut iter = kv_store.scan(..).await?;
     let mut count = 1;
     while let Ok(Some(item)) = iter.next().await {
         assert_eq!(item.key, format!("test_key{count}").into_bytes());
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Error> {
     assert_eq!(kv2.value, b"test_value2".as_slice());
 
     // Seek ahead to next key
-    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
+    let mut iter = kv_store.scan(..).await?;
     let next_key = b"test_key4";
     iter.seek(next_key).await?;
     let kv4 = iter.next().await?.unwrap();

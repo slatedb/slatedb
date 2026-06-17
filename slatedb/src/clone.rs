@@ -484,7 +484,7 @@ mod tests {
     use slatedb_common::SystemClock;
     use std::collections::BTreeMap;
     use std::ops::Bound;
-    use std::ops::{RangeBounds, RangeFull};
+    use std::ops::RangeBounds;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -551,7 +551,7 @@ mod tests {
         let clone_db = Db::open(clone_path.clone(), object_store.clone())
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
             .await;
         clone_db.close().await.unwrap();
@@ -620,7 +620,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(
             &checkpoint_table,
             ..,
@@ -1382,7 +1382,7 @@ mod tests {
         // segments are untouched.
         let mut expected = table.clone();
         expected.remove(&Bytes::from_static(b"aaa-001"));
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         clone_db.close().await.unwrap();
@@ -1422,12 +1422,12 @@ mod tests {
             Settings::default(),
         )
         .await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         assert_segment_prefix_scan(&clone_db, &table, b"bbb", b"bbc").await;
         let mut cross_iter = clone_db
-            .scan::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec())
+            .scan(b"aaa".to_vec()..=b"ddd-999".to_vec())
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(
@@ -1503,7 +1503,7 @@ mod tests {
         expected.extend(table_b.clone());
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
@@ -1613,7 +1613,7 @@ mod tests {
 
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
@@ -1715,7 +1715,7 @@ mod tests {
 
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         // The prefix scan on the shared `bbb` segment must surface rows from
@@ -1759,7 +1759,7 @@ mod tests {
 
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(
             &table,
             Bytes::from_static(b"bbb")..Bytes::from_static(b"ddd"),
