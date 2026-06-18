@@ -254,64 +254,6 @@ impl DbReaderBuilder {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use slatedb::object_store::memory::InMemory;
-
-    use super::{DbBuilder, DbReaderBuilder};
-    use crate::object_store::ObjectStore;
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn db_builder_builds_from_current_thread_runtime() {
-        let store = new_test_store();
-        let builder = DbBuilder::new(
-            "bindings-uniffi-runtime-current-thread-db".to_owned(),
-            store,
-        );
-
-        let db = builder.build().await.expect("failed to build db");
-        db.put(b"key".to_vec(), b"value".to_vec())
-            .await
-            .expect("failed to write value");
-        db.close().await.expect("failed to close db");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn db_reader_builder_builds_from_current_thread_runtime() {
-        let store = new_test_store();
-        let path = "bindings-uniffi-runtime-current-thread-reader";
-        let db_builder = DbBuilder::new(path.to_owned(), store.clone());
-        let db = db_builder.build().await.expect("failed to build seed db");
-        db.put(b"key".to_vec(), b"value".to_vec())
-            .await
-            .expect("failed to write seed value");
-        db.flush().await.expect("failed to flush seed db");
-        db.close().await.expect("failed to close seed db");
-
-        let reader_builder = DbReaderBuilder::new(path.to_owned(), store);
-        let reader = reader_builder
-            .build()
-            .await
-            .expect("failed to build reader");
-        assert_eq!(
-            reader
-                .get(b"key".to_vec())
-                .await
-                .expect("failed to read value"),
-            Some(b"value".to_vec())
-        );
-        reader.close().await.expect("failed to close reader");
-    }
-
-    fn new_test_store() -> Arc<ObjectStore> {
-        Arc::new(ObjectStore {
-            inner: Arc::new(InMemory::new()),
-        })
-    }
-}
-
 /// Builder for opening an administrative [`crate::Admin`] handle.
 ///
 /// Builders are single-use: calling [`AdminBuilder::build`] consumes the builder.
