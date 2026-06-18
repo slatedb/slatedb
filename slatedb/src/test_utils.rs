@@ -6,7 +6,7 @@ use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::tablestore::TableStore;
+use crate::tablestore::{ObjectStoreCallTag, RetryReason, SstType, TableStore, TableStoreKind};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -1400,14 +1400,17 @@ mod tests {
 pub(crate) enum RecordedCall {
     Get {
         head: bool,
-        kind: Option<crate::tablestore::TableStoreKind>,
-        retry: Option<crate::tablestore::RetryReason>,
+        kind: Option<TableStoreKind>,
+        sst_type: Option<SstType>,
+        retry: Option<RetryReason>,
     },
     Put {
-        kind: Option<crate::tablestore::TableStoreKind>,
+        kind: Option<TableStoreKind>,
+        sst_type: Option<SstType>,
     },
     PutMultipart {
-        kind: Option<crate::tablestore::TableStoreKind>,
+        kind: Option<TableStoreKind>,
+        sst_type: Option<SstType>,
     },
 }
 
@@ -1431,7 +1434,7 @@ impl RecordingObjectStore {
         self.calls.lock().clear();
     }
 
-    pub(crate) fn get_kinds(&self, head: bool) -> Vec<Option<crate::tablestore::TableStoreKind>> {
+    pub(crate) fn get_kinds(&self, head: bool) -> Vec<Option<TableStoreKind>> {
         self.calls
             .lock()
             .iter()
@@ -1442,7 +1445,20 @@ impl RecordingObjectStore {
             .collect()
     }
 
-    pub(crate) fn get_retries(&self, head: bool) -> Vec<Option<crate::tablestore::RetryReason>> {
+    pub(crate) fn get_sst_types(&self, head: bool) -> Vec<Option<SstType>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Get {
+                    head: h, sst_type, ..
+                } if *h == head => Some(*sst_type),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn get_retries(&self, head: bool) -> Vec<Option<RetryReason>> {
         self.calls
             .lock()
             .iter()
@@ -1453,12 +1469,26 @@ impl RecordingObjectStore {
             .collect()
     }
 
-    pub(crate) fn write_kinds(&self) -> Vec<Option<crate::tablestore::TableStoreKind>> {
+    pub(crate) fn write_kinds(&self) -> Vec<Option<TableStoreKind>> {
         self.calls
             .lock()
             .iter()
             .filter_map(|c| match c {
-                RecordedCall::Put { kind } | RecordedCall::PutMultipart { kind } => Some(*kind),
+                RecordedCall::Put { kind, .. } | RecordedCall::PutMultipart { kind, .. } => {
+                    Some(*kind)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn write_sst_types(&self) -> Vec<Option<SstType>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Put { sst_type, .. }
+                | RecordedCall::PutMultipart { sst_type, .. } => Some(*sst_type),
                 _ => None,
             })
             .collect()
@@ -1478,10 +1508,12 @@ impl ObjectStore for RecordingObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
+        let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
-            kind: crate::tablestore::TableStoreKind::from_extensions(&options.extensions),
-            retry: crate::tablestore::RetryReason::from_extensions(&options.extensions),
+            kind: tag.map(|t| t.kind),
+            sst_type: tag.map(|t| t.sst_type),
+            retry: tag.and_then(|t| t.retry),
         });
         self.inner.get_opts(location, options).await
     }
@@ -1492,8 +1524,10 @@ impl ObjectStore for RecordingObjectStore {
         payload: PutPayload,
         opts: OS_PutOptions,
     ) -> object_store::Result<PutResult> {
+        let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::Put {
-            kind: crate::tablestore::TableStoreKind::from_extensions(&opts.extensions),
+            kind: tag.map(|t| t.kind),
+            sst_type: tag.map(|t| t.sst_type),
         });
         self.inner.put_opts(location, payload, opts).await
     }
@@ -1503,8 +1537,10 @@ impl ObjectStore for RecordingObjectStore {
         location: &Path,
         opts: object_store::PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::PutMultipart {
-            kind: crate::tablestore::TableStoreKind::from_extensions(&opts.extensions),
+            kind: tag.map(|t| t.kind),
+            sst_type: tag.map(|t| t.sst_type),
         });
         self.inner.put_multipart_opts(location, opts).await
     }
