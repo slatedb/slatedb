@@ -28,6 +28,7 @@ import asyncio
 from slatedb.uniffi import (
     DbBuilder,
     IsolationLevel,
+    KeyRange,
     ObjectStore,
     WriteBatch,
 )
