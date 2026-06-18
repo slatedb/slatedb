@@ -23,7 +23,7 @@
 pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache_manager::{self, CacheTarget};
-use std::ops::{Range, RangeBounds};
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
@@ -998,10 +998,9 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
+    pub async fn scan<T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         self.scan_with_options(range, &ScanOptions::default()).await
     }
@@ -1038,21 +1037,16 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_with_options<K, T>(
+    pub async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let start = range.start_bound().map(Bytes::copy_from_slice);
+        let end = range.end_bound().map(Bytes::copy_from_slice);
         let range = (start, end);
         self.inner
             .scan_with_options(BytesRange::from(range), options, None)
@@ -1102,6 +1096,7 @@ impl Db {
     ///     assert_eq!(None, iter.next().await?);
     ///
     ///     // Restrict the scan to suffixes from b"a" onward.
+    ///     // Ordinary Rust range syntax works here; `as_slice()` is optional.
     ///     let mut iter = db.scan_prefix(b"ab", b"a".as_slice()..).await?;
     ///     let kv = iter.next().await?.unwrap();
     ///     assert_eq!(kv.key.as_ref(), b"aba");
@@ -1109,14 +1104,14 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_prefix<'a, P, T>(
+    pub async fn scan_prefix<P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -1166,7 +1161,7 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_prefix_with_options<'a, P, T>(
+    pub async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1174,7 +1169,7 @@ impl Db {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
@@ -1911,19 +1906,18 @@ impl DbReadOps for Db {
         Db::get_key_value_with_options(self, key, options).await
     }
 
-    async fn scan_with_options<K, T>(
+    async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         Db::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<'a, P, T>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1931,7 +1925,7 @@ impl DbReadOps for Db {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         Db::scan_prefix_with_options(self, prefix, subrange, options).await
     }
@@ -2355,6 +2349,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scan_and_prefix_range_forms_are_accepted() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_range_forms", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"a", b"v0").await.unwrap();
+        kv_store.put(b"aa", b"v1").await.unwrap();
+        kv_store.put(b"ab", b"v2").await.unwrap();
+        kv_store.put(b"b", b"v3").await.unwrap();
+
+        let mut all = kv_store.scan(..).await.unwrap();
+        assert_eq!(all.next().await.unwrap().unwrap().key.as_ref(), b"a");
+        assert_eq!(all.next().await.unwrap().unwrap().key.as_ref(), b"aa");
+        assert_eq!(all.next().await.unwrap().unwrap().key.as_ref(), b"ab");
+        assert_eq!(all.next().await.unwrap().unwrap().key.as_ref(), b"b");
+        assert_eq!(all.next().await.unwrap(), None);
+
+        let mut range = kv_store.scan(b"a".to_vec()..=b"ab".to_vec()).await.unwrap();
+        assert_eq!(range.next().await.unwrap().unwrap().key.as_ref(), b"a");
+        assert_eq!(range.next().await.unwrap().unwrap().key.as_ref(), b"aa");
+        assert_eq!(range.next().await.unwrap().unwrap().key.as_ref(), b"ab");
+        assert_eq!(range.next().await.unwrap(), None);
+
+        let mut prefix = kv_store.scan_prefix(b"a", b"".to_vec()..).await.unwrap();
+        assert_eq!(prefix.next().await.unwrap().unwrap().key.as_ref(), b"a");
+        assert_eq!(prefix.next().await.unwrap().unwrap().key.as_ref(), b"aa");
+        assert_eq!(prefix.next().await.unwrap().unwrap().key.as_ref(), b"ab");
+        assert_eq!(prefix.next().await.unwrap(), None);
+
+        let mut bounded_prefix = kv_store
+            .scan_prefix(b"a", b"a".to_vec()..=b"b".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded_prefix.next().await.unwrap().unwrap().key.as_ref(),
+            b"aa"
+        );
+        assert_eq!(
+            bounded_prefix.next().await.unwrap().unwrap().key.as_ref(),
+            b"ab"
+        );
+        assert_eq!(bounded_prefix.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_scan_descending_returns_records_in_reverse_order() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_scan_descending", object_store)
@@ -2370,10 +2414,7 @@ mod tests {
         kv_store.put(b"d", b"v3").await.unwrap();
 
         let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
-        let mut iter = kv_store
-            .scan_with_options::<Vec<u8>, _>(.., &scan_options)
-            .await
-            .unwrap();
+        let mut iter = kv_store.scan_with_options(.., &scan_options).await.unwrap();
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"d");
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"b");
@@ -2400,7 +2441,7 @@ mod tests {
 
         let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
         let mut iter = kv_store
-            .scan_with_options::<Vec<u8>, _>(b"b".to_vec()..b"d".to_vec(), &scan_options)
+            .scan_with_options(b"b".to_vec()..b"d".to_vec(), &scan_options)
             .await
             .unwrap();
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
@@ -2427,10 +2468,7 @@ mod tests {
         kv_store.delete(b"d").await.unwrap();
 
         let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
-        let mut iter = kv_store
-            .scan_with_options::<Vec<u8>, _>(.., &scan_options)
-            .await
-            .unwrap();
+        let mut iter = kv_store.scan_with_options(.., &scan_options).await.unwrap();
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"a");
         assert_eq!(iter.next().await.unwrap(), None);
@@ -3987,7 +4025,10 @@ mod tests {
             let seek_key = sample::bytes_in_range(rng, scan_range);
             iter.seek(seek_key.clone()).await.unwrap();
 
-            let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
+            let seek_range = BytesRange::new(
+                Included(seek_key),
+                std::ops::RangeBounds::end_bound(scan_range).cloned(),
+            );
             test_utils::assert_ranged_db_scan(
                 table,
                 seek_range,
@@ -9192,7 +9233,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut iter = db.scan::<Bytes, _>(..).await.unwrap();
+        let mut iter = db.scan(..).await.unwrap();
 
         let row_entry1 = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(row_entry1.key, Bytes::from_static(b"key1"));
@@ -9294,7 +9335,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // when:
-        let mut iter = db.scan::<&[u8], _>(..).await.unwrap();
+        let mut iter = db.scan(..).await.unwrap();
         let _ = iter.next().await;
 
         // then:
@@ -10610,7 +10651,7 @@ mod tests {
         .await;
 
         let mut asc_iter = reader
-            .scan::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec())
+            .scan(b"aaa".to_vec()..=b"ddd-999".to_vec())
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(
@@ -10623,7 +10664,7 @@ mod tests {
 
         let desc_options = ScanOptions::default().with_order(IterationOrder::Descending);
         let mut desc_iter = reader
-            .scan_with_options::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec(), &desc_options)
+            .scan_with_options(b"aaa".to_vec()..=b"ddd-999".to_vec(), &desc_options)
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(
@@ -10635,7 +10676,7 @@ mod tests {
         .await;
 
         let mut gap_iter = reader
-            .scan::<Vec<u8>, _>(b"bbc".to_vec()..=b"ddd-002".to_vec())
+            .scan(b"bbc".to_vec()..=b"ddd-002".to_vec())
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(

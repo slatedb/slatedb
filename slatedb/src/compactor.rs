@@ -1881,7 +1881,7 @@ mod tests {
         .expect("not every segment compacted before scan");
 
         // Full ascending scan crosses every segment in prefix order.
-        let mut iter = db.scan::<Vec<u8>, _>(..).await.unwrap();
+        let mut iter = db.scan(..).await.unwrap();
         let mut collected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         while let Some(kv) = iter.next().await.unwrap() {
             collected.push((kv.key.to_vec(), kv.value.to_vec()));
@@ -1909,7 +1909,7 @@ mod tests {
         // Cross-segment range scan: spans the tail of aaa, all of bbb, and stops
         // before the head of ccc.
         let mut iter = db
-            .scan::<Vec<u8>, _>(b"aaa-002".to_vec()..b"ccc-001".to_vec())
+            .scan(b"aaa-002".to_vec()..b"ccc-001".to_vec())
             .await
             .unwrap();
         let mut keys: Vec<Vec<u8>> = Vec::new();

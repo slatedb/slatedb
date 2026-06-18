@@ -2987,6 +2987,7 @@ impl<'a> Compaction<'a> {
   pub const VT_STATUS: flatbuffers::VOffsetT = 10;
   pub const VT_OUTPUT_SSTS: flatbuffers::VOffsetT = 12;
   pub const VT_WORKER: flatbuffers::VOffsetT = 14;
+  pub const VT_SUBCOMPACTIONS: flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2998,6 +2999,7 @@ impl<'a> Compaction<'a> {
     args: &'args CompactionArgs<'args>
   ) -> flatbuffers::WIPOffset<Compaction<'bldr>> {
     let mut builder = CompactionBuilder::new(_fbb);
+    if let Some(x) = args.subcompactions { builder.add_subcompactions(x); }
     if let Some(x) = args.worker { builder.add_worker(x); }
     if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
     if let Some(x) = args.spec { builder.add_spec(x); }
@@ -3051,6 +3053,13 @@ impl<'a> Compaction<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<WorkerSpec>>(Compaction::VT_WORKER, None)}
   }
   #[inline]
+  pub fn subcompactions(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction>>>>(Compaction::VT_SUBCOMPACTIONS, None)}
+  }
+  #[inline]
   #[allow(non_snake_case)]
   pub fn spec_as_tiered_compaction_spec(&self) -> Option<TieredCompactionSpec<'a>> {
     if self.spec_type() == CompactionSpec::TieredCompactionSpec {
@@ -3098,6 +3107,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
      .visit_field::<CompactionStatus>("status", Self::VT_STATUS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("output_ssts", Self::VT_OUTPUT_SSTS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<WorkerSpec>>("worker", Self::VT_WORKER, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Subcompaction>>>>("subcompactions", Self::VT_SUBCOMPACTIONS, false)?
      .finish();
     Ok(())
   }
@@ -3109,6 +3119,7 @@ pub struct CompactionArgs<'a> {
     pub status: CompactionStatus,
     pub output_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub worker: Option<flatbuffers::WIPOffset<WorkerSpec<'a>>>,
+    pub subcompactions: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>>>,
 }
 impl<'a> Default for CompactionArgs<'a> {
   #[inline]
@@ -3120,6 +3131,7 @@ impl<'a> Default for CompactionArgs<'a> {
       status: CompactionStatus::Submitted,
       output_ssts: None,
       worker: None,
+      subcompactions: None,
     }
   }
 }
@@ -3152,6 +3164,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_worker(&mut self, worker: flatbuffers::WIPOffset<WorkerSpec<'b >>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<WorkerSpec>>(Compaction::VT_WORKER, worker);
+  }
+  #[inline]
+  pub fn add_subcompactions(&mut self, subcompactions: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Subcompaction<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_SUBCOMPACTIONS, subcompactions);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionBuilder<'a, 'b, A> {
@@ -3198,6 +3214,122 @@ impl core::fmt::Debug for Compaction<'_> {
       ds.field("status", &self.status());
       ds.field("output_ssts", &self.output_ssts());
       ds.field("worker", &self.worker());
+      ds.field("subcompactions", &self.subcompactions());
+      ds.finish()
+  }
+}
+pub enum SubcompactionOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct Subcompaction<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Subcompaction<'a> {
+  type Inner = Subcompaction<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> Subcompaction<'a> {
+  pub const VT_RANGE: flatbuffers::VOffsetT = 4;
+  pub const VT_OUTPUT_SSTS: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    Subcompaction { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SubcompactionArgs<'args>
+  ) -> flatbuffers::WIPOffset<Subcompaction<'bldr>> {
+    let mut builder = SubcompactionBuilder::new(_fbb);
+    if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
+    if let Some(x) = args.range { builder.add_range(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn range(&self) -> BytesRange<'a> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<BytesRange>>(Subcompaction::VT_RANGE, None).unwrap()}
+  }
+  #[inline]
+  pub fn output_ssts(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>(Subcompaction::VT_OUTPUT_SSTS, None)}
+  }
+}
+
+impl flatbuffers::Verifiable for Subcompaction<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("range", Self::VT_RANGE, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("output_ssts", Self::VT_OUTPUT_SSTS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SubcompactionArgs<'a> {
+    pub range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
+    pub output_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
+}
+impl<'a> Default for SubcompactionArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SubcompactionArgs {
+      range: None, // required field
+      output_ssts: None,
+    }
+  }
+}
+
+pub struct SubcompactionBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SubcompactionBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_range(&mut self, range: flatbuffers::WIPOffset<BytesRange<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<BytesRange>>(Subcompaction::VT_RANGE, range);
+  }
+  #[inline]
+  pub fn add_output_ssts(&mut self, output_ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Subcompaction::VT_OUTPUT_SSTS, output_ssts);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SubcompactionBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SubcompactionBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Subcompaction<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, Subcompaction::VT_RANGE,"range");
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for Subcompaction<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("Subcompaction");
+      ds.field("range", &self.range());
+      ds.field("output_ssts", &self.output_ssts());
       ds.finish()
   }
 }

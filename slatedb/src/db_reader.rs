@@ -1,4 +1,4 @@
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
@@ -36,7 +36,7 @@ use parking_lot::RwLock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 use std::collections::{BTreeSet, VecDeque};
-use std::ops::{RangeBounds, Sub};
+use std::ops::Sub;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tokio::runtime::Handle;
@@ -999,10 +999,9 @@ impl DbReader {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
+    pub async fn scan<T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         self.scan_with_options(range, &ScanOptions::default()).await
     }
@@ -1053,21 +1052,16 @@ impl DbReader {
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
-    pub async fn scan_with_options<K, T>(
+    pub async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let start = range.start_bound().map(Bytes::copy_from_slice);
+        let end = range.end_bound().map(Bytes::copy_from_slice);
         let range = BytesRange::from((start, end));
         self.inner
             .scan_with_options(range, options, None)
@@ -1089,14 +1083,14 @@ impl DbReader {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    pub async fn scan_prefix<'a, P, T>(
+    pub async fn scan_prefix<P, T>(
         &self,
         prefix: P,
         subrange: T,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
@@ -1114,7 +1108,7 @@ impl DbReader {
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
-    pub async fn scan_prefix_with_options<'a, P, T>(
+    pub async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1122,7 +1116,7 @@ impl DbReader {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
@@ -1187,19 +1181,18 @@ impl DbReadOps for DbReader {
         DbReader::get_key_value_with_options(self, key, options).await
     }
 
-    async fn scan_with_options<K, T>(
+    async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         DbReader::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<'a, P, T>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
         subrange: T,
@@ -1207,7 +1200,7 @@ impl DbReadOps for DbReader {
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
-        T: RangeBounds<&'a [u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         DbReader::scan_prefix_with_options(self, prefix, subrange, options).await
     }
@@ -1319,7 +1312,6 @@ mod tests {
     use slatedb_common::DbRand;
     use slatedb_common::MockSystemClock;
     use std::collections::{BTreeMap, VecDeque};
-    use std::ops::RangeFull;
     use std::sync::Arc;
     use std::time::Duration;
     use uuid::Uuid;
@@ -1646,7 +1638,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut db_iter = reader.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut db_iter = reader.scan(..).await.unwrap();
         let mut table = BTreeMap::new();
         table.insert(
             Bytes::copy_from_slice(checkpoint_key),
@@ -1688,7 +1680,7 @@ mod tests {
         db.flush().await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let mut db_iter = reader.scan::<Vec<u8>, _>(..).await.unwrap();
+        let mut db_iter = reader.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
             .await;
 

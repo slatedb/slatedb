@@ -33,6 +33,7 @@ pub use fail_parallel;
 pub use object_store;
 
 pub use batch::WriteBatch;
+pub use bytes_range::ByteRangeBounds;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 #[cfg(feature = "compaction_filters")]
@@ -159,6 +160,7 @@ mod sst_iter;
 mod sst_reader;
 mod sst_stats;
 mod store_provider;
+mod subcompaction;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;
