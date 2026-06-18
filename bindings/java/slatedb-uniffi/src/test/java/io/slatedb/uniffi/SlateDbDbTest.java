@@ -213,13 +213,13 @@ class SlateDbDbTest {
                                     TestSupport.bytes("item:"),
                                     new KeyRange(
                                             TestSupport.bytes("02"),
-                                            true,
+                                            false,
                                             TestSupport.bytes("03"),
                                             true)))) {
                 TestSupport.assertRows(
                         TestSupport.drainIterator(iterator),
-                        new String[] {"item:02", "item:03"},
-                        new String[] {"second", "third"});
+                        new String[] {"item:03"},
+                        new String[] {"third"});
             }
 
             try (DbIterator iterator =

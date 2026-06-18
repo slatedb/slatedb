@@ -208,15 +208,15 @@ async def test_db_scan_variants() -> None:
             b"item:",
             KeyRange(
                 start=b"02",
-                start_inclusive=True,
+                start_inclusive=False,
                 end=b"03",
                 end_inclusive=True,
             ),
         )
         require_rows(
             await drain_iterator(bounded_prefix_scan),
-            ["item:02", "item:03"],
-            ["second", "third"],
+            ["item:03"],
+            ["third"],
         )
 
         prefix_scan_with_options = await db.scan_prefix_with_options(
