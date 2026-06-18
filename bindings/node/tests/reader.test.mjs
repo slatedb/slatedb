@@ -146,6 +146,18 @@ test("reader scan variants", async (t) => {
     ["first", "second", "third"],
   );
 
+  const boundedPrefixScan = cleanup.track(await reader.scan_prefix(bytes("item:"), {
+    start: bytes("02"),
+    start_inclusive: true,
+    end: bytes("03"),
+    end_inclusive: true,
+  }));
+  requireRows(
+    await drainIterator(boundedPrefixScan),
+    ["item:02", "item:03"],
+    ["second", "third"],
+  );
+
   const prefixScanWithOptions = cleanup.track(await reader.scan_prefix_with_options(
     bytes("item:"),
     fullRange(),

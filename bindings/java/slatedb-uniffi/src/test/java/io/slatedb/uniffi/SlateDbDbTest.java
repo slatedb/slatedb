@@ -209,6 +209,21 @@ class SlateDbDbTest {
 
             try (DbIterator iterator =
                     TestSupport.await(
+                            db.scanPrefix(
+                                    TestSupport.bytes("item:"),
+                                    new KeyRange(
+                                            TestSupport.bytes("02"),
+                                            true,
+                                            TestSupport.bytes("03"),
+                                            true)))) {
+                TestSupport.assertRows(
+                        TestSupport.drainIterator(iterator),
+                        new String[] {"item:02", "item:03"},
+                        new String[] {"second", "third"});
+            }
+
+            try (DbIterator iterator =
+                    TestSupport.await(
                             db.scanPrefixWithOptions(
                                     TestSupport.bytes("item:"),
                                     new KeyRange(null, false, null, false),

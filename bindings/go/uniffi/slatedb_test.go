@@ -779,6 +779,18 @@ func TestDbScanVariants(t *testing.T) {
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 
+	iter, err = handle.db.ScanPrefix([]byte("item:"), slatedb.KeyRange{
+		Start:          bytesPtr([]byte("02")),
+		StartInclusive: true,
+		End:            bytesPtr([]byte("03")),
+		EndInclusive:   true,
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix(bounded): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+	requireRows(t, drainIterator(t, iter), []string{"item:02", "item:03"}, []string{"second", "third"})
+
 	iter, err = handle.db.ScanPrefixWithOptions(
 		[]byte("item:"),
 		slatedb.KeyRange{},
@@ -1281,6 +1293,18 @@ func TestDbReaderScanVariants(t *testing.T) {
 	}
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
+
+	iter, err = readerHandle.reader.ScanPrefix([]byte("item:"), slatedb.KeyRange{
+		Start:          bytesPtr([]byte("02")),
+		StartInclusive: true,
+		End:            bytesPtr([]byte("03")),
+		EndInclusive:   true,
+	})
+	if err != nil {
+		t.Fatalf("DbReader.ScanPrefix(bounded): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+	requireRows(t, drainIterator(t, iter), []string{"item:02", "item:03"}, []string{"second", "third"})
 
 	iter, err = readerHandle.reader.ScanPrefixWithOptions(
 		[]byte("item:"),

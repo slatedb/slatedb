@@ -140,6 +140,21 @@ async def test_reader_scan_variants() -> None:
                 ["first", "second", "third"],
             )
 
+            bounded_prefix_scan = await reader.scan_prefix(
+                b"item:",
+                KeyRange(
+                    start=b"02",
+                    start_inclusive=True,
+                    end=b"03",
+                    end_inclusive=True,
+                ),
+            )
+            require_rows(
+                await drain_iterator(bounded_prefix_scan),
+                ["item:02", "item:03"],
+                ["second", "third"],
+            )
+
             prefix_scan_with_options = await reader.scan_prefix_with_options(
                 b"item:",
                 KeyRange(
