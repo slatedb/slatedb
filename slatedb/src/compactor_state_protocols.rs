@@ -334,6 +334,7 @@ impl CompactorStateWriter {
 mod tests {
     use super::*;
     use crate::admin::AdminBuilder;
+    use crate::bytes_range::BytesRange;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
@@ -344,6 +345,7 @@ mod tests {
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
+    use crate::subcompaction::Subcompaction;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -638,7 +640,8 @@ mod tests {
         dirty.value.insert(
             Compaction::new(running_id, CompactionSpec::new(vec![], 0))
                 .with_status(CompactionStatus::Running)
-                .with_output_ssts(output_ssts.clone()),
+                .with_subcompactions(vec![Subcompaction::new(BytesRange::unbounded())
+                    .with_output_ssts(output_ssts.clone())]),
         );
         stored_compactions.update(dirty).await.unwrap();
 
@@ -661,10 +664,10 @@ mod tests {
             .value
             .get(&running_id)
             .expect("missing running compaction");
-        // new() leaves Running entries untouched and preserves their output_ssts
+        // new() leaves Running entries untouched and preserves their output
         // through the load; reclaiming stale ones is the ticker's job.
         assert_eq!(compaction.status(), CompactionStatus::Running);
-        assert_eq!(compaction.output_ssts(), &output_ssts);
+        assert_eq!(compaction.output_ssts(), output_ssts);
     }
 
     /// `CompactorStateWriter::new` no longer reclaims stale `Running`

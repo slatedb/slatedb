@@ -87,7 +87,9 @@ table Compaction {
     // Current lifecycle status for this compaction
     status: CompactionStatus;
 
-    // Output SSTs already produced by this compaction.
+    // Deprecated (RFC-0028): produced output now lives per-range in
+    // `subcompactions`. Retained for wire conformance; no longer read or
+    // written by current code.
     output_ssts: [CompactedSsTable];
 
     // Spec of the worker that has claimed this compaction. null = unclaimed
