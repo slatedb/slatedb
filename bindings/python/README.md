@@ -28,6 +28,7 @@ import asyncio
 from slatedb.uniffi import (
     DbBuilder,
     IsolationLevel,
+    KeyRange,
     ObjectStore,
     WriteBatch,
 )
@@ -48,7 +49,15 @@ async def main() -> None:
         batch.put(b"user:3", b"Carol")
         await db.write(batch)
 
-        scan = await db.scan_prefix(b"user:")
+        scan = await db.scan_prefix(
+            b"user:",
+            KeyRange(
+                start=None,
+                start_inclusive=False,
+                end=None,
+                end_inclusive=False,
+            ),
+        )
         while (row := await scan.next()) is not None:
             print(row.key, row.value)
 

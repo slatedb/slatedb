@@ -116,7 +116,10 @@ class SlateDbReaderTest {
                 }
 
                 try (DbIterator iterator =
-                        TestSupport.await(reader.scanPrefix(TestSupport.bytes("item:")))) {
+                        TestSupport.await(
+                                reader.scanPrefix(
+                                        TestSupport.bytes("item:"),
+                                        new KeyRange(null, false, null, false)))) {
                     TestSupport.assertRows(
                             TestSupport.drainIterator(iterator),
                             new String[] {"item:01", "item:02", "item:03"},
@@ -125,8 +128,24 @@ class SlateDbReaderTest {
 
                 try (DbIterator iterator =
                         TestSupport.await(
+                                reader.scanPrefix(
+                                        TestSupport.bytes("item:"),
+                                        new KeyRange(
+                                                TestSupport.bytes("02"),
+                                                false,
+                                                TestSupport.bytes("03"),
+                                                true)))) {
+                    TestSupport.assertRows(
+                            TestSupport.drainIterator(iterator),
+                            new String[] {"item:03"},
+                            new String[] {"third"});
+                }
+
+                try (DbIterator iterator =
+                        TestSupport.await(
                                 reader.scanPrefixWithOptions(
                                         TestSupport.bytes("item:"),
+                                        new KeyRange(null, false, null, false),
                                         TestSupport.scanOptions(32L, false, 1L)))) {
                     TestSupport.assertRows(
                             TestSupport.drainIterator(iterator),
