@@ -95,6 +95,10 @@ finally:
     await db.shutdown()
 ```
 
+## Runtime Notes
+
+Writable databases and readers enter a dedicated multi-threaded Tokio runtime while opening so SlateDB's long-lived background tasks capture a multi-threaded Tokio handle. Foreground binding calls are still awaited through the normal Python async API. By default, the runtime uses the host's available parallelism. Set `SLATEDB_UNIFFI_RUNTIME_THREADS` to a positive integer before the first `DbBuilder.build()` or `DbReaderBuilder.build()` call to override the worker thread count for the lifetime of the process.
+
 ## Local Development
 
 This package reuses the shared Rust UniFFI crate at `../uniffi/Cargo.toml`. The generated Python module under `slatedb/uniffi/_slatedb_uniffi/` is build output and should not be edited by hand.

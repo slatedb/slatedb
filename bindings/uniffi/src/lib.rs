@@ -13,6 +13,7 @@ mod logging;
 mod merge_operator;
 mod metrics;
 mod object_store;
+mod runtime;
 mod settings;
 mod types;
 mod validation;
