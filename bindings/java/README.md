@@ -51,6 +51,8 @@ Maven:
 - most database operations return `CompletableFuture`
 - native-backed handles implement `AutoCloseable` and should be closed
 
+Writable databases and readers enter a dedicated multi-threaded Tokio runtime while opening so SlateDB's long-lived background tasks capture a multi-threaded Tokio handle. Foreground binding calls are still awaited through the normal Java `CompletableFuture` API. By default, the runtime uses the host's available parallelism. Set `SLATEDB_UNIFFI_RUNTIME_THREADS` to a positive integer before the first `DbBuilder.build()` or `DbReaderBuilder.build()` call to override the worker thread count for the lifetime of the process.
+
 ## Metrics
 
 Use `DefaultMetricsRecorder` when you want to observe SlateDB metrics from Java without wiring a

@@ -12,6 +12,7 @@ use crate::filter_policy::{
 use crate::merge_operator::{adapt_merge_operator, MergeOperator};
 use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
+use crate::runtime;
 use crate::settings::Settings;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
@@ -137,7 +138,7 @@ impl DbBuilder {
     /// Opens the database and consumes this builder.
     pub async fn build(&self) -> Result<Arc<Db>, Error> {
         let builder = self.take_builder()?;
-        let db = builder.build().await?;
+        let db = runtime::enter(async move { builder.build().await.map_err(Error::from) }).await?;
         Ok(Arc::new(Db::new(db)))
     }
 }
@@ -247,7 +248,8 @@ impl DbReaderBuilder {
     /// Opens the reader and consumes this builder.
     pub async fn build(&self) -> Result<Arc<DbReader>, Error> {
         let builder = self.take_builder()?;
-        let reader = builder.build().await?;
+        let reader =
+            runtime::enter(async move { builder.build().await.map_err(Error::from) }).await?;
         Ok(Arc::new(DbReader::new(reader)))
     }
 }
