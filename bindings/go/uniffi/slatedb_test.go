@@ -772,7 +772,7 @@ func TestDbScanVariants(t *testing.T) {
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 
-	iter, err = handle.db.ScanPrefix([]byte("item:"))
+	iter, err = handle.db.ScanPrefix([]byte("item:"), slatedb.KeyRange{})
 	if err != nil {
 		t.Fatalf("ScanPrefix(): %v", err)
 	}
@@ -781,6 +781,7 @@ func TestDbScanVariants(t *testing.T) {
 
 	iter, err = handle.db.ScanPrefixWithOptions(
 		[]byte("item:"),
+		slatedb.KeyRange{},
 		slatedb.ScanOptions{
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
@@ -1274,7 +1275,7 @@ func TestDbReaderScanVariants(t *testing.T) {
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 
-	iter, err = readerHandle.reader.ScanPrefix([]byte("item:"))
+	iter, err = readerHandle.reader.ScanPrefix([]byte("item:"), slatedb.KeyRange{})
 	if err != nil {
 		t.Fatalf("DbReader.ScanPrefix(): %v", err)
 	}
@@ -1283,6 +1284,7 @@ func TestDbReaderScanVariants(t *testing.T) {
 
 	iter, err = readerHandle.reader.ScanPrefixWithOptions(
 		[]byte("item:"),
+		slatedb.KeyRange{},
 		slatedb.ScanOptions{
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,

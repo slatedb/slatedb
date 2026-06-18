@@ -81,22 +81,31 @@ impl DbSnapshot {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    /// Scans rows whose keys start with `prefix` as of this snapshot.
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
-        let iter = self.inner.scan_prefix(prefix, ..).await?;
+    /// Scans rows whose keys start with `prefix` as of this snapshot,
+    /// restricted to `subrange`.
+    pub async fn scan_prefix(
+        &self,
+        prefix: Vec<u8>,
+        subrange: KeyRange,
+    ) -> Result<Arc<DbIterator>, Error> {
+        let subrange = subrange.into_bounds()?;
+        let iter = self.inner.scan_prefix(prefix, subrange).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    /// Scans rows whose keys start with `prefix` as of this snapshot using custom options.
+    /// Scans rows whose keys start with `prefix` as of this snapshot,
+    /// restricted to `subrange`, using custom options.
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
+        subrange: KeyRange,
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
+        let subrange = subrange.into_bounds()?;
         let options = options.try_into()?;
         let iter = self
             .inner
-            .scan_prefix_with_options(prefix, .., &options)
+            .scan_prefix_with_options(prefix, subrange, &options)
             .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }

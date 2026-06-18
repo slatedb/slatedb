@@ -202,7 +202,7 @@ test("db scan variants", async (t) => {
     ["first", "second", "third"],
   );
 
-  const prefixScan = cleanup.track(await db.scan_prefix(bytes("item:")));
+  const prefixScan = cleanup.track(await db.scan_prefix(bytes("item:"), fullRange()));
   requireRows(
     await drainIterator(prefixScan),
     ["item:01", "item:02", "item:03"],
@@ -211,6 +211,7 @@ test("db scan variants", async (t) => {
 
   const prefixScanWithOptions = cleanup.track(await db.scan_prefix_with_options(
     bytes("item:"),
+    fullRange(),
     scanOptions(32, false, 1),
   ));
   requireRows(
