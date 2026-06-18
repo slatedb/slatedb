@@ -267,10 +267,10 @@ impl CompactionExecuteBench {
             destination: 0,
             sst_views,
             sorted_runs: vec![],
-            subcompactions: vec![],
             compaction_clock_tick: manifest.db_state().last_l0_clock_tick,
-            retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
+            retention_min_seq: None,
+            job_ctx: None,
         })
     }
 
@@ -307,10 +307,10 @@ impl CompactionExecuteBench {
             destination: 0,
             sst_views: vec![],
             sorted_runs: srs,
-            subcompactions: vec![],
             compaction_clock_tick: state.last_l0_clock_tick,
-            retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
+            retention_min_seq: None,
+            job_ctx: None,
         }
     }
 

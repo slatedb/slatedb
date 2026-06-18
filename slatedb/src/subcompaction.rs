@@ -55,7 +55,6 @@ impl Subcompaction {
     /// Sets the output SSTs produced by this subcompaction.
     // Consumed by the subcompaction executor in a follow-up RFC-0028 PR; this
     // PR only introduces the data model and its extend-only contract.
-    #[allow(dead_code)]
     pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
         assert!(
             output_ssts.starts_with(self.output_ssts.as_slice()),

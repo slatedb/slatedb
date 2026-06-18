@@ -2987,7 +2987,7 @@ impl<'a> Compaction<'a> {
   pub const VT_STATUS: flatbuffers::VOffsetT = 10;
   pub const VT_OUTPUT_SSTS: flatbuffers::VOffsetT = 12;
   pub const VT_WORKER: flatbuffers::VOffsetT = 14;
-  pub const VT_SUBCOMPACTIONS: flatbuffers::VOffsetT = 16;
+  pub const VT_JOB_CTX: flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2999,7 +2999,7 @@ impl<'a> Compaction<'a> {
     args: &'args CompactionArgs<'args>
   ) -> flatbuffers::WIPOffset<Compaction<'bldr>> {
     let mut builder = CompactionBuilder::new(_fbb);
-    if let Some(x) = args.subcompactions { builder.add_subcompactions(x); }
+    if let Some(x) = args.job_ctx { builder.add_job_ctx(x); }
     if let Some(x) = args.worker { builder.add_worker(x); }
     if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
     if let Some(x) = args.spec { builder.add_spec(x); }
@@ -3053,11 +3053,11 @@ impl<'a> Compaction<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<WorkerSpec>>(Compaction::VT_WORKER, None)}
   }
   #[inline]
-  pub fn subcompactions(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>> {
+  pub fn job_ctx(&self) -> Option<CompactionJobContext<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction>>>>(Compaction::VT_SUBCOMPACTIONS, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<CompactionJobContext>>(Compaction::VT_JOB_CTX, None)}
   }
   #[inline]
   #[allow(non_snake_case)]
@@ -3107,7 +3107,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
      .visit_field::<CompactionStatus>("status", Self::VT_STATUS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("output_ssts", Self::VT_OUTPUT_SSTS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<WorkerSpec>>("worker", Self::VT_WORKER, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Subcompaction>>>>("subcompactions", Self::VT_SUBCOMPACTIONS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<CompactionJobContext>>("job_ctx", Self::VT_JOB_CTX, false)?
      .finish();
     Ok(())
   }
@@ -3119,7 +3119,7 @@ pub struct CompactionArgs<'a> {
     pub status: CompactionStatus,
     pub output_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub worker: Option<flatbuffers::WIPOffset<WorkerSpec<'a>>>,
-    pub subcompactions: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>>>,
+    pub job_ctx: Option<flatbuffers::WIPOffset<CompactionJobContext<'a>>>,
 }
 impl<'a> Default for CompactionArgs<'a> {
   #[inline]
@@ -3131,7 +3131,7 @@ impl<'a> Default for CompactionArgs<'a> {
       status: CompactionStatus::Submitted,
       output_ssts: None,
       worker: None,
-      subcompactions: None,
+      job_ctx: None,
     }
   }
 }
@@ -3166,8 +3166,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<WorkerSpec>>(Compaction::VT_WORKER, worker);
   }
   #[inline]
-  pub fn add_subcompactions(&mut self, subcompactions: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Subcompaction<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_SUBCOMPACTIONS, subcompactions);
+  pub fn add_job_ctx(&mut self, job_ctx: flatbuffers::WIPOffset<CompactionJobContext<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<CompactionJobContext>>(Compaction::VT_JOB_CTX, job_ctx);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionBuilder<'a, 'b, A> {
@@ -3214,7 +3214,121 @@ impl core::fmt::Debug for Compaction<'_> {
       ds.field("status", &self.status());
       ds.field("output_ssts", &self.output_ssts());
       ds.field("worker", &self.worker());
+      ds.field("job_ctx", &self.job_ctx());
+      ds.finish()
+  }
+}
+pub enum CompactionJobContextOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct CompactionJobContext<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for CompactionJobContext<'a> {
+  type Inner = CompactionJobContext<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> CompactionJobContext<'a> {
+  pub const VT_SUBCOMPACTIONS: flatbuffers::VOffsetT = 4;
+  pub const VT_RETENTION_MIN_SEQ: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    CompactionJobContext { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CompactionJobContextArgs<'args>
+  ) -> flatbuffers::WIPOffset<CompactionJobContext<'bldr>> {
+    let mut builder = CompactionJobContextBuilder::new(_fbb);
+    builder.add_retention_min_seq(args.retention_min_seq);
+    if let Some(x) = args.subcompactions { builder.add_subcompactions(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn subcompactions(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction>>>>(CompactionJobContext::VT_SUBCOMPACTIONS, None)}
+  }
+  #[inline]
+  pub fn retention_min_seq(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CompactionJobContext::VT_RETENTION_MIN_SEQ, Some(0)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for CompactionJobContext<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Subcompaction>>>>("subcompactions", Self::VT_SUBCOMPACTIONS, false)?
+     .visit_field::<u64>("retention_min_seq", Self::VT_RETENTION_MIN_SEQ, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CompactionJobContextArgs<'a> {
+    pub subcompactions: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>>>,
+    pub retention_min_seq: u64,
+}
+impl<'a> Default for CompactionJobContextArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CompactionJobContextArgs {
+      subcompactions: None,
+      retention_min_seq: 0,
+    }
+  }
+}
+
+pub struct CompactionJobContextBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionJobContextBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_subcompactions(&mut self, subcompactions: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Subcompaction<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(CompactionJobContext::VT_SUBCOMPACTIONS, subcompactions);
+  }
+  #[inline]
+  pub fn add_retention_min_seq(&mut self, retention_min_seq: u64) {
+    self.fbb_.push_slot::<u64>(CompactionJobContext::VT_RETENTION_MIN_SEQ, retention_min_seq, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionJobContextBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CompactionJobContextBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<CompactionJobContext<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for CompactionJobContext<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("CompactionJobContext");
       ds.field("subcompactions", &self.subcompactions());
+      ds.field("retention_min_seq", &self.retention_min_seq());
       ds.finish()
   }
 }

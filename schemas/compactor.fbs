@@ -81,23 +81,32 @@ table Compaction {
     // ID of compaction
     id: Ulid (required);
 
-    // Specificaiton defining the work to be done for this compaction
+    // Specification defining the work to be done for this compaction
     spec: CompactionSpec (required);
 
     // Current lifecycle status for this compaction
     status: CompactionStatus;
 
-    // Deprecated (RFC-0028): produced output now lives per-range in
-    // `subcompactions`. Retained for wire conformance; no longer read or
-    // written by current code.
+    // Output SSTs of the compaction (set in Compacted state)
     output_ssts: [CompactedSsTable];
 
     // Spec of the worker that has claimed this compaction. null = unclaimed
     worker: WorkerSpec;
 
+    // Information required to resume a compaction job
+    job_ctx: CompactionJobContext;
+}
+
+// Holds information required to resume a running job or inspect the result of
+// a complete compaction job. This includes the outputs of planning (e.g.
+// subcompactions, retention_min_seq) along with the job's outputs
+table CompactionJobContext {
     // Subcompactions partitioning this compaction into non-overlapping key
     // ranges (RFC-0028).
     subcompactions: [Subcompaction];
+
+    // The min retention seq num to use when executing the compaction
+    retention_min_seq: ulong;
 }
 
 // A compaction over a sub-range of the parent compaction's key space
