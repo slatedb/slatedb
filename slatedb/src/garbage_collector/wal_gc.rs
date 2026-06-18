@@ -5,11 +5,12 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use log::error;
-use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask};
+use super::filter::retain_allowed_by_gc_filter;
+use super::{GcFilter, GcStats, GcTask};
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 
 /// Selects which class of WAL object a [`WalGcTask`] collects.
 ///
@@ -36,6 +37,7 @@ pub(crate) struct WalGcTask {
     stats: Arc<GcStats>,
     wal_options: GarbageCollectorDirectoryOptions,
     mode: WalGcMode,
+    gc_filter: Option<Arc<dyn GcFilter>>,
 }
 
 impl std::fmt::Debug for WalGcTask {
@@ -54,6 +56,7 @@ impl WalGcTask {
         stats: Arc<GcStats>,
         wal_options: GarbageCollectorDirectoryOptions,
         mode: WalGcMode,
+        gc_filter: Option<Arc<dyn GcFilter>>,
     ) -> Self {
         WalGcTask {
             manifest_store,
@@ -61,6 +64,7 @@ impl WalGcTask {
             stats,
             wal_options,
             mode,
+            gc_filter,
         }
     }
 
@@ -99,7 +103,7 @@ impl GcTask for WalGcTask {
             .await?;
         let last_compacted_wal_sst_id = latest_manifest.manifest.core.replay_after_wal_id;
         let min_age = self.wal_sst_min_age();
-        let sst_ids_to_delete = self
+        let ssts_to_delete = self
             .table_store
             .list_wal_ssts(..last_compacted_wal_sst_id)
             .await?
@@ -119,6 +123,10 @@ impl GcTask for WalGcTask {
                     &active_manifests,
                 )
             })
+            .collect::<Vec<_>>();
+        let ssts_to_delete = retain_allowed_by_gc_filter(&self.gc_filter, ssts_to_delete).await;
+        let sst_ids_to_delete = ssts_to_delete
+            .into_iter()
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 

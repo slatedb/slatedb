@@ -5,7 +5,7 @@ use object_store::{path::Path, ObjectMeta};
 ///
 /// This mirrors [`object_store::ObjectMeta`] so SlateDB crates can use a common
 /// public type without exposing the upstream crate's type directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectMetadata {
     /// The full path to the object.
     pub location: Path,
