@@ -351,14 +351,14 @@ pub struct Compaction {
     ///
     /// This is tracked only in memory at the moment.
     status: CompactionStatus,
-    /// Output SSTs produced by this compaction, if any.
-    output_ssts: Vec<SsTableHandle>,
     /// The worker that has claimed this compaction. `None` means the
     /// compaction is unclaimed (only valid when `status == Submitted`).
     worker: Option<WorkerSpec>,
     /// Subcompactions partitioning this compaction into non-overlapping key
-    /// ranges (RFC-0028). Empty when the compaction runs as a single merge
-    /// over the full keyspace.
+    /// ranges (RFC-0028). The produced output SSTs are recorded per range
+    /// here; the aggregate is exposed via [`Compaction::output_ssts`]. A
+    /// compaction that runs as a single merge has one range spanning the full
+    /// keyspace. Empty only before any progress has been recorded.
     subcompactions: Vec<Subcompaction>,
 }
 
@@ -369,7 +369,6 @@ impl Compaction {
             spec,
             bytes_processed: 0,
             status: CompactionStatus::Submitted,
-            output_ssts: Vec::new(),
             worker: None,
             subcompactions: Vec::new(),
         }
@@ -377,11 +376,6 @@ impl Compaction {
 
     pub(crate) fn with_status(mut self, status: CompactionStatus) -> Self {
         self.status = status;
-        self
-    }
-
-    pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
-        self.output_ssts = output_ssts;
         self
     }
 
@@ -465,27 +459,20 @@ impl Compaction {
         self.status
     }
 
-    /// Sets the output SSTs produced by this compaction.
-    // Consumed once the worker wires up progress/heartbeat emission in the
-    // failure-detection follow-up.
-    #[allow(dead_code)]
-    pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
-        assert!(
-            output_ssts.starts_with(self.output_ssts.as_slice()),
-            "new output SSTs must always extend previous output SSTs"
-        );
-        self.output_ssts = output_ssts;
-    }
-
-    /// Returns the output SSTs produced by this compaction.
-    pub fn output_ssts(&self) -> &Vec<SsTableHandle> {
-        &self.output_ssts
+    /// Returns all output SSTs produced by this compaction, aggregated across
+    /// its subcompactions in range (ascending key) order. Subcompaction ranges
+    /// partition the keyspace and are stored in order, so the concatenation is
+    /// the destination sorted run's SSTs in key order.
+    pub fn output_ssts(&self) -> Vec<SsTableHandle> {
+        self.subcompactions
+            .iter()
+            .flat_map(|s| s.output_ssts().iter().cloned())
+            .collect()
     }
 
     /// Sets the subcompactions for this compaction. The plan (number of
     /// subcompactions and their ranges) is immutable once set; updates may
-    /// only advance per-range status and extend per-range output SSTs.
-    #[allow(dead_code)]
+    /// only extend per-range output SSTs.
     pub(crate) fn set_subcompactions(&mut self, subcompactions: Vec<Subcompaction>) {
         if !self.subcompactions.is_empty() {
             assert_eq!(

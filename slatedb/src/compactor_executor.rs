@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::bytes_range::BytesRange;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 #[cfg(feature = "compaction_filters")]
@@ -29,6 +30,7 @@ use crate::peeking_iterator::PeekingIterator;
 use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::subcompaction::Subcompaction;
 use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
@@ -63,8 +65,10 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) sst_views: Vec<SsTableView>,
     /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
-    /// Output SSTs already written for this compaction when resuming.
-    pub(crate) output_ssts: Vec<SsTableHandle>,
+    /// Subcompactions for this job and their already-written output SSTs
+    /// (RFC-0028), used to resume after a reclaim. A single unbounded range
+    /// means the job runs as one merge; empty means no progress was recorded.
+    pub(crate) subcompactions: Vec<Subcompaction>,
     /// The clock tick representing the time the compaction occurs. This is used
     /// to make decisions about retention of expiring records.
     pub(crate) compaction_clock_tick: i64,
@@ -72,6 +76,17 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) is_dest_last_run: bool,
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
+}
+
+impl StartCompactionJobArgs {
+    /// Output SSTs to resume the merge from: the produced output of the job's
+    /// single subcompaction (RFC-0028), or empty when none has been recorded.
+    fn resume_output_ssts(&self) -> &[SsTableHandle] {
+        self.subcompactions
+            .first()
+            .map(|s| s.output_ssts().as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 impl std::fmt::Debug for StartCompactionJobArgs {
@@ -82,7 +97,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("destination", &self.destination)
             .field("ssts", &self.sst_views)
             .field("sorted_runs", &self.sorted_runs)
-            .field("output_ssts", &self.output_ssts)
+            .field("subcompactions", &self.subcompactions)
             .field("compaction_clock_tick", &self.compaction_clock_tick)
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("retention_min_seq", &self.retention_min_seq)
@@ -263,7 +278,7 @@ impl TokioCompactionExecutorInner {
         &self,
         job_args: &'a StartCompactionJobArgs,
     ) -> Result<ResumingIterator<Box<dyn TrackedRowEntryIterator + 'a>>, SlateDBError> {
-        let resume_cursor = match job_args.output_ssts.last() {
+        let resume_cursor = match job_args.resume_output_ssts().last() {
             Some(output_sst) => {
                 last_written_key_and_seq(self.table_store.clone(), output_sst).await?
             }
@@ -362,6 +377,11 @@ impl TokioCompactionExecutorInner {
         bytes_processed: u64,
         output_ssts: &[SsTableHandle],
     ) {
+        // A job is a single merge over one unbounded range, so report progress
+        // as one subcompaction (RFC-0028) covering the whole key space.
+        let subcompactions = vec![
+            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output_ssts.to_vec())
+        ];
         // Allow send() because we are treating the executor like an external
         // component. They can do what they want. If the send fails (e.g., during
         // DB shutdown), we log it and continue with the compaction work.
@@ -371,7 +391,7 @@ impl TokioCompactionExecutorInner {
             .try_send(WorkerMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
-                output_ssts: output_ssts.to_vec(),
+                subcompactions,
             })
         {
             debug!(
@@ -416,9 +436,18 @@ impl TokioCompactionExecutorInner {
         &self,
         args: StartCompactionJobArgs,
     ) -> Result<SortedRun, SlateDBError> {
+        // Each job runs as a single merge over one (unbounded) range, so resume
+        // and progress reporting only ever look at the first subcompaction.
+        // Splitting a job into multiple ranges is not yet executed; guard the
+        // assumption so a future planner can't silently drop ranges here.
+        assert!(
+            args.subcompactions.len() <= 1,
+            "executor runs each job as a single merge; got {} subcompactions",
+            args.subcompactions.len()
+        );
         debug!("executing compaction [job_args={:?}]", args);
         let mut all_iter = self.load_iterators(&args).await?;
-        let mut output_ssts = args.output_ssts.clone();
+        let mut output_ssts = args.resume_output_ssts().to_vec();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
         ));
@@ -1128,6 +1157,11 @@ mod tests {
         } else {
             Vec::new()
         };
+        let subcompactions = if output_ssts.is_empty() {
+            vec![]
+        } else {
+            vec![Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output_ssts)]
+        };
 
         // Build compaction args that resume from the output SST starting point and expect
         // the iterator to continue at the correct next row.
@@ -1137,7 +1171,7 @@ mod tests {
             destination: 0,
             sst_views: l0_sst_views,
             sorted_runs,
-            output_ssts,
+            subcompactions,
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq,
@@ -1305,7 +1339,7 @@ mod tests {
                         destination: 0,
                         sst_views: l0_ssts.clone(),
                         sorted_runs: sorted_runs.clone(),
-                        output_ssts: Vec::new(),
+                        subcompactions: Vec::new(),
                         compaction_clock_tick: 0,
                         is_dest_last_run: false,
                         retention_min_seq,
@@ -1350,7 +1384,8 @@ mod tests {
                             destination: 0,
                             sst_views: l0_ssts.clone(),
                             sorted_runs: sorted_runs.clone(),
-                            output_ssts,
+                            subcompactions: vec![Subcompaction::new(BytesRange::unbounded())
+                                .with_output_ssts(output_ssts)],
                             compaction_clock_tick: 0,
                             is_dest_last_run: false,
                             retention_min_seq,
@@ -1461,7 +1496,7 @@ mod tests {
             destination: 0,
             sst_views,
             sorted_runs: vec![],
-            output_ssts: vec![],
+            subcompactions: vec![],
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
@@ -1634,7 +1669,7 @@ mod tests {
                 destination: 0,
                 sst_views: ssts.into_iter().map(SsTableView::identity).collect(),
                 sorted_runs: vec![],
-                output_ssts: vec![],
+                subcompactions: vec![],
                 compaction_clock_tick: 0,
                 is_dest_last_run,
                 retention_min_seq,

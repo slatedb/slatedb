@@ -880,7 +880,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix()
 		})
-		if checksum != 44288 {
+		if checksum != 23945 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix: UniFFI API checksum mismatch")
 		}
@@ -889,7 +889,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options()
 		})
-		if checksum != 34774 {
+		if checksum != 8173 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
@@ -1015,7 +1015,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix()
 		})
-		if checksum != 2510 {
+		if checksum != 16399 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix: UniFFI API checksum mismatch")
 		}
@@ -1024,7 +1024,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options()
 		})
-		if checksum != 46251 {
+		if checksum != 35795 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
@@ -1114,7 +1114,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix()
 		})
-		if checksum != 57746 {
+		if checksum != 55324 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix: UniFFI API checksum mismatch")
 		}
@@ -1123,7 +1123,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options()
 		})
-		if checksum != 4221 {
+		if checksum != 38325 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
@@ -1276,7 +1276,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix()
 		})
-		if checksum != 28799 {
+		if checksum != 25663 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix: UniFFI API checksum mismatch")
 		}
@@ -1285,7 +1285,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options()
 		})
-		if checksum != 31002 {
+		if checksum != 2853 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
@@ -3051,10 +3051,11 @@ type DbInterface interface {
 	PutWithOptions(key []byte, value []byte, putOptions PutOptions, writeOptions WriteOptions) (WriteHandle, error)
 	// Scans rows inside `range`.
 	Scan(varRange KeyRange) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix`.
-	ScanPrefix(prefix []byte) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix` using custom scan options.
-	ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix`, restricted to `subrange`.
+	ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix`, restricted to `subrange`,
+	// using custom scan options.
+	ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Scans rows inside `range` using custom scan options.
 	ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Flushes outstanding work and closes the database.
@@ -3614,8 +3615,8 @@ func (_self *Db) Scan(varRange KeyRange) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix`.
-func (_self *Db) ScanPrefix(prefix []byte) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix`, restricted to `subrange`.
+func (_self *Db) ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -3630,7 +3631,7 @@ func (_self *Db) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
@@ -3648,8 +3649,9 @@ func (_self *Db) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix` using custom scan options.
-func (_self *Db) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix`, restricted to `subrange`,
+// using custom scan options.
+func (_self *Db) ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -3664,7 +3666,7 @@ func (_self *Db) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbI
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
@@ -4481,10 +4483,11 @@ type DbReaderInterface interface {
 	GetWithOptions(key []byte, options ReadOptions) (*[]byte, error)
 	// Scans rows inside `range`.
 	Scan(varRange KeyRange) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix`.
-	ScanPrefix(prefix []byte) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix` using custom scan options.
-	ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix`, restricted to `subrange`.
+	ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix`, restricted to `subrange`,
+	// using custom scan options.
+	ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Scans rows inside `range` using custom scan options.
 	ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Closes the reader.
@@ -4716,8 +4719,8 @@ func (_self *DbReader) Scan(varRange KeyRange) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix`.
-func (_self *DbReader) ScanPrefix(prefix []byte) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix`, restricted to `subrange`.
+func (_self *DbReader) ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -4732,7 +4735,7 @@ func (_self *DbReader) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
@@ -4750,8 +4753,9 @@ func (_self *DbReader) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix` using custom scan options.
-func (_self *DbReader) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix`, restricted to `subrange`,
+// using custom scan options.
+func (_self *DbReader) ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -4766,7 +4770,7 @@ func (_self *DbReader) ScanPrefixWithOptions(prefix []byte, options ScanOptions)
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
@@ -5186,10 +5190,12 @@ type DbSnapshotInterface interface {
 	GetWithOptions(key []byte, options ReadOptions) (*[]byte, error)
 	// Scans rows inside `range` as of this snapshot.
 	Scan(varRange KeyRange) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix` as of this snapshot.
-	ScanPrefix(prefix []byte) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix` as of this snapshot using custom options.
-	ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix` as of this snapshot,
+	// restricted to `subrange`.
+	ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix` as of this snapshot,
+	// restricted to `subrange`, using custom options.
+	ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Scans rows inside `range` as of this snapshot using custom scan options.
 	ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error)
 }
@@ -5377,8 +5383,9 @@ func (_self *DbSnapshot) Scan(varRange KeyRange) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix` as of this snapshot.
-func (_self *DbSnapshot) ScanPrefix(prefix []byte) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix` as of this snapshot,
+// restricted to `subrange`.
+func (_self *DbSnapshot) ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -5393,7 +5400,7 @@ func (_self *DbSnapshot) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
@@ -5411,8 +5418,9 @@ func (_self *DbSnapshot) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix` as of this snapshot using custom options.
-func (_self *DbSnapshot) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix` as of this snapshot,
+// restricted to `subrange`, using custom options.
+func (_self *DbSnapshot) ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbSnapshot")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -5427,7 +5435,7 @@ func (_self *DbSnapshot) ScanPrefixWithOptions(prefix []byte, options ScanOption
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
@@ -5573,10 +5581,12 @@ type DbTransactionInterface interface {
 	Rollback() error
 	// Scans rows inside `range` as visible to this transaction.
 	Scan(varRange KeyRange) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix` as visible to this transaction.
-	ScanPrefix(prefix []byte) (*DbIterator, error)
-	// Scans rows whose keys start with `prefix` as visible to this transaction using custom options.
-	ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix` as visible to this transaction,
+	// restricted to `subrange`.
+	ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error)
+	// Scans rows whose keys start with `prefix` as visible to this transaction,
+	// restricted to `subrange`, using custom options.
+	ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Scans rows inside `range` as visible to this transaction using custom options.
 	ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Returns the sequence number assigned when the transaction started.
@@ -6083,8 +6093,9 @@ func (_self *DbTransaction) Scan(varRange KeyRange) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix` as visible to this transaction.
-func (_self *DbTransaction) ScanPrefix(prefix []byte) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix` as visible to this transaction,
+// restricted to `subrange`.
+func (_self *DbTransaction) ScanPrefix(prefix []byte, subrange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -6099,7 +6110,7 @@ func (_self *DbTransaction) ScanPrefix(prefix []byte) (*DbIterator, error) {
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
@@ -6117,8 +6128,9 @@ func (_self *DbTransaction) ScanPrefix(prefix []byte) (*DbIterator, error) {
 	return res, err
 }
 
-// Scans rows whose keys start with `prefix` as visible to this transaction using custom options.
-func (_self *DbTransaction) ScanPrefixWithOptions(prefix []byte, options ScanOptions) (*DbIterator, error) {
+// Scans rows whose keys start with `prefix` as visible to this transaction,
+// restricted to `subrange`, using custom options.
+func (_self *DbTransaction) ScanPrefixWithOptions(prefix []byte, subrange KeyRange, options ScanOptions) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -6133,7 +6145,7 @@ func (_self *DbTransaction) ScanPrefixWithOptions(prefix []byte, options ScanOpt
 			return FfiConverterDbIteratorINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterScanOptionsINSTANCE.Lower(options)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(prefix), FfiConverterKeyRangeINSTANCE.Lower(subrange), FfiConverterScanOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
