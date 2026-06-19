@@ -173,7 +173,7 @@ impl DbTransaction {
         let range = range.into_bounds()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan::<Vec<u8>, _>(range).await?;
+        let iter = tx.scan(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -187,28 +187,39 @@ impl DbTransaction {
         let options = options.try_into()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan_with_options::<Vec<u8>, _>(range, &options).await?;
+        let iter = tx.scan_with_options(range, &options).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    /// Scans rows whose keys start with `prefix` as visible to this transaction.
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
+    /// Scans rows whose keys start with `prefix` as visible to this transaction,
+    /// restricted to `subrange`.
+    pub async fn scan_prefix(
+        &self,
+        prefix: Vec<u8>,
+        subrange: KeyRange,
+    ) -> Result<Arc<DbIterator>, Error> {
+        let subrange = subrange.into_bounds()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan_prefix(prefix).await?;
+        let iter = tx.scan_prefix(prefix, subrange).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    /// Scans rows whose keys start with `prefix` as visible to this transaction using custom options.
+    /// Scans rows whose keys start with `prefix` as visible to this transaction,
+    /// restricted to `subrange`, using custom options.
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
+        subrange: KeyRange,
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
+        let subrange = subrange.into_bounds()?;
         let options = options.try_into()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        let iter = tx.scan_prefix_with_options(prefix, &options).await?;
+        let iter = tx
+            .scan_prefix_with_options(prefix, subrange, &options)
+            .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 

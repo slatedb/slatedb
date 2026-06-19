@@ -14,7 +14,7 @@ async fn main() -> Result<(), Error> {
     db.put(b"test_key10", b"test_value10").await?;
 
     // Scan over unbound range
-    let mut iter = db.scan::<Vec<u8>, _>(..).await?;
+    let mut iter = db.scan(..).await?;
     // Scans return bytewise key order
     let expected = [
         ("test_key1", "test_value1"),
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Error> {
     assert_eq!(iter.next().await?, None);
 
     // Seek ahead to next key
-    let mut iter = db.scan::<Vec<u8>, _>(..).await?;
+    let mut iter = db.scan(..).await?;
     let next_key = b"test_key4";
     iter.seek(next_key).await?;
     let kv4 = iter.next().await?.unwrap();
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Error> {
     assert_eq!(iter.next().await?, None);
 
     // Scan over prefix
-    let mut prefixed = db.scan_prefix(b"test_key1").await?;
+    let mut prefixed = db.scan_prefix(b"test_key1", ..).await?;
     let expected_keys: [&[u8]; 2] = [b"test_key1", b"test_key10"];
     for expected_key in expected_keys {
         let kv = prefixed.next().await?.unwrap();

@@ -12,6 +12,7 @@ import {
 } from "../index.js";
 import {
   ConcatMergeOperator,
+  FixedThreeByteSegmentExtractor,
   TEST_DB_PATH,
   bytes,
   createCleanup,
@@ -47,6 +48,53 @@ test("db lifecycle and status", async (t) => {
       message: "Closed error: db is closed",
     },
   );
+});
+
+function requireSegments(segments, ...want) {
+  assert.equal(segments.length, want.length, `unexpected segment count: ${JSON.stringify(segments)}`);
+  for (const [index, prefix] of want.entries()) {
+    assert.deepEqual(segments[index].prefix, bytes(prefix), `unexpected segment at index ${index}`);
+  }
+}
+
+test("db status segments without extractor", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  const db = await openDb(store, { cleanup });
+
+  await db.put(bytes("aaa-1"), bytes("value"));
+
+  requireSegments(db.status().segments);
+});
+
+test("db status segments with extractor", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  const db = await openDb(store, {
+    cleanup,
+    configure(builder) {
+      builder.with_segment_extractor(new FixedThreeByteSegmentExtractor());
+    },
+  });
+
+  requireSegments(db.status().segments);
+
+  await db.put(bytes("bbb-1"), bytes("value"));
+  await db.put(bytes("aaa-1"), bytes("value"));
+
+  // Unflushed writes are reported from the memtable, sorted by prefix.
+  requireSegments(db.status().segments, "aaa", "bbb");
+
+  // Another write in an existing segment must not produce a duplicate.
+  await db.put(bytes("aaa-2"), bytes("value"));
+  requireSegments(db.status().segments, "aaa", "bbb");
+
+  // Segments survive the flush from memtable to manifest.
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+  requireSegments(db.status().segments, "aaa", "bbb");
+
+  // A key the extractor cannot route to a segment is rejected.
+  await expectInvalid(() => db.put(bytes("xy"), bytes("value")));
 });
 
 test("db crud and metadata", async (t) => {
@@ -154,15 +202,28 @@ test("db scan variants", async (t) => {
     ["first", "second", "third"],
   );
 
-  const prefixScan = cleanup.track(await db.scan_prefix(bytes("item:")));
+  const prefixScan = cleanup.track(await db.scan_prefix(bytes("item:"), fullRange()));
   requireRows(
     await drainIterator(prefixScan),
     ["item:01", "item:02", "item:03"],
     ["first", "second", "third"],
   );
 
+  const boundedPrefixScan = cleanup.track(await db.scan_prefix(bytes("item:"), {
+    start: bytes("02"),
+    start_inclusive: false,
+    end: bytes("03"),
+    end_inclusive: true,
+  }));
+  requireRows(
+    await drainIterator(boundedPrefixScan),
+    ["item:03"],
+    ["third"],
+  );
+
   const prefixScanWithOptions = cleanup.track(await db.scan_prefix_with_options(
     bytes("item:"),
+    fullRange(),
     scanOptions(32, false, 1),
   ));
   requireRows(

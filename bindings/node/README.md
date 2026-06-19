@@ -191,6 +191,8 @@ tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/linux-x64-gnu/libslatedb_unif
 
 The published `@slatedb/uniffi` tarball contains generated JavaScript and TypeScript bindings plus bundled native libraries. Consumers install one npm package; there is no separate Rust build step or native download in normal usage.
 
+Writable databases and readers enter a dedicated multi-threaded Tokio runtime while opening so SlateDB's long-lived background tasks capture a multi-threaded Tokio handle. Foreground binding calls are still awaited through the normal JavaScript async API. By default, the runtime uses the host's available parallelism. Set `SLATEDB_UNIFFI_RUNTIME_THREADS` to a positive integer before the first `DbBuilder.build()` or `DbReaderBuilder.build()` call to override the worker thread count for the lifetime of the process.
+
 At runtime, the package loads the native library that matches the current host from `prebuilds/<target>/`. The published package currently includes:
 
 - `linux-x64-gnu`

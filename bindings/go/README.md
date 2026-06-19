@@ -23,6 +23,14 @@ If you are working from this repository, that usually means building
 `target/debug` or `target/release`. See [DEVELOPMENT.md](DEVELOPMENT.md) for
 more details.
 
+Writable databases and readers enter a dedicated multi-threaded Tokio runtime
+while opening so SlateDB's long-lived background tasks capture a multi-threaded
+Tokio handle. Foreground binding calls are still made through the normal Go API.
+By default, the runtime uses the host's available parallelism. Set
+`SLATEDB_UNIFFI_RUNTIME_THREADS` to a positive integer before the first
+`DbBuilder.Build()` or `DbReaderBuilder.Build()` call to override the worker
+thread count for the lifetime of the process.
+
 ## Quick Start
 
 ```go

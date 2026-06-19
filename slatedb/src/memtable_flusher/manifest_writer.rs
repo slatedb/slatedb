@@ -877,7 +877,7 @@ mod tests {
     use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
@@ -1035,6 +1035,7 @@ mod tests {
             PathResolver::new(Path::from(path.clone())),
             Arc::clone(&fp_registry),
             None,
+            TableStoreKind::Main,
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =

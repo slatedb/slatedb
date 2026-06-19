@@ -66,7 +66,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils;
     use bytes::Bytes;
     use chrono::TimeDelta;
@@ -446,6 +446,7 @@ mod tests {
             SsTableFormat::default(),
             path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let sst_handle = SsTableView::identity(table_store.open_sst(table_id).await.unwrap());
 

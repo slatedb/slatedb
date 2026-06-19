@@ -4,6 +4,7 @@ import pytest
 
 from conftest import (
     ConcatMergeOperator,
+    FixedThreeByteSegmentExtractor,
     TEST_DB_PATH,
     drain_iterator,
     merge_options,
@@ -44,6 +45,49 @@ async def test_db_lifecycle_and_status() -> None:
         await db.put(b"after-shutdown", b"value")
     assert exc.value.reason == CloseReason.CLEAN
     assert exc.value.message == "Closed error: db is closed"
+
+
+def require_segments(segments: list, *want: str) -> None:
+    assert [segment.prefix for segment in segments] == [prefix.encode() for prefix in want]
+
+
+@pytest.mark.asyncio
+async def test_db_status_segments_without_extractor() -> None:
+    store = new_memory_store()
+
+    async with open_db(store) as db:
+        await db.put(b"aaa-1", b"value")
+
+        require_segments(db.status().segments)
+
+
+@pytest.mark.asyncio
+async def test_db_status_segments_with_extractor() -> None:
+    store = new_memory_store()
+
+    def configure(builder: DbBuilder) -> None:
+        builder.with_segment_extractor(FixedThreeByteSegmentExtractor())
+
+    async with open_db(store, configure=configure) as db:
+        require_segments(db.status().segments)
+
+        await db.put(b"bbb-1", b"value")
+        await db.put(b"aaa-1", b"value")
+
+        # Unflushed writes are reported from the memtable, sorted by prefix.
+        require_segments(db.status().segments, "aaa", "bbb")
+
+        # Another write in an existing segment must not produce a duplicate.
+        await db.put(b"aaa-2", b"value")
+        require_segments(db.status().segments, "aaa", "bbb")
+
+        # Segments survive the flush from memtable to manifest.
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+        require_segments(db.status().segments, "aaa", "bbb")
+
+        # A key the extractor cannot route to a segment is rejected.
+        with pytest.raises(Error.Invalid):
+            await db.put(b"xy", b"value")
 
 
 @pytest.mark.asyncio
@@ -145,15 +189,44 @@ async def test_db_scan_variants() -> None:
             ["first", "second", "third"],
         )
 
-        prefix_scan = await db.scan_prefix(b"item:")
+        prefix_scan = await db.scan_prefix(
+            b"item:",
+            KeyRange(
+                start=None,
+                start_inclusive=False,
+                end=None,
+                end_inclusive=False,
+            ),
+        )
         require_rows(
             await drain_iterator(prefix_scan),
             ["item:01", "item:02", "item:03"],
             ["first", "second", "third"],
         )
 
+        bounded_prefix_scan = await db.scan_prefix(
+            b"item:",
+            KeyRange(
+                start=b"02",
+                start_inclusive=False,
+                end=b"03",
+                end_inclusive=True,
+            ),
+        )
+        require_rows(
+            await drain_iterator(bounded_prefix_scan),
+            ["item:03"],
+            ["third"],
+        )
+
         prefix_scan_with_options = await db.scan_prefix_with_options(
             b"item:",
+            KeyRange(
+                start=None,
+                start_inclusive=False,
+                end=None,
+                end_inclusive=False,
+            ),
             scan_options(32, False, 1),
         )
         require_rows(

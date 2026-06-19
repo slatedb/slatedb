@@ -77,7 +77,7 @@ impl slatedb::PrefixExtractor for PrefixExtractorAdapter {
     }
 }
 
-fn adapt_prefix_extractor(
+pub(crate) fn adapt_prefix_extractor(
     extractor: Arc<dyn PrefixExtractor>,
 ) -> Arc<dyn slatedb::PrefixExtractor> {
     Arc::new(PrefixExtractorAdapter::new(extractor))

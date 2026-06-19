@@ -1,12 +1,11 @@
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashSet;
-use std::ops::RangeBounds;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::batch::{WriteBatch, WriteBatchIterator};
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
@@ -193,10 +192,9 @@ impl DbTransaction {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
+    pub async fn scan<T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         self.scan_with_options(range, &ScanOptions::default()).await
     }
@@ -210,62 +208,74 @@ impl DbTransaction {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_with_options<K, T>(
+    pub async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         // TODO: this range conversion logic can be extract to an util
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
-        self.scan_inner(BytesRange::from(range), options, None)
-            .await
+        let start = range.start_bound().map(Bytes::copy_from_slice);
+        let end = range.end_bound().map(Bytes::copy_from_slice);
+        let range = BytesRange::from((start, end));
+        self.scan_inner(range, options, None).await
     }
 
-    /// Scan all keys that share the provided prefix using the default scan options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// using the default scan options.
     /// This operation will track the read range for conflict detection in SSI mode.
+    ///
+    /// The subrange bounds are key *suffixes* interpreted relative to the
+    /// prefix: a bound `s` selects the full key `prefix ++ s`. Pass `..` to
+    /// scan the prefix's entire keyspace.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    pub async fn scan_prefix<P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+    ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
-        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
     }
 
-    /// Scan all keys that share the provided prefix with custom options.
+    /// Scan keys that share the provided prefix, restricted to `subrange`,
+    /// with custom options. See [`Self::scan_prefix`] for the subrange
+    /// semantics.
     /// This operation will track the read range for conflict detection in SSI mode.
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
+    ///   scan; `..` scans all keys with the prefix
     /// - `options`: the scan options to use
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_prefix_with_options<P>(
+    pub async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
+        subrange: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
-        let range = BytesRange::from_prefix(prefix.as_ref());
+        let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
         self.scan_inner(range, options, Some(prefix)).await
     }
 
@@ -632,27 +642,28 @@ impl DbReadOps for DbTransaction {
         DbTransaction::get_key_value_with_options(self, key, options).await
     }
 
-    async fn scan_with_options<K, T>(
+    async fn scan_with_options<T>(
         &self,
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
+        T: ByteRangeBounds + Send,
     {
         DbTransaction::scan_with_options(self, range, options).await
     }
 
-    async fn scan_prefix_with_options<P>(
+    async fn scan_prefix_with_options<P, T>(
         &self,
         prefix: P,
+        subrange: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
+        T: ByteRangeBounds + Send,
     {
-        DbTransaction::scan_prefix_with_options(self, prefix, options).await
+        DbTransaction::scan_prefix_with_options(self, prefix, subrange, options).await
     }
 }
 
@@ -1095,7 +1106,7 @@ mod tests {
             .unwrap();
 
         {
-            let mut iter = txn1.scan_prefix(b"users/").await.unwrap();
+            let mut iter = txn1.scan_prefix(b"users/", ..).await.unwrap();
             assert!(iter.next().await.unwrap().is_none(), "no users yet");
         }
 
@@ -1104,6 +1115,62 @@ mod tests {
 
         txn1.put(b"users/bob", b"second").unwrap();
         assert!(txn1.commit().await.is_err());
+    }
+
+    /// A `scan_prefix` with a bounded subrange must register exactly the
+    /// composed range for SSI conflict detection: a concurrent write inside
+    /// the subrange aborts the transaction even if never yielded, while a
+    /// write under the same prefix but outside the subrange does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_ssi_scan_prefix_subrange_tracks_composed_range() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        db.put(b"users/m_mallory", b"v").await.unwrap();
+        db.flush().await.unwrap();
+
+        // A write under the prefix but before the subrange start is not a
+        // conflict: the tracked range starts at users/m, not users/.
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        {
+            let mut iter = txn1
+                .scan_prefix(b"users/", b"m".as_slice()..)
+                .await
+                .unwrap();
+            let kv = iter.next().await.unwrap().expect("mallory in subrange");
+            assert_eq!(kv.key.as_ref(), b"users/m_mallory");
+            assert!(iter.next().await.unwrap().is_none());
+        }
+        db.put(b"users/alice", b"outside subrange").await.unwrap();
+        txn1.put(b"t1_marker", b"x").unwrap();
+        txn1.commit()
+            .await
+            .expect("write under prefix but outside subrange must not conflict");
+
+        // A write inside the subrange is a phantom even though the scan never
+        // yielded it.
+        let txn2 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        {
+            let mut iter = txn2
+                .scan_prefix(b"users/", b"m".as_slice()..)
+                .await
+                .unwrap();
+            let kv = iter.next().await.unwrap().expect("mallory in subrange");
+            assert_eq!(kv.key.as_ref(), b"users/m_mallory");
+            assert!(iter.next().await.unwrap().is_none());
+        }
+        db.put(b"users/zach", b"inside subrange").await.unwrap();
+        txn2.put(b"t2_marker", b"x").unwrap();
+        assert!(
+            txn2.commit().await.is_err(),
+            "write inside the subrange must abort the transaction"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

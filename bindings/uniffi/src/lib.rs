@@ -13,6 +13,7 @@ mod logging;
 mod merge_operator;
 mod metrics;
 mod object_store;
+mod runtime;
 mod settings;
 mod types;
 mod validation;
@@ -44,11 +45,12 @@ pub use object_store::ObjectStore;
 pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,
-    CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat, KeyRange, KeyValue,
-    RowEntry, RowEntryKind, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo,
-    SsTableView, SstType, VersionedCompactions, VersionedManifest, WriteHandle,
+    CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat,
+    IdentifiedObjectMetadata, KeyRange, KeyValue, ObjectMetadata, RowEntry, RowEntryKind,
+    SegmentPrefix, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
+    SstType, VersionedCompactions, VersionedManifest, WriteHandle,
 };
-pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
+pub use wal_reader::{WalFile, WalFileIterator, WalReader};
 pub use write_batch::WriteBatch;
 
 uniffi::setup_scaffolding!("slatedb");

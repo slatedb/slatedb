@@ -59,8 +59,9 @@ use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::object_stores::ObjectStores;
 use crate::sst_stats::SstStats;
-use crate::tablestore::{SstFileMetadata, TableStore};
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
+use crate::IdentifiedObjectMetadata;
 
 /// Opens compacted SST files for read-only inspection.
 ///
@@ -93,6 +94,7 @@ impl SstReader {
             sst_format,
             root_path.into(),
             cache,
+            TableStoreKind::Reader,
         ));
         Self { table_store }
     }
@@ -164,11 +166,13 @@ impl SstFile {
     ///
     /// Returns an error if the SST file does not exist or if there is an
     /// issue reading from object storage.
-    pub async fn metadata(&self) -> Result<SstFileMetadata, crate::Error> {
-        self.table_store
+    pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata<Ulid>, crate::Error> {
+        let metadata = self
+            .table_store
             .metadata(&self.handle.id)
             .await
-            .map_err(Into::into)
+            .map_err(crate::Error::from)?;
+        Ok(IdentifiedObjectMetadata::new(self.id, metadata))
     }
 
     /// Reads the stats block from object storage.
@@ -252,6 +256,7 @@ impl SstFile {
 mod tests {
     use super::*;
     use crate::config::{FlushOptions, FlushType, PutOptions, SstBlockSize, WriteOptions};
+    use crate::paths::PathResolver;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
     use crate::Db;
@@ -481,8 +486,12 @@ mod tests {
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let metadata = sst_file.metadata().await.unwrap();
 
-        assert!(metadata.size > 0);
-        assert!(matches!(metadata.id, SsTableId::Compacted(_)));
+        assert_eq!(metadata.id, view.sst.id.unwrap_compacted_id());
+        assert!(metadata.metadata.size > 0);
+        assert_eq!(
+            metadata.metadata.location,
+            PathResolver::new(path).table_path(&view.sst.id)
+        );
     }
 
     #[tokio::test]

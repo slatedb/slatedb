@@ -13,7 +13,7 @@ SlateDB stores key-value pairs sorted by key in lexicographic byte order. A rang
 Use `Db::scan(..)` to iterate over the full keyspace. Range scans follow bytewise key order, so `test_key10` sorts before `test_key2`. If numeric order matters, use fixed-width encodings such as `test_key02` and `test_key10`.
 
 ```rust
-let mut entries = db.scan::<Vec<u8>, _>(..).await?;
+let mut entries = db.scan(..).await?;
 while let Some(kv) = entries.next().await? {
     println!("{:?} = {:?}", kv.key, kv.value);
 }
@@ -28,7 +28,7 @@ db.scan("test_key2".."test_key4").await?;  // excludes test_key4
 db.scan("test_key2"..="test_key4").await?; // includes test_key4
 db.scan("test_key2"..).await?;             // test_key2 and later
 db.scan(.."test_key4").await?;             // before test_key4
-db.scan::<Vec<u8>, _>(..).await?;          // all keys
+db.scan(..).await?;          // all keys
 ```
 
 ## Seek within a scan
@@ -36,7 +36,7 @@ db.scan::<Vec<u8>, _>(..).await?;          // all keys
 Call `seek` on an iterator to fast-forward to the first key equal to or greater than the requested key. The seek target must stay inside the original scan range and must move forward from the iterator's current position.
 
 ```rust
-let mut iter = db.scan::<Vec<u8>, _>(..).await?;
+let mut iter = db.scan(..).await?;
 iter.seek(b"test_key3").await?;
 let kv = iter.next().await?.unwrap();
 assert_eq!(kv.key.as_ref(), b"test_key3");
@@ -44,10 +44,11 @@ assert_eq!(kv.key.as_ref(), b"test_key3");
 
 ## Scan for prefixes
 
-If your access pattern is "all keys that start with this prefix," use `scan_prefix` instead of manually building a start and end range.
+If your access pattern is "all keys that start with this prefix," use `scan_prefix` instead of manually building a start and end range. The second argument restricts the scan to a range of key *suffixes* relative to the prefix; pass `..` to scan the prefix's entire keyspace. You can pass ordinary Rust range syntax directly, including suffix ranges over byte slices or `Vec<u8>`.
 
 ```rust
-let mut iter = db.scan_prefix(b"test_key").await?;
+let mut iter = db.scan_prefix(b"test_key", ..).await?;   // all keys with the prefix
+let mut iter = db.scan_prefix(b"test_key", b"2"..).await?; // test_key2 onward
 ```
 
 ## Complete example

@@ -1406,6 +1406,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::bytes_range::BytesRange;
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
@@ -1432,7 +1433,8 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::tablestore::TableStore;
+    use crate::subcompaction::Subcompaction;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, FixedThreeBytePrefixExtractor, GatedObjectStore};
     use crate::types::KeyValue;
     use crate::types::RowEntry;
@@ -2022,7 +2024,7 @@ mod tests {
         .expect("not every segment compacted before scan");
 
         // Full ascending scan crosses every segment in prefix order.
-        let mut iter = db.scan::<Vec<u8>, _>(..).await.unwrap();
+        let mut iter = db.scan(..).await.unwrap();
         let mut collected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         while let Some(kv) = iter.next().await.unwrap() {
             collected.push((kv.key.to_vec(), kv.value.to_vec()));
@@ -2034,7 +2036,7 @@ mod tests {
 
         // Per-segment prefix scan should return only that segment's keys.
         for prefix in prefixes {
-            let mut iter = db.scan_prefix(prefix).await.unwrap();
+            let mut iter = db.scan_prefix(prefix, ..).await.unwrap();
             let mut keys: Vec<Vec<u8>> = Vec::new();
             while let Some(kv) = iter.next().await.unwrap() {
                 keys.push(kv.key.to_vec());
@@ -2050,7 +2052,7 @@ mod tests {
         // Cross-segment range scan: spans the tail of aaa, all of bbb, and stops
         // before the head of ccc.
         let mut iter = db
-            .scan::<Vec<u8>, _>(b"aaa-002".to_vec()..b"ccc-001".to_vec())
+            .scan(b"aaa-002".to_vec()..b"ccc-001".to_vec())
             .await
             .unwrap();
         let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -4693,7 +4695,7 @@ mod tests {
                     destination,
                     sst_views,
                     sorted_runs,
-                    output_ssts: compaction.output_ssts().clone(),
+                    subcompactions: compaction.subcompactions().clone(),
                     compaction_clock_tick: db_state.last_l0_clock_tick,
                     retention_min_seq: Some(db_state.recent_snapshot_min_seq),
                     is_dest_last_run,
@@ -4724,12 +4726,10 @@ mod tests {
                 loop {
                     stored.refresh().await.unwrap();
                     let mut dirty = stored.prepare_dirty().unwrap();
-                    dirty.value.insert(
-                        compaction
-                            .clone()
-                            .with_status(CompactionStatus::Compacted)
-                            .with_output_ssts(output_ssts.clone()),
-                    );
+                    let mut completed = compaction.clone().with_status(CompactionStatus::Compacted);
+                    completed.set_subcompactions(vec![Subcompaction::new(BytesRange::unbounded())
+                        .with_output_ssts(output_ssts.clone())]);
+                    dirty.value.insert(completed);
                     match stored.update(dirty).await {
                         Ok(()) => break,
                         Err(e) if e.is_sequenced_write_conflict() => continue,
@@ -5689,6 +5689,7 @@ mod tests {
             sst_format,
             Path::from(PATH),
             None,
+            TableStoreKind::Compactor,
         ));
         (manifest_store, compactions_store, table_store)
     }
@@ -5861,6 +5862,20 @@ mod tests {
         )
     }
 
+    // Builds a Compacted compaction whose output is recorded on a single
+    // unbounded-range subcompaction, mirroring what a worker persists on finish.
+    fn compacted_with_output(
+        id: Ulid,
+        spec: CompactionSpec,
+        output: Vec<SsTableHandle>,
+    ) -> Compaction {
+        let mut compaction = Compaction::new(id, spec).with_status(CompactionStatus::Compacted);
+        compaction.set_subcompactions(vec![
+            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output)
+        ]);
+        compaction
+    }
+
     #[tokio::test]
     async fn test_commit_compacted_entries_writes_manifest() {
         // given: a handler with one L0 in the manifest
@@ -5879,9 +5894,7 @@ mod tests {
         let spec = CompactionSpec::new(sources, destination);
         let compaction_id = Ulid::from_parts(1, 0);
         let output_sst = fake_output_sst();
-        let compaction = Compaction::new(compaction_id, spec)
-            .with_status(CompactionStatus::Compacted)
-            .with_output_ssts(vec![output_sst.clone()]);
+        let compaction = compacted_with_output(compaction_id, spec, vec![output_sst.clone()]);
 
         // inject the Compacted compaction into state (bypassing the executor)
         fixture
@@ -5925,12 +5938,11 @@ mod tests {
         // given: a Compacted SR0→SR1 compaction to validate the SR source path removed when not in L0
         let sr1_output_sst = fake_output_sst();
         let sr_compaction_id = Ulid::from_parts(2, 0);
-        let sr_compaction = Compaction::new(
+        let sr_compaction = compacted_with_output(
             sr_compaction_id,
             CompactionSpec::new(vec![SourceId::SortedRun(0)], 1),
-        )
-        .with_status(CompactionStatus::Compacted)
-        .with_output_ssts(vec![sr1_output_sst.clone()]);
+            vec![sr1_output_sst.clone()],
+        );
         fixture
             .handler
             .state_mut()
@@ -5983,9 +5995,7 @@ mod tests {
         let ghost_view_id = Ulid::from_parts(u64::MAX, 0);
         let spec = CompactionSpec::new(vec![SourceId::SstView(ghost_view_id)], 0);
         let compaction_id = Ulid::new();
-        let compaction = Compaction::new(compaction_id, spec)
-            .with_status(CompactionStatus::Compacted)
-            .with_output_ssts(vec![fake_output_sst()]);
+        let compaction = compacted_with_output(compaction_id, spec, vec![fake_output_sst()]);
 
         fixture
             .handler

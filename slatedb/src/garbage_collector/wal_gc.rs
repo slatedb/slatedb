@@ -1,15 +1,16 @@
 use crate::manifest::Manifest;
-use crate::tablestore::SstFileMetadata;
 use crate::{
-    config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
-    tablestore::TableStore,
+    config::GarbageCollectorDirectoryOptions, db_state::SsTableId, error::SlateDBError,
+    manifest::store::ManifestStore, tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
 use log::error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask};
+use super::filter::retain_allowed_by_gc_filter;
+use super::{GcFilter, GcStats, GcTask};
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 
 /// Selects which class of WAL object a [`WalGcTask`] collects.
 ///
@@ -36,6 +37,7 @@ pub(crate) struct WalGcTask {
     stats: Arc<GcStats>,
     wal_options: GarbageCollectorDirectoryOptions,
     mode: WalGcMode,
+    gc_filter: Option<Arc<dyn GcFilter>>,
 }
 
 impl std::fmt::Debug for WalGcTask {
@@ -54,6 +56,7 @@ impl WalGcTask {
         stats: Arc<GcStats>,
         wal_options: GarbageCollectorDirectoryOptions,
         mode: WalGcMode,
+        gc_filter: Option<Arc<dyn GcFilter>>,
     ) -> Self {
         WalGcTask {
             manifest_store,
@@ -61,16 +64,17 @@ impl WalGcTask {
             stats,
             wal_options,
             mode,
+            gc_filter,
         }
     }
 
     fn is_wal_sst_eligible_for_deletion(
         utc_now: &DateTime<Utc>,
-        wal_sst: &SstFileMetadata,
+        wal_sst: &IdentifiedObjectMetadata<SsTableId>,
         min_age: &chrono::Duration,
         active_manifests: &BTreeMap<u64, Manifest>,
     ) -> bool {
-        if utc_now.signed_duration_since(wal_sst.last_modified) <= *min_age {
+        if utc_now.signed_duration_since(wal_sst.metadata.last_modified) <= *min_age {
             return false;
         }
 
@@ -99,16 +103,16 @@ impl GcTask for WalGcTask {
             .await?;
         let last_compacted_wal_sst_id = latest_manifest.manifest.core.replay_after_wal_id;
         let min_age = self.wal_sst_min_age();
-        let sst_ids_to_delete = self
+        let ssts_to_delete = self
             .table_store
             .list_wal_ssts(..last_compacted_wal_sst_id)
             .await?
             .into_iter()
             .filter(|wal_sst| match self.mode {
                 // In regular mode, only consider WAL SSTs with size > 0 for deletion.
-                WalGcMode::Regular => wal_sst.size > 0,
+                WalGcMode::Regular => wal_sst.metadata.size > 0,
                 // In fence mode, only consider zero-byte WAL SSTs for deletion.
-                WalGcMode::Fence => wal_sst.size == 0,
+                WalGcMode::Fence => wal_sst.metadata.size == 0,
             })
             // Respect min_age and any WAL references held by active checkpoint manifests.
             .filter(|wal_sst| {
@@ -119,6 +123,10 @@ impl GcTask for WalGcTask {
                     &active_manifests,
                 )
             })
+            .collect::<Vec<_>>();
+        let ssts_to_delete = retain_allowed_by_gc_filter(&self.gc_filter, ssts_to_delete).await;
+        let sst_ids_to_delete = ssts_to_delete
+            .into_iter()
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 

@@ -15,6 +15,7 @@ use slatedb::manifest::{
 use slatedb::CacheTarget as CoreCacheTarget;
 use slatedb::ValueDeletable;
 use slatedb::{Checkpoint as CoreCheckpoint, VersionedCompactions as CoreVersionedCompactions};
+use slatedb_common::object_metadata::IdentifiedObjectMetadata as CoreIdentifiedObjectMetadata;
 use ulid::Ulid;
 
 use uuid::Uuid;
@@ -122,6 +123,22 @@ impl From<slatedb::WriteHandle> for WriteHandle {
     }
 }
 
+/// A segment (RFC-0024), identified by the key prefix it owns; the segment
+/// spans the key interval `[prefix, prefix++)`.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SegmentPrefix {
+    /// The key prefix owned by the segment.
+    pub prefix: Vec<u8>,
+}
+
+impl From<slatedb::SegmentPrefix> for SegmentPrefix {
+    fn from(value: slatedb::SegmentPrefix) -> Self {
+        Self {
+            prefix: value.prefix.to_vec(),
+        }
+    }
+}
+
 /// Snapshot of the current database lifecycle and durability state.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct DbStatus {
@@ -129,13 +146,20 @@ pub struct DbStatus {
     pub durable_seq: u64,
     /// Present once the handle has been closed.
     pub close_reason: Option<CloseReason>,
+    /// All segment prefixes (RFC-0024) as of this snapshot: those in the
+    /// current manifest unioned with those touched in this handle's memtables
+    /// but not yet flushed. Sorted ascending by prefix and deduplicated; empty
+    /// when no segment extractor is configured.
+    pub segments: Vec<SegmentPrefix>,
 }
 
 impl From<slatedb::DbStatus> for DbStatus {
     fn from(value: slatedb::DbStatus) -> Self {
+        let segments = value.list_segments().into_iter().map(Into::into).collect();
         Self {
             durable_seq: value.durable_seq,
             close_reason: value.close_reason.map(Into::into),
+            segments,
         }
     }
 }
@@ -474,6 +498,54 @@ pub enum SsTableId {
     Wal(u64),
     /// Compacted SST identified by ULID string.
     Compacted(String),
+}
+
+/// Metadata describing an object in object storage.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ObjectMetadata {
+    /// Last-modified timestamp seconds component.
+    pub last_modified_seconds: i64,
+    /// Last-modified timestamp nanoseconds component.
+    pub last_modified_nanos: u32,
+    /// Object size in bytes.
+    pub size: u64,
+    /// Object-store location.
+    pub location: String,
+    /// The object's ETag, when the object store provides one.
+    pub e_tag: Option<String>,
+    /// The object version, when the object store provides one.
+    pub version: Option<String>,
+}
+
+impl From<slatedb::ObjectMetadata> for ObjectMetadata {
+    fn from(metadata: slatedb::ObjectMetadata) -> Self {
+        Self {
+            last_modified_seconds: metadata.last_modified.timestamp(),
+            last_modified_nanos: metadata.last_modified.timestamp_subsec_nanos(),
+            size: metadata.size,
+            location: metadata.location.to_string(),
+            e_tag: metadata.e_tag,
+            version: metadata.version,
+        }
+    }
+}
+
+/// Metadata for an object plus the domain identifier parsed from its path.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct IdentifiedObjectMetadata {
+    /// Parsed domain identifier for the object.
+    pub id: u64,
+    /// Object-store metadata.
+    pub metadata: ObjectMetadata,
+}
+
+impl From<CoreIdentifiedObjectMetadata<u64>> for IdentifiedObjectMetadata {
+    fn from(value: CoreIdentifiedObjectMetadata<u64>) -> Self {
+        Self {
+            id: value.id,
+            metadata: value.metadata.into(),
+        }
+    }
 }
 
 impl From<&CoreSsTableId> for SsTableId {

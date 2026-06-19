@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use serde::Serialize;
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::{Bound, RangeBounds};
+use std::ops::{
+    Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive,
+};
 
 use crate::comparable_range::{ComparableRange, EndBound, StartBound};
 
@@ -10,6 +12,107 @@ use crate::comparable_range::{ComparableRange, EndBound, StartBound};
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct BytesRange {
     inner: ComparableRange<Bytes>,
+}
+
+pub trait ByteRangeBounds {
+    fn start_bound(&self) -> Bound<&[u8]>;
+    fn end_bound(&self) -> Bound<&[u8]>;
+}
+
+fn bound_as_bytes<K: AsRef<[u8]>>(bound: Bound<&K>) -> Bound<&[u8]> {
+    match bound {
+        Bound::Included(k) => Bound::Included(k.as_ref()),
+        Bound::Excluded(k) => Bound::Excluded(k.as_ref()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+impl<K: AsRef<[u8]>> ByteRangeBounds for Range<K> {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        Bound::Included(self.start.as_ref())
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        Bound::Excluded(self.end.as_ref())
+    }
+}
+
+impl<K: AsRef<[u8]>> ByteRangeBounds for RangeInclusive<K> {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        bound_as_bytes(std::ops::RangeBounds::start_bound(self))
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        bound_as_bytes(std::ops::RangeBounds::end_bound(self))
+    }
+}
+
+impl<K: AsRef<[u8]>> ByteRangeBounds for RangeFrom<K> {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        Bound::Included(self.start.as_ref())
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        Bound::Unbounded
+    }
+}
+
+impl<K: AsRef<[u8]>> ByteRangeBounds for RangeTo<K> {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        Bound::Unbounded
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        Bound::Excluded(self.end.as_ref())
+    }
+}
+
+impl<K: AsRef<[u8]>> ByteRangeBounds for RangeToInclusive<K> {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        Bound::Unbounded
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        Bound::Included(self.end.as_ref())
+    }
+}
+
+impl ByteRangeBounds for RangeFull {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        Bound::Unbounded
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        Bound::Unbounded
+    }
+}
+
+impl ByteRangeBounds for BytesRange {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        RangeBounds::start_bound(self).map(|b| b.as_ref())
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        RangeBounds::end_bound(self).map(|b| b.as_ref())
+    }
+}
+
+impl<T: AsRef<[u8]>> ByteRangeBounds for (Bound<T>, Bound<T>) {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        match &self.0 {
+            Bound::Included(v) => Bound::Included(v.as_ref()),
+            Bound::Excluded(v) => Bound::Excluded(v.as_ref()),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        match &self.1 {
+            Bound::Included(v) => Bound::Included(v.as_ref()),
+            Bound::Excluded(v) => Bound::Excluded(v.as_ref()),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
 }
 
 impl Serialize for BytesRange {
@@ -101,6 +204,42 @@ impl BytesRange {
         Self::new(Included(start), end)
     }
 
+    /// Build the range of keys that start with `prefix`, restricted to
+    /// `subrange`. Subrange bounds are key *suffixes*: a bound `s` denotes
+    /// the full key `prefix ++ s`. Because every key in the range shares the
+    /// prefix, ordering suffixes is the same as ordering full keys.
+    ///
+    /// - An unbounded subrange start means "from the first key with this
+    ///   prefix" (the bare prefix itself).
+    /// - An unbounded subrange end means "to the end of the prefix's
+    ///   keyspace" (exclusive at the incremented prefix, or unbounded when
+    ///   the prefix is empty or all `0xff`).
+    /// - `from_prefix_and_subrange(prefix, ..)` is equivalent to
+    ///   [`Self::from_prefix`]; an empty prefix degenerates to a plain range
+    ///   over the subrange bounds.
+    pub(crate) fn from_prefix_and_subrange(prefix: &[u8], subrange: impl ByteRangeBounds) -> Self {
+        let concat = |suffix: &[u8]| {
+            let mut key = Vec::with_capacity(prefix.len() + suffix.len());
+            key.extend_from_slice(prefix);
+            key.extend_from_slice(suffix);
+            Bytes::from(key)
+        };
+        let start = match subrange.start_bound() {
+            Included(s) => Included(concat(s)),
+            Excluded(s) => Excluded(concat(s)),
+            Unbounded if prefix.is_empty() => Unbounded,
+            Unbounded => Included(Bytes::copy_from_slice(prefix)),
+        };
+        let end = match subrange.end_bound() {
+            Included(e) => Included(concat(e)),
+            Excluded(e) => Excluded(concat(e)),
+            Unbounded => Self::increment_prefix(prefix)
+                .map(Excluded)
+                .unwrap_or(Unbounded),
+        };
+        Self::new(start, end)
+    }
+
     /// Compute the smallest byte string that is lexicographically greater than any key
     /// starting with `prefix`. Returns `None` when `prefix` is all `0xff`.
     fn increment_prefix(prefix: &[u8]) -> Option<Bytes> {
@@ -139,7 +278,7 @@ impl BytesRange {
     }
 
     pub(crate) fn is_start_bound_included_or_unbounded(&self) -> bool {
-        !matches!(self.start_bound(), Excluded(_))
+        !matches!(ByteRangeBounds::start_bound(self), Excluded(_))
     }
 
     #[cfg(test)]
@@ -161,7 +300,7 @@ impl BytesRange {
     }
 
     pub(crate) fn as_point(&self) -> Option<&Bytes> {
-        match (self.start_bound(), self.end_bound()) {
+        match (RangeBounds::start_bound(self), RangeBounds::end_bound(self)) {
             (Bound::Included(start), Bound::Included(end)) if start == end => Some(start),
             _ => None,
         }
@@ -175,9 +314,9 @@ pub(crate) mod tests {
     use crate::proptest_util::sample;
 
     use bytes::Bytes;
-    use proptest::{prop_assert, proptest};
+    use proptest::{prop_assert, prop_assert_eq, proptest};
     use std::ops::Bound;
-    use std::ops::Bound::Unbounded;
+    use std::ops::Bound::{Included, Unbounded};
     use std::ops::RangeBounds;
 
     #[test]
@@ -192,6 +331,120 @@ pub(crate) mod tests {
     fn test_arbitrary_empty_range() {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
+        });
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_full_subrange_equals_from_prefix() {
+        proptest!(|(prefix in arbitrary::bytes(8))| {
+            prop_assert_eq!(
+                BytesRange::from_prefix_and_subrange(&prefix, ..),
+                BytesRange::from_prefix(&prefix)
+            );
+        });
+    }
+
+    #[test]
+    fn test_byte_range_bounds_for_common_shapes() {
+        let full = BytesRange::from_prefix_and_subrange(b"p", ..);
+        assert_eq!(full.start_bound(), Included(&Bytes::from_static(b"p")));
+        assert_eq!(full.end_bound(), Bound::Excluded(&Bytes::from_static(b"q")));
+
+        let range = BytesRange::from_prefix_and_subrange(b"", b"a".to_vec()..=b"b".to_vec());
+        assert_eq!(range.start_bound(), Included(&Bytes::from_static(b"a")));
+        assert_eq!(range.end_bound(), Included(&Bytes::from_static(b"b")));
+
+        let tuple = BytesRange::from_prefix_and_subrange(
+            b"ab",
+            (Bound::Excluded(&b"x"[..]), Bound::Included(&b"y"[..])),
+        );
+        assert_eq!(
+            tuple,
+            BytesRange::from_prefix_and_subrange(
+                b"ab",
+                (Bound::Excluded(&b"x"[..]), Bound::Included(&b"y"[..]))
+            )
+        );
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_bounded_both_ends() {
+        let range = BytesRange::from_prefix_and_subrange(b"user1:", &b"0005"[..]..&b"0042"[..]);
+        let start = Bytes::from("user1:0005");
+        let end = Bytes::from("user1:0042");
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Excluded(&end));
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_inclusive_end() {
+        let range = BytesRange::from_prefix_and_subrange(b"ab", ..=&b"x"[..]);
+        let start = Bytes::from("ab");
+        let end = Bytes::from("abx");
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Included(&end));
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_from_suffix_to_end_of_prefix() {
+        // The cursor shape: everything with the prefix from a suffix onward.
+        let range = BytesRange::from_prefix_and_subrange(b"ab", &b"x"[..]..);
+        let start = Bytes::from("abx");
+        let end = Bytes::from("ac");
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Excluded(&end));
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_excluded_start() {
+        let range = BytesRange::from_prefix_and_subrange(
+            b"ab",
+            (Bound::Excluded(&b"x"[..]), Bound::Unbounded),
+        );
+        let start = Bytes::from("abx");
+        assert_eq!(range.start_bound(), Bound::Excluded(&start));
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_all_ff_prefix_unbounded_end() {
+        let prefix = vec![0xff, 0xff];
+        let range = BytesRange::from_prefix_and_subrange(&prefix, &b"a"[..]..);
+        let start = Bytes::from(vec![0xff, 0xff, b'a']);
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Unbounded);
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_empty_prefix_is_plain_range() {
+        let range = BytesRange::from_prefix_and_subrange(b"", &b"a"[..]..&b"b"[..]);
+        assert_eq!(range, BytesRange::from_slice(&b"a"[..]..&b"b"[..]));
+        let unbounded = BytesRange::from_prefix_and_subrange(b"", ..);
+        assert_eq!(unbounded, BytesRange::unbounded());
+    }
+
+    #[test]
+    #[should_panic(expected = "Range must be non-empty")]
+    fn test_from_prefix_and_subrange_rejects_reversed_bounds() {
+        let _ = BytesRange::from_prefix_and_subrange(b"ab", b"z".to_vec()..b"a".to_vec());
+    }
+
+    #[test]
+    fn test_from_prefix_and_subrange_keys_start_with_prefix() {
+        // Safety property for filter consultation: every key in the composed
+        // range starts with the prefix, so probing prefix filters with it
+        // can never cause a false-negative SST skip.
+        proptest!(|(
+            prefix in arbitrary::nonempty_bytes(6),
+            suffix in arbitrary::bytes(6),
+            mut rng in arbitrary::rng()
+        )| {
+            let range = BytesRange::from_prefix_and_subrange(&prefix, suffix.as_ref()..);
+            let key = sample::bytes_in_range(&mut rng, &range);
+            prop_assert!(
+                key.starts_with(prefix.as_ref()),
+                "key {:?} in {:?} does not start with prefix {:?}",
+                key, range, prefix,
+            );
         });
     }
 

@@ -1,13 +1,17 @@
 //! Integration tests for the prefix bloom filter.
 //!
-//! Two test modules:
+//! Three test modules:
 //!   * [`composite_filters`]: integration tests that configure two filter
 //!     policies on a single DB (one full-key, one conditional prefix) and
 //!     verify reads work after closing/reopening with policies in a different
 //!     order.
-//!   * [`prop_test`]: a property test asserting that `scan_prefix` returns the
-//!     same results with and without a prefix bloom filter configured. The
-//!     filter must never introduce false negatives.
+//!   * [`subrange`]: integration tests for `scan_prefix` restricted to a
+//!     subrange, asserting both correct results and actual SST pruning via
+//!     the filter-negative counter.
+//!   * [`prop_test`]: a property test asserting that `scan_prefix` (with and
+//!     without a subrange) returns the same results with and without a prefix
+//!     bloom filter configured. The filter must never introduce false
+//!     negatives.
 
 mod composite_filters {
     use std::sync::Arc;
@@ -153,7 +157,7 @@ mod composite_filters {
         }
         // scan_prefix on the prefix-extracted domain returns all matching keys.
         let mut iter = db
-            .scan_prefix_with_options(b"u:", &ScanOptions::default())
+            .scan_prefix_with_options(b"u:", .., &ScanOptions::default())
             .await
             .expect("scan_prefix failed");
         let mut keys = Vec::new();
@@ -169,7 +173,7 @@ mod composite_filters {
         // bloom is bypassed (extractor returns None) and the full-key bloom
         // is irrelevant for prefix scans, so all SSTs are visited.
         let mut iter = db
-            .scan_prefix_with_options(b"metric:", &ScanOptions::default())
+            .scan_prefix_with_options(b"metric:", .., &ScanOptions::default())
             .await
             .expect("scan_prefix failed");
         let mut keys = Vec::new();
@@ -219,6 +223,164 @@ mod composite_filters {
     }
 }
 
+mod subrange {
+    use std::sync::Arc;
+
+    use slatedb::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
+    use slatedb::db_stats::{FILTER_KIND_LABEL, FILTER_KIND_PREFIX, SST_FILTER_NEGATIVE_COUNT};
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::{BloomFilterPolicy, Db, PrefixExtractor, PrefixTarget};
+    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
+
+    const PREFIX_LEN: usize = 3;
+
+    /// Fixed-length prefix extractor, as in [`crate::prop_test`].
+    struct FixedPrefixExtractor;
+
+    impl PrefixExtractor for FixedPrefixExtractor {
+        fn name(&self) -> &str {
+            "fixed3"
+        }
+
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+            let input = match target {
+                PrefixTarget::Point(k) => k.as_ref(),
+                PrefixTarget::Prefix(p) => p.as_ref(),
+            };
+            (input.len() >= PREFIX_LEN).then_some(PREFIX_LEN)
+        }
+    }
+
+    fn prefix_filter_negatives(recorder: &DefaultMetricsRecorder) -> u64 {
+        recorder
+            .snapshot()
+            .by_name_and_labels(
+                SST_FILTER_NEGATIVE_COUNT,
+                &[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)],
+            )
+            .map(|m| match m.value {
+                MetricValue::Counter(v) => v,
+                ref other => panic!("expected counter, got {:?}", other),
+            })
+            .unwrap_or(0)
+    }
+
+    async fn collect_keys(mut iter: slatedb::DbIterator) -> Vec<Vec<u8>> {
+        let mut keys = Vec::new();
+        while let Some(kv) = iter.next().await.expect("iterator next failed") {
+            keys.push(kv.key.to_vec());
+        }
+        keys
+    }
+
+    /// Three SSTs: one holding the `bbb` keys and two "sandwich" SSTs whose
+    /// key ranges (`aaa..ccc`) overlap any `bbb` scan range but contain no
+    /// `bbb` keys. Range-based pruning cannot exclude the sandwich SSTs, so
+    /// any skip observed on the filter-negative counter is the prefix bloom
+    /// filter consulted through the subrange scan path.
+    #[tokio::test]
+    async fn subrange_scan_prunes_ssts_and_returns_exact_keys() {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder("/test/subrange", Arc::new(InMemory::new()))
+            .with_settings(Settings {
+                min_filter_keys: 0,
+                compactor_options: None,
+                ..Settings::default()
+            })
+            .with_filter_policies(vec![Arc::new(
+                BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(FixedPrefixExtractor)),
+            )])
+            .with_metrics_recorder(recorder.clone())
+            .build()
+            .await
+            .expect("failed to build db");
+
+        let put = PutOptions::default();
+        let write = WriteOptions {
+            await_durable: false,
+            seqnum: 0,
+        };
+        let ssts: &[&[&[u8]]] = &[
+            &[b"aaa1", b"ccc1"], // sandwich
+            &[b"bbb1", b"bbb2", b"bbb3", b"bbb4"],
+            &[b"aaa2", b"ccc2"], // sandwich
+        ];
+        for sst in ssts {
+            for key in *sst {
+                db.put_with_options(key, b"v", &put, &write)
+                    .await
+                    .expect("put failed");
+            }
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .expect("memtable flush failed");
+        }
+
+        // Subrange scan returns exactly the keys whose suffix falls in the
+        // subrange, and the two sandwich SSTs are skipped on the filter.
+        let negatives_before = prefix_filter_negatives(&recorder);
+        let iter = db
+            .scan_prefix(b"bbb", b"2".as_slice()..b"4".as_slice())
+            .await
+            .expect("scan_prefix failed");
+        assert_eq!(
+            collect_keys(iter).await,
+            vec![b"bbb2".to_vec(), b"bbb3".to_vec()]
+        );
+        assert_eq!(
+            prefix_filter_negatives(&recorder) - negatives_before,
+            2,
+            "expected both sandwich SSTs to be skipped on the prefix filter"
+        );
+
+        // Inclusive end bound.
+        let iter = db
+            .scan_prefix(b"bbb", ..=b"2".as_slice())
+            .await
+            .expect("scan_prefix failed");
+        assert_eq!(
+            collect_keys(iter).await,
+            vec![b"bbb1".to_vec(), b"bbb2".to_vec()]
+        );
+
+        // Full subrange is equivalent to the classic prefix scan.
+        let iter = db
+            .scan_prefix(b"bbb", ..)
+            .await
+            .expect("scan_prefix failed");
+        assert_eq!(
+            collect_keys(iter).await,
+            vec![
+                b"bbb1".to_vec(),
+                b"bbb2".to_vec(),
+                b"bbb3".to_vec(),
+                b"bbb4".to_vec()
+            ]
+        );
+
+        // A plain range scan over the same composed bounds returns the same
+        // keys but does not consult prefix filters.
+        let negatives_before = prefix_filter_negatives(&recorder);
+        let iter = db
+            .scan(b"bbb2".as_slice()..b"bbb4".as_slice())
+            .await
+            .expect("scan failed");
+        assert_eq!(
+            collect_keys(iter).await,
+            vec![b"bbb2".to_vec(), b"bbb3".to_vec()]
+        );
+        assert_eq!(
+            prefix_filter_negatives(&recorder),
+            negatives_before,
+            "plain range scans must not consult prefix filters"
+        );
+
+        db.close().await.expect("close failed");
+    }
+}
+
 mod prop_test {
     use std::sync::Arc;
 
@@ -226,7 +388,9 @@ mod prop_test {
     use proptest::prelude::*;
     use slatedb::config::{PutOptions, ScanOptions, Settings, WriteOptions};
     use slatedb::object_store::memory::InMemory;
-    use slatedb::{BloomFilterPolicy, Db, FilterPolicy, PrefixExtractor, PrefixTarget};
+    use slatedb::{
+        BloomFilterPolicy, ByteRangeBounds, Db, FilterPolicy, PrefixExtractor, PrefixTarget,
+    };
     use tokio::runtime::Runtime;
 
     const PREFIX_LEN: usize = 3;
@@ -299,9 +463,13 @@ mod prop_test {
         db.flush().await.expect("flush failed");
     }
 
-    async fn collect_prefix_scan(db: &Db, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    async fn collect_prefix_scan(
+        db: &Db,
+        prefix: &[u8],
+        subrange: impl ByteRangeBounds + Send,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut iter = db
-            .scan_prefix_with_options(prefix, &ScanOptions::default())
+            .scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
             .await
             .expect("scan_prefix failed");
         let mut out = Vec::new();
@@ -362,10 +530,37 @@ mod prop_test {
 
                 let pick = prefixes[query_seed as usize % prefixes.len()].clone();
 
-                let no_filter_results = collect_prefix_scan(&db_no_filter, &pick).await;
-                let with_filter_results = collect_prefix_scan(&db_with_filter, &pick).await;
+                let no_filter_results = collect_prefix_scan(&db_no_filter, &pick, ..).await;
+                let with_filter_results = collect_prefix_scan(&db_with_filter, &pick, ..).await;
 
-                prop_assert_eq!(no_filter_results, with_filter_results);
+                prop_assert_eq!(&no_filter_results, &with_filter_results);
+
+                // Subrange-restricted scans agree between the two DBs and
+                // with a client-side filtering of the full prefix scan. Use a
+                // suffix of one of the matching keys as the lower bound so
+                // the subrange is usually non-trivial.
+                let mut suffixes: Vec<Vec<u8>> = keys
+                    .iter()
+                    .filter(|k| k.starts_with(&pick) && k.len() > PREFIX_LEN)
+                    .map(|k| k[PREFIX_LEN..].to_vec())
+                    .collect();
+                suffixes.sort();
+                suffixes.dedup();
+                if !suffixes.is_empty() {
+                    let lo = suffixes[query_seed as usize % suffixes.len()].clone();
+                    let no_filter_sub =
+                        collect_prefix_scan(&db_no_filter, &pick, lo.as_slice()..).await;
+                    let with_filter_sub =
+                        collect_prefix_scan(&db_with_filter, &pick, lo.as_slice()..).await;
+                    prop_assert_eq!(&no_filter_sub, &with_filter_sub);
+
+                    let expected: Vec<(Vec<u8>, Vec<u8>)> = no_filter_results
+                        .iter()
+                        .filter(|(k, _)| k[PREFIX_LEN..] >= lo[..])
+                        .cloned()
+                        .collect();
+                    prop_assert_eq!(&no_filter_sub, &expected);
+                }
 
                 db_no_filter.close().await.expect("close failed");
                 db_with_filter.close().await.expect("close failed");

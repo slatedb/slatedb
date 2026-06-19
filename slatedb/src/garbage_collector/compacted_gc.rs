@@ -13,7 +13,8 @@ use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask};
+use super::filter::retain_allowed_by_gc_filter;
+use super::{GcFilter, GcStats, GcTask};
 
 #[derive(Clone)]
 pub(crate) struct CompactedGcTask {
@@ -22,6 +23,7 @@ pub(crate) struct CompactedGcTask {
     table_store: Arc<TableStore>,
     stats: Arc<GcStats>,
     compacted_options: GarbageCollectorDirectoryOptions,
+    gc_filter: Option<Arc<dyn GcFilter>>,
 }
 
 impl std::fmt::Debug for CompactedGcTask {
@@ -39,6 +41,7 @@ impl CompactedGcTask {
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
         compacted_options: GarbageCollectorDirectoryOptions,
+        gc_filter: Option<Arc<dyn GcFilter>>,
     ) -> Self {
         CompactedGcTask {
             manifest_store,
@@ -46,6 +49,7 @@ impl CompactedGcTask {
             table_store,
             stats,
             compacted_options,
+            gc_filter,
         }
     }
 
@@ -206,17 +210,23 @@ impl GcTask for CompactedGcTask {
             compaction_low_watermark_dt,
             newest_l0_dt,
         );
-        let sst_ids_to_delete = self
+        let ssts_to_delete = self
             .table_store
             // List all SSTs in the table store
             .list_compacted_ssts(..)
             .await?
             .into_iter()
-            .map(|sst| sst.id)
             // Filter out SSTs that were more recently created than the cutoff_dt
-            .filter(|id| DateTime::<Utc>::from(id.unwrap_compacted_id().datetime()) < cutoff_dt)
+            .filter(|sst| {
+                DateTime::<Utc>::from(sst.id.unwrap_compacted_id().datetime()) < cutoff_dt
+            })
             // Filter out SSTs that are active in the manifest (including actively checkpointed SSTs)
-            .filter(|id| !active_ssts.contains(id))
+            .filter(|sst| !active_ssts.contains(&sst.id))
+            .collect::<Vec<_>>();
+        let ssts_to_delete = retain_allowed_by_gc_filter(&self.gc_filter, ssts_to_delete).await;
+        let sst_ids_to_delete = ssts_to_delete
+            .into_iter()
+            .map(|sst| sst.id)
             .collect::<Vec<_>>();
 
         if self.compacted_options.dry_run && !sst_ids_to_delete.is_empty() {
@@ -256,6 +266,7 @@ mod tests {
     use crate::manifest::store::StoredManifest;
     use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment};
     use crate::object_stores::ObjectStores;
+    use crate::tablestore::TableStoreKind;
     use crate::test_utils::build_test_sst;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path};
@@ -274,6 +285,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest store and initial manifest
@@ -350,6 +362,7 @@ mod tests {
             table_store.clone(),
             stats,
             opts,
+            None,
         );
 
         let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
@@ -378,6 +391,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest store and initial manifest
@@ -455,6 +469,7 @@ mod tests {
             table_store.clone(),
             stats,
             opts,
+            None,
         );
 
         let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
@@ -484,6 +499,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest store with empty DB
@@ -556,6 +572,7 @@ mod tests {
             table_store.clone(),
             stats,
             opts,
+            None,
         );
 
         // Run GC at a fixed time and verify only the SST strictly
@@ -586,6 +603,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            TableStoreKind::GC,
         ));
 
         // Manifest with an L0 newer than the compaction output.
@@ -649,6 +667,7 @@ mod tests {
             table_store.clone(),
             stats,
             opts,
+            None,
         );
 
         let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();

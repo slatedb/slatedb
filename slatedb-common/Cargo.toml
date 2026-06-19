@@ -10,6 +10,7 @@ homepage.workspace = true
 [dependencies]
 chrono = { workspace = true }
 log = { workspace = true }
+object_store = { workspace = true }
 rand = { workspace = true }
 rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }

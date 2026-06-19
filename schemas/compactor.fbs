@@ -87,11 +87,33 @@ table Compaction {
     // Current lifecycle status for this compaction
     status: CompactionStatus;
 
-    // Output SSTs already produced by this compaction.
+    // Deprecated (RFC-0028): produced output now lives per-range in
+    // `subcompactions`. Retained for wire conformance; no longer read or
+    // written by current code.
     output_ssts: [CompactedSsTable];
 
     // Spec of the worker that has claimed this compaction. null = unclaimed
     worker: WorkerSpec;
+
+    // Subcompactions partitioning this compaction into non-overlapping key
+    // ranges (RFC-0028).
+    subcompactions: [Subcompaction];
+}
+
+// A compaction over a sub-range of the parent compaction's key space
+// (RFC-0028). Subcompactions are only valid within the context of a parent
+// `Compaction` and let a single logical compaction execute its disjoint
+// ranges in parallel while resuming at range granularity after a failure.
+table Subcompaction {
+    // Key range covered by this subcompaction. Ranges of the subcompactions
+    // within a parent compaction are non-overlapping and together cover the
+    // full key space.
+    range: BytesRange (required);
+
+    // Output SSTs already produced by this subcompaction. A subcompaction with
+    // output SSTs that cover its full range has completed; on resume, ranges
+    // with no recorded output are re-run from scratch. 
+    output_ssts: [CompactedSsTable];
 }
 
 table CompactionsV1 {

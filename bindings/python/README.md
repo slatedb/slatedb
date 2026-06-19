@@ -28,6 +28,7 @@ import asyncio
 from slatedb.uniffi import (
     DbBuilder,
     IsolationLevel,
+    KeyRange,
     ObjectStore,
     WriteBatch,
 )
@@ -48,7 +49,15 @@ async def main() -> None:
         batch.put(b"user:3", b"Carol")
         await db.write(batch)
 
-        scan = await db.scan_prefix(b"user:")
+        scan = await db.scan_prefix(
+            b"user:",
+            KeyRange(
+                start=None,
+                start_inclusive=False,
+                end=None,
+                end_inclusive=False,
+            ),
+        )
         while (row := await scan.next()) is not None:
             print(row.key, row.value)
 
@@ -94,6 +103,10 @@ try:
 finally:
     await db.shutdown()
 ```
+
+## Runtime Notes
+
+Writable databases and readers enter a dedicated multi-threaded Tokio runtime while opening so SlateDB's long-lived background tasks capture a multi-threaded Tokio handle. Foreground binding calls are still awaited through the normal Python async API. By default, the runtime uses the host's available parallelism. Set `SLATEDB_UNIFFI_RUNTIME_THREADS` to a positive integer before the first `DbBuilder.build()` or `DbReaderBuilder.build()` call to override the worker thread count for the lifetime of the process.
 
 ## Local Development
 

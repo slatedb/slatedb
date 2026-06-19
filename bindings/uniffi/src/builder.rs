@@ -6,10 +6,13 @@ use crate::db::Db;
 use crate::db_cache::DbCache;
 use crate::db_reader::DbReader;
 use crate::error::{Error, SlateDbError};
-use crate::filter_policy::{collect_filter_policies, FilterPolicy};
+use crate::filter_policy::{
+    adapt_prefix_extractor, collect_filter_policies, FilterPolicy, PrefixExtractor,
+};
 use crate::merge_operator::{adapt_merge_operator, MergeOperator};
 use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
+use crate::runtime;
 use crate::settings::Settings;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
@@ -117,6 +120,17 @@ impl DbBuilder {
         self.update_builder(|builder| builder.with_filter_policies(policies))
             .map_err(Into::into)
     }
+
+    /// Sets the segment extractor (RFC-0024). When configured, every write is
+    /// routed through the extractor and the database tracks per-segment LSM
+    /// state. The extractor must be configured at database creation time and
+    /// cannot be changed thereafter.
+    pub fn with_segment_extractor(&self, extractor: Arc<dyn PrefixExtractor>) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_segment_extractor(adapt_prefix_extractor(extractor))
+        })
+        .map_err(Into::into)
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -124,7 +138,7 @@ impl DbBuilder {
     /// Opens the database and consumes this builder.
     pub async fn build(&self) -> Result<Arc<Db>, Error> {
         let builder = self.take_builder()?;
-        let db = builder.build().await?;
+        let db = runtime::enter(async move { builder.build().await.map_err(Error::from) }).await?;
         Ok(Arc::new(Db::new(db)))
     }
 }
@@ -217,6 +231,16 @@ impl DbReaderBuilder {
         self.update_builder(|builder| builder.with_filter_policies(policies))
             .map_err(Into::into)
     }
+
+    /// Sets the segment extractor (RFC-0024). A reader opening a segmented
+    /// database must configure an extractor matching the one the database
+    /// was created with.
+    pub fn with_segment_extractor(&self, extractor: Arc<dyn PrefixExtractor>) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_segment_extractor(adapt_prefix_extractor(extractor))
+        })
+        .map_err(Into::into)
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -224,7 +248,8 @@ impl DbReaderBuilder {
     /// Opens the reader and consumes this builder.
     pub async fn build(&self) -> Result<Arc<DbReader>, Error> {
         let builder = self.take_builder()?;
-        let reader = builder.build().await?;
+        let reader =
+            runtime::enter(async move { builder.build().await.map_err(Error::from) }).await?;
         Ok(Arc::new(DbReader::new(reader)))
     }
 }

@@ -3320,6 +3320,7 @@ dependencies = [
  "rstest",
  "serde_json",
  "slatedb",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3334,6 +3335,7 @@ version = "0.13.0"
 dependencies = [
  "chrono",
  "log",
+ "object_store",
  "rand 0.9.4",
  "rand_xoshiro",
  "serde",

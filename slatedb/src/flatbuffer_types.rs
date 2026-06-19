@@ -17,6 +17,7 @@ use crate::compactor_state::{
 };
 use crate::db_state::{self, FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
 use crate::db_state::{SsTableHandle, SsTableView};
+use crate::subcompaction::Subcompaction as CompactorSubcompaction;
 
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
@@ -41,6 +42,7 @@ use crate::flatbuffer_types::root_generated::{
     CompactionsV1Args, CompressionFormat, DrainSegmentSpec, DrainSegmentSpecArgs, ManifestV1Args,
     Segment as FbSegment, SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1,
     SortedRunArgs as FbSortedRunV1Args, SortedRunV2, SortedRunV2Args, SstType as FbSstType,
+    Subcompaction as FbSubcompaction, SubcompactionArgs as FbSubcompactionArgs,
     TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
     UuidArgs,
 };
@@ -598,15 +600,34 @@ impl FlatBufferCompactionsCodec {
     ) -> Result<CompactorCompaction, SlateDBError> {
         let spec = Self::compaction_spec(compaction, version)?;
         let status = CompactionStatus::from(compaction.status());
-        let output_ssts = compaction
+        let worker = compaction.worker().and_then(Self::worker_spec);
+        // Pre-RFC-0028 compaction files persisted finished output in the
+        // top-level `output_ssts` field. Preserve that output as the single
+        // unbounded subcompaction so a restarted/upgraded coordinator can
+        // safely commit an already-Compacted entry.
+        let subcompactions = match compaction.subcompactions() {
+            Some(subs) => subs.iter().map(Self::subcompaction).collect(),
+            None => compaction
+                .output_ssts()
+                .map(|ssts| {
+                    vec![CompactorSubcompaction::new(BytesRange::unbounded())
+                        .with_output_ssts(ssts.iter().map(Self::compacted_sst).collect())]
+                })
+                .unwrap_or_default(),
+        };
+        Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
+            .with_status(status)
+            .with_worker(worker)
+            .with_subcompactions(subcompactions))
+    }
+
+    fn subcompaction(subcompaction: FbSubcompaction) -> CompactorSubcompaction {
+        let range = FlatBufferManifestCodec::decode_bytes_range(subcompaction.range());
+        let output_ssts = subcompaction
             .output_ssts()
             .map(|ssts| ssts.iter().map(Self::compacted_sst).collect())
             .unwrap_or_default();
-        let worker = compaction.worker().and_then(Self::worker_spec);
-        Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
-            .with_status(status)
-            .with_output_ssts(output_ssts)
-            .with_worker(worker))
+        CompactorSubcompaction::new(range).with_output_ssts(output_ssts)
     }
 
     fn worker_spec(
@@ -1050,9 +1071,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let id = self.add_ulid(&compaction.id());
         let (spec_type, spec) = self.add_compaction_spec(compaction.spec());
         let status = FbCompactionStatus::from(compaction.status());
-        let output_ssts = (!compaction.output_ssts().is_empty())
-            .then(|| self.add_compacted_ssts(compaction.output_ssts().iter()));
         let worker = compaction.worker().map(|w| self.add_worker_spec(w));
+        let subcompactions = (!compaction.subcompactions().is_empty())
+            .then(|| self.add_subcompactions(compaction.subcompactions().iter()));
         FbCompaction::create(
             &mut self.builder,
             &FbCompactionArgs {
@@ -1060,10 +1081,42 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 spec_type,
                 spec: Some(spec),
                 status,
-                output_ssts,
+                // Produced output lives in `subcompactions` (RFC-0028); the
+                // legacy top-level field is no longer written.
+                output_ssts: None,
                 worker,
+                subcompactions,
             },
         )
+    }
+
+    fn add_subcompaction(
+        &mut self,
+        subcompaction: &CompactorSubcompaction,
+    ) -> WIPOffset<FbSubcompaction<'b>> {
+        let range = self.add_bytes_range(subcompaction.range());
+        let output_ssts = (!subcompaction.output_ssts().is_empty())
+            .then(|| self.add_compacted_ssts(subcompaction.output_ssts().iter()));
+        FbSubcompaction::create(
+            &mut self.builder,
+            &FbSubcompactionArgs {
+                range: Some(range),
+                output_ssts,
+            },
+        )
+    }
+
+    fn add_subcompactions<'a, I>(
+        &mut self,
+        subcompactions: I,
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbSubcompaction<'b>>>>
+    where
+        I: Iterator<Item = &'a CompactorSubcompaction>,
+    {
+        let subcompactions: Vec<WIPOffset<FbSubcompaction>> = subcompactions
+            .map(|sub| self.add_subcompaction(sub))
+            .collect();
+        self.builder.create_vector(subcompactions.as_ref())
     }
 
     fn add_worker_spec(
@@ -1463,6 +1516,7 @@ mod tests {
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
     use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
+    use crate::subcompaction::Subcompaction;
     use crate::{checkpoint, error::SlateDBError};
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
@@ -1907,7 +1961,9 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 11),
         )
         .with_status(CompactionStatus::Running)
-        .with_output_ssts(output_ssts);
+        .with_subcompactions(vec![
+            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output_ssts)
+        ]);
         let compaction_sr = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
@@ -1971,6 +2027,57 @@ mod tests {
         assert!(decoded_drain.spec().is_drain());
         assert_eq!(decoded_drain.spec().segment(), &drain_prefix);
         assert_eq!(decoded_drain.spec().destination(), None);
+    }
+
+    #[test]
+    fn test_should_encode_decode_compaction_with_subcompactions() {
+        fn new_output_sst(first_key: &[u8]) -> SsTableHandle {
+            SsTableHandle::new(
+                SsTableId::Compacted(ulid::Ulid::new()),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo {
+                    first_entry: Some(Bytes::copy_from_slice(first_key)),
+                    ..Default::default()
+                },
+            )
+        }
+
+        // given: a compaction exercising all subcompaction range shapes
+        // (unbounded edges and a bounded middle range), including ranges with
+        // and without output SSTs
+        let subcompactions = vec![
+            Subcompaction::new(BytesRange::new(
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Excluded(Bytes::from_static(b"g")),
+            ))
+            .with_output_ssts(vec![new_output_sst(b"a"), new_output_sst(b"d")]),
+            Subcompaction::new(BytesRange::new(
+                std::ops::Bound::Included(Bytes::from_static(b"g")),
+                std::ops::Bound::Excluded(Bytes::from_static(b"q")),
+            ))
+            .with_output_ssts(vec![new_output_sst(b"g")]),
+            Subcompaction::new(BytesRange::new(
+                std::ops::Bound::Included(Bytes::from_static(b"q")),
+                std::ops::Bound::Unbounded,
+            )),
+        ];
+        let compaction = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
+        )
+        .with_status(CompactionStatus::Running)
+        .with_subcompactions(subcompactions);
+        let mut compactions = Compactions::new(1);
+        compactions.insert(compaction.clone());
+
+        // when: the compactions are encoded and decoded
+        let codec = FlatBufferCompactionsCodec {};
+        let bytes = codec.encode(&compactions);
+        let decoded = codec.decode(&bytes).expect("failed to decode compactions");
+
+        // then: the decoded compaction matches the original
+        let decoded_compaction = decoded.get(&compaction.id()).expect("missing compaction");
+        assert_eq!(decoded_compaction, &compaction);
     }
 
     #[test]
@@ -2312,7 +2419,9 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 0),
         )
         .with_status(CompactionStatus::Running)
-        .with_output_ssts(vec![output_sst]);
+        .with_subcompactions(vec![
+            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(vec![output_sst])
+        ]);
         let mut compactions = Compactions::new(1);
         compactions.insert(compaction.clone());
         let codec = FlatBufferCompactionsCodec {};
@@ -2331,9 +2440,11 @@ mod tests {
     }
 
     #[test]
-    fn test_should_decode_compaction_output_sst_with_no_version_set_using_original_version() {
-        // given: manually build a compactions flatbuffer with an output SST
-        // that has no format_version set, simulating a legacy compactions file
+    fn test_should_preserve_legacy_top_level_output_ssts_as_unbounded_subcompaction() {
+        // given: manually build a compactions flatbuffer whose output is recorded
+        // only in the legacy top-level `output_ssts` field, with no
+        // `subcompactions` (a file written by a version predating RFC-0028
+        // per-range output)
         use super::root_generated::{
             CompactedSsTable, CompactedSsTableArgs, Compaction as FbCompaction,
             CompactionArgs as FbCompactionArgs, CompactionSpec as FbCompactionSpec,
@@ -2342,7 +2453,6 @@ mod tests {
             TieredCompactionSpecArgs,
         };
         let mut fbb = flatbuffers::FlatBufferBuilder::new();
-        // Build an output SST without format_version
         let first_entry = fbb.create_vector(b"key1");
         let sst_info = FbSsTableInfo::create(
             &mut fbb,
@@ -2404,9 +2514,10 @@ mod tests {
                 id: Some(compaction_id),
                 spec_type: FbCompactionSpec::TieredCompactionSpec,
                 spec: Some(spec.as_union_value()),
-                status: FbCompactionStatus::Running,
+                status: FbCompactionStatus::Compacted,
                 output_ssts: Some(output_ssts_vec),
                 worker: None,
+                subcompactions: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);
@@ -2427,11 +2538,22 @@ mod tests {
         let codec = FlatBufferCompactionsCodec {};
         let decoded = codec.decode(&bytes).expect("failed to decode compactions");
 
-        // then: format_version should default to ORIGINAL_SST_FORMAT_VERSION
+        // then: legacy top-level output is wrapped as the single unbounded
+        // subcompaction so already-finished distributed compactions survive
+        // restart/upgrade before the coordinator commits them.
         let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
+        assert_eq!(decoded_compaction.status(), CompactionStatus::Compacted);
+        assert_eq!(decoded_compaction.subcompactions().len(), 1);
         assert_eq!(
-            decoded_compaction.output_ssts()[0].format_version,
-            super::ORIGINAL_SST_FORMAT_VERSION
+            decoded_compaction.subcompactions()[0].range(),
+            &BytesRange::unbounded()
+        );
+        let output_ssts = decoded_compaction.output_ssts();
+        assert_eq!(output_ssts.len(), 1);
+        assert_eq!(output_ssts[0].id, SsTableId::Compacted(sst_ulid));
+        assert_eq!(
+            output_ssts[0].info.first_entry,
+            Some(Bytes::from_static(b"key1"))
         );
     }
 
@@ -2482,6 +2604,7 @@ mod tests {
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
                 worker: None,
+                subcompactions: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);
@@ -2548,6 +2671,7 @@ mod tests {
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
                 worker: None,
+                subcompactions: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);

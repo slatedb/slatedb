@@ -489,6 +489,88 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	}
 }
 
+type fixedThreeByteSegmentExtractor struct{}
+
+func (fixedThreeByteSegmentExtractor) Name() string { return "fixed_three_byte" }
+
+func (fixedThreeByteSegmentExtractor) PrefixLen(target slatedb.PrefixTarget) *uint64 {
+	var key []byte
+	switch t := target.(type) {
+	case slatedb.PrefixTargetPoint:
+		key = t.Key
+	case slatedb.PrefixTargetPrefix:
+		key = t.Prefix
+	}
+	if len(key) < 3 {
+		return nil
+	}
+	n := uint64(3)
+	return &n
+}
+
+func assertSegments(t *testing.T, segments []slatedb.SegmentPrefix, want ...string) {
+	t.Helper()
+
+	if len(segments) != len(want) {
+		t.Fatalf("Status().Segments: got %d segments %v, want %d %v", len(segments), segments, len(want), want)
+	}
+	for i, prefix := range want {
+		if !bytes.Equal(segments[i].Prefix, []byte(prefix)) {
+			t.Fatalf("Status().Segments[%d]: got %q, want %q", i, segments[i].Prefix, prefix)
+		}
+	}
+}
+
+func TestDbStatusSegmentsWithoutExtractor(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	if _, err := handle.db.Put([]byte("aaa-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(aaa-1): %v", err)
+	}
+
+	assertSegments(t, handle.db.Status().Segments)
+}
+
+func TestDbStatusSegmentsWithExtractor(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithSegmentExtractor(fixedThreeByteSegmentExtractor{}); err != nil {
+			t.Fatalf("WithSegmentExtractor(): %v", err)
+		}
+	})
+
+	assertSegments(t, handle.db.Status().Segments)
+
+	if _, err := handle.db.Put([]byte("bbb-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(bbb-1): %v", err)
+	}
+	if _, err := handle.db.Put([]byte("aaa-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(aaa-1): %v", err)
+	}
+
+	// Unflushed writes are reported from the memtable, sorted by prefix.
+	assertSegments(t, handle.db.Status().Segments, "aaa", "bbb")
+
+	// Another write in an existing segment must not produce a duplicate.
+	if _, err := handle.db.Put([]byte("aaa-2"), []byte("value")); err != nil {
+		t.Fatalf("Put(aaa-2): %v", err)
+	}
+	assertSegments(t, handle.db.Status().Segments, "aaa", "bbb")
+
+	// Segments survive the flush from memtable to manifest.
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+	assertSegments(t, handle.db.Status().Segments, "aaa", "bbb")
+
+	// A key the extractor cannot route to a segment is rejected.
+	if _, err := handle.db.Put([]byte("xy"), []byte("value")); err == nil {
+		t.Fatalf("Put(xy): got nil error, want unroutable-key error")
+	}
+}
+
 func TestDbCrudAndMetadata(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
@@ -690,15 +772,28 @@ func TestDbScanVariants(t *testing.T) {
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 
-	iter, err = handle.db.ScanPrefix([]byte("item:"))
+	iter, err = handle.db.ScanPrefix([]byte("item:"), slatedb.KeyRange{})
 	if err != nil {
 		t.Fatalf("ScanPrefix(): %v", err)
 	}
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 
+	iter, err = handle.db.ScanPrefix([]byte("item:"), slatedb.KeyRange{
+		Start:          bytesPtr([]byte("02")),
+		StartInclusive: false,
+		End:            bytesPtr([]byte("03")),
+		EndInclusive:   true,
+	})
+	if err != nil {
+		t.Fatalf("ScanPrefix(bounded): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+	requireRows(t, drainIterator(t, iter), []string{"item:03"}, []string{"third"})
+
 	iter, err = handle.db.ScanPrefixWithOptions(
 		[]byte("item:"),
+		slatedb.KeyRange{},
 		slatedb.ScanOptions{
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
@@ -1192,15 +1287,28 @@ func TestDbReaderScanVariants(t *testing.T) {
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 
-	iter, err = readerHandle.reader.ScanPrefix([]byte("item:"))
+	iter, err = readerHandle.reader.ScanPrefix([]byte("item:"), slatedb.KeyRange{})
 	if err != nil {
 		t.Fatalf("DbReader.ScanPrefix(): %v", err)
 	}
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 
+	iter, err = readerHandle.reader.ScanPrefix([]byte("item:"), slatedb.KeyRange{
+		Start:          bytesPtr([]byte("02")),
+		StartInclusive: false,
+		End:            bytesPtr([]byte("03")),
+		EndInclusive:   true,
+	})
+	if err != nil {
+		t.Fatalf("DbReader.ScanPrefix(bounded): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+	requireRows(t, drainIterator(t, iter), []string{"item:03"}, []string{"third"})
+
 	iter, err = readerHandle.reader.ScanPrefixWithOptions(
 		[]byte("item:"),
+		slatedb.KeyRange{},
 		slatedb.ScanOptions{
 			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
@@ -1963,7 +2071,10 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("WalFile.Metadata() for file %d: %v", i, err)
 		}
-		if metadata.Location == "" {
+		if metadata.Id != file.Id() {
+			t.Fatalf("WalFile.Metadata() for file %d: Id = %d, want %d", i, metadata.Id, file.Id())
+		}
+		if metadata.Metadata.Location == "" {
 			t.Fatalf("WalFile.Metadata() for file %d: Location is empty", i)
 		}
 
@@ -1974,7 +2085,7 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		t.Cleanup(iter.Destroy)
 
 		rows := drainWalIterator(t, iter)
-		if metadata.SizeBytes == 0 {
+		if metadata.Metadata.Size == 0 {
 			if len(rows) != 0 {
 				t.Fatalf("zero-byte WAL file %d returned %d rows, want 0", i, len(rows))
 			}

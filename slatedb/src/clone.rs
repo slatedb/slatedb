@@ -54,6 +54,7 @@ pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
         clone_path.clone(),
         clone_sources.clone(),
         object_stores.store_of(Main).clone(),
+        object_stores.store_of(Wal).clone(),
         system_clock.clone(),
         rand,
         fp_registry.clone(),
@@ -92,6 +93,7 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
     clone_path: Path,
     source_specs: Vec<CloneSourceSpec<R>>,
     object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
@@ -145,8 +147,8 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                 .await?;
 
                 let manifest: Manifest = match &sources[..] {
-                    // no need to call validate_no_wal() because for single source, WAL is copied
-                    // by the caller (create_clone)
+                    // no need to call validate_no_data_wal() because for single source,
+                    // WAL is copied by the caller (create_clone)
                     [single_source] => Manifest::cloned(
                         &single_source.manifest,
                         single_source.path.to_string(),
@@ -154,7 +156,7 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                         rand,
                     ),
                     [..] => {
-                        validate_no_wal(&sources)?;
+                        validate_no_data_wal(&sources, &wal_object_store).await?;
                         Manifest::cloned_from_union(sources, rand)?
                     }
                 };
@@ -329,12 +331,39 @@ fn validate_clone_source_specs<R: RangeBounds<Bytes> + Clone>(
     Ok(())
 }
 
-fn validate_no_wal(sources: &[CloneSource]) -> Result<(), SlateDBError> {
+async fn validate_no_data_wal(
+    sources: &[CloneSource],
+    wal_object_store: &Arc<dyn ObjectStore>,
+) -> Result<(), SlateDBError> {
     let mut parents_with_wal = vec![];
     for source in sources {
-        let m = source.manifest.clone();
-        let has_wal = m.core.next_wal_sst_id - 1 > m.core.replay_after_wal_id;
-        if has_wal {
+        let core = &source.manifest.core;
+        // Cheap manifest check first: if the WAL range is empty there is
+        // nothing to inspect.
+        if core.next_wal_sst_id.saturating_sub(1) <= core.replay_after_wal_id {
+            continue;
+        }
+
+        let path_resolver = PathResolver::new(source.path.clone());
+        let mut has_data_wal = false;
+        for wal_id in (core.replay_after_wal_id + 1)..core.next_wal_sst_id {
+            let path = path_resolver.table_path(&SsTableId::Wal(wal_id));
+            match wal_object_store.head(&path).await {
+                Ok(meta) => {
+                    // Fence WALs are zero-byte `SsTableId::Wal` objects (written via
+                    // `TableStore::write_wal_fence`). They contain no data, so dropping them loses
+                    // nothing and the source is allowed to participate in the union. We use the
+                    // same zero-size discriminator that fence garbage_collector/wal_gc.rs uses.
+                    if meta.size > 0 {
+                        has_data_wal = true;
+                        break;
+                    }
+                }
+                Err(e) => return Err(SlateDBError::from(e)),
+            }
+        }
+
+        if has_data_wal {
             parents_with_wal.push(source.path.clone());
         }
     }
@@ -484,7 +513,7 @@ mod tests {
     use slatedb_common::SystemClock;
     use std::collections::BTreeMap;
     use std::ops::Bound;
-    use std::ops::{RangeBounds, RangeFull};
+    use std::ops::RangeBounds;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -551,7 +580,7 @@ mod tests {
         let clone_db = Db::open(clone_path.clone(), object_store.clone())
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
             .await;
         clone_db.close().await.unwrap();
@@ -620,7 +649,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(
             &checkpoint_table,
             ..,
@@ -1290,7 +1319,7 @@ mod tests {
         prefix_lo: &'static [u8],
         prefix_hi: &'static [u8],
     ) {
-        let mut iter = db.scan_prefix(prefix_lo).await.unwrap();
+        let mut iter = db.scan_prefix(prefix_lo, ..).await.unwrap();
         test_utils::assert_ranged_db_scan(
             expected,
             Bytes::from_static(prefix_lo)..Bytes::from_static(prefix_hi),
@@ -1382,7 +1411,7 @@ mod tests {
         // segments are untouched.
         let mut expected = table.clone();
         expected.remove(&Bytes::from_static(b"aaa-001"));
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         clone_db.close().await.unwrap();
@@ -1422,12 +1451,12 @@ mod tests {
             Settings::default(),
         )
         .await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         assert_segment_prefix_scan(&clone_db, &table, b"bbb", b"bbc").await;
         let mut cross_iter = clone_db
-            .scan::<Vec<u8>, _>(b"aaa".to_vec()..=b"ddd-999".to_vec())
+            .scan(b"aaa".to_vec()..=b"ddd-999".to_vec())
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(
@@ -1503,7 +1532,7 @@ mod tests {
         expected.extend(table_b.clone());
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
@@ -1613,7 +1642,7 @@ mod tests {
 
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
@@ -1715,7 +1744,7 @@ mod tests {
 
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
             .await;
         // The prefix scan on the shared `bbb` segment must surface rows from
@@ -1759,7 +1788,7 @@ mod tests {
 
         let clone_db =
             open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
-        let mut full_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut full_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ranged_db_scan(
             &table,
             Bytes::from_static(b"bbb")..Bytes::from_static(b"ddd"),
@@ -1769,5 +1798,284 @@ mod tests {
         .await;
         assert_segment_prefix_scan(&clone_db, &table, b"bbb", b"bbc").await;
         clone_db.close().await.unwrap();
+    }
+
+    /// Builds a WAL-disabled parent DB at `path` holding `table` in L0 (no
+    /// segment extractor, so it can be unioned with other unsegmented sources).
+    #[cfg(feature = "wal_disable")]
+    async fn build_plain_wal_disabled_parent(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        table: &BTreeMap<Bytes, Bytes>,
+    ) {
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(wal_disabled_settings())
+            .build()
+            .await
+            .unwrap();
+        test_utils::seed_database(&db, table, false).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+    }
+
+    /// Builds a WAL-disabled parent DB at `path` holding `table` in L0 (so the
+    /// natural WAL range is empty), then manually extends the manifest's WAL
+    /// range by one id and plants a WAL object at that id. `wal_bytes` controls
+    /// whether the planted WAL is a fence (zero bytes) or carries data
+    /// (non-empty). Returns the id of the planted WAL object.
+    #[cfg(feature = "wal_disable")]
+    async fn build_parent_with_planted_wal(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        table: &BTreeMap<Bytes, Bytes>,
+        wal_bytes: Bytes,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> u64 {
+        build_plain_wal_disabled_parent(path, object_store.clone(), table).await;
+
+        // Extend the manifest's WAL range so that
+        // `next_wal_sst_id - 1 > replay_after_wal_id`, forcing validation to
+        // inspect the planted WAL object.
+        let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+        let mut sm = StoredManifest::load(manifest_store, system_clock)
+            .await
+            .unwrap();
+        let planted_wal_id = sm.db_state().next_wal_sst_id;
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = planted_wal_id + 1;
+        sm.update(dirty).await.unwrap();
+
+        // Plant the WAL object directly in the object store at the resolved path.
+        use object_store::ObjectStoreExt;
+        let wal_path = PathResolver::new(path.clone()).table_path(&SsTableId::Wal(planted_wal_id));
+        object_store.put(&wal_path, wal_bytes.into()).await.unwrap();
+
+        planted_wal_id
+    }
+
+    /// Builds a WAL-disabled parent DB at `path` holding `table` in L0, then
+    /// extends the manifest's WAL range by one id *without* planting any WAL
+    /// object. This leaves a manifest-referenced WAL id whose object is missing,
+    /// exercising the missing-object (`NotFound`) branch of
+    /// `validate_no_data_wal`, which must fail.
+    #[cfg(feature = "wal_disable")]
+    async fn build_parent_with_missing_wal(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        table: &BTreeMap<Bytes, Bytes>,
+        system_clock: Arc<dyn SystemClock>,
+    ) {
+        build_plain_wal_disabled_parent(path, object_store.clone(), table).await;
+
+        // Extend the manifest's WAL range so that
+        // `next_wal_sst_id - 1 > replay_after_wal_id`, forcing validation to
+        // inspect a WAL object that was never written.
+        let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+        let mut sm = StoredManifest::load(manifest_store, system_clock)
+            .await
+            .unwrap();
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id += 1;
+        sm.update(dirty).await.unwrap();
+    }
+
+    /// A union clone whose source references only a zero-byte (fence) WAL above
+    /// `replay_after_wal_id` must SUCCEED: the fence WAL holds no data and the
+    /// union clone drops WAL objects anyway.
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_union_clone_with_fence_only_wal_succeeds() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let parent_path_a = Path::from("/tmp/test_parent_fence_union_a");
+        let parent_path_b = Path::from("/tmp/test_parent_fence_union_b");
+        let clone_path = Path::from("/tmp/test_clone_fence_union");
+
+        let table_a = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"aaa-002"), Bytes::from_static(b"v2")),
+        ]);
+        let table_b = BTreeMap::from([
+            (Bytes::from_static(b"zzz-001"), Bytes::from_static(b"v3")),
+            (Bytes::from_static(b"zzz-002"), Bytes::from_static(b"v4")),
+        ]);
+
+        // Source A carries a fence (zero-byte) WAL above replay_after_wal_id.
+        build_parent_with_planted_wal(
+            &parent_path_a,
+            object_store.clone(),
+            &table_a,
+            Bytes::new(),
+            system_clock.clone(),
+        )
+        .await;
+        // Source B has no extra WAL.
+        build_plain_wal_disabled_parent(&parent_path_b, object_store.clone(), &table_b).await;
+
+        crate::clone::create_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()),
+            ],
+            clone_path.clone(),
+            ObjectStores::new(object_store.clone(), Some(object_store.clone())),
+            Arc::new(FailPointRegistry::new()),
+            system_clock.clone(),
+            Arc::new(DbRand::default()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("union clone with a fence-only WAL should succeed");
+
+        // The unioned clone should contain data from both sources.
+        let mut expected: BTreeMap<Bytes, Bytes> = table_a.clone();
+        expected.extend(table_b.clone());
+        let clone_db = Db::builder(clone_path.clone(), object_store.clone())
+            .with_settings(wal_disabled_settings())
+            .build()
+            .await
+            .unwrap();
+        let mut iter = clone_db.scan(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut iter)
+            .await;
+        clone_db.close().await.unwrap();
+    }
+
+    /// A union clone whose source references a real (non-empty) data WAL above
+    /// `replay_after_wal_id` must FAIL with `InvalidUnionSourceWithWal`, since
+    /// the union clone would silently drop that WAL data.
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_fail_union_clone_with_data_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let parent_path_a = Path::from("/tmp/test_parent_data_wal_union_a");
+        let parent_path_b = Path::from("/tmp/test_parent_data_wal_union_b");
+        let clone_path = Path::from("/tmp/test_clone_data_wal_union");
+
+        let table_a = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"aaa-002"), Bytes::from_static(b"v2")),
+        ]);
+        let table_b = BTreeMap::from([
+            (Bytes::from_static(b"zzz-001"), Bytes::from_static(b"v3")),
+            (Bytes::from_static(b"zzz-002"), Bytes::from_static(b"v4")),
+        ]);
+
+        // Source A carries a real data WAL (non-empty) above replay_after_wal_id.
+        build_parent_with_planted_wal(
+            &parent_path_a,
+            object_store.clone(),
+            &table_a,
+            Bytes::from_static(b"this-is-not-a-fence-it-has-data"),
+            system_clock.clone(),
+        )
+        .await;
+        build_plain_wal_disabled_parent(&parent_path_b, object_store.clone(), &table_b).await;
+
+        let err = crate::clone::create_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()),
+            ],
+            clone_path.clone(),
+            ObjectStores::new(object_store.clone(), Some(object_store.clone())),
+            Arc::new(FailPointRegistry::new()),
+            system_clock.clone(),
+            Arc::new(DbRand::default()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            SlateDBError::InvalidUnionSourceWithWal { paths } => {
+                assert!(paths.contains(&parent_path_a));
+            }
+            other => panic!("expected InvalidUnionSourceWithWal, got {other:?}"),
+        }
+    }
+
+    /// A union clone whose source references a WAL id that has no backing object
+    /// (HEAD returns `NotFound`) must FAIL: a WAL object missing within the
+    /// manifest's WAL bounds violates an invariant and signals a misconfigured
+    /// WAL object store or data loss.
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_fail_union_clone_with_missing_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let parent_path_a = Path::from("/tmp/test_parent_missing_wal_union_a");
+        let parent_path_b = Path::from("/tmp/test_parent_missing_wal_union_b");
+        let clone_path = Path::from("/tmp/test_clone_missing_wal_union");
+
+        let table_a = BTreeMap::from([
+            (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
+            (Bytes::from_static(b"aaa-002"), Bytes::from_static(b"v2")),
+        ]);
+        let table_b = BTreeMap::from([
+            (Bytes::from_static(b"zzz-001"), Bytes::from_static(b"v3")),
+            (Bytes::from_static(b"zzz-002"), Bytes::from_static(b"v4")),
+        ]);
+
+        // Source A references a WAL id above replay_after_wal_id whose object is
+        // missing.
+        build_parent_with_missing_wal(
+            &parent_path_a,
+            object_store.clone(),
+            &table_a,
+            system_clock.clone(),
+        )
+        .await;
+        build_plain_wal_disabled_parent(&parent_path_b, object_store.clone(), &table_b).await;
+
+        let expected_missing_wal_path = PathResolver::new(parent_path_a.clone())
+            .table_path(&SsTableId::Wal({
+                let manifest_store =
+                    Arc::new(ManifestStore::new(&parent_path_a, object_store.clone()));
+                let sm = StoredManifest::load(manifest_store, system_clock.clone())
+                    .await
+                    .unwrap();
+                sm.manifest().core.replay_after_wal_id + 1
+            }))
+            .to_string();
+
+        let err = crate::clone::create_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()),
+            ],
+            clone_path.clone(),
+            ObjectStores::new(object_store.clone(), Some(object_store.clone())),
+            Arc::new(FailPointRegistry::new()),
+            system_clock.clone(),
+            Arc::new(DbRand::default()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                SlateDBError::ObjectStoreError(ref source)
+                    if matches!(
+                        source.as_ref(),
+                        ObjectStoreError::NotFound { path, .. }
+                            if path == &expected_missing_wal_path
+                    )
+            ),
+            "expected NotFound for the missing WAL object, got {err:?}"
+        );
     }
 }

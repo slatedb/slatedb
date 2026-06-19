@@ -33,6 +33,7 @@ pub use fail_parallel;
 pub use object_store;
 
 pub use batch::WriteBatch;
+pub use bytes_range::ByteRangeBounds;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 #[cfg(feature = "compaction_filters")]
@@ -59,23 +60,22 @@ pub use filter_policy::{
 };
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
-pub use garbage_collector::GarbageCollectorBuilder;
+pub use garbage_collector::{GarbageCollectorBuilder, GcFilter};
 pub use instrumented_object_store::stats as instrumented_object_store_stats;
 pub use iter::IterationOrder;
 pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
-pub use slatedb_common::DbRand;
+pub use slatedb_common::{DbRand, IdentifiedObjectMetadata, ObjectMetadata};
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
 pub use sst_reader::{SstFile, SstReader};
 pub use sst_stats::{BlockStats, SstStats};
-pub use tablestore::SstFileMetadata;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 pub use types::{RowEntry, ValueDeletable};
-pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
+pub use wal_reader::{WalFile, WalFileIterator, WalReader};
 
 pub mod admin;
 pub mod cached_object_store;
@@ -160,6 +160,7 @@ mod sst_iter;
 mod sst_reader;
 mod sst_stats;
 mod store_provider;
+mod subcompaction;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;

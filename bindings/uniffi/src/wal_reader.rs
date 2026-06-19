@@ -5,20 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::error::Error;
 use crate::object_store::ObjectStore;
-use crate::types::RowEntry;
-
-/// Metadata describing a WAL file in object storage.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct WalFileMetadata {
-    /// Last-modified timestamp seconds component.
-    pub last_modified_seconds: i64,
-    /// Last-modified timestamp nanoseconds component.
-    pub last_modified_nanos: u32,
-    /// File size in bytes.
-    pub size_bytes: u64,
-    /// Object-store location of the file.
-    pub location: String,
-}
+use crate::types::{IdentifiedObjectMetadata, RowEntry};
 
 /// Handle for a single WAL file.
 #[derive(uniffi::Object)]
@@ -53,14 +40,9 @@ impl WalFile {
 #[uniffi::export(async_runtime = "tokio")]
 impl WalFile {
     /// Reads object-store metadata for this WAL file.
-    pub async fn metadata(&self) -> Result<WalFileMetadata, Error> {
+    pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata, Error> {
         let metadata = self.inner.metadata().await?;
-        Ok(WalFileMetadata {
-            last_modified_seconds: metadata.last_modified_dt.timestamp(),
-            last_modified_nanos: metadata.last_modified_dt.timestamp_subsec_nanos(),
-            size_bytes: metadata.size_bytes,
-            location: metadata.location.to_string(),
-        })
+        Ok(metadata.into())
     }
 
     /// Opens an iterator over raw row entries in this WAL file.

@@ -187,7 +187,7 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -226,6 +226,7 @@ mod tests {
                 SsTableFormat::default(),
                 path,
                 None,
+                TableStoreKind::Main,
             ));
             let stored_manifest = StoredManifest::create_new_db(
                 manifest_store.clone(),
@@ -317,6 +318,7 @@ mod tests {
                 gc_opts,
                 &MetricsRecorderHelper::noop(),
                 Arc::new(DefaultSystemClock::new()),
+                None,
             );
             gc.run_gc_once().await;
             // verify all regular (size > 0) wals up to wal_id are deleted (the wal
@@ -328,7 +330,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|w| w.size > 0)
+                .filter(|w| w.metadata.size > 0)
                 .collect();
             assert!(
                 remaining.is_empty(),
@@ -355,7 +357,7 @@ mod tests {
         async fn assert_fencing_wal(&self) {
             let wals = self.table_store.list_wal_ssts(..).await.unwrap();
             let last = wals.last().expect("wal list is empty");
-            assert_eq!(last.size, 0, "last wal is not a fence wal");
+            assert_eq!(last.metadata.size, 0, "last wal is not a fence wal");
         }
 
         async fn assert_wals_contiguous(&self) {

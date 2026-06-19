@@ -9,6 +9,26 @@ The garbage collector has a configurable minimum age and interval for each file 
 
 Each garbage collection directory type supports a `dry_run` option. When enabled, the collector logs files that would be deleted without actually deleting them. This is useful for testing or verifying garbage collection behavior before enabling actual deletion.
 
+## Filtering Deletion Candidates
+
+SlateDB supports custom filtering of garbage collection candidates through the `GcFilter` trait. This allows users to intercept files before deletion and approve or reject them based on custom logic.
+
+The `GcFilter::filter` method receives a set of files that SlateDB has already determined are eligible for deletion (files older than `min_age` that are not referenced by any active manifest or checkpoint). The filter returns the subset of files that may be physically deleted. Any files not returned by the filter are retained.
+
+A common use case for `GcFilter` is verifying that files have been replicated to another bucket before allowing deletion. For example, in a mirror-maker-like scenario for cross-region or cross-cloud replication, the filter can check that a file exists in the destination bucket before approving it for deletion from the source.
+
+To configure a filter, use the `with_gc_filter()` method on `GarbageCollectorBuilder`:
+
+```rust
+let gc_filter = Arc::new(MyGcFilter::new());
+let gc = GarbageCollectorBuilder::new(path, object_store)
+    .with_gc_filter(gc_filter)
+    .build()
+    .await?;
+```
+
+The filter is optional. If no filter is configured, garbage collection proceeds normally based on age and reference checks alone.
+
 Below is a diagram illustrating the high-level flow of garbage collection in SlateDB:
 
 ```mermaid
@@ -19,17 +39,20 @@ flowchart TD
     B --> C[Run WAL SST GC Task]
     C --> C1[List WAL SSTs older than last compacted ID]
     C1 --> C2[Filter by min_age and active references]
-    C2 --> C3[Delete eligible WAL SSTs]
+    C2 --> C2a[Apply GcFilter if configured]
+    C2a --> C3[Delete eligible WAL SSTs]
 
     B --> D[Run Compacted SST GC Task]
     D --> D1[List all compacted and L0 SSTs]
     D1 --> D2[Gather active SST IDs from manifests]
-    D2 --> D3[Delete SSTs not referenced and older than min_age]
+    D2 --> D2a[Apply GcFilter if configured]
+    D2a --> D3[Delete SSTs not referenced and older than min_age]
 
     B --> E[Run Manifest GC Task]
     E --> E1["List all manifests (exclude latest)"]
     E1 --> E2[Gather active manifest IDs from checkpoints]
-    E2 --> E3[Delete manifests not referenced and older than min_age]
+    E2 --> E2a[Apply GcFilter if configured]
+    E2a --> E3[Delete manifests not referenced and older than min_age]
 
     C3 & D3 & E3 --> G[Wait for Next Interval or Shutdown]
 ```
