@@ -1070,6 +1070,7 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::sst_builder::BlockFormat;
+    use crate::tablestore::TableStoreKind;
     use crate::test_utils::assert_kv;
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
@@ -1097,6 +1098,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -1346,6 +1348,7 @@ mod tests {
             format.clone(),
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         );
         let mut builder = writer.table_builder();
         builder
@@ -1377,6 +1380,7 @@ mod tests {
             format,
             root_path,
             Some(cache),
+            TableStoreKind::Main,
         ));
 
         let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
@@ -1431,6 +1435,7 @@ mod tests {
             format.clone(),
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         );
         let mut builder = writer.table_builder();
         builder
@@ -1462,6 +1467,7 @@ mod tests {
             format,
             root_path,
             Some(cache),
+            TableStoreKind::Main,
         ));
 
         let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
@@ -1516,6 +1522,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ))
     }
 
@@ -1551,6 +1558,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let mut builder = table_store.table_builder();
 
@@ -1627,6 +1635,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
@@ -1677,6 +1686,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1721,6 +1731,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1762,6 +1773,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
 
         // Build SST with specified format (keys 0-99)
@@ -1838,6 +1850,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1948,6 +1961,7 @@ mod tests {
             format,
             root_path.clone(),
             Some(split_cache.clone()),
+            TableStoreKind::Main,
         ));
 
         let mut builder = table_store.table_builder();
@@ -2065,6 +2079,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ));
 
         let keys_and_values = vec![
@@ -2113,6 +2128,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ));
 
         let keys_and_values = vec![
@@ -2163,6 +2179,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ));
 
         // Create keys with shared prefixes to exercise prefix compression
@@ -2226,6 +2243,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ));
 
         // Create keys that will span multiple blocks
@@ -2294,6 +2312,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ));
 
         let mut builder = table_store
@@ -2347,6 +2366,7 @@ mod tests {
             format,
             root_path,
             None,
+            TableStoreKind::Main,
         ));
 
         let mut builder = table_store
@@ -2406,6 +2426,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
 
         // Build an SST with enough keys to span multiple blocks
@@ -2544,6 +2565,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
 
         // Build an SST with enough data for multiple blocks
@@ -2613,6 +2635,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
 
         let mut writer = table_store.table_writer(SsTableId::Wal(0));
@@ -2709,6 +2732,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            TableStoreKind::Main,
         ));
 
         // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.

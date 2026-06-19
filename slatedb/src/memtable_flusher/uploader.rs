@@ -294,7 +294,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::FixedThreeBytePrefixExtractor;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::WatchableOnceCell;
@@ -342,6 +342,7 @@ mod tests {
             PathResolver::new(Path::from(path)),
             fp_registry.clone(),
             None,
+            TableStoreKind::Main,
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =

@@ -1293,7 +1293,7 @@ mod tests {
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::subcompaction::Subcompaction;
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, FixedThreeBytePrefixExtractor, GatedObjectStore};
     use crate::types::KeyValue;
     use crate::types::RowEntry;
@@ -5542,6 +5542,7 @@ mod tests {
             sst_format,
             Path::from(PATH),
             None,
+            TableStoreKind::Compactor,
         ));
         (manifest_store, compactions_store, table_store)
     }

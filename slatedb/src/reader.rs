@@ -474,7 +474,7 @@ mod tests {
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
@@ -521,6 +521,7 @@ mod tests {
                 SsTableFormat::default(),
                 Path::from("/test"),
                 None,
+                TableStoreKind::Main,
             ));
 
             Self {

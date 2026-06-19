@@ -158,7 +158,7 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
-use crate::tablestore::TableStore;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
@@ -544,6 +544,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
+            TableStoreKind::Main,
         ));
 
         // Initialize the database
@@ -619,18 +620,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             write_rx,
             &tokio_handle,
         )?;
-        // Not to pollute the cache during compaction or GC
-        let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(
-                retrying_main_object_store.clone(),
-                retrying_wal_object_store.clone(),
-            ),
-            sst_format,
-            path_resolver.clone(),
-            self.fp_registry.clone(),
-            None,
-        ));
-
+        // The compactor and GC each get their own cacheless store (so background
+        // reads do not pollute the foreground cache), tagged with their kind.
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
                 CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
@@ -652,9 +643,20 @@ impl<P: Into<Path>> DbBuilder<P> {
                 builder = builder.with_merge_operator(operator);
             }
 
+            let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
+                ObjectStores::new(
+                    retrying_main_object_store.clone(),
+                    retrying_wal_object_store.clone(),
+                ),
+                sst_format.clone(),
+                path_resolver.clone(),
+                self.fp_registry.clone(),
+                None,
+                TableStoreKind::Compactor,
+            ));
             let compactor_handlers = builder
                 .build_handler(
-                    uncached_table_store.clone(),
+                    compactor_table_store,
                     manifest_store.clone(),
                     compactions_store.clone(),
                 )
@@ -690,12 +692,23 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .options
                 .metric_level
                 .or(Some(self.settings.metric_level));
+            let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
+                ObjectStores::new(
+                    retrying_main_object_store.clone(),
+                    retrying_wal_object_store.clone(),
+                ),
+                sst_format.clone(),
+                path_resolver.clone(),
+                self.fp_registry.clone(),
+                None,
+                TableStoreKind::GC,
+            ));
             let gc = gc_builder
                 .with_system_clock(system_clock.clone())
                 .with_metrics_recorder(metrics_recorder.clone())
                 .with_seed(rand.rng().next_u64())
                 .build_collector(
-                    uncached_table_store.clone(),
+                    gc_table_store,
                     manifest_store.clone(),
                     compactions_store.clone(),
                     retrying_main_object_store.clone(),
@@ -959,6 +972,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             SsTableFormat::default(), // read only SSTs can use default
             path,
             None, // no need for cache in GC
+            TableStoreKind::GC,
         ));
         GarbageCollector::new(
             manifest_store,
@@ -1172,7 +1186,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             ObjectStores::new(retrying_main_object_store, None),
             sst_format,
             path,
-            None, // no need for cache in GC
+            None,
+            TableStoreKind::Compactor,
         ));
 
         let scheduler_supplier = self
@@ -1335,6 +1350,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             SsTableFormat::default(),
             path,
             None,
+            TableStoreKind::Compactor,
         ));
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
@@ -1639,6 +1655,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             block_cache: wrapped_cache,
             block_transformer: self.block_transformer.clone(),
             filter_policies: self.filter_policies.clone(),
+            kind: TableStoreKind::Reader,
         };
 
         let reader = DbReader::open_internal(

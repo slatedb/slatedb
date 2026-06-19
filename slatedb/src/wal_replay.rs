@@ -283,7 +283,7 @@ mod tests {
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils};
     use bytes::Bytes;
@@ -765,6 +765,7 @@ mod tests {
             SsTableFormat::default(),
             path,
             None,
+            TableStoreKind::Main,
         ))
     }
 

@@ -430,6 +430,7 @@ impl GarbageCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tablestore::TableStoreKind;
 
     use std::collections::HashSet;
     use std::{fs::OpenOptions, sync::Arc};
@@ -1644,6 +1645,7 @@ mod tests {
             sst_format,
             path,
             None,
+            TableStoreKind::GC,
         ));
 
         (

@@ -59,7 +59,7 @@ use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::object_stores::ObjectStores;
 use crate::sst_stats::SstStats;
-use crate::tablestore::TableStore;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
 use crate::IdentifiedObjectMetadata;
 
@@ -94,6 +94,7 @@ impl SstReader {
             sst_format,
             root_path.into(),
             cache,
+            TableStoreKind::Reader,
         ));
         Self { table_store }
     }

@@ -1299,7 +1299,7 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::reader::Reader;
     use crate::store_provider::StoreProvider;
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils, CloseReason, Db};
     use bytes::Bytes;
@@ -2912,6 +2912,7 @@ mod tests {
                 PathResolver::new(self.path.clone()),
                 Arc::clone(&self.fp_registry),
                 None,
+                TableStoreKind::Reader,
             ))
         }
 
