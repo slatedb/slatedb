@@ -153,7 +153,7 @@ SSTable 2:
 
 Now a read for `key56` will only need to search the first SSTable. Readers need only check the key range of each SSTable (stored in memory) to determine if it might contain the key. The unpartitioned tables, are called _level 0 (L0)_ SSTables. The partitioned tables are called _sorted runs (SRs)_. L0 SSTables are part of the write path, as we saw above. Sorted runs are generated through a background compaction process.
 
-::: note
+:::note
 
 Sorted runs are a logical construct. The files written to disk are the sorted run's SSTables. The manifest (which we'll see in a moment) contains the mapping from a sorted run ID to its SSTables.
 
