@@ -2,11 +2,11 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
-use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
-use crate::error::SlateDBError;
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView, SstType};
+use crate::error::{RetryReason, SlateDBError};
 use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::tablestore::{ObjectStoreCallTag, RetryReason, SstType, TableStore, TableStoreKind};
+use crate::tablestore::{ObjectStoreCallTag, TableStore, TableStoreKind};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -1395,7 +1395,7 @@ mod tests {
 }
 
 /// One object store call observed by [`RecordingObjectStore`], with the
-/// `TableStoreKind` / `RetryReason` tags it carried.
+/// `TableStoreKind` / `SstType` / `RetryReason` tags it carried.
 #[derive(Clone, Debug)]
 pub(crate) enum RecordedCall {
     Get {

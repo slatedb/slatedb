@@ -19,8 +19,8 @@ use ulid::Ulid;
 use crate::blob::ReadOnlyBlob;
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_cache_manager::CacheTarget;
-use crate::db_state::{SsTableHandle, SsTableId};
-use crate::error::SlateDBError;
+use crate::db_state::{SsTableHandle, SsTableId, SstType};
+use crate::error::{RetryReason, SlateDBError};
 use crate::filter_policy::NamedFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
@@ -54,6 +54,33 @@ impl ReadOnlyObject {
     fn extensions(&self) -> Extensions {
         self.tag.into()
     }
+}
+
+/// Reads from a [`ReadOnlyObject`] for an SST `$id`, with validation-retry.
+///
+/// It expands to the retry-wrapper future, so callers `.await` it.
+/// This is used instead of repeating the same retry logic for every individual
+/// read from an SST object.
+macro_rules! read_obj {
+    ($store:expr, $id:expr, |$obj:ident| $read:expr) => {{
+        let object_store = $store.object_stores.store_for($id);
+        let path = $store.path($id);
+        read_with_validation_retry(
+            ObjectStoreCallTag::new($store.kind, SstType::from($id)),
+            move |tag| {
+                let object_store = object_store.clone();
+                let path = path.clone();
+                async move {
+                    let $obj = ReadOnlyObject {
+                        object_store,
+                        path,
+                        tag,
+                    };
+                    $read.await.map_err(|e| e.with_path(&$obj.path))
+                }
+            },
+        )
+    }};
 }
 
 impl ReadOnlyBlob for ReadOnlyObject {
@@ -542,49 +569,15 @@ impl TableStore {
     }
 
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
-        let object_store = self.object_stores.store_for(id);
-        let path = self.path(id);
-        let (info, version) = read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)),
-            |tag| {
-                let obj = ReadOnlyObject {
-                    object_store: object_store.clone(),
-                    path: path.clone(),
-                    tag,
-                };
-                async move {
-                    self.sst_format
-                        .read_info_and_version(&obj)
-                        .await
-                        .map_err(|e| e.with_path(&obj.path))
-                }
-            },
-        )
-        .await?;
+        let (info, version) =
+            read_obj!(self, id, |obj| self.sst_format.read_info_and_version(&obj)).await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 
     #[cfg(test)]
     pub(crate) async fn read_sst_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
-        let object_store = self.object_stores.store_for(id);
-        let path = self.path(id);
-        let (_, version) = read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)),
-            |tag| {
-                let obj = ReadOnlyObject {
-                    object_store: object_store.clone(),
-                    path: path.clone(),
-                    tag,
-                };
-                async move {
-                    self.sst_format
-                        .read_info_and_version(&obj)
-                        .await
-                        .map_err(|e| e.with_path(&obj.path))
-                }
-            },
-        )
-        .await?;
+        let (_, version) =
+            read_obj!(self, id, |obj| self.sst_format.read_info_and_version(&obj)).await?;
         Ok(version)
     }
 
@@ -636,24 +629,9 @@ impl TableStore {
                 }
             }
         }
-        let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
-            |tag| {
-                let obj = ReadOnlyObject {
-                    object_store: object_store.clone(),
-                    path: path.clone(),
-                    tag,
-                };
-                async move {
-                    self.sst_format
-                        .read_filters(&handle.info, &obj)
-                        .await
-                        .map_err(|e| e.with_path(&obj.path))
-                }
-            },
-        )
+        read_obj!(self, &handle.id, |obj| self
+            .sst_format
+            .read_filters(&handle.info, &obj))
         .await
     }
 
@@ -684,24 +662,9 @@ impl TableStore {
                 return Ok(Some(stats.as_ref().clone()));
             }
         }
-        let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
-            |tag| {
-                let obj = ReadOnlyObject {
-                    object_store: object_store.clone(),
-                    path: path.clone(),
-                    tag,
-                };
-                async move {
-                    self.sst_format
-                        .read_stats(&handle.info, &obj)
-                        .await
-                        .map_err(|e| e.with_path(&obj.path))
-                }
-            },
-        )
+        read_obj!(self, &handle.id, |obj| self
+            .sst_format
+            .read_stats(&handle.info, &obj))
         .await
     }
 
@@ -730,24 +693,9 @@ impl TableStore {
                 return Ok(index);
             }
         }
-        let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        let index = read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
-            |tag| {
-                let obj = ReadOnlyObject {
-                    object_store: object_store.clone(),
-                    path: path.clone(),
-                    tag,
-                };
-                async move {
-                    self.sst_format
-                        .read_index(&handle.info, &obj)
-                        .await
-                        .map_err(|e| e.with_path(&obj.path))
-                }
-            },
-        )
+        let index = read_obj!(self, &handle.id, |obj| self
+            .sst_format
+            .read_index(&handle.info, &obj))
         .await?;
         Ok(Arc::new(index))
     }
@@ -1019,24 +967,12 @@ impl TableStore {
         handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
-        read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
-            |tag| {
-                let obj = ReadOnlyObject {
-                    object_store: object_store.clone(),
-                    path: path.clone(),
-                    tag,
-                };
-                async move {
-                    let index = self.sst_format.read_index(&handle.info, &obj).await?;
-                    self.sst_format
-                        .read_block(&handle.info, &index, block, &obj)
-                        .await
-                }
-            },
-        )
+        read_obj!(self, &handle.id, |obj| async {
+            let index = self.sst_format.read_index(&handle.info, &obj).await?;
+            self.sst_format
+                .read_block(&handle.info, &index, block, &obj)
+                .await
+        })
         .await
     }
 
@@ -1128,33 +1064,13 @@ async fn wal_object_exists(
 /// reissue carries a [`RetryReason`] so a caching wrapper drops its local copy.
 const MAX_VALIDATION_RETRIES: usize = 1;
 
-/// Classifies an error as a recoverable SST validation failure to retry with a
-/// [`RetryReason`], or `None` if it is not.
-fn validation_retry_reason(err: &SlateDBError) -> Option<RetryReason> {
-    match err {
-        SlateDBError::ChecksumMismatch { .. } => Some(RetryReason::CrcMismatch),
-        #[cfg(any(
-            feature = "snappy",
-            feature = "zlib",
-            feature = "lz4",
-            feature = "zstd"
-        ))]
-        SlateDBError::BlockDecompressionError => Some(RetryReason::DecompressionError),
-        SlateDBError::InvalidFlatbuffer(_)
-        | SlateDBError::EmptyBlock
-        | SlateDBError::EmptyBlockMeta
-        | SlateDBError::InvalidFilterBlock
-        | SlateDBError::BlockTransformError => Some(RetryReason::BlockDecodeError),
-        _ => None,
-    }
-}
-
 /// Runs `read` with the source/type `tag`, reissuing it with a [`RetryReason`]
 /// set on the tag when the result is a recoverable validation failure.
 ///
-/// Only compacted-SST reads are retried: a WAL read has no caching wrapper to
-/// drop a corrupt local copy, so a reissue would just refetch the same bytes.
-/// It is read once without retry.
+/// This is done to enable object store wrappers like a cache to know when
+/// to drop a cached entry that failed validation and retry the read from the
+/// source of truth (object store) instead of repeatedly returning the same
+/// invalid cached entry.
 async fn read_with_validation_retry<T, Fut>(
     mut tag: ObjectStoreCallTag,
     mut read: impl FnMut(ObjectStoreCallTag) -> Fut,
@@ -1162,15 +1078,10 @@ async fn read_with_validation_retry<T, Fut>(
 where
     Fut: std::future::Future<Output = Result<T, SlateDBError>>,
 {
-    let max_retries = if tag.sst_type == SstType::CompactedSst {
-        MAX_VALIDATION_RETRIES
-    } else {
-        0
-    };
-    for _ in 0..max_retries {
+    for _ in 0..MAX_VALIDATION_RETRIES {
         let result = read(tag).await;
         match result {
-            Err(ref err) => match validation_retry_reason(err) {
+            Err(ref err) => match err.maybe_validation_retry_reason() {
                 Some(reason) => {
                     warn!(
                         "retrying SST read after validation failure [reason={:?}, error={}]",
@@ -1196,6 +1107,10 @@ fn tagged_buf_writer(
     path: Path,
     tag: ObjectStoreCallTag,
 ) -> BufWriter {
+    // The one sanctioned `BufWriter::new`: it attaches the tag right after, so
+    // every SST streaming write carries it. Other sites are steered here by the
+    // clippy `disallowed-methods` rule on `BufWriter::new`.
+    #[allow(clippy::disallowed_methods)]
     BufWriter::new(object_store, path).with_extensions(tag.into())
 }
 
@@ -1320,25 +1235,6 @@ pub(crate) enum TableStoreKind {
     GC,
 }
 
-/// The kind of SST a [`TableStore`] object store call targets. Tagged on every
-/// read and write via `object_store::Extensions` alongside the source
-/// [`TableStoreKind`], so a caching wrapper can distinguish WAL from compacted
-/// traffic explicitly rather than by the absence of a tag.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SstType {
-    Wal,
-    CompactedSst,
-}
-
-impl From<&SsTableId> for SstType {
-    fn from(id: &SsTableId) -> Self {
-        match id {
-            SsTableId::Wal(_) => SstType::Wal,
-            SsTableId::Compacted(_) => SstType::CompactedSst,
-        }
-    }
-}
-
 /// The tag carried on every tablestore object store call via
 /// `object_store::Extensions`.
 ///
@@ -1378,20 +1274,6 @@ impl From<ObjectStoreCallTag> for Extensions {
         extensions.insert(tag);
         extensions
     }
-}
-
-/// Why a compacted-SST read is being reissued after a validation failure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetryReason {
-    CrcMismatch,
-    BlockDecodeError,
-    #[cfg(any(
-        feature = "snappy",
-        feature = "zlib",
-        feature = "lz4",
-        feature = "zstd"
-    ))]
-    DecompressionError,
 }
 
 #[allow(dead_code)]
@@ -3004,12 +2886,11 @@ mod tests {
 
     mod kind_tags {
         use super::super::{
-            read_with_validation_retry, ObjectStoreCallTag, RetryReason, SstType, TableStoreKind,
-            MAX_VALIDATION_RETRIES,
+            read_with_validation_retry, ObjectStoreCallTag, TableStoreKind, MAX_VALIDATION_RETRIES,
         };
         use super::{Path, ROOT};
-        use crate::db_state::SsTableId;
-        use crate::error::SlateDBError;
+        use crate::db_state::{SsTableId, SstType};
+        use crate::error::{RetryReason, SlateDBError};
         use crate::format::sst::SsTableFormat;
         use crate::object_stores::ObjectStores;
         use crate::tablestore::TableStore;
@@ -3038,7 +2919,7 @@ mod tests {
             (recording, ts)
         }
 
-        // Compacted-SST range reads carry the source kind and CompactedSst type.
+        // Compacted-SST range reads carry the source kind and Compacted type.
         #[tokio::test]
         async fn compacted_reads_carry_source_and_type() {
             let (recording, ts) = recording_store(TableStoreKind::Reader);
@@ -3059,8 +2940,8 @@ mod tests {
                 recording
                     .get_sst_types(false)
                     .iter()
-                    .all(|t| *t == Some(SstType::CompactedSst)),
-                "compacted reads should carry the CompactedSst type"
+                    .all(|t| *t == Some(SstType::Compacted)),
+                "compacted reads should carry the Compacted type"
             );
             assert!(
                 recording.get_retries(false).iter().all(|r| r.is_none()),
@@ -3086,8 +2967,8 @@ mod tests {
             );
             assert_eq!(
                 recording.get_sst_types(true),
-                vec![Some(SstType::CompactedSst)],
-                "the metadata HEAD read should carry the CompactedSst type"
+                vec![Some(SstType::Compacted)],
+                "the metadata HEAD read should carry the Compacted type"
             );
         }
 
@@ -3120,7 +3001,7 @@ mod tests {
             let attempts = AtomicUsize::new(0);
             let obs = observed.clone();
             let result: Result<u8, SlateDBError> = read_with_validation_retry(
-                ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::CompactedSst),
+                ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted),
                 |tag| {
                     obs.lock().unwrap().push(tag);
                     let n = attempts.fetch_add(1, Ordering::SeqCst);
@@ -3143,12 +3024,12 @@ mod tests {
                 vec![
                     ObjectStoreCallTag {
                         kind: TableStoreKind::Compactor,
-                        sst_type: SstType::CompactedSst,
+                        sst_type: SstType::Compacted,
                         retry: None,
                     },
                     ObjectStoreCallTag {
                         kind: TableStoreKind::Compactor,
-                        sst_type: SstType::CompactedSst,
+                        sst_type: SstType::Compacted,
                         retry: Some(RetryReason::CrcMismatch),
                     },
                 ],
@@ -3156,25 +3037,45 @@ mod tests {
             );
         }
 
-        // A WAL read is not retried on a validation failure: it is issued exactly
-        // once and the error surfaces directly.
+        // A WAL read is reissued once on a recoverable validation failure, the
+        // same as a compacted read, with the RetryReason set on the reissue.
         #[tokio::test]
-        async fn wal_read_is_not_retried() {
+        async fn wal_read_is_retried() {
+            let observed: Arc<Mutex<Vec<ObjectStoreCallTag>>> = Arc::new(Mutex::new(Vec::new()));
             let attempts = AtomicUsize::new(0);
+            let obs = observed.clone();
             let result: Result<u8, SlateDBError> = read_with_validation_retry(
                 ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Wal),
-                |_tag| {
-                    attempts.fetch_add(1, Ordering::SeqCst);
-                    async move { Err(SlateDBError::ChecksumMismatch { path: None }) }
+                |tag| {
+                    obs.lock().unwrap().push(tag);
+                    let n = attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if n == 0 {
+                            Err(SlateDBError::ChecksumMismatch { path: None })
+                        } else {
+                            Ok(7u8)
+                        }
+                    }
                 },
             )
             .await;
 
-            assert!(matches!(result, Err(SlateDBError::ChecksumMismatch { .. })));
+            assert_eq!(result.unwrap(), 7);
             assert_eq!(
-                attempts.load(Ordering::SeqCst),
-                1,
-                "a WAL read must not be reissued"
+                observed.lock().unwrap().clone(),
+                vec![
+                    ObjectStoreCallTag {
+                        kind: TableStoreKind::Main,
+                        sst_type: SstType::Wal,
+                        retry: None,
+                    },
+                    ObjectStoreCallTag {
+                        kind: TableStoreKind::Main,
+                        sst_type: SstType::Wal,
+                        retry: Some(RetryReason::CrcMismatch),
+                    },
+                ],
+                "a WAL read should be reissued once with the retry reason"
             );
         }
     }

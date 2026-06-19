@@ -387,6 +387,15 @@ pub enum SstType {
     Wal,
 }
 
+impl From<&SsTableId> for SstType {
+    fn from(id: &SsTableId) -> Self {
+        match id {
+            SsTableId::Wal(_) => SstType::Wal,
+            SsTableId::Compacted(_) => SstType::Compacted,
+        }
+    }
+}
+
 /// Filter block format stored in SsTableInfo.
 /// Default is `Composite` (the current format). `Legacy` is only set when
 /// decoding old SSTs via FlatBuffers (where the field is absent and maps to 0).

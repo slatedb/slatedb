@@ -176,9 +176,8 @@ carry distinct kinds.
 
 When decoding an SST read fails with a recoverable error (CRC mismatch, block
 decode, decompression), the TableStore reissues the read once with
-`retry = Some(reason)`. Only compacted reads are retried: a WAL read has no
-caching wrapper above it that would hold a corrupt copy, so a reissue would only
-refetch the same bytes.
+`retry = Some(reason)`. Both compacted and WAL reads are reissued, so a wrapper
+caching either kind can drop a corrupt local copy on the retry.
 
 The retry tag tells a wrapper to drop its cached part for the path and refetch
 from upstream instead of returning the same corrupt bytes. Without it, a wrapper
