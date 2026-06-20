@@ -76,7 +76,7 @@ pub(crate) struct StartCompactionJobArgs {
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
     /// Optional resume context to use for resuming a compaction job
-    pub(crate) job_ctx: Option<CompactionContext>,
+    pub(crate) ctx: Option<CompactionContext>,
 }
 
 impl std::fmt::Debug for StartCompactionJobArgs {
@@ -89,13 +89,13 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("sorted_runs", &self.sorted_runs)
             .field("compaction_clock_tick", &self.compaction_clock_tick)
             .field("is_dest_last_run", &self.is_dest_last_run)
-            .field("job_ctx", &self.job_ctx)
+            .field("ctx", &self.ctx)
             .finish()
     }
 }
 
 struct SubcompactionArgs {
-    // index in to job_ctx.subcompactions()
+    // index in to ctx.subcompactions()
     index: usize,
     range: BytesRange,
     // Only read when the `compaction_filters` feature builds the filter's
@@ -111,10 +111,10 @@ struct SubcompactionArgs {
     output_ssts: Vec<SsTableHandle>,
 }
 
-/// A compaction job that has been planned and is ready to be executed
-struct CompactionJob {
+/// A compaction that has been planned and is ready to be executed
+struct PlannedCompaction {
     // the context where state required to resume the job is recorded
-    job_ctx: CompactionContext,
+    ctx: CompactionContext,
     // args for starting each subcompaction
     subcompaction_args: Vec<SubcompactionArgs>,
 }
@@ -424,7 +424,7 @@ impl TokioCompactionExecutorInner {
         &self,
         id: Ulid,
         bytes_processed: u64,
-        job_ctx: CompactionContext,
+        ctx: CompactionContext,
     ) {
         // Allow send() because we are treating the executor like an external
         // component. They can do what they want. If the send fails (e.g., during
@@ -435,7 +435,7 @@ impl TokioCompactionExecutorInner {
             .try_send(WorkerMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
-                job_ctx,
+                ctx,
             })
         {
             debug!(
@@ -469,9 +469,9 @@ impl TokioCompactionExecutorInner {
     fn plan_compaction_job(
         &self,
         args: StartCompactionJobArgs,
-    ) -> CompactionJob {
-        let job_ctx = match args.job_ctx {
-            Some(job_ctx) => job_ctx,
+    ) -> PlannedCompaction {
+        let ctx = match args.ctx {
+            Some(ctx) => ctx,
             None => {
                 CompactionContext::new(
                     self.plan_subcompactions(&args),
@@ -479,8 +479,8 @@ impl TokioCompactionExecutorInner {
                 )
             }
         };
-        assert!(!job_ctx.subcompactions().is_empty());
-        let subcompaction_args = job_ctx.subcompactions().iter().enumerate()
+        assert!(!ctx.subcompactions().is_empty());
+        let subcompaction_args = ctx.subcompactions().iter().enumerate()
             .map(|(index, s)| SubcompactionArgs {
                 index,
                 range: s.range().clone(),
@@ -489,12 +489,12 @@ impl TokioCompactionExecutorInner {
                 sorted_runs: args.sorted_runs.clone(),
                 compaction_clock_tick: args.compaction_clock_tick,
                 is_dest_last_run: args.is_dest_last_run,
-                retention_min_seq: job_ctx.retention_min_seq(),
+                retention_min_seq: ctx.retention_min_seq(),
                 output_ssts: s.output_ssts().clone(),
             })
             .collect::<Vec<_>>();
-        CompactionJob {
-            job_ctx,
+        PlannedCompaction {
+            ctx,
             subcompaction_args,
         }
     }
@@ -509,7 +509,7 @@ impl TokioCompactionExecutorInner {
     /// - Writes output SSTs up to `max_sst_size`, reporting periodic progress
     ///
     /// ## Returns
-    /// - The job context with all output SST handles.
+    /// - The compaction context with all output SST handles.
     #[instrument(level = "debug", skip_all, fields(id = %args.id))]
     async fn plan_and_execute_compaction_job(
         self: &Arc<Self>,
@@ -525,8 +525,8 @@ impl TokioCompactionExecutorInner {
         // Plan the job's ranges, then run them concurrently.
         let id = args.id;
         let destination = args.destination;
-        let job = self.plan_compaction_job(args);
-        self.execute_compaction_job(id, destination, job, sequence_tracker)
+        let planned = self.plan_compaction_job(args);
+        self.execute_compaction_job(id, destination, planned, sequence_tracker)
             .await
     }
 
@@ -558,13 +558,13 @@ impl TokioCompactionExecutorInner {
         self: &Arc<Self>,
         id: Ulid,
         destination: u32,
-        job: CompactionJob,
+        planned: PlannedCompaction,
         sequence_tracker: Arc<SequenceTracker>,
     ) -> Result<SortedRun, SlateDBError> {
-        let CompactionJob {
-            mut job_ctx,
+        let PlannedCompaction {
+            mut ctx,
             subcompaction_args
-        } = job;
+        } = planned;
         let num_subcompactions = subcompaction_args.len();
         debug!(
             "executing compaction with subcompactions [id={}, subcompactions={}]",
@@ -587,14 +587,14 @@ impl TokioCompactionExecutorInner {
         // zero bytes processed before the ranges re-report their resumed
         // progress — a momentary drop to zero. Skip it; the per-range progress
         // emitted as each range starts carries the resumed totals instead.
-        if job_ctx
+        if ctx
             .subcompactions()
             .iter()
             .map(|s| s.output_ssts().len())
             .sum::<usize>()
             == 0
         {
-            self.send_compaction_progress(id, 0, job_ctx.clone());
+            self.send_compaction_progress(id, 0, ctx.clone());
         }
 
         let (sub_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -668,19 +668,19 @@ impl TokioCompactionExecutorInner {
                     // Each range reports monotonically increasing bytes (its
                     // resume offset is already folded in), so store the latest.
                     bytes_processed_by_sub[index] = bytes_processed;
-                    job_ctx.set_output_ssts(index, output_ssts);
+                    ctx.set_output_ssts(index, output_ssts);
                     let total_bytes = bytes_processed_by_sub.iter().sum();
-                    self.send_compaction_progress(id, total_bytes, job_ctx.clone());
+                    self.send_compaction_progress(id, total_bytes, ctx.clone());
                 }
                 SubcompactionEvent::Finished {
                     index,
                     result
                 } => match result {
                     Ok(output_ssts) => {
-                        job_ctx.set_output_ssts(index, output_ssts);
+                        ctx.set_output_ssts(index, output_ssts);
                         completed[index] = true;
                         let total_bytes = bytes_processed_by_sub.iter().sum();
-                        self.send_compaction_progress(id, total_bytes, job_ctx.clone());
+                        self.send_compaction_progress(id, total_bytes, ctx.clone());
                     }
                     Err(e) => {
                         first_error = Some(e);
@@ -712,7 +712,7 @@ impl TokioCompactionExecutorInner {
         // Verify it before committing the run rather than silently producing a
         // corrupt one: adjacent output SSTs must not overlap by boundary key.
         // The check is cheap because the boundary keys are already in memory.
-        let output_ssts: Vec<&SsTableHandle> = job_ctx.subcompactions()
+        let output_ssts: Vec<&SsTableHandle> = ctx.subcompactions()
             .iter()
             .flat_map(|sub| sub.output_ssts().iter())
             .collect();
@@ -1665,7 +1665,7 @@ mod tests {
                         compaction_clock_tick: 0,
                         is_dest_last_run: false,
                         retention_min_seq,
-                        job_ctx: Some(CompactionContext::new(
+                        ctx: Some(CompactionContext::new(
                             vec![Subcompaction::new(BytesRange::unbounded())],
                             retention_min_seq,
                         )),
@@ -1716,7 +1716,7 @@ mod tests {
                             compaction_clock_tick: 0,
                             is_dest_last_run: false,
                             retention_min_seq,
-                            job_ctx: Some(CompactionContext::new(
+                            ctx: Some(CompactionContext::new(
                                 vec![Subcompaction::new(BytesRange::unbounded())
                                     .with_output_ssts(output_ssts)],
                                 retention_min_seq,
@@ -1825,7 +1825,7 @@ mod tests {
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
-            job_ctx: Some(CompactionContext::new(subcompactions, Some(0))),
+            ctx: Some(CompactionContext::new(subcompactions, Some(0))),
         }
     }
 
@@ -1908,8 +1908,8 @@ mod tests {
     fn collect_snapshots(rx: &async_channel::Receiver<WorkerMessage>) -> Vec<Vec<Subcompaction>> {
         let mut snapshots = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let WorkerMessage::CompactionJobProgress { job_ctx, .. } = msg {
-                let subcompactions = job_ctx.subcompactions().clone();
+            if let WorkerMessage::CompactionJobProgress { ctx, .. } = msg {
+                let subcompactions = ctx.subcompactions().clone();
                 if !subcompactions.is_empty() {
                     snapshots.push(subcompactions);
                 }
@@ -2298,14 +2298,14 @@ mod tests {
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
-            job_ctx: None,
+            ctx: None,
         };
 
         // when/then: a fresh job plans a single unbounded-range subcompaction.
         let planned = ctx.executor.inner.plan_compaction_job(args.clone());
-        assert_eq!(planned.job_ctx.subcompactions().len(), 1);
+        assert_eq!(planned.ctx.subcompactions().len(), 1);
         assert_eq!(
-            planned.job_ctx.subcompactions()[0].range(),
+            planned.ctx.subcompactions()[0].range(),
             &BytesRange::unbounded()
         );
 
@@ -2315,13 +2315,13 @@ mod tests {
             Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..)),
         ];
         let args = StartCompactionJobArgs {
-            job_ctx: Some(CompactionContext::new(persisted.clone(), Some(0))),
+            ctx: Some(CompactionContext::new(persisted.clone(), Some(0))),
             ..args
         };
 
         // when/then: the persisted plan is returned verbatim.
         let planned = ctx.executor.inner.plan_compaction_job(args);
-        assert_eq!(planned.job_ctx.subcompactions(), &persisted);
+        assert_eq!(planned.ctx.subcompactions(), &persisted);
     }
 
     /// A blocked SST `close()` (the object-store flush of a finished output SST)
@@ -2409,7 +2409,7 @@ mod tests {
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
-            job_ctx: Some(CompactionContext::new(
+            ctx: Some(CompactionContext::new(
                 vec![Subcompaction::new(BytesRange::unbounded())],
                 Some(0),
             )),
@@ -2593,7 +2593,7 @@ mod tests {
                 compaction_clock_tick: 0,
                 is_dest_last_run,
                 retention_min_seq,
-                job_ctx: Some(CompactionContext::new(
+                ctx: Some(CompactionContext::new(
                     vec![Subcompaction::new(BytesRange::unbounded())],
                     retention_min_seq,
                 )),

@@ -270,7 +270,7 @@ impl CompactionExecuteBench {
             compaction_clock_tick: manifest.db_state().last_l0_clock_tick,
             is_dest_last_run,
             retention_min_seq: None,
-            job_ctx: None,
+            ctx: None,
         })
     }
 
@@ -310,7 +310,7 @@ impl CompactionExecuteBench {
             compaction_clock_tick: state.last_l0_clock_tick,
             is_dest_last_run,
             retention_min_seq: Some(state.recent_snapshot_min_seq),
-            job_ctx: None,
+            ctx: None,
         }
     }
 

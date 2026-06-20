@@ -4561,7 +4561,7 @@ mod tests {
                     compaction_clock_tick: db_state.last_l0_clock_tick,
                     is_dest_last_run,
                     retention_min_seq: None,
-                    job_ctx: compaction.ctx().cloned(),
+                    ctx: compaction.ctx().cloned(),
                 };
 
                 self.real_executor.start_compaction_job(args);
