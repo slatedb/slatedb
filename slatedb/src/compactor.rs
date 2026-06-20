@@ -1272,7 +1272,6 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    use crate::bytes_range::BytesRange;
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
@@ -1282,7 +1281,6 @@ mod tests {
         CompactionExecutor, TokioCompactionExecutor, TokioCompactionExecutorOptions,
     };
     use crate::compactor_state::Compaction;
-    use crate::compactor_state::CompactionContext;
     use crate::compactor_state::CompactionStatus;
     use crate::compactor_state::{SourceId, WorkerSpec};
     use crate::config::{
@@ -1300,7 +1298,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::subcompaction::Subcompaction;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, FixedThreeBytePrefixExtractor, GatedObjectStore};
     use crate::types::KeyValue;

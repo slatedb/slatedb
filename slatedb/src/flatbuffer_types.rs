@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use flatbuffers::{
     FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, VerifierOptions, WIPOffset,
 };
-use tracing::warn;
+use log::warn;
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
@@ -607,7 +607,7 @@ impl FlatBufferCompactionsCodec {
         let mut output_ssts = compaction
             .output_ssts()
             .map(|ssts| ssts.iter().map(Self::compacted_sst).collect())
-            .unwrap_or(vec![]);
+            .unwrap_or_default();
         // The `ctx` union is schema-extensible, but the only variant we ever
         // write (and the only one the in-memory model (compactor_state.rs) supports) is
         // `TieredCompactionContext`. Any other variant decodes as `None`.

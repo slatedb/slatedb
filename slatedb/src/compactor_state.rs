@@ -364,7 +364,7 @@ impl CompactionContext {
     ) {
         self.subcompactions
             .get_mut(subcompaction)
-            .expect(format!("subcompaction index {} out of bounds", subcompaction).as_str())
+            .expect("subcompaction index out of bounds")
             .set_output_ssts(output_ssts);
     }
 
