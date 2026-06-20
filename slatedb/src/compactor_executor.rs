@@ -1795,6 +1795,7 @@ mod tests {
             },
             root_path.clone(),
             None,
+            TableStoreKind::Compactor,
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
