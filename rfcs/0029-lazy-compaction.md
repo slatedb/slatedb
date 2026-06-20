@@ -184,6 +184,10 @@ and offsets) to derive exact block liveness by correlating the view's
 dead blocks + blocks superseded by overlays. Dropped records (e.g., bottom-level
 tombstones) are estimated from per-block stats.
 
+Liveness is judged against `retention_min_seq`, not key overlap alone: an older
+block overlapped by a newer SST is dead only if the superseding versions fall
+below `retention_min_seq` (otherwise an active snapshot may still need it).
+
 The planner reads its budget from the `CompactionSpec` (not from live manifest
 state) and rewrites the least valuable references (least bytes saved per budget
 unit consumed). Planning is then a pure function of these immutable inputs.
@@ -223,9 +227,9 @@ partially live.
 
 ### Compaction filters (RFC-0017)
 
-A filter is said to be **stateless** if it can run on any subset of inputs and
-produce identical decisions (e.g., custom TTLs, `NoopFilter`). If a filter is
-not stateless, the planner falls back to a full rewrite.
+A filter is said to be **stateless** if no state is carried from one entry to
+the next. Another way to put it is that `filter(A ∪ B) = filter(A) ∪ filter(B)`.
+If a filter is not stateless, the planner falls back to a full rewrite.
 
 Filters declare statelessness by overriding
 `CompactionFilter::is_stateless() -> bool` (default `false`).
@@ -236,6 +240,10 @@ segments.
 
 If a filter emits `Delete` while writing an overlay block, it is treated as a
 `Tombstone`.
+
+Note: Just like today, blocks are unfiltered until rewritten, and there is no
+guarantee this happens by a specific deadline. As with [TTL](#ttl-rfc-0003),
+operators who need that guarantee can force an eager (non-lazy) rewrite.
 
 ### Resumable compaction (RFC-0013)
 
@@ -365,8 +373,9 @@ SlateDB features and components impacted by this RFC:
 - **No-overhead guarantee:** Manifests and SSTs are byte-identical with the
   enable flag off.
 - **Run disjointness and snapping:** Randomized compactions assert view and
-  overlay ranges never overlap, all live keys remain reachable, and no
-  superseded version is exposed.
+  overlay ranges never overlap. All live keys remain reachable, and no
+  superseded version is exposed, including versions an active snapshot below
+  `retention_min_seq` still pins.
 - **Resume determinism:** Kill/resume tests assert that the plan re-derived from
   the `CompactionSpec` is identical, `output_ssts` overlay correlation is
   stable, and failed matches fall back to full rewrites.
