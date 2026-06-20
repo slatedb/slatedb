@@ -632,8 +632,7 @@ mod tests {
             ),
         ];
         let job_ctx = Some(CompactionContext::new(
-            vec![Subcompaction::new(BytesRange::unbounded())
-                .with_output_ssts(output_ssts.clone())],
+            vec![Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output_ssts.clone())],
             Some(0),
         ));
 
@@ -645,7 +644,7 @@ mod tests {
         dirty.value.insert(
             Compaction::new(running_id, CompactionSpec::new(vec![], 0))
                 .with_status(CompactionStatus::Running)
-                .with_ctx(job_ctx.clone())
+                .with_ctx(job_ctx.clone()),
         );
         stored_compactions.update(dirty).await.unwrap();
 

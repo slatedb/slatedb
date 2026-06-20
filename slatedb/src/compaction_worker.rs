@@ -48,6 +48,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionContext, CompactionStatus, WorkerSpec};
 use crate::config::CompactionWorkerOptions;
+use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
@@ -60,7 +61,6 @@ use crate::utils::IdGenerator;
 use crate::CompactionFilterSupplier;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
-use crate::db_state::SortedRun;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
@@ -161,8 +161,7 @@ fn total_output_ssts(subcompactions: &[Subcompaction]) -> usize {
 }
 
 fn total_output_ssts_in_ctx(ctx: Option<&CompactionContext>) -> usize {
-    ctx
-        .map(|ctx| total_output_ssts(ctx.subcompactions()))
+    ctx.map(|ctx| total_output_ssts(ctx.subcompactions()))
         .unwrap_or(0)
 }
 
@@ -665,8 +664,7 @@ impl CompactionWorkerHandler {
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let updated = existing
                 .with_status(CompactionStatus::Compacted)
-                .with_output_ssts(
-                    sorted_run.sst_views.iter().map(|v| v.sst.clone()).collect())
+                .with_output_ssts(sorted_run.sst_views.iter().map(|v| v.sst.clone()).collect())
                 .with_worker(Some(WorkerSpec::new(self.worker_id.clone(), heartbeat_ms)))
                 .with_ctx(None);
             dirty.value.insert(updated);
@@ -1022,7 +1020,10 @@ mod tests {
             sst_views: vec![SsTableView::identity(output_handle.clone())],
         };
 
-        fx.handler.handle_finished(id, Ok(sorted_run)).await.unwrap();
+        fx.handler
+            .handle_finished(id, Ok(sorted_run))
+            .await
+            .unwrap();
 
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Compacted);
@@ -1185,7 +1186,13 @@ mod tests {
         );
         assert_eq!(c.ctx(), Some(&ctx));
         let ctx = c.ctx().unwrap();
-        assert_eq!(0, ctx.subcompactions().iter().map(|s| s.output_ssts().len()).sum::<usize>());
+        assert_eq!(
+            0,
+            ctx.subcompactions()
+                .iter()
+                .map(|s| s.output_ssts().len())
+                .sum::<usize>()
+        );
     }
 
     /// When the executor reports per-range subcompaction progress (RFC-0028),

@@ -615,11 +615,15 @@ impl FlatBufferCompactionsCodec {
         // model to define the context as an enum.
         let ctx = match compaction.ctx_type() {
             FbCompactionContext::NONE => None,
-            FbCompactionContext::TieredCompactionContext =>
-                compaction.ctx_as_tiered_compaction_context().map(Self::compaction_context),
+            FbCompactionContext::TieredCompactionContext => compaction
+                .ctx_as_tiered_compaction_context()
+                .map(Self::compaction_context),
             _ => {
-                warn!("unknown compaction context type: {:?}", compaction.ctx_type());
-                return Err(SlateDBError::InvalidCompaction)
+                warn!(
+                    "unknown compaction context type: {:?}",
+                    compaction.ctx_type()
+                );
+                return Err(SlateDBError::InvalidCompaction);
             }
         };
         if status == CompactionStatus::Running || status == CompactionStatus::Submitted {
@@ -636,9 +640,7 @@ impl FlatBufferCompactionsCodec {
             .with_ctx(ctx))
     }
 
-    fn compaction_context(
-        ctx: FbTieredCompactionContext,
-    ) -> CompactorCompactionContext {
+    fn compaction_context(ctx: FbTieredCompactionContext) -> CompactorCompactionContext {
         let subcompactions = ctx
             .subcompactions()
             .map(|subs| subs.iter().map(Self::subcompaction).collect())

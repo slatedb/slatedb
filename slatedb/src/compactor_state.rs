@@ -357,8 +357,13 @@ impl CompactionContext {
         }
     }
 
-    pub(crate) fn set_output_ssts(&mut self, subcompaction: usize, output_ssts: Vec<SsTableHandle>) {
-        self.subcompactions.get_mut(subcompaction)
+    pub(crate) fn set_output_ssts(
+        &mut self,
+        subcompaction: usize,
+        output_ssts: Vec<SsTableHandle>,
+    ) {
+        self.subcompactions
+            .get_mut(subcompaction)
             .expect(format!("subcompaction index {} out of bounds", subcompaction).as_str())
             .set_output_ssts(output_ssts);
     }
@@ -374,8 +379,7 @@ impl CompactionContext {
 
     pub(crate) fn validate_update(&self, updated: &Self) {
         assert_eq!(
-            self.retention_min_seq,
-            updated.retention_min_seq,
+            self.retention_min_seq, updated.retention_min_seq,
             "compaction retention_min_seq must not change once set"
         );
         assert_eq!(
@@ -383,7 +387,11 @@ impl CompactionContext {
             updated.subcompactions.len(),
             "subcompaction plan must not change once set"
         );
-        for (prev, next) in self.subcompactions.iter().zip(updated.subcompactions.iter()) {
+        for (prev, next) in self
+            .subcompactions
+            .iter()
+            .zip(updated.subcompactions.iter())
+        {
             assert_eq!(
                 prev.range(),
                 next.range(),
