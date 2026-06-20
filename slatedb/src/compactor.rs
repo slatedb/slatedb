@@ -1110,7 +1110,7 @@ impl CompactorEventHandler {
                 self.state_mut().finish_drain_compaction(compaction.id());
             } else {
                 self.state_mut().update_compaction(&compaction.id(), |c| {
-                    c.clear_job_ctx();
+                    c.clear_ctx();
                     c.set_status(CompactionStatus::Scheduled)
                 });
             }
@@ -1282,7 +1282,7 @@ mod tests {
         CompactionExecutor, TokioCompactionExecutor, TokioCompactionExecutorOptions,
     };
     use crate::compactor_state::Compaction;
-    use crate::compactor_state::CompactionJobContext;
+    use crate::compactor_state::CompactionContext;
     use crate::compactor_state::CompactionStatus;
     use crate::compactor_state::{SourceId, WorkerSpec};
     use crate::config::{
@@ -4561,7 +4561,7 @@ mod tests {
                     compaction_clock_tick: db_state.last_l0_clock_tick,
                     is_dest_last_run,
                     retention_min_seq: None,
-                    job_ctx: compaction.job_ctx().cloned(),
+                    job_ctx: compaction.ctx().cloned(),
                 };
 
                 self.real_executor.start_compaction_job(args);
@@ -4590,7 +4590,7 @@ mod tests {
                         .clone()
                         .with_status(CompactionStatus::Compacted)
                         .with_output_ssts(result.sst_views.iter().map(|v| v.sst.clone()).collect())
-                        .with_job_ctx(None);
+                        .with_ctx(None);
                     dirty.value.insert(completed);
                     match stored.update(dirty).await {
                         Ok(()) => break,

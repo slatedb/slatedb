@@ -77,6 +77,25 @@ table WorkerSpec {
     last_heartbeat_ms: uint64;
 }
 
+// Holds information required to resume a running job or inspect the result of
+// a complete compaction job. This includes the outputs of planning (e.g.
+// subcompactions, retention_min_seq) along with the job's outputs. Different
+// compaction types may need to hold different types of context. For now,
+// we only define context for tiered compactions as those are the only kind
+// that track and resume from intermediate state.
+union CompactionContext {
+    TieredCompactionContext,
+}
+
+table TieredCompactionContext {
+    // Subcompactions partitioning this compaction into non-overlapping key
+    // ranges (RFC-0028).
+    subcompactions: [Subcompaction];
+
+    // The min retention seq num to use when executing the compaction
+    retention_min_seq: ulong;
+}
+
 table Compaction {
     // ID of compaction
     id: Ulid (required);
@@ -93,20 +112,8 @@ table Compaction {
     // Spec of the worker that has claimed this compaction. null = unclaimed
     worker: WorkerSpec;
 
-    // Information required to resume a compaction job
-    job_ctx: CompactionJobContext;
-}
-
-// Holds information required to resume a running job or inspect the result of
-// a complete compaction job. This includes the outputs of planning (e.g.
-// subcompactions, retention_min_seq) along with the job's outputs
-table CompactionJobContext {
-    // Subcompactions partitioning this compaction into non-overlapping key
-    // ranges (RFC-0028).
-    subcompactions: [Subcompaction];
-
-    // The min retention seq num to use when executing the compaction
-    retention_min_seq: ulong;
+    // Information required to resume a compaction job on a worker
+    ctx: CompactionContext;
 }
 
 // A compaction over a sub-range of the parent compaction's key space

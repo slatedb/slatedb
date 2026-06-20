@@ -337,7 +337,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
-        Compaction, CompactionJobContext, CompactionSpec, CompactionStatus, Compactions,
+        Compaction, CompactionContext, CompactionSpec, CompactionStatus, Compactions,
         CompactorState, VersionedCompactions, WorkerSpec,
     };
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
@@ -631,7 +631,7 @@ mod tests {
                 },
             ),
         ];
-        let job_ctx = Some(CompactionJobContext::new(
+        let job_ctx = Some(CompactionContext::new(
             vec![Subcompaction::new(BytesRange::unbounded())
                 .with_output_ssts(output_ssts.clone())],
             Some(0),
@@ -645,7 +645,7 @@ mod tests {
         dirty.value.insert(
             Compaction::new(running_id, CompactionSpec::new(vec![], 0))
                 .with_status(CompactionStatus::Running)
-                .with_job_ctx(job_ctx.clone())
+                .with_ctx(job_ctx.clone())
         );
         stored_compactions.update(dirty).await.unwrap();
 
@@ -671,7 +671,7 @@ mod tests {
         // new() leaves Running entries untouched and preserves their output
         // through the load; reclaiming stale ones is the ticker's job.
         assert_eq!(compaction.status(), CompactionStatus::Running);
-        assert_eq!(compaction.job_ctx(), job_ctx.as_ref());
+        assert_eq!(compaction.ctx(), job_ctx.as_ref());
     }
 
     /// `CompactorStateWriter::new` no longer reclaims stale `Running`

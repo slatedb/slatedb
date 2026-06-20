@@ -338,7 +338,7 @@ impl WorkerSpec {
 static EMPTY_SUBCOMPACTIONS: Vec<Subcompaction> = Vec::new();
 
 #[derive(Clone, PartialEq, Debug, Serialize)]
-pub struct CompactionJobContext {
+pub struct CompactionContext {
     /// Subcompactions partitioning this compaction into non-overlapping key
     /// ranges (RFC-0028). The produced output SSTs are recorded per range
     /// here; On completion the aggregate is recorded in [`Compaction::output_ssts`]. A
@@ -349,7 +349,7 @@ pub struct CompactionJobContext {
     retention_min_seq: Option<u64>,
 }
 
-impl CompactionJobContext {
+impl CompactionContext {
     pub(crate) fn new(subcompactions: Vec<Subcompaction>, retention_min_seq: Option<u64>) -> Self {
         Self {
             subcompactions,
@@ -419,7 +419,7 @@ pub struct Compaction {
     /// The worker that has claimed this compaction. `None` means the
     /// compaction is unclaimed (only valid when `status == Submitted`).
     worker: Option<WorkerSpec>,
-    job_ctx: Option<CompactionJobContext>,
+    ctx: Option<CompactionContext>,
 }
 
 impl Compaction {
@@ -431,7 +431,7 @@ impl Compaction {
             status: CompactionStatus::Submitted,
             worker: None,
             output_ssts: vec![],
-            job_ctx: None,
+            ctx: None,
         }
     }
 
@@ -445,8 +445,8 @@ impl Compaction {
         self
     }
 
-    pub(crate) fn with_job_ctx(mut self, job_ctx: Option<CompactionJobContext>) -> Self {
-        self.job_ctx = job_ctx;
+    pub(crate) fn with_ctx(mut self, ctx: Option<CompactionContext>) -> Self {
+        self.ctx = ctx;
         self
     }
 
@@ -531,30 +531,30 @@ impl Compaction {
     }
 
     /// Returns the job context required to resume a compaction job
-    pub fn job_ctx(&self) -> Option<&CompactionJobContext> {
-        self.job_ctx.as_ref()
+    pub fn ctx(&self) -> Option<&CompactionContext> {
+        self.ctx.as_ref()
     }
 
-    pub(crate) fn set_job_ctx(&mut self, updated: Option<CompactionJobContext>) {
-        match (&self.job_ctx, updated) {
-            (_, None) => self.job_ctx = None,
+    pub(crate) fn set_ctx(&mut self, updated: Option<CompactionContext>) {
+        match (&self.ctx, updated) {
+            (_, None) => self.ctx = None,
             (Some(existing), Some(updated)) => {
                 existing.validate_update(&updated);
-                self.job_ctx = Some(updated);
+                self.ctx = Some(updated);
             }
-            (None, Some(updated)) => self.job_ctx = Some(updated),
+            (None, Some(updated)) => self.ctx = Some(updated),
         }
     }
 
-    pub(crate) fn clear_job_ctx(&mut self) {
-        self.job_ctx = None;
+    pub(crate) fn clear_ctx(&mut self) {
+        self.set_ctx(None);
     }
 
     /// Returns the subcompactions of this compaction, if any.
     pub fn subcompactions(&self) -> &Vec<Subcompaction> {
-        self.job_ctx
+        self.ctx
             .as_ref()
-            .map(CompactionJobContext::subcompactions)
+            .map(CompactionContext::subcompactions)
             .unwrap_or(&EMPTY_SUBCOMPACTIONS)
     }
 
@@ -562,7 +562,7 @@ impl Compaction {
     pub(crate) fn set_status(&mut self, status: CompactionStatus) {
         self.status = status;
         if status == CompactionStatus::Failed {
-            self.clear_job_ctx();
+            self.clear_ctx();
         }
     }
 
@@ -1239,11 +1239,11 @@ mod tests {
             Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
         )
-        .with_job_ctx(Some(CompactionJobContext::new(subcompactions, Some(0))))
+        .with_ctx(Some(CompactionContext::new(subcompactions, Some(0))))
     }
 
     fn set_test_subcompactions(compaction: &mut Compaction, subcompactions: Vec<Subcompaction>) {
-        compaction.set_job_ctx(Some(CompactionJobContext::new(subcompactions, Some(0))));
+        compaction.set_ctx(Some(CompactionContext::new(subcompactions, Some(0))));
     }
 
     #[test]

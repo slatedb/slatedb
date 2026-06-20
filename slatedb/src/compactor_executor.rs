@@ -17,7 +17,7 @@ use crate::compaction_filter::CompactionFilterSupplier;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter_iterator::CompactionFilterIterator;
 use crate::compaction_worker::WorkerMessage;
-use crate::compactor_state::CompactionJobContext;
+use crate::compactor_state::CompactionContext;
 use crate::config::CompactionWorkerOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
@@ -76,7 +76,7 @@ pub(crate) struct StartCompactionJobArgs {
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
     /// Optional resume context to use for resuming a compaction job
-    pub(crate) job_ctx: Option<CompactionJobContext>,
+    pub(crate) job_ctx: Option<CompactionContext>,
 }
 
 impl std::fmt::Debug for StartCompactionJobArgs {
@@ -114,7 +114,7 @@ struct SubcompactionArgs {
 /// A compaction job that has been planned and is ready to be executed
 struct CompactionJob {
     // the context where state required to resume the job is recorded
-    job_ctx: CompactionJobContext,
+    job_ctx: CompactionContext,
     // args for starting each subcompaction
     subcompaction_args: Vec<SubcompactionArgs>,
 }
@@ -424,7 +424,7 @@ impl TokioCompactionExecutorInner {
         &self,
         id: Ulid,
         bytes_processed: u64,
-        job_ctx: CompactionJobContext,
+        job_ctx: CompactionContext,
     ) {
         // Allow send() because we are treating the executor like an external
         // component. They can do what they want. If the send fails (e.g., during
@@ -473,7 +473,7 @@ impl TokioCompactionExecutorInner {
         let job_ctx = match args.job_ctx {
             Some(job_ctx) => job_ctx,
             None => {
-                CompactionJobContext::new(
+                CompactionContext::new(
                     self.plan_subcompactions(&args),
                     args.retention_min_seq
                 )
@@ -1665,7 +1665,7 @@ mod tests {
                         compaction_clock_tick: 0,
                         is_dest_last_run: false,
                         retention_min_seq,
-                        job_ctx: Some(CompactionJobContext::new(
+                        job_ctx: Some(CompactionContext::new(
                             vec![Subcompaction::new(BytesRange::unbounded())],
                             retention_min_seq,
                         )),
@@ -1716,7 +1716,7 @@ mod tests {
                             compaction_clock_tick: 0,
                             is_dest_last_run: false,
                             retention_min_seq,
-                            job_ctx: Some(CompactionJobContext::new(
+                            job_ctx: Some(CompactionContext::new(
                                 vec![Subcompaction::new(BytesRange::unbounded())
                                     .with_output_ssts(output_ssts)],
                                 retention_min_seq,
@@ -1825,7 +1825,7 @@ mod tests {
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
-            job_ctx: Some(CompactionJobContext::new(subcompactions, Some(0))),
+            job_ctx: Some(CompactionContext::new(subcompactions, Some(0))),
         }
     }
 
@@ -2315,7 +2315,7 @@ mod tests {
             Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..)),
         ];
         let args = StartCompactionJobArgs {
-            job_ctx: Some(CompactionJobContext::new(persisted.clone(), Some(0))),
+            job_ctx: Some(CompactionContext::new(persisted.clone(), Some(0))),
             ..args
         };
 
@@ -2409,7 +2409,7 @@ mod tests {
             compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(0),
-            job_ctx: Some(CompactionJobContext::new(
+            job_ctx: Some(CompactionContext::new(
                 vec![Subcompaction::new(BytesRange::unbounded())],
                 Some(0),
             )),
@@ -2593,7 +2593,7 @@ mod tests {
                 compaction_clock_tick: 0,
                 is_dest_last_run,
                 retention_min_seq,
-                job_ctx: Some(CompactionJobContext::new(
+                job_ctx: Some(CompactionContext::new(
                     vec![Subcompaction::new(BytesRange::unbounded())],
                     retention_min_seq,
                 )),

@@ -309,7 +309,7 @@ impl CompactionExecuteBench {
             sorted_runs: srs,
             compaction_clock_tick: state.last_l0_clock_tick,
             is_dest_last_run,
-            retention_min_seq: None,
+            retention_min_seq: Some(state.recent_snapshot_min_seq),
             job_ctx: None,
         }
     }
