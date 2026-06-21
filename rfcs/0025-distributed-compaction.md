@@ -75,7 +75,7 @@ The design in this RFC sidesteps this complexity by separating coordination (sch
 ## Non-Goals
 
 - **Changing the compaction scheduling strategy.** The scheduler logic is unchanged; only execution is distributed.
-  - **Eliminating L0 admission back-pressure for a single hot segment.** L0 capacity is released by manifest commits, and the current scheduler permits one L0-sourcing compaction per segment due to the single cursor L0 watermark design. Addressing this bottleneck directly requires faster execution of a single logical L0 compaction (for example, through subcompactions), or a separate redesign of L0 scheduling, commit ordering, and watermark semantics.
+- **Eliminating L0 admission back-pressure for a single hot segment.** L0 capacity is released by manifest commits, and the current scheduler permits one L0-sourcing compaction per segment due to the single cursor L0 watermark design. Addressing this bottleneck directly requires faster execution of a single logical L0 compaction (for example, through subcompactions), or a separate redesign of L0 scheduling, commit ordering, and watermark semantics.
 - **Multi-coordinator support.** The single-coordinator invariant is preserved; leader election across coordinators or purely distributed coordination is a future concern. This includes split-brain handling (e.g. a zombie coordinator that resumes writing after a new coordinator has taken over): deployments are responsible for ensuring at most one coordinator is active at a time to avoid fencing the DB.
 - **Changes to the public read/write API.** Distributed compaction is transparent to DB clients.
 

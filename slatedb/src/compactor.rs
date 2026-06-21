@@ -756,7 +756,7 @@ impl CompactorEventHandler {
                 ),
                 None => error!(
                     "reclaiming Running compaction that has no worker; this should \
-                     not happen [id={}]",
+                     not happen. please open issue. [id={}]",
                     id
                 ),
             }
@@ -1350,10 +1350,7 @@ pub mod stats {
     /// Registered once per worker from the worker's recorder with the worker id
     /// baked into the label set, and incremented by the executor (which always
     /// runs inside a worker). A shared metrics backend can therefore attribute
-    /// throughput to individual workers in multi-worker deployments. These
-    /// deliberately reuse the legacy `slatedb.compactor.bytes_compacted` /
-    /// `running_compactions` names with a worker label; the coordinator no longer
-    /// emits the unlabeled versions, so the series do not collide.
+    /// throughput to individual workers in multi-worker deployments.
     #[derive(Clone)]
     pub(crate) struct WorkerStats {
         /// Bytes written to output SSTs by this worker (cumulative).

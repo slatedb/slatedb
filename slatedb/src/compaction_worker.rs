@@ -8,7 +8,7 @@
 //! `Compacted` entries and commits the manifest update (see
 //! [`crate::compactor::CompactorEventHandler::commit_compacted_entries`]).
 //!
-//! # Deployment shapes
+//! # Deployment patterns
 //!
 //! Workers run in one of two modes:
 //!
@@ -41,12 +41,12 @@
 //! The coordinator reclaims stale Running compactions whose
 //! `last_heartbeat_ms` is older than
 //! [`crate::config::CompactorOptions::worker_heartbeat_timeout`].
-//! Reclaimed jobs resume from their last checkpoint (`output_ssts`) when the
+//! Reclaimed jobs resume from their last persisted state (`output_ssts`) when the
 //! next worker picks them up.
 //!
 //! # Metrics
 //!
-//! Workers emit the following per-worker metrics tagged `{worker_id=<id>}`:
+//! Workers emit the following per-worker metrics labeled `{worker_id=<id>}`:
 //!
 //! | Metric | Description |
 //! |---|---|
@@ -266,15 +266,12 @@ impl CompactionWorkerHandler {
         let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
         let worker_id = rand.rng().gen_ulid(system_clock.as_ref()).to_string();
         info!(
-        "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
-        worker_id,
-        options.max_concurrent_compactions,
-        options.compactions_poll_interval,
-    );
+            "starting compaction worker [worker_id={}, max_concurrent_compactions={}, compactions_poll_interval={:?}]",
+            worker_id,
+            options.max_concurrent_compactions,
+            options.compactions_poll_interval,
+        );
 
-        // Per-worker throughput metrics are emitted by the executor, tagged with
-        // this worker's id (see [`WorkerStats`]). The coordinator's `stats` carry
-        // no per-worker throughput, so the two never collide on a shared backend.
         let worker_stats = WorkerStats::new(&recorder, &worker_id);
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
