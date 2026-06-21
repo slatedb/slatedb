@@ -18,7 +18,7 @@ Table of Contents:
    * [Heartbeat and Failure Detection](#heartbeat-and-failure-detection)
    * [Worker Lifecycle](#worker-lifecycle)
    * [Manifest Commit Protocol](#manifest-commit-protocol)
-   * [Deployment Shapes](#deployment-shapes)
+   * [Deployment Patterns](#deployment-patterns)
 - [Impact Analysis](#impact-analysis)
    * [Core API & Query Semantics](#core-api-query-semantics)
    * [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -328,7 +328,7 @@ On coordinator restart, the recovery logic is:
 2. For each `Compacted` job, retry steps 2–3 of the normal flow above. `validate_compaction()` is called before the manifest write and will fail if the job's sources are already absent from the manifest (i.e. step 2 already completed before the crash). In that case the job is marked `Failed` in `.compactions`. This is safe: the manifest was already updated, the output SSTs are already referenced and protected from GC, and the scheduler has no dependency on whether the entry reads `Completed` or `Failed`.
 3. Retain active (`Submitted`, `Scheduled`, `Running`, `Compacted`) and last finished (`Completed`, `Failed`) entries.
 
-### Deployment Shapes
+### Deployment Patterns
 
 In all cases the coordinator uses `RemoteCompactionExecutor`. `compactor_options: None` in `Settings` means no coordinator runs in that process; a standalone `Compactor` process owns coordination instead.
 
@@ -572,7 +572,7 @@ Use gossip to distribute jobs directly.
 
 ### Compaction routing
 
-Routing compactions to specific workers or worker classes (e.g. L0 jobs to an embedded worker, major compactions to a beefy short-lived node). The claim protocol in this RFC is designed so that selectivity can be added entirely on the worker side without coordinator or schema changes: a worker can filter `Submitted` entries by `CompactionSpec` properties (level, input bytes, etc.) before attempting a claim. Common shapes worth exploring:
+Routing compactions to specific workers or worker classes (e.g. L0 jobs to an embedded worker, major compactions to a beefy short-lived node). The claim protocol in this RFC is designed so that selectivity can be added entirely on the worker side without coordinator or schema changes: a worker can filter `Submitted` entries by `CompactionSpec` properties (level, input bytes, etc.) before attempting a claim. Common policies worth exploring:
 
 - **L0 affinity:** embedded workers preferentially claim L0 jobs to keep flush-side latency low; remote workers handle larger compactions. Naively prioritizing L0 jobs interacts with `max_concurrent_compactions`: a single worker could greedily claim every available L0 job, bottlenecking them on one worker's CPU/IO rather than spreading them across the pool. In practice we expect only one or two L0 compactions outstanding at a time, so simple prioritization is likely fine; a pluggable work-scheduling trait is a natural extension if fairer policies are ever needed.
 - **Size-class pools:** small jobs go to long-lived workers; large major compactions go to a separate pool of beefy short-lived nodes that can scale to zero between jobs.
