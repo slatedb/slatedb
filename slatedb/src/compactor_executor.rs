@@ -33,7 +33,7 @@ use crate::retention_iterator::RetentionIterator;
 use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
-use crate::subcompaction::Subcompaction;
+use crate::subcompaction::{plan_subcompaction_ranges, Subcompaction};
 use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
@@ -470,10 +470,16 @@ impl TokioCompactionExecutorInner {
         Ok(())
     }
 
-    fn plan_compaction_job(&self, args: StartCompactionJobArgs) -> PlannedCompaction {
+    async fn plan_compaction_job(
+        &self,
+        args: StartCompactionJobArgs,
+    ) -> Result<PlannedCompaction, SlateDBError> {
         let ctx = match args.ctx {
             Some(ctx) => ctx,
-            None => CompactionContext::new(self.plan_subcompactions(&args), args.retention_min_seq),
+            None => CompactionContext::new(
+                self.plan_subcompactions(&args).await?,
+                args.retention_min_seq,
+            ),
         };
         assert!(!ctx.subcompactions().is_empty());
         let subcompaction_args = ctx
@@ -492,10 +498,10 @@ impl TokioCompactionExecutorInner {
                 output_ssts: s.output_ssts().clone(),
             })
             .collect::<Vec<_>>();
-        PlannedCompaction {
+        Ok(PlannedCompaction {
             ctx,
             subcompaction_args,
-        }
+        })
     }
 
     /// Executes a single compaction job and returns the resulting context.
@@ -524,21 +530,35 @@ impl TokioCompactionExecutorInner {
         // Plan the job's ranges, then run them concurrently.
         let id = args.id;
         let destination = args.destination;
-        let planned = self.plan_compaction_job(args);
+        let planned = self.plan_compaction_job(args).await?;
         self.execute_compaction_job(id, destination, planned, sequence_tracker)
             .await
     }
 
-    /// Determines the subcompaction plan for a job (RFC-0028).
+    /// Plans the subcompaction ranges for a fresh job (RFC-0028).
+    ///
+    /// Only called when the job carries no resume context: a job that is
+    /// resuming reuses its persisted [`CompactionContext`] verbatim (see
+    /// [`Self::plan_compaction_job`]). Reads the input SST indexes to choose
+    /// split points (see [`plan_subcompaction_ranges`]), so this is fallible.
     ///
     /// ## Returns
-    /// - The persisted subcompactions when the job carries a plan: it is
-    ///   returned verbatim so output SSTs already recorded against its ranges
-    ///   stay valid.
-    /// - Otherwise a single subcompaction covering the whole (unbounded) key
-    ///   space.
-    fn plan_subcompactions(&self, _args: &StartCompactionJobArgs) -> Vec<Subcompaction> {
-        vec![Subcompaction::new(BytesRange::unbounded())]
+    /// - The planned ranges or a single unbounded range when
+    ///   subcompactions are disabled
+    async fn plan_subcompactions(
+        &self,
+        args: &StartCompactionJobArgs,
+    ) -> Result<Vec<Subcompaction>, SlateDBError> {
+        let ranges = plan_subcompaction_ranges(
+            &self.table_store,
+            &args.l0_sst_views,
+            &args.sorted_runs,
+            self.options.max_subcompactions,
+            self.options.max_sst_size as u64,
+            self.options.max_fetch_tasks,
+        )
+        .await?;
+        Ok(ranges.into_iter().map(Subcompaction::new).collect())
     }
 
     /// Executes a compaction job's subcompactions (RFC-0028), running every
@@ -2323,8 +2343,13 @@ mod tests {
             ctx: None,
         };
 
-        // when/then: a fresh job plans a single unbounded-range subcompaction.
-        let planned = ctx.executor.inner.plan_compaction_job(args.clone());
+        // when/then: a fresh job with no inputs plans a single unbounded range.
+        let planned = ctx
+            .executor
+            .inner
+            .plan_compaction_job(args.clone())
+            .await
+            .unwrap();
         assert_eq!(planned.ctx.subcompactions().len(), 1);
         assert_eq!(
             planned.ctx.subcompactions()[0].range(),
@@ -2342,8 +2367,45 @@ mod tests {
         };
 
         // when/then: the persisted plan is returned verbatim.
-        let planned = ctx.executor.inner.plan_compaction_job(args);
+        let planned = ctx.executor.inner.plan_compaction_job(args).await.unwrap();
         assert_eq!(planned.ctx.subcompactions(), &persisted);
+    }
+
+    /// The planner reads the real input SST indexes and splits a sizable
+    /// multi-source compaction into several ranges (RFC-0028) when given no
+    /// resume context. This exercises the index-sampling path end to end,
+    /// unlike the tests that supply an explicit plan.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn should_plan_split_from_sst_indexes() {
+        let (executor, table_store, _rx) = subcompaction_env(
+            "testdb-plan-from-indexes",
+            #[cfg(feature = "compaction_filters")]
+            None,
+        )
+        .await;
+        let (l0_sst_views, sorted_runs) = split_inputs(&table_store).await;
+
+        // given: a fresh job (no resume context) whose total input far exceeds
+        // the 512-byte max_sst_size floor.
+        let args = StartCompactionJobArgs {
+            id: Ulid::new(),
+            compaction_id: Ulid::new(),
+            destination: 0,
+            l0_sst_views,
+            sorted_runs,
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            ctx: None,
+        };
+
+        // when: planning the job.
+        let planned = executor.inner.plan_compaction_job(args).await.unwrap();
+
+        // then: it splits into multiple ranges, capped at max_subcompactions.
+        let n = planned.ctx.subcompactions().len();
+        assert!(n > 1, "expected an index-driven split, got {n} range(s)");
+        assert!(n <= 4, "must not exceed max_subcompactions");
     }
 
     /// A blocked SST `close()` (the object-store flush of a finished output SST)
