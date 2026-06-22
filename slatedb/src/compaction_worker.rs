@@ -38,8 +38,6 @@ use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
 use ulid::Ulid;
 
-#[cfg(test)]
-use crate::bytes_range::BytesRange;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
@@ -158,11 +156,6 @@ struct JobProgressState {
 /// Total output SSTs recorded across a subcompaction progress (RFC-0028).
 fn total_output_ssts(subcompactions: &[Subcompaction]) -> usize {
     subcompactions.iter().map(|s| s.output_ssts().len()).sum()
-}
-
-fn total_output_ssts_in_ctx(ctx: Option<&CompactionContext>) -> usize {
-    ctx.map(|ctx| total_output_ssts(ctx.subcompactions()))
-        .unwrap_or(0)
 }
 
 /// Internal `MessageHandler` for the worker's event loop.
@@ -514,7 +507,11 @@ impl CompactionWorkerHandler {
             (
                 bytes_trigger,
                 ctx_changed,
-                total_output_ssts_in_ctx(state.last_hb_ctx.as_ref()),
+                state
+                    .last_hb_ctx
+                    .as_ref()
+                    .map(|ctx| total_output_ssts(ctx.subcompactions()))
+                    .unwrap_or(0),
             )
         };
 
@@ -801,6 +798,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::bytes_range::BytesRange;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;

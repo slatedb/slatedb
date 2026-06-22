@@ -7100,25 +7100,6 @@ mod tests {
         panic!("manifest condition took longer than timeout")
     }
 
-    async fn wait_for_db_core_condition(
-        db: &Db,
-        cond: impl Fn(&ManifestCore) -> bool,
-        timeout: Duration,
-    ) -> ManifestCore {
-        let start = tokio::time::Instant::now();
-        while start.elapsed() < timeout {
-            let core = {
-                let state = db.inner.state.read();
-                state.state().core().clone()
-            };
-            if cond(&core) {
-                return core;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("db core condition took longer than timeout")
-    }
-
     fn test_db_options(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
@@ -7337,15 +7318,20 @@ mod tests {
             db.flush().await.unwrap();
         }
 
-        let staged = wait_for_db_core_condition(
-            &db,
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let staged = wait_for_manifest_condition(
+            &mut stored_manifest,
             |core| core.last_l0_seq >= 6 && core.recent_snapshot_min_seq == snapshot_seq,
             Duration::from_secs(10),
         )
         .await;
         assert!(
             staged.tree.l0.len() > 1,
-            "the repro needs multiple L0s so compaction has work to resume"
+            "the test requires multiple L0s so compaction has work to resume"
         );
 
         fail_parallel::cfg(
@@ -7387,8 +7373,8 @@ mod tests {
             .unwrap();
         db.put(b"zz-advance-retention", b"x").await.unwrap();
         db.flush().await.unwrap();
-        wait_for_db_core_condition(
-            &db,
+        wait_for_manifest_condition(
+            &mut stored_manifest,
             |core| core.last_l0_seq >= 7 && core.recent_snapshot_min_seq > snapshot_seq,
             Duration::from_secs(10),
         )
