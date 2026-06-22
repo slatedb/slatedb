@@ -14,8 +14,8 @@ use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutOptions as OS_PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use rand::{Rng, RngCore};
 use std::cmp::Ordering as CmpOrdering;
@@ -121,6 +121,105 @@ pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
     let mut rng = rand::rng();
     let random_bytes: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
     Bytes::from(random_bytes)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExtensionMarker;
+
+#[derive(Clone)]
+pub(crate) struct ExtensionObjectStore {
+    inner: Arc<dyn ObjectStore>,
+}
+
+impl ExtensionObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self { inner }
+    }
+}
+
+impl fmt::Debug for ExtensionObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ExtensionObjectStore({})", self.inner)
+    }
+}
+
+impl fmt::Display for ExtensionObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ExtensionObjectStore({})", self.inner)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ExtensionObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        let mut result = self.inner.get_opts(location, options).await?;
+        result.extensions.insert(ExtensionMarker);
+        Ok(result)
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: OS_PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let mut result = self.inner.put_opts(location, payload, opts).await?;
+        result.extensions.insert(ExtensionMarker);
+        Ok(result)
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        self.inner.rename_opts(from, to, options).await
+    }
 }
 
 // it seems that insta still does not allow to customize the snapshot path in insta.yaml,
@@ -669,6 +768,7 @@ impl ObjectStore for FlakyObjectStore {
                 let meta = result.meta.clone();
                 let range = result.range.clone();
                 let attributes = result.attributes.clone();
+                let extensions = result.extensions.clone();
                 let body = result.bytes().await?;
                 let truncated = body.slice(..truncate_bytes.min(body.len()));
                 return Ok(object_store::GetResult {
@@ -678,6 +778,7 @@ impl ObjectStore for FlakyObjectStore {
                     meta,
                     range,
                     attributes,
+                    extensions,
                 });
             }
         }

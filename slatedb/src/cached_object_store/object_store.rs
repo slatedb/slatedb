@@ -6,8 +6,8 @@ use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
 use object_store::{
-    Attributes, CopyOptions, GetRange, GetResultPayload, PutMultipartOptions, PutResult,
-    RenameOptions,
+    Attributes, CopyOptions, Extensions, GetRange, GetResultPayload, PutMultipartOptions,
+    PutResult, RenameOptions,
 };
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
 use slatedb_common::clock::SystemClock;
@@ -33,9 +33,10 @@ pub(crate) struct CachedObjectStore {
     pub(crate) cache_puts: bool,
     stats: Arc<CachedObjectStoreStats>,
     // Deduplicates concurrent HEAD requests for the same path after a cache miss.
-    head_flights: SingleFlight<Path, (ObjectMeta, Attributes)>,
+    head_flights: SingleFlight<Path, (ObjectMeta, Attributes, Extensions)>,
     // Deduplicates concurrent prefetch/GET requests for the same path after a cache miss.
-    prefetch_flights: SingleFlight<(Path, Option<GetRangeKey>), (ObjectMeta, Attributes)>,
+    prefetch_flights:
+        SingleFlight<(Path, Option<GetRangeKey>), (ObjectMeta, Attributes, Extensions)>,
     // Deduplicates concurrent fetches of the same part after a cache miss.
     // Keyed on (path, part_id) so multiple readers needing the same part share one fetch.
     part_flights: SingleFlight<(Path, PartID), Bytes>,
@@ -170,11 +171,11 @@ impl CachedObjectStore {
     pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<GetResult> {
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
         if let Ok(Some((meta, attributes))) = entry.read_head().await {
-            return Ok(head_only_get_result(meta, attributes));
+            return Ok(head_only_get_result(meta, attributes, Extensions::new()));
         }
 
         // Cache miss — deduplicate concurrent HEAD requests for the same path.
-        let (meta, attributes) = self
+        let (meta, attributes, extensions) = self
             .head_flights
             .call(location.clone(), || async {
                 let result = self
@@ -190,11 +191,12 @@ impl CachedObjectStore {
                     .await?;
                 let meta = result.meta.clone();
                 let attributes = result.attributes.clone();
+                let extensions = result.extensions.clone();
                 self.save_get_result(location, result).await.ok();
-                Ok::<_, object_store::Error>((meta, attributes))
+                Ok::<_, object_store::Error>((meta, attributes, extensions))
             })
             .await?;
-        Ok(head_only_get_result(meta, attributes))
+        Ok(head_only_get_result(meta, attributes, extensions))
     }
 
     pub(crate) async fn cached_get_opts(
@@ -202,7 +204,8 @@ impl CachedObjectStore {
         location: &Path,
         opts: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let (meta, attributes) = self.maybe_prefetch_range(location, opts.clone()).await?;
+        let (meta, attributes, extensions) =
+            self.maybe_prefetch_range(location, opts.clone()).await?;
 
         let get_range = opts.range.clone();
         let range = self.canonicalize_range(get_range, meta.size)?;
@@ -222,6 +225,7 @@ impl CachedObjectStore {
             range,
             attributes,
             payload: GetResultPayload::Stream(result_stream),
+            extensions,
         })
     }
 
@@ -267,10 +271,10 @@ impl CachedObjectStore {
         &self,
         location: &Path,
         mut opts: GetOptions,
-    ) -> object_store::Result<(ObjectMeta, Attributes)> {
+    ) -> object_store::Result<(ObjectMeta, Attributes, Extensions)> {
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
-            Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
+            Ok(Some((meta, attrs))) => return Ok((meta, attrs, Extensions::new())),
             Ok(None) => {}
             Err(e) => {
                 warn!(
@@ -295,11 +299,12 @@ impl CachedObjectStore {
                     let get_result = self.object_store.get_opts(location, opts).await?;
                     let result_meta = get_result.meta.clone();
                     let result_attrs = get_result.attributes.clone();
+                    let result_extensions = get_result.extensions.clone();
                     // swallow the error on saving to disk here (the disk might be already full), just fallback
                     // to the object store.
                     // TODO: add a warning log here
                     self.save_get_result(location, get_result).await.ok();
-                    Ok((result_meta, result_attrs))
+                    Ok((result_meta, result_attrs, result_extensions))
                 },
             )
             .await
@@ -549,12 +554,17 @@ impl CachedObjectStore {
     }
 }
 
-fn head_only_get_result(meta: ObjectMeta, attributes: Attributes) -> GetResult {
+fn head_only_get_result(
+    meta: ObjectMeta,
+    attributes: Attributes,
+    extensions: Extensions,
+) -> GetResult {
     GetResult {
         payload: GetResultPayload::Stream(stream::empty().boxed()),
         range: 0..0,
         meta,
         attributes,
+        extensions,
     }
 }
 
@@ -709,7 +719,9 @@ mod tests {
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
     use crate::cached_object_store::storage_fs::FsCacheEntry;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
-    use crate::test_utils::{gen_rand_bytes, FlakyObjectStore, GatedObjectStore};
+    use crate::test_utils::{
+        gen_rand_bytes, ExtensionMarker, ExtensionObjectStore, FlakyObjectStore, GatedObjectStore,
+    };
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
@@ -722,6 +734,22 @@ mod tests {
         let path = format!("/tmp/testcache-{}", dir_name);
         let _ = std::fs::remove_dir_all(&path);
         std::path::PathBuf::from(path)
+    }
+
+    fn new_cached_store(object_store: Arc<dyn ObjectStore>) -> Arc<CachedObjectStore> {
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        CachedObjectStore::new(object_store, cache_storage, 1024, false, stats).unwrap()
     }
 
     #[tokio::test]
@@ -857,6 +885,60 @@ mod tests {
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 2);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cached_get_opts_preserves_extensions_on_cache_miss() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let location = Path::from("/data/test_extensions_get");
+        inner
+            .put(
+                &location,
+                PutPayload::from_bytes(bytes::Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
+        let cached_store = new_cached_store(marking);
+        let result = cached_store
+            .cached_get_opts(
+                &location,
+                GetOptions {
+                    range: Some(GetRange::Bounded(0..5)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("cache miss should fetch from inner store");
+
+        assert!(result.extensions.get::<ExtensionMarker>().is_some());
+        assert_eq!(
+            result.bytes().await.unwrap(),
+            bytes::Bytes::from_static(b"hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_head_preserves_extensions_on_cache_miss() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let location = Path::from("/data/test_extensions_head");
+        inner
+            .put(
+                &location,
+                PutPayload::from_bytes(bytes::Bytes::from_static(b"hello")),
+            )
+            .await
+            .unwrap();
+
+        let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
+        let cached_store = new_cached_store(marking);
+        let result = cached_store
+            .cached_head(&location)
+            .await
+            .expect("cache miss should fetch head from inner store");
+
+        assert!(result.extensions.get::<ExtensionMarker>().is_some());
     }
 
     #[test]

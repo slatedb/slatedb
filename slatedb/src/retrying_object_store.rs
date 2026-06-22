@@ -11,9 +11,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
-    Attribute, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
-    MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
-    PutPayload, PutResult, RenameOptions,
+    Attribute, CopyOptions, Extensions, GetOptions, GetRange, GetResult, GetResultPayload,
+    ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions,
+    PutOptions, PutPayload, PutResult, RenameOptions,
 };
 
 use crate::utils::IdGenerator;
@@ -211,6 +211,7 @@ impl MultipartUpload for RetryingMultipartUpload {
                     return Ok(PutResult {
                         e_tag: meta.e_tag,
                         version: meta.version,
+                        extensions: Extensions::new(),
                     });
                 }
                 result
@@ -258,6 +259,7 @@ impl ObjectStore for RetryingObjectStore {
                 Self::expected_range_len(&options_range.expect("range is set"), file_size);
             let range = result.range.clone();
             let attributes = result.attributes.clone();
+            let extensions = result.extensions.clone();
             let bytes = result.bytes().await?;
             let bytes_len = bytes.len() as u64;
 
@@ -278,6 +280,7 @@ impl ObjectStore for RetryingObjectStore {
                 meta,
                 range,
                 attributes,
+                extensions,
             })
         })
         .retry(Self::retry_builder())
@@ -350,6 +353,7 @@ impl ObjectStore for RetryingObjectStore {
                     Ok(PutResult {
                         e_tag: meta.e_tag,
                         version: meta.version,
+                        extensions: Extensions::new(),
                     })
                 } else {
                     result
@@ -547,7 +551,7 @@ impl ObjectStore for RetryingObjectStore {
 #[cfg(test)]
 mod tests {
     use super::RetryingObjectStore;
-    use crate::test_utils::FlakyObjectStore;
+    use crate::test_utils::{ExtensionMarker, ExtensionObjectStore, FlakyObjectStore};
     use bytes::Bytes;
     use futures::TryStreamExt;
     use object_store::memory::InMemory;
@@ -588,6 +592,54 @@ mod tests {
 
         let got = retrying.get(&path).await.unwrap();
         assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn test_put_opts_preserves_extensions() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
+        let retrying = RetryingObjectStore::new(marking, test_rand(), test_clock());
+
+        let path = Path::from("/data/extension-put");
+        let result = retrying
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello")),
+                PutOptions::default(),
+            )
+            .await
+            .expect("put should succeed");
+
+        assert!(result.extensions.get::<ExtensionMarker>().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_opts_range_preserves_extensions() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/data/extension-get");
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+        let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
+        let retrying = RetryingObjectStore::new(marking, test_rand(), test_clock());
+
+        let result = retrying
+            .get_opts(
+                &path,
+                GetOptions {
+                    range: Some((0..5).into()),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .expect("range read should succeed");
+
+        assert!(result.extensions.get::<ExtensionMarker>().is_some());
+        assert_eq!(result.bytes().await.unwrap(), Bytes::from_static(b"hello"));
     }
 
     #[tokio::test]
