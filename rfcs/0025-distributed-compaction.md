@@ -66,7 +66,7 @@ The design in this RFC sidesteps this complexity by separating coordination (sch
 
 ## Goals
 
-- Increase aggregate compaction execution throughput for concurrently runnable, non-conflicting compactions. Scaling is workload-dependent and bounded by scheduler parallelism, source conflicts, coordinator commit capacity, and object store bandwidth.
+- Increase aggregate compaction execution throughput for concurrently runnable, non-conflicting compactions.
 - Tolerate individual worker failures without losing compaction progress, by checkpointing output SSTs and reclaiming stalled jobs.
 - Preserve the single-writer invariant: only the coordinator commits manifest updates.
 - Add no external dependencies beyond the object store already required by SlateDB.

@@ -512,10 +512,10 @@ pub(crate) struct CompactorEventHandler {
     system_clock: Arc<dyn SystemClock>,
     recorder: MetricsRecorderHelper,
     /// Job ids the coordinator has observed claimed by a worker (`Running` or
-    /// `Compacted` with a worker assigned). `None` until the first metrics update;
-    /// that update counts all inherited claims once before establishing the
-    /// set-difference baseline. See [`Self::update_distributed_compaction_metrics`].
-    prev_claimed: Option<HashSet<Ulid>>,
+    /// `Compacted` with a worker assigned). Initially empty, so the first metrics
+    /// update counts every inherited claim before establishing the set-difference
+    /// baseline. See [`Self::update_distributed_compaction_metrics`].
+    prev_claimed: HashSet<Ulid>,
     /// Cached handles for per-worker `worker_last_heartbeat_ms` gauges. Handles are
     /// retained only for workers currently owning in-flight jobs, so this map cannot
     /// grow without bound. Dropping a handle does not remove its registered metric
@@ -593,7 +593,7 @@ impl CompactorEventHandler {
             stats,
             system_clock,
             recorder,
-            prev_claimed: None,
+            prev_claimed: HashSet::new(),
             worker_heartbeat_gauges: HashMap::new(),
         })
     }
@@ -797,18 +797,14 @@ impl CompactorEventHandler {
             .collect();
 
         let current_ids: HashSet<Ulid> = claimed.iter().map(|(id, _)| *id).collect();
-        // On the first update, count all inherited claims once. This includes
-        // work claimed while the coordinator was unavailable; thereafter the
-        // counter records only newly observed claim ids.
-        if let Some(prev) = self.prev_claimed.as_ref() {
-            let newly_claimed = current_ids.difference(prev).count() as u64;
-            if newly_claimed > 0 {
-                self.stats.jobs_claimed.increment(newly_claimed);
-            }
-        } else if !current_ids.is_empty() {
-            self.stats.jobs_claimed.increment(current_ids.len() as u64);
+        // The initially empty set counts all inherited claims once.
+        // This includes work claimed while the coordinator was unavailable;
+        // thereafter the counter records only newly observed claim ids.
+        let newly_claimed = current_ids.difference(&self.prev_claimed).count() as u64;
+        if newly_claimed > 0 {
+            self.stats.jobs_claimed.increment(newly_claimed);
         }
-        self.prev_claimed = Some(current_ids);
+        self.prev_claimed = current_ids;
 
         // Refresh the cached gauge handle for every worker that owns an in-flight
         // job. Remove handles for workers that no longer do so, keeping worker_heartbeat_gauges
