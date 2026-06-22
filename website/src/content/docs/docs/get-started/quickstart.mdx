@@ -62,7 +62,7 @@ SlateDB is implemented in Rust and ships official bindings for Go, Java, Node.js
 
 ## Usage
 
-SlateDB reads and writes through an object store. Every binding exposes `ObjectStore.resolve(...)` (or `InMemory::new()` in Rust) which accepts any URL supported by Rust's [`object_store`](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) crate, including `memory:///`, `file:///...`, `s3://`, `gs://`, and `az://`. The examples below use `memory:///` so they run without any external setup.
+SlateDB reads and writes through an object store. Every binding exposes `ObjectStore.resolve(...)` which accepts any URL supported by Rust's [`object_store`](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) crate, including `memory:///`, `file:///...`, `s3://`, `gs://`, and `az://`. Pass the database path separately to `Db::open`, `DbBuilder`, or `NewDbBuilder`, as the examples below do.
 
 <Tabs syncKey="lang">
   <TabItem label="Rust">
