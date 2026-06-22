@@ -4539,7 +4539,7 @@ mod tests {
             let scheduled = self.get_scheduled_compactions().await;
             for compaction in scheduled {
                 let destination = compaction.spec().destination().expect("tiered spec");
-                let sst_views = compaction.get_l0_sst_views(db_state);
+                let l0_sst_views = compaction.get_l0_sst_views(db_state);
                 let sorted_runs = compaction.get_sorted_runs(db_state);
                 let is_dest_last_run = match db_state.tree_for_segment(compaction.spec().segment())
                 {
@@ -4553,7 +4553,7 @@ mod tests {
                     id: compaction.id(),
                     compaction_id: compaction.id(),
                     destination,
-                    sst_views,
+                    l0_sst_views,
                     sorted_runs,
                     compaction_clock_tick: db_state.last_l0_clock_tick,
                     is_dest_last_run,

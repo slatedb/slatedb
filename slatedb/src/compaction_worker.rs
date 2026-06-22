@@ -565,7 +565,7 @@ impl CompactionWorkerHandler {
             .spec()
             .destination()
             .ok_or(SlateDBError::InvalidCompaction)?;
-        let sst_views = compaction.get_l0_sst_views(db_state);
+        let l0_sst_views = compaction.get_l0_sst_views(db_state);
         let sorted_runs = compaction.get_sorted_runs(db_state);
 
         // Reject drain specs (workers only execute tiered compactions; drain
@@ -589,7 +589,7 @@ impl CompactionWorkerHandler {
             .iter()
             .filter_map(|s| s.maybe_unwrap_sorted_run())
             .collect();
-        let actual_l0: Vec<Ulid> = sst_views.iter().map(|v| v.id).collect();
+        let actual_l0: Vec<Ulid> = l0_sst_views.iter().map(|v| v.id).collect();
         let actual_srs: Vec<u32> = sorted_runs.iter().map(|sr| sr.id).collect();
         if actual_l0 != expected_l0 || actual_srs != expected_srs {
             return Err(SlateDBError::InvalidCompaction);
@@ -609,7 +609,7 @@ impl CompactionWorkerHandler {
             id: compaction.id(),
             compaction_id: compaction.id(),
             destination,
-            sst_views,
+            l0_sst_views,
             sorted_runs,
             compaction_clock_tick: db_state.last_l0_clock_tick,
             is_dest_last_run,

@@ -65,7 +65,7 @@ pub(crate) struct StartCompactionJobArgs {
     /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
     /// Input L0 SSTs for this job.
-    pub(crate) sst_views: Vec<SsTableView>,
+    pub(crate) l0_sst_views: Vec<SsTableView>,
     /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
     /// The clock tick representing the time the compaction occurs. This is used
@@ -87,7 +87,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("id", &self.id)
             .field("job_id", &self.compaction_id)
             .field("destination", &self.destination)
-            .field("ssts", &self.sst_views)
+            .field("ssts", &self.l0_sst_views)
             .field("sorted_runs", &self.sorted_runs)
             .field("compaction_clock_tick", &self.compaction_clock_tick)
             .field("is_dest_last_run", &self.is_dest_last_run)
@@ -105,7 +105,7 @@ struct SubcompactionArgs {
     // destination passed to `execute_subcompactions`.
     #[cfg_attr(not(feature = "compaction_filters"), allow(dead_code))]
     destination: u32,
-    sst_views: Vec<SsTableView>,
+    l0_sst_views: Vec<SsTableView>,
     sorted_runs: Vec<SortedRun>,
     compaction_clock_tick: i64,
     is_dest_last_run: bool,
@@ -336,9 +336,10 @@ impl TokioCompactionExecutorInner {
             filter_context: None,
         };
 
-        let max_parallel = compute_max_parallel(job_args.sst_views.len(), &job_args.sorted_runs, 4);
+        let max_parallel =
+            compute_max_parallel(job_args.l0_sst_views.len(), &job_args.sorted_runs, 4);
         // L0 (borrowed)
-        let l0_iters_futures = build_concurrent(job_args.sst_views.iter(), max_parallel, |h| {
+        let l0_iters_futures = build_concurrent(job_args.l0_sst_views.iter(), max_parallel, |h| {
             let sst_iter_options = sst_iter_options.clone();
             SstIterator::new_borrowed_initialized(
                 job_args.range.clone(),
@@ -477,7 +478,7 @@ impl TokioCompactionExecutorInner {
                 index,
                 range: s.range().clone(),
                 destination: args.destination,
-                sst_views: args.sst_views.clone(),
+                l0_sst_views: args.l0_sst_views.clone(),
                 sorted_runs: args.sorted_runs.clone(),
                 compaction_clock_tick: args.compaction_clock_tick,
                 is_dest_last_run: args.is_dest_last_run,
@@ -1462,7 +1463,7 @@ mod tests {
             index: 0,
             range: BytesRange::unbounded(),
             destination: 0,
-            sst_views: l0_sst_views,
+            l0_sst_views: l0_sst_views,
             sorted_runs,
             compaction_clock_tick: 0,
             is_dest_last_run: false,
@@ -1643,7 +1644,7 @@ mod tests {
                         id: Ulid::new(),
                         compaction_id: Ulid::new(),
                         destination: 0,
-                        sst_views: l0_ssts.clone(),
+                        l0_sst_views: l0_ssts.clone(),
                         sorted_runs: sorted_runs.clone(),
                         compaction_clock_tick: 0,
                         is_dest_last_run: false,
@@ -1694,7 +1695,7 @@ mod tests {
                             id: Ulid::new(),
                             compaction_id: Ulid::new(),
                             destination: 0,
-                            sst_views: l0_ssts.clone(),
+                            l0_sst_views: l0_ssts.clone(),
                             sorted_runs: sorted_runs.clone(),
                             compaction_clock_tick: 0,
                             is_dest_last_run: false,
@@ -1795,7 +1796,7 @@ mod tests {
     /// given `subcompactions` plan, with the defaults the subcompaction tests
     /// share (destination 0, retaining everything, not the last run).
     fn job_with_subcompactions(
-        sst_views: Vec<SsTableView>,
+        l0_sst_views: Vec<SsTableView>,
         sorted_runs: Vec<SortedRun>,
         subcompactions: Vec<Subcompaction>,
     ) -> StartCompactionJobArgs {
@@ -1803,7 +1804,7 @@ mod tests {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
             destination: 0,
-            sst_views,
+            l0_sst_views,
             sorted_runs,
             compaction_clock_tick: 0,
             is_dest_last_run: false,
@@ -2292,7 +2293,7 @@ mod tests {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
             destination: 0,
-            sst_views: vec![],
+            l0_sst_views: vec![],
             sorted_runs: vec![],
             compaction_clock_tick: 0,
             is_dest_last_run: false,
@@ -2388,7 +2389,7 @@ mod tests {
             })
             .collect();
         let input_ssts = write_sst(&table_store, &entries, usize::MAX).await;
-        let sst_views: Vec<SsTableView> =
+        let l0_sst_views: Vec<SsTableView> =
             input_ssts.into_iter().map(SsTableView::identity).collect();
 
         // given: the object-store flush (`put`) for output SSTs is blocked. Setup
@@ -2403,7 +2404,7 @@ mod tests {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
             destination: 0,
-            sst_views,
+            l0_sst_views,
             sorted_runs: vec![],
             compaction_clock_tick: 0,
             is_dest_last_run: false,
@@ -2589,7 +2590,7 @@ mod tests {
                 id: Ulid::new(),
                 compaction_id: Ulid::new(),
                 destination: 0,
-                sst_views: ssts.into_iter().map(SsTableView::identity).collect(),
+                l0_sst_views: ssts.into_iter().map(SsTableView::identity).collect(),
                 sorted_runs: vec![],
                 compaction_clock_tick: 0,
                 is_dest_last_run,
