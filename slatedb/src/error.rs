@@ -264,6 +264,9 @@ pub(crate) enum SlateDBError {
     #[error("invalid object store URL. url=`{0}`")]
     InvalidObjectStoreURL(String, #[source] url::ParseError),
 
+    #[error("invalid object store path. provide path to builder instead. path=`{0}`")]
+    InvalidObjectStorePath(String),
+
     #[error("transaction conflict")]
     TransactionConflict,
 
@@ -639,6 +642,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidObjectStoreURL(_, err) => {
                 Error::invalid(msg).with_source(Box::new(err))
             }
+            SlateDBError::InvalidObjectStorePath(_) => Error::invalid(msg),
             SlateDBError::UnknownConfigurationFormat(_) => Error::invalid(msg),
             SlateDBError::InvalidSSTBatchSize(_) => Error::invalid(msg),
             SlateDBError::InvalidCheckpointLifetime(_) => Error::invalid(msg),

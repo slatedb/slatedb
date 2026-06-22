@@ -6,14 +6,13 @@ use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
 use object_store::{
-    Attributes, CopyOptions, GetRange, GetResultPayload, PutMultipartOptions, PutResult,
-    RenameOptions,
+    Attributes, CopyOptions, Extensions, GetRange, GetResultPayload, PutMultipartOptions,
+    PutResult, RenameOptions,
 };
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 use std::{ops::Range, sync::Arc};
-use tokio::sync::OnceCell;
 
 use crate::single_flight::SingleFlight;
 
@@ -32,13 +31,12 @@ pub(crate) struct CachedObjectStore {
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
     pub(crate) admission_picker: AdmissionPicker,
     pub(crate) cache_puts: bool,
-    // Absolute path of the root folder relative to the bucket. See #1319.
-    resolved_root: Arc<OnceCell<Path>>,
     stats: Arc<CachedObjectStoreStats>,
     // Deduplicates concurrent HEAD requests for the same path after a cache miss.
-    head_flights: SingleFlight<Path, (ObjectMeta, Attributes)>,
+    head_flights: SingleFlight<Path, (ObjectMeta, Attributes, Extensions)>,
     // Deduplicates concurrent prefetch/GET requests for the same path after a cache miss.
-    prefetch_flights: SingleFlight<(Path, Option<GetRangeKey>), (ObjectMeta, Attributes)>,
+    prefetch_flights:
+        SingleFlight<(Path, Option<GetRangeKey>), (ObjectMeta, Attributes, Extensions)>,
     // Deduplicates concurrent fetches of the same part after a cache miss.
     // Keyed on (path, part_id) so multiple readers needing the same part share one fetch.
     part_flights: SingleFlight<(Path, PartID), Bytes>,
@@ -63,7 +61,6 @@ impl CachedObjectStore {
             stats,
             admission_picker: AdmissionPicker::default(),
             cache_puts,
-            resolved_root: Arc::new(OnceCell::new()),
             head_flights: SingleFlight::new(),
             prefetch_flights: SingleFlight::new(),
             part_flights: SingleFlight::new(),
@@ -171,101 +168,14 @@ impl CachedObjectStore {
         Ok(())
     }
 
-    /// Returns the canonical cache key for a requested location.
-    ///
-    /// The key is `resolved_root + location` once root resolution succeeds.
-    /// Returns `None` while the root is still unresolved. The root is resolved
-    /// lazily from observed metadata locations, so this method may return `None`
-    /// for early requests until successful GET/HEAD responses are observed.
-    fn cache_location_for(&self, location: &Path) -> Option<Path> {
-        cache_location_for(&self.resolved_root, location)
-    }
-
-    /// Lazily resolves the root prefix and validates the derived cache key.
-    ///
-    /// ## Arguments
-    ///
-    /// - `requested_location`: the location from the incoming request, treated as a suffix
-    ///   for root inference.
-    /// - `meta_location`: the location from the observed metadata, expected to be
-    ///   `root + requested_location`.
-    ///
-    /// ## Returns
-    ///
-    /// Returns `true` only when:
-    ///
-    /// - `resolved_root` is already known or can be safely inferred from metadata; and
-    /// - the derived canonical cache key matches `meta_location`.
-    ///
-    /// Returns `false` otherwise. This is a defensive guard: on mismatch, cache writes are
-    /// skipped to avoid poisoning cache entries with unsafe keys.
-    fn resolve_root(&self, requested_location: &Path, meta_location: &Path) -> bool {
-        // If root is not resolved yet, try to infer it from the metadata location
-        if self.resolved_root.get().is_none() {
-            let Some(root) = Self::infer_root(requested_location, meta_location) else {
-                warn!(
-                    "failed to resolve cache root lazily [requested_location={}, meta_location={}]",
-                    requested_location, meta_location,
-                );
-                return false;
-            };
-            let _ = self.resolved_root.set(root);
-        }
-        // Get cache location so we can verify it matches the metadata location. This should always
-        // succeed after root resolution.
-        let Some(cache_location) = self.cache_location_for(requested_location) else {
-            warn!(
-                "cache location is unexpectedly unavailable after root resolution [requested_location={}, meta_location={}]",
-                requested_location, meta_location,
-            );
-            return false;
-        };
-        // Verify the cache location matches the metadata location. Again, should always be true, but
-        // you can never trust object stores completely.
-        if &cache_location != meta_location {
-            warn!(
-                "resolved root mismatch [requested_location={}, cache_location={}, meta_location={}]",
-                requested_location, cache_location, meta_location,
-            );
-            return false;
-        }
-        true
-    }
-
-    /// Infers a root prefix by treating `requested_location` as a suffix of `meta_location`.
-    ///
-    /// Returns `Some(root)` when `meta_location == root + requested_location`,
-    /// otherwise returns `None`.
-    fn infer_root(requested_location: &Path, meta_location: &Path) -> Option<Path> {
-        let requested_str = requested_location.as_ref();
-        let meta_str = meta_location.as_ref();
-
-        if requested_str.is_empty() {
-            return Some(meta_location.clone());
-        }
-
-        let prefix = meta_str.strip_suffix(requested_str)?;
-
-        // Ensure suffix matching happens at a path-segment boundary.
-        if !prefix.is_empty() && !prefix.ends_with('/') {
-            return None;
-        }
-
-        Some(Path::from(prefix.trim_end_matches('/')))
-    }
-
     pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<GetResult> {
-        if let Some(cache_location) = self.cache_location_for(location) {
-            let entry = self
-                .cache_storage
-                .entry(&cache_location, self.part_size_bytes);
-            if let Ok(Some((meta, attributes))) = entry.read_head().await {
-                return Ok(head_only_get_result(meta, attributes));
-            }
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
+        if let Ok(Some((meta, attributes))) = entry.read_head().await {
+            return Ok(head_only_get_result(meta, attributes, Extensions::new()));
         }
 
         // Cache miss — deduplicate concurrent HEAD requests for the same path.
-        let (meta, attributes) = self
+        let (meta, attributes, extensions) = self
             .head_flights
             .call(location.clone(), || async {
                 let result = self
@@ -281,13 +191,12 @@ impl CachedObjectStore {
                     .await?;
                 let meta = result.meta.clone();
                 let attributes = result.attributes.clone();
-                if self.resolve_root(location, &meta.location) {
-                    self.save_get_result(result).await.ok();
-                }
-                Ok::<_, object_store::Error>((meta, attributes))
+                let extensions = result.extensions.clone();
+                self.save_get_result(location, result).await.ok();
+                Ok::<_, object_store::Error>((meta, attributes, extensions))
             })
             .await?;
-        Ok(head_only_get_result(meta, attributes))
+        Ok(head_only_get_result(meta, attributes, extensions))
     }
 
     pub(crate) async fn cached_get_opts(
@@ -295,14 +204,8 @@ impl CachedObjectStore {
         location: &Path,
         opts: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let (meta, attributes) = self.maybe_prefetch_range(location, opts.clone()).await?;
-
-        // If we still can't derive a safe canonical cache key after calling
-        // maybe_prefetch_range, bypass cache for this request since there's no
-        // point in fetching by range.
-        if self.cache_location_for(location).is_none() {
-            return self.object_store.get_opts(location, opts.clone()).await;
-        }
+        let (meta, attributes, extensions) =
+            self.maybe_prefetch_range(location, opts.clone()).await?;
 
         let get_range = opts.range.clone();
         let range = self.canonicalize_range(get_range, meta.size)?;
@@ -322,6 +225,7 @@ impl CachedObjectStore {
             range,
             attributes,
             payload: GetResultPayload::Stream(result_stream),
+            extensions,
         })
     }
 
@@ -344,12 +248,7 @@ impl CachedObjectStore {
             .await?;
 
         // Then, save to local cache if admission policy allows it
-        let Some(cache_location) = self.cache_location_for(location) else {
-            return Ok(result);
-        };
-        let entry = self
-            .cache_storage
-            .entry(&cache_location, self.part_size_bytes);
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
         if self.admission_picker.pick(entry.as_ref()).admitted() {
             // Convert PutPayload to stream and save parts to cache.
             // Note: cached_head() already saved the head, so we only need to save parts
@@ -372,20 +271,16 @@ impl CachedObjectStore {
         &self,
         location: &Path,
         mut opts: GetOptions,
-    ) -> object_store::Result<(ObjectMeta, Attributes)> {
-        if let Some(cache_location) = self.cache_location_for(location) {
-            let entry = self
-                .cache_storage
-                .entry(&cache_location, self.part_size_bytes);
-            match entry.read_head().await {
-                Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(
-                        "failed to read head from disk cache, will fallback to object store [location={}, error={:?}]",
-                        location, e,
-                    );
-                }
+    ) -> object_store::Result<(ObjectMeta, Attributes, Extensions)> {
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
+        match entry.read_head().await {
+            Ok(Some((meta, attrs))) => return Ok((meta, attrs, Extensions::new())),
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    "failed to read head from disk cache, will fallback to object store [location={}, error={:?}]",
+                    location, e,
+                );
             }
         }
 
@@ -404,13 +299,12 @@ impl CachedObjectStore {
                     let get_result = self.object_store.get_opts(location, opts).await?;
                     let result_meta = get_result.meta.clone();
                     let result_attrs = get_result.attributes.clone();
+                    let result_extensions = get_result.extensions.clone();
                     // swallow the error on saving to disk here (the disk might be already full), just fallback
                     // to the object store.
                     // TODO: add a warning log here
-                    if self.resolve_root(location, &result_meta.location) {
-                        self.save_get_result(get_result).await.ok();
-                    }
-                    Ok((result_meta, result_attrs))
+                    self.save_get_result(location, get_result).await.ok();
+                    Ok((result_meta, result_attrs, result_extensions))
                 },
             )
             .await
@@ -419,7 +313,11 @@ impl CachedObjectStore {
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
     /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
-    async fn save_get_result(&self, result: GetResult) -> object_store::Result<u64> {
+    async fn save_get_result(
+        &self,
+        cache_location: &Path,
+        result: GetResult,
+    ) -> object_store::Result<u64> {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
         assert!(result.range.start.is_multiple_of(part_size_bytes_u64));
         assert!(
@@ -429,7 +327,7 @@ impl CachedObjectStore {
 
         let entry = self
             .cache_storage
-            .entry(&result.meta.location, self.part_size_bytes);
+            .entry(cache_location, self.part_size_bytes);
         let object_size = result.meta.size;
 
         if self.admission_picker.pick(entry.as_ref()).admitted() {
@@ -531,15 +429,11 @@ impl CachedObjectStore {
             this.stats.object_store_cache_part_access.increment(1);
 
             // Try local cache first.
-            if let Some(cache_location) = this.cache_location_for(&location) {
-                let entry = this
-                    .cache_storage
-                    .entry(&cache_location, this.part_size_bytes);
-                // Cache hit, so return immediately.
-                if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
-                    this.stats.object_store_cache_part_hits.increment(1);
-                    return Ok(bytes);
-                }
+            let entry = this.cache_storage.entry(&location, this.part_size_bytes);
+            // Cache hit, so return immediately.
+            if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
+                this.stats.object_store_cache_part_hits.increment(1);
+                return Ok(bytes);
             }
 
             // Cache miss, so we need to fetch from the object store.
@@ -564,31 +458,13 @@ impl CachedObjectStore {
                         )
                         .await?;
 
-                    // Get the cache entry again after successful get so we can cache the part.
-                    let cache_entry = if this.resolve_root(&location, &get_result.meta.location) {
-                        this.cache_location_for(&location).map(|cache_location| {
-                            this.cache_storage
-                                .entry(&cache_location, this.part_size_bytes)
-                        })
-                    } else {
-                        // If the root resolution fails, we won't be able to derive a canonical cache
-                        // key. Skip saving to cache to avoid poisoning the cache with unsafe keys.
-                        None
-                    };
-
-                    // Save the head and the part to cache for future accesses. Just read the bytes
-                    // if we still can't derive a canonical cache key.
-                    let bytes = if let Some(entry) = cache_entry {
-                        // Save the head and the part to cache for future accesses.
-                        let meta = get_result.meta.clone();
-                        let attrs = get_result.attributes.clone();
-                        let bytes = get_result.bytes().await?;
-                        entry.save_head((&meta, &attrs)).await.ok();
-                        entry.save_part(part_id, bytes.clone()).await.ok();
-                        bytes
-                    } else {
-                        get_result.bytes().await?
-                    };
+                    // Save the head and the part to cache for future accesses.
+                    let entry = this.cache_storage.entry(&location, this.part_size_bytes);
+                    let meta = get_result.meta.clone();
+                    let attrs = get_result.attributes.clone();
+                    let bytes = get_result.bytes().await?;
+                    entry.save_head((&meta, &attrs)).await.ok();
+                    entry.save_part(part_id, bytes.clone()).await.ok();
 
                     Ok::<_, object_store::Error>(bytes)
                 })
@@ -678,22 +554,18 @@ impl CachedObjectStore {
     }
 }
 
-fn head_only_get_result(meta: ObjectMeta, attributes: Attributes) -> GetResult {
+fn head_only_get_result(
+    meta: ObjectMeta,
+    attributes: Attributes,
+    extensions: Extensions,
+) -> GetResult {
     GetResult {
         payload: GetResultPayload::Stream(stream::empty().boxed()),
         range: 0..0,
         meta,
         attributes,
+        extensions,
     }
-}
-
-fn cache_location_for(resolved_root: &Arc<OnceCell<Path>>, location: &Path) -> Option<Path> {
-    resolved_root.get().map(|root| {
-        if root.as_ref().is_empty() {
-            return location.clone();
-        }
-        root.parts().chain(location.parts()).collect()
-    })
 }
 
 impl std::fmt::Display for CachedObjectStore {
@@ -753,21 +625,17 @@ impl ObjectStore for CachedObjectStore {
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        let resolved_root = self.resolved_root.clone();
         let cache_storage = self.cache_storage.clone();
         let part_size_bytes = self.part_size_bytes;
 
         self.object_store
             .delete_stream(locations)
             .then(move |result| {
-                let resolved_root = resolved_root.clone();
                 let cache_storage = cache_storage.clone();
                 async move {
                     if let Ok(ref location) = result {
-                        if let Some(cache_location) = cache_location_for(&resolved_root, location) {
-                            let entry = cache_storage.entry(&cache_location, part_size_bytes);
-                            entry.delete().await;
-                        }
+                        let entry = cache_storage.entry(location, part_size_bytes);
+                        entry.delete().await;
                     }
                     result
                 }
@@ -843,7 +711,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use bytes::Bytes;
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
     use rand::Rng;
 
@@ -852,7 +719,9 @@ mod tests {
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
     use crate::cached_object_store::storage_fs::FsCacheEntry;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
-    use crate::test_utils::{gen_rand_bytes, FlakyObjectStore, GatedObjectStore};
+    use crate::test_utils::{
+        gen_rand_bytes, ExtensionMarker, ExtensionObjectStore, FlakyObjectStore, GatedObjectStore,
+    };
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
@@ -867,126 +736,12 @@ mod tests {
         std::path::PathBuf::from(path)
     }
 
-    #[derive(Debug)]
-    struct MismatchedMetaStore {
-        inner: Arc<dyn ObjectStore>,
-        bad_location: Path,
-    }
-
-    impl MismatchedMetaStore {
-        fn new(inner: Arc<dyn ObjectStore>, bad_location: Path) -> Self {
-            Self {
-                inner,
-                bad_location,
-            }
-        }
-    }
-
-    impl std::fmt::Display for MismatchedMetaStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "MismatchedMetaStore({})", self.inner)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for MismatchedMetaStore {
-        async fn get_opts(
-            &self,
-            location: &Path,
-            options: GetOptions,
-        ) -> object_store::Result<object_store::GetResult> {
-            let mut result = self.inner.get_opts(location, options).await?;
-            result.meta.location = self.bad_location.clone();
-            Ok(result)
-        }
-
-        async fn put_opts(
-            &self,
-            location: &Path,
-            payload: PutPayload,
-            opts: object_store::PutOptions,
-        ) -> object_store::Result<object_store::PutResult> {
-            self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &Path,
-            opts: object_store::PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
-            self.inner.put_multipart_opts(location, opts).await
-        }
-
-        fn delete_stream(
-            &self,
-            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
-        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
-            self.inner.delete_stream(locations)
-        }
-
-        fn list(
-            &self,
-            prefix: Option<&Path>,
-        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
-        {
-            self.inner.list(prefix)
-        }
-
-        fn list_with_offset(
-            &self,
-            prefix: Option<&Path>,
-            offset: &Path,
-        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
-        {
-            self.inner.list_with_offset(prefix, offset)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&Path>,
-        ) -> object_store::Result<object_store::ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(
-            &self,
-            from: &Path,
-            to: &Path,
-            options: object_store::CopyOptions,
-        ) -> object_store::Result<()> {
-            self.inner.copy_opts(from, to, options).await
-        }
-    }
-
-    #[test]
-    fn test_infer_root() {
-        assert_eq!(
-            CachedObjectStore::infer_root(
-                &Path::from("manifest/0001.manifest"),
-                &Path::from("tenant-a/manifest/0001.manifest")
-            ),
-            Some(Path::from("tenant-a"))
-        );
-        assert_eq!(
-            CachedObjectStore::infer_root(
-                &Path::from("manifest/0001.manifest"),
-                &Path::from("other/path")
-            ),
-            None
-        );
-        assert_eq!(
-            CachedObjectStore::infer_root(&Path::from("b/c"), &Path::from("ab/c")),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn test_lazy_resolve_root_from_meta_location() -> object_store::Result<()> {
-        let backing_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    fn new_cached_store(object_store: Arc<dyn ObjectStore>) -> Arc<CachedObjectStore> {
+        let test_cache_folder = new_test_cache_folder();
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
         let cache_storage = Arc::new(FsCacheStorage::new(
-            new_test_cache_folder(),
+            test_cache_folder,
             None,
             None,
             stats.clone(),
@@ -994,179 +749,7 @@ mod tests {
             Arc::new(DbRand::default()),
             1000,
         ));
-        let prefixed: Arc<dyn ObjectStore> = Arc::new(object_store::prefix::PrefixStore::new(
-            backing_store.clone(),
-            Path::from("tenant-a"),
-        ));
-        let cached_store =
-            CachedObjectStore::new(prefixed, cache_storage, 1024, false, stats).unwrap();
-
-        let relative_location = Path::from("manifest/0001.manifest");
-        let full_location = Path::from("tenant-a/manifest/0001.manifest");
-        let payload = Bytes::from_static(b"tenant-a-manifest");
-        backing_store
-            .put(&full_location, PutPayload::from_bytes(payload.clone()))
-            .await?;
-
-        assert_eq!(cached_store.resolved_root.get().cloned(), None);
-        let got = cached_store
-            .cached_get_opts(&relative_location, GetOptions::default())
-            .await?
-            .bytes()
-            .await?;
-        assert_eq!(got, payload);
-        assert_eq!(
-            cached_store.resolved_root.get().cloned(),
-            Some(Path::from("tenant-a"))
-        );
-
-        let scoped_entry = cached_store.cache_storage.entry(&full_location, 1024);
-        assert_eq!(scoped_entry.cached_parts().await?.len(), 1);
-        let unscoped_entry = cached_store.cache_storage.entry(&relative_location, 1024);
-        assert_eq!(unscoped_entry.cached_parts().await?.len(), 0);
-
-        backing_store.delete(&full_location).await?;
-        let got_cached = cached_store
-            .cached_get_opts(&relative_location, GetOptions::default())
-            .await?
-            .bytes()
-            .await?;
-        assert_eq!(got_cached, payload);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_shared_cache_with_prefix_stores_does_not_collide() -> object_store::Result<()> {
-        let backing_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let cache_storage = Arc::new(FsCacheStorage::new(
-            new_test_cache_folder(),
-            None,
-            None,
-            {
-                let recorder = MetricsRecorderHelper::noop();
-                Arc::new(CachedObjectStoreStats::new(&recorder))
-            },
-            Arc::new(DefaultSystemClock::new()),
-            Arc::new(DbRand::default()),
-            1000,
-        ));
-
-        let store_a: Arc<dyn ObjectStore> = Arc::new(object_store::prefix::PrefixStore::new(
-            backing_store.clone(),
-            Path::from("db-a"),
-        ));
-        let store_b: Arc<dyn ObjectStore> = Arc::new(object_store::prefix::PrefixStore::new(
-            backing_store.clone(),
-            Path::from("db-b"),
-        ));
-
-        let cached_a = CachedObjectStore::new(store_a, cache_storage.clone(), 1024, false, {
-            let recorder = MetricsRecorderHelper::noop();
-            Arc::new(CachedObjectStoreStats::new(&recorder))
-        })
-        .unwrap();
-        let cached_b = CachedObjectStore::new(store_b, cache_storage.clone(), 1024, false, {
-            let recorder = MetricsRecorderHelper::noop();
-            Arc::new(CachedObjectStoreStats::new(&recorder))
-        })
-        .unwrap();
-
-        let relative = Path::from("manifest/0001.manifest");
-        let full_a = Path::from("db-a/manifest/0001.manifest");
-        let full_b = Path::from("db-b/manifest/0001.manifest");
-        let payload_a = Bytes::from_static(b"tenant-a-data");
-        let payload_b = Bytes::from_static(b"tenant-b-data");
-
-        backing_store
-            .put(&full_a, PutPayload::from_bytes(payload_a.clone()))
-            .await?;
-        backing_store
-            .put(&full_b, PutPayload::from_bytes(payload_b.clone()))
-            .await?;
-
-        let got_a = cached_a
-            .cached_get_opts(&relative, GetOptions::default())
-            .await?
-            .bytes()
-            .await?;
-        let got_b = cached_b
-            .cached_get_opts(&relative, GetOptions::default())
-            .await?
-            .bytes()
-            .await?;
-        assert_eq!(got_a, payload_a);
-        assert_eq!(got_b, payload_b);
-        assert_eq!(
-            cached_a.resolved_root.get().cloned(),
-            Some(Path::from("db-a"))
-        );
-        assert_eq!(
-            cached_b.resolved_root.get().cloned(),
-            Some(Path::from("db-b"))
-        );
-
-        let unscoped_entry = cache_storage.entry(&relative, 1024);
-        assert_eq!(unscoped_entry.cached_parts().await?.len(), 0);
-        let scoped_a = cache_storage.entry(&full_a, 1024);
-        let scoped_b = cache_storage.entry(&full_b, 1024);
-        assert_eq!(scoped_a.cached_parts().await?.len(), 1);
-        assert_eq!(scoped_b.cached_parts().await?.len(), 1);
-
-        backing_store.delete(&full_a).await?;
-        backing_store.delete(&full_b).await?;
-        let got_cached_a = cached_a
-            .cached_get_opts(&relative, GetOptions::default())
-            .await?
-            .bytes()
-            .await?;
-        let got_cached_b = cached_b
-            .cached_get_opts(&relative, GetOptions::default())
-            .await?
-            .bytes()
-            .await?;
-        assert_eq!(got_cached_a, payload_a);
-        assert_eq!(got_cached_b, payload_b);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_meta_location_mismatch_bypasses_cache() -> object_store::Result<()> {
-        let backing_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let bad_meta_store: Arc<dyn ObjectStore> = Arc::new(MismatchedMetaStore::new(
-            backing_store.clone(),
-            Path::from("wrong/root"),
-        ));
-        let recorder = MetricsRecorderHelper::noop();
-        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
-        let cache_storage = Arc::new(FsCacheStorage::new(
-            new_test_cache_folder(),
-            None,
-            None,
-            stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
-            Arc::new(DbRand::default()),
-            1000,
-        ));
-        let cached_store =
-            CachedObjectStore::new(bad_meta_store, cache_storage, 1024, false, stats).unwrap();
-
-        let location = Path::from("data/file.sst");
-        let payload = Bytes::from_static(b"payload");
-        backing_store
-            .put(&location, PutPayload::from_bytes(payload.clone()))
-            .await?;
-
-        assert_eq!(cached_store.resolved_root.get().cloned(), None);
-        let got = cached_store
-            .cached_get_opts(&location, GetOptions::default())
-            .await?
-            .bytes()
-            .await?;
-        assert_eq!(got, payload);
-        assert_eq!(cached_store.resolved_root.get().cloned(), None);
-        let entry = cached_store.cache_storage.entry(&location, 1024);
-        assert_eq!(entry.cached_parts().await?.len(), 0);
-        Ok(())
+        CachedObjectStore::new(object_store, cache_storage, 1024, false, stats).unwrap()
     }
 
     #[tokio::test]
@@ -1201,7 +784,7 @@ mod tests {
                 .unwrap();
         let entry = cached_store.cache_storage.entry(&location, 1024);
 
-        let object_size_hint = cached_store.save_get_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(&location, get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3 + 32);
 
         // assert the cached meta
@@ -1277,7 +860,7 @@ mod tests {
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, part_size, false, stats).unwrap();
         let entry = cached_store.cache_storage.entry(&location, part_size);
-        let object_size_hint = cached_store.save_get_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(&location, get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 3);
@@ -1302,6 +885,60 @@ mod tests {
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 2);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cached_get_opts_preserves_extensions_on_cache_miss() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let location = Path::from("/data/test_extensions_get");
+        inner
+            .put(
+                &location,
+                PutPayload::from_bytes(bytes::Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
+        let cached_store = new_cached_store(marking);
+        let result = cached_store
+            .cached_get_opts(
+                &location,
+                GetOptions {
+                    range: Some(GetRange::Bounded(0..5)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("cache miss should fetch from inner store");
+
+        assert!(result.extensions.get::<ExtensionMarker>().is_some());
+        assert_eq!(
+            result.bytes().await.unwrap(),
+            bytes::Bytes::from_static(b"hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_head_preserves_extensions_on_cache_miss() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let location = Path::from("/data/test_extensions_head");
+        inner
+            .put(
+                &location,
+                PutPayload::from_bytes(bytes::Bytes::from_static(b"hello")),
+            )
+            .await
+            .unwrap();
+
+        let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
+        let cached_store = new_cached_store(marking);
+        let result = cached_store
+            .cached_head(&location)
+            .await
+            .expect("cache miss should fetch head from inner store");
+
+        assert!(result.extensions.get::<ExtensionMarker>().is_some());
     }
 
     #[test]
@@ -2083,10 +1720,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cache_location1 = cached_store.cache_location_for(&location1).unwrap();
-        let entry1 = cached_store
-            .cache_storage
-            .entry(&cache_location1, PART_SIZE);
+        let entry1 = cached_store.cache_storage.entry(&location1, PART_SIZE);
         let parts1 = entry1.cached_parts().await.unwrap();
         if cached {
             assert_eq!(parts1.len(), 3, "{parts1:?}");
@@ -2096,10 +1730,7 @@ mod tests {
             assert_eq!(cache_storage.file_handle_cache_population(), 3);
         }
 
-        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
-        let entry2 = cached_store
-            .cache_storage
-            .entry(&cache_location2, PART_SIZE);
+        let entry2 = cached_store.cache_storage.entry(&location2, PART_SIZE);
         let parts2 = entry2.cached_parts().await.unwrap();
         assert_eq!(parts2.len(), 3, "{parts2:?}");
 
@@ -2110,25 +1741,18 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
 
-        let entry1 = cached_store
-            .cache_storage
-            .entry(&cache_location1, PART_SIZE);
+        let entry1 = cached_store.cache_storage.entry(&location1, PART_SIZE);
         let parts1 = entry1.cached_parts().await.unwrap();
         assert_eq!(parts1.len(), 0, "{parts1:?}");
         assert_eq!(cache_storage.file_handle_cache_population(), 3);
 
-        let cache_location2 = cached_store.cache_location_for(&location2).unwrap();
-        let entry2 = cached_store
-            .cache_storage
-            .entry(&cache_location2, PART_SIZE);
+        let entry2 = cached_store.cache_storage.entry(&location2, PART_SIZE);
         let parts2 = entry2.cached_parts().await.unwrap();
         assert_eq!(parts2.len(), 3, "{parts2:?}");
 
         // verify repeated delete is idempotent
         cached_store.delete(&location1).await.unwrap();
-        let entry1 = cached_store
-            .cache_storage
-            .entry(&cache_location1, PART_SIZE);
+        let entry1 = cached_store.cache_storage.entry(&location1, PART_SIZE);
         let parts1 = entry1.cached_parts().await.unwrap();
         assert_eq!(parts1.len(), 0, "{parts1:?}");
         assert_eq!(cache_storage.file_handle_cache_population(), 3);

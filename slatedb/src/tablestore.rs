@@ -1098,10 +1098,6 @@ where
 }
 
 /// Builds a [`BufWriter`] whose upload carries `tag` in its extensions.
-///
-/// Caveat: object_store 0.13.2 drops extensions on the single-PUT shutdown path
-/// (payload fits in capacity), so compacted SSTs below that threshold reach a
-/// wrapper untagged. Fixed upstream on the object_store main branch.
 fn tagged_buf_writer(
     object_store: Arc<dyn ObjectStore>,
     path: Path,
@@ -3076,6 +3072,26 @@ mod tests {
                     },
                 ],
                 "a WAL read should be reissued once with the retry reason"
+            );
+        }
+
+        #[tokio::test]
+        async fn compacted_writes_carry_source_and_compacted_type() {
+            let (recording, ts) = recording_store(TableStoreKind::Compactor);
+            let encoded = build_test_sst(&format(), 4).await;
+            let id = SsTableId::Compacted(ulid::Ulid::new());
+            ts.write_sst(&id, &encoded, false).await.unwrap();
+
+            let kinds = recording.write_kinds();
+            let sst_types = recording.write_sst_types();
+            assert!(!kinds.is_empty(), "expected at least one write");
+            assert!(
+                kinds.iter().all(|k| *k == Some(TableStoreKind::Compactor)),
+                "compacted writes should carry the source kind, got {kinds:?}"
+            );
+            assert!(
+                sst_types.iter().all(|t| *t == Some(SstType::Compacted)),
+                "compacted writes should carry the Compacted type, got {sst_types:?}"
             );
         }
     }
