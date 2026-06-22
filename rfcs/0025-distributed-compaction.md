@@ -491,7 +491,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ### Performance & Cost
 - **Latency**: Read/write latency is unchanged. The distributed model adds one extra round-trip to the L0 drain cycle that does not exist in the embedded case: the coordinator writes a `Submitted` job to `.compactions`, then a worker picks it up on its next poll. In the worst case this delays the start of an L0 compaction by up to the upper end of the poll ticker's randomized wait (`3 * compactions_poll_interval_ms / 2`). Whether the end-to-end drain time (submit → claim → compact → manifest commit) remains competitive with the current single-node path warrants benchmarking, particularly at the default `compactions_poll_interval_ms`.
 
-- **Throughput**: Scales up to the available independent, non-conflicting compaction work. It is bounded by scheduler parallelism, source conflicts, coordinator manifest-commit capacity, and worker/object store bandwidth. The coordinator may batch completed jobs into one manifest update, but manifest commits remain a serial process done by the coordinator rather than a separate commit lane per worker.
+- **Throughput**: Scales up to the available independent, non-conflicting compaction work. It is bounded by how much independent work the scheduler produces, source conflicts, and worker/object store bandwidth. The coordinator may batch completed jobs into one manifest update, but manifest commits remain a serial process done by the coordinator rather than a separate commit lane per worker.
 - **Object-store requests**: ~1 GET per poll interval + ~1 PUT per claim + ~1 PUT per output SST. At N=10 workers polling every 5s: ~120 GETs/min overhead.
 - **Space/write/read amplification**: Unchanged.
 
