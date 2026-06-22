@@ -1865,11 +1865,19 @@ impl Db {
 
     /// Resolve an object store from a URL.
     ///
+    /// URL must not have a path component. This is an artifact of the way `object_store`
+    /// handles URL parsing. Paths should be providedd in the various `*Builder::new`
+    /// methods that take `path` arguments, not in the URL passed to this method.
+    ///
     /// ## Arguments
-    /// - `url`: the URL to resolve, for example `s3://my-bucket/my-prefix`.
+    /// - `url`: the URL to resolve with no trailing path, for example `s3://my-bucket`.
     ///
     /// ## Returns
     /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
+    ///
+    /// ## Errors
+    /// - `Error`: if the URL is unparseable, if the URL contains a path component, or if
+    ///   there was an error initializing the object store.
     pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
         let url = url
             .try_into()
