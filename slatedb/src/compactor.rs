@@ -754,11 +754,15 @@ impl CompactorEventHandler {
                      [worker_id={}, id={}]",
                     worker_id, id
                 ),
-                None => error!(
-                    "reclaiming Running compaction that has no worker; this should \
-                     not happen. please open issue. [id={}]",
-                    id
-                ),
+                None => {
+                    let message = format!(
+                        "reclaiming Running compaction that has no worker; this should \
+                         not happen. please open issue. [id={}]",
+                        id
+                    );
+                    debug_assert!(false, "{message}");
+                    error!("{message}");
+                }
             }
             self.state_mut().update_compaction(id, |c| {
                 c.set_status(CompactionStatus::Submitted);
@@ -6208,10 +6212,14 @@ mod tests {
         assert!(c.worker().is_some(), "worker should still be set");
     }
 
-    /// A Running compaction with no worker at all must also be reclaimed to
-    /// Submitted — the claim protocol shouldn't produce this state, but if it
-    /// somehow arises the entry would otherwise be stuck in Running forever.
+    /// A Running compaction without a worker violates the claim protocol. It
+    /// panics in debug builds and is reclaimed in release builds so it cannot
+    /// remain stuck in Running forever.
     #[tokio::test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "reclaiming Running compaction that has no worker")
+    )]
     async fn test_reclaim_worker_less_running_compaction() {
         let system_clock = Arc::new(MockSystemClock::new());
         let options = Arc::new(CompactorOptions {
