@@ -73,7 +73,9 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) compaction_clock_tick: i64,
     /// Whether the destination sorted run is the last (newest) run after compaction.
     pub(crate) is_dest_last_run: bool,
-    /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
+    /// Optional minimum sequence to retain; lower sequences may be dropped by retention. This
+    /// value is used only when planning the compaction. Once the compaction has started, if it is
+    /// then resumed, then the executor uses retention_min_seq from ctx
     pub(crate) retention_min_seq: Option<u64>,
     /// Optional resume context to use for resuming a compaction job
     pub(crate) ctx: Option<CompactionContext>,

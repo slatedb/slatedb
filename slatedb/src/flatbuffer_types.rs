@@ -626,7 +626,10 @@ impl FlatBufferCompactionsCodec {
                 return Err(SlateDBError::InvalidCompaction);
             }
         };
-        if status == CompactionStatus::Running || status == CompactionStatus::Submitted {
+        if status == CompactionStatus::Running
+            || status == CompactionStatus::Scheduled
+            || status == CompactionStatus::Submitted
+        {
             // When upgrading to 0.14 its possible RUNNING compactions have output ssts in
             // output_ssts instead of ctx. In this case we just drop them and the compaction
             // restarts. We could migrate them to ctx, but opt not to since we don't know
@@ -1567,16 +1570,19 @@ mod tests {
     use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
     use crate::subcompaction::Subcompaction;
     use crate::{checkpoint, error::SlateDBError};
+    use rstest::rstest;
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
     use std::sync::Arc;
 
+    use crate::compactor_state::CompactionStatus as CompactorCompactionStatus;
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};
 
+    use super::root_generated::CompactionStatus as FbCompactionStatus;
     use super::{root_generated, COMPACTIONS_FORMAT_VERSION, MANIFEST_FORMAT_VERSION};
 
     #[test]
@@ -2490,16 +2496,21 @@ mod tests {
         assert_eq!(decoded_compaction, &compaction);
     }
 
-    #[test]
-    fn test_should_preserve_legacy_top_level_output_ssts_as_unbounded_subcompaction() {
+    #[rstest]
+    #[case(FbCompactionStatus::Submitted, CompactorCompactionStatus::Submitted)]
+    #[case(FbCompactionStatus::Scheduled, CompactorCompactionStatus::Scheduled)]
+    #[case(FbCompactionStatus::Running, CompactorCompactionStatus::Running)]
+    fn test_should_clear_legacy_top_level_output_ssts_on_pre_compacted_states(
+        #[case] fb_status: FbCompactionStatus,
+        #[case] status: CompactorCompactionStatus,
+    ) {
         // given: manually build a compactions flatbuffer whose intermediate output is recorded
         // only in the top-level `output_ssts` field, with no `ctx` (a file written by a
         // version predating RFC-0028 per-range output)
         use super::root_generated::{
             CompactedSsTable, CompactedSsTableArgs, Compaction as FbCompaction,
-            CompactionArgs as FbCompactionArgs, CompactionSpec as FbCompactionSpec,
-            CompactionStatus as FbCompactionStatus, CompactionsV1, CompactionsV1Args,
-            SsTableInfo as FbSsTableInfo, SsTableInfoArgs, TieredCompactionSpec,
+            CompactionArgs as FbCompactionArgs, CompactionSpec as FbCompactionSpec, CompactionsV1,
+            CompactionsV1Args, SsTableInfo as FbSsTableInfo, SsTableInfoArgs, TieredCompactionSpec,
             TieredCompactionSpecArgs,
         };
         let mut fbb = flatbuffers::FlatBufferBuilder::new();
@@ -2564,7 +2575,7 @@ mod tests {
                 id: Some(compaction_id),
                 spec_type: FbCompactionSpec::TieredCompactionSpec,
                 spec: Some(spec.as_union_value()),
-                status: FbCompactionStatus::Running,
+                status: fb_status,
                 output_ssts: Some(output_ssts_vec),
                 worker: None,
                 ctx_type: super::root_generated::CompactionContext::NONE,
@@ -2591,7 +2602,7 @@ mod tests {
 
         // then: legacy top-level output is omitted
         let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
-        assert_eq!(decoded_compaction.status(), CompactionStatus::Running);
+        assert_eq!(decoded_compaction.status(), status);
         assert!(decoded_compaction.ctx().is_none());
         assert!(decoded_compaction.output_ssts().is_empty());
     }
