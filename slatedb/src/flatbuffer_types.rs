@@ -7,12 +7,14 @@ use chrono::{DateTime, Utc};
 use flatbuffers::{
     FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, VerifierOptions, WIPOffset,
 };
+use log::warn;
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
 use crate::checkpoint;
 use crate::compactor_state::{
-    Compaction as CompactorCompaction, CompactionSpec as CompactorCompactionSpec, CompactionStatus,
+    Compaction as CompactorCompaction, CompactionContext as CompactorCompactionContext,
+    CompactionSpec as CompactorCompactionSpec, CompactionStatus,
     Compactions as CompactorCompactions, SourceId,
 };
 use crate::db_state::{self, FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
@@ -38,13 +40,14 @@ use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, CompactedSsTableV2, CompactedSsTableV2Args, CompactedSsTableView,
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
-    CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
-    CompactionsV1Args, CompressionFormat, DrainSegmentSpec, DrainSegmentSpecArgs, ManifestV1Args,
-    Segment as FbSegment, SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1,
-    SortedRunArgs as FbSortedRunV1Args, SortedRunV2, SortedRunV2Args, SstType as FbSstType,
-    Subcompaction as FbSubcompaction, SubcompactionArgs as FbSubcompactionArgs,
-    TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
-    UuidArgs,
+    CompactionContext as FbCompactionContext, CompactionSpec as FbCompactionSpec,
+    CompactionStatus as FbCompactionStatus, CompactionsV1, CompactionsV1Args, CompressionFormat,
+    DrainSegmentSpec, DrainSegmentSpecArgs, ManifestV1Args, Segment as FbSegment,
+    SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
+    SortedRunV2, SortedRunV2Args, SstType as FbSstType, Subcompaction as FbSubcompaction,
+    SubcompactionArgs as FbSubcompactionArgs, TieredCompactionContext as FbTieredCompactionContext,
+    TieredCompactionContextArgs as FbTieredCompactionContextArgs, TieredCompactionSpec,
+    TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
 use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
@@ -601,24 +604,51 @@ impl FlatBufferCompactionsCodec {
         let spec = Self::compaction_spec(compaction, version)?;
         let status = CompactionStatus::from(compaction.status());
         let worker = compaction.worker().and_then(Self::worker_spec);
-        // Pre-RFC-0028 compaction files persisted finished output in the
-        // top-level `output_ssts` field. Preserve that output as the single
-        // unbounded subcompaction so a restarted/upgraded coordinator can
-        // safely commit an already-Compacted entry.
-        let subcompactions = match compaction.subcompactions() {
-            Some(subs) => subs.iter().map(Self::subcompaction).collect(),
-            None => compaction
-                .output_ssts()
-                .map(|ssts| {
-                    vec![CompactorSubcompaction::new(BytesRange::unbounded())
-                        .with_output_ssts(ssts.iter().map(Self::compacted_sst).collect())]
-                })
-                .unwrap_or_default(),
+        let mut output_ssts = compaction
+            .output_ssts()
+            .map(|ssts| ssts.iter().map(Self::compacted_sst).collect())
+            .unwrap_or_default();
+        // The `ctx` union is schema-extensible, but the only variant we ever
+        // write (and the only one the in-memory model (compactor_state.rs) supports) is
+        // `TieredCompactionContext`. Any other variant decodes as `None`.
+        // If/when we do support different types of compactions, we should extend the in-memory
+        // model to define the context as an enum.
+        let ctx = match compaction.ctx_type() {
+            FbCompactionContext::NONE => None,
+            FbCompactionContext::TieredCompactionContext => compaction
+                .ctx_as_tiered_compaction_context()
+                .map(Self::compaction_context),
+            _ => {
+                warn!(
+                    "unknown compaction context type: {:?}",
+                    compaction.ctx_type()
+                );
+                return Err(SlateDBError::InvalidCompaction);
+            }
         };
+        if status == CompactionStatus::Running
+            || status == CompactionStatus::Scheduled
+            || status == CompactionStatus::Submitted
+        {
+            // When upgrading to 0.14 its possible RUNNING compactions have output ssts in
+            // output_ssts instead of ctx. In this case we just drop them and the compaction
+            // restarts. We could migrate them to ctx, but opt not to since we don't know
+            // how to set retention_min_seq
+            output_ssts = vec![];
+        }
         Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
             .with_status(status)
             .with_worker(worker)
-            .with_subcompactions(subcompactions))
+            .with_output_ssts(output_ssts)
+            .with_ctx(ctx))
+    }
+
+    fn compaction_context(ctx: FbTieredCompactionContext) -> CompactorCompactionContext {
+        let subcompactions = ctx
+            .subcompactions()
+            .map(|subs| subs.iter().map(Self::subcompaction).collect())
+            .unwrap_or_default();
+        CompactorCompactionContext::new(subcompactions, Some(ctx.retention_min_seq()))
     }
 
     fn subcompaction(subcompaction: FbSubcompaction) -> CompactorSubcompaction {
@@ -1072,8 +1102,16 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let (spec_type, spec) = self.add_compaction_spec(compaction.spec());
         let status = FbCompactionStatus::from(compaction.status());
         let worker = compaction.worker().map(|w| self.add_worker_spec(w));
-        let subcompactions = (!compaction.subcompactions().is_empty())
-            .then(|| self.add_subcompactions(compaction.subcompactions().iter()));
+        // The in-memory context always maps onto the `TieredCompactionContext`
+        // union variant; the union exists only to keep the schema extensible.
+        let (ctx_type, ctx) = match compaction.ctx() {
+            Some(ctx) => (
+                FbCompactionContext::TieredCompactionContext,
+                Some(self.add_tiered_compaction_context(ctx).as_union_value()),
+            ),
+            None => (FbCompactionContext::NONE, None),
+        };
+        let output_ssts = self.add_compacted_ssts(compaction.output_ssts().iter());
         FbCompaction::create(
             &mut self.builder,
             &FbCompactionArgs {
@@ -1081,11 +1119,25 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 spec_type,
                 spec: Some(spec),
                 status,
-                // Produced output lives in `subcompactions` (RFC-0028); the
-                // legacy top-level field is no longer written.
-                output_ssts: None,
+                output_ssts: Some(output_ssts),
                 worker,
+                ctx_type,
+                ctx,
+            },
+        )
+    }
+
+    fn add_tiered_compaction_context(
+        &mut self,
+        ctx: &CompactorCompactionContext,
+    ) -> WIPOffset<FbTieredCompactionContext<'b>> {
+        let subcompactions = (!ctx.subcompactions().is_empty())
+            .then(|| self.add_subcompactions(ctx.subcompactions().iter()));
+        FbTieredCompactionContext::create(
+            &mut self.builder,
+            &FbTieredCompactionContextArgs {
                 subcompactions,
+                retention_min_seq: ctx.retention_min_seq().unwrap_or_default(),
             },
         )
     }
@@ -1509,7 +1561,7 @@ pub(crate) mod test_utils {
 mod tests {
     use crate::bytes_range::BytesRange;
     use crate::compactor_state::{
-        Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
+        Compaction, CompactionContext, CompactionSpec, CompactionStatus, Compactions, SourceId,
     };
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
     use crate::flatbuffer_types::{
@@ -1518,16 +1570,19 @@ mod tests {
     use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
     use crate::subcompaction::Subcompaction;
     use crate::{checkpoint, error::SlateDBError};
+    use rstest::rstest;
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
     use std::sync::Arc;
 
+    use crate::compactor_state::CompactionStatus as CompactorCompactionStatus;
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};
 
+    use super::root_generated::CompactionStatus as FbCompactionStatus;
     use super::{root_generated, COMPACTIONS_FORMAT_VERSION, MANIFEST_FORMAT_VERSION};
 
     #[test]
@@ -1961,9 +2016,10 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 11),
         )
         .with_status(CompactionStatus::Running)
-        .with_subcompactions(vec![
-            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output_ssts)
-        ]);
+        .with_ctx(Some(CompactionContext::new(
+            vec![Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output_ssts)],
+            Some(0),
+        )));
         let compaction_sr = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
@@ -2066,7 +2122,7 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
         )
         .with_status(CompactionStatus::Running)
-        .with_subcompactions(subcompactions);
+        .with_ctx(Some(CompactionContext::new(subcompactions, Some(0))));
         let mut compactions = Compactions::new(1);
         compactions.insert(compaction.clone());
 
@@ -2419,9 +2475,10 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 0),
         )
         .with_status(CompactionStatus::Running)
-        .with_subcompactions(vec![
-            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(vec![output_sst])
-        ]);
+        .with_ctx(Some(CompactionContext::new(
+            vec![Subcompaction::new(BytesRange::unbounded()).with_output_ssts(vec![output_sst])],
+            Some(0),
+        )));
         let mut compactions = Compactions::new(1);
         compactions.insert(compaction.clone());
         let codec = FlatBufferCompactionsCodec {};
@@ -2433,23 +2490,27 @@ mod tests {
         // then:
         let decoded_compaction = decoded.get(&compaction.id()).expect("missing compaction");
         assert_eq!(
-            decoded_compaction.output_ssts()[0].format_version,
+            decoded_compaction.subcompactions()[0].output_ssts()[0].format_version,
             SST_FORMAT_VERSION_LATEST
         );
         assert_eq!(decoded_compaction, &compaction);
     }
 
-    #[test]
-    fn test_should_preserve_legacy_top_level_output_ssts_as_unbounded_subcompaction() {
-        // given: manually build a compactions flatbuffer whose output is recorded
-        // only in the legacy top-level `output_ssts` field, with no
-        // `subcompactions` (a file written by a version predating RFC-0028
-        // per-range output)
+    #[rstest]
+    #[case(FbCompactionStatus::Submitted, CompactorCompactionStatus::Submitted)]
+    #[case(FbCompactionStatus::Scheduled, CompactorCompactionStatus::Scheduled)]
+    #[case(FbCompactionStatus::Running, CompactorCompactionStatus::Running)]
+    fn test_should_clear_legacy_top_level_output_ssts_on_pre_compacted_states(
+        #[case] fb_status: FbCompactionStatus,
+        #[case] status: CompactorCompactionStatus,
+    ) {
+        // given: manually build a compactions flatbuffer whose intermediate output is recorded
+        // only in the top-level `output_ssts` field, with no `ctx` (a file written by a
+        // version predating RFC-0028 per-range output)
         use super::root_generated::{
             CompactedSsTable, CompactedSsTableArgs, Compaction as FbCompaction,
-            CompactionArgs as FbCompactionArgs, CompactionSpec as FbCompactionSpec,
-            CompactionStatus as FbCompactionStatus, CompactionsV1, CompactionsV1Args,
-            SsTableInfo as FbSsTableInfo, SsTableInfoArgs, TieredCompactionSpec,
+            CompactionArgs as FbCompactionArgs, CompactionSpec as FbCompactionSpec, CompactionsV1,
+            CompactionsV1Args, SsTableInfo as FbSsTableInfo, SsTableInfoArgs, TieredCompactionSpec,
             TieredCompactionSpecArgs,
         };
         let mut fbb = flatbuffers::FlatBufferBuilder::new();
@@ -2514,10 +2575,11 @@ mod tests {
                 id: Some(compaction_id),
                 spec_type: FbCompactionSpec::TieredCompactionSpec,
                 spec: Some(spec.as_union_value()),
-                status: FbCompactionStatus::Compacted,
+                status: fb_status,
                 output_ssts: Some(output_ssts_vec),
                 worker: None,
-                subcompactions: None,
+                ctx_type: super::root_generated::CompactionContext::NONE,
+                ctx: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);
@@ -2538,23 +2600,11 @@ mod tests {
         let codec = FlatBufferCompactionsCodec {};
         let decoded = codec.decode(&bytes).expect("failed to decode compactions");
 
-        // then: legacy top-level output is wrapped as the single unbounded
-        // subcompaction so already-finished distributed compactions survive
-        // restart/upgrade before the coordinator commits them.
+        // then: legacy top-level output is omitted
         let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
-        assert_eq!(decoded_compaction.status(), CompactionStatus::Compacted);
-        assert_eq!(decoded_compaction.subcompactions().len(), 1);
-        assert_eq!(
-            decoded_compaction.subcompactions()[0].range(),
-            &BytesRange::unbounded()
-        );
-        let output_ssts = decoded_compaction.output_ssts();
-        assert_eq!(output_ssts.len(), 1);
-        assert_eq!(output_ssts[0].id, SsTableId::Compacted(sst_ulid));
-        assert_eq!(
-            output_ssts[0].info.first_entry,
-            Some(Bytes::from_static(b"key1"))
-        );
+        assert_eq!(decoded_compaction.status(), status);
+        assert!(decoded_compaction.ctx().is_none());
+        assert!(decoded_compaction.output_ssts().is_empty());
     }
 
     #[test]
@@ -2604,7 +2654,8 @@ mod tests {
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
                 worker: None,
-                subcompactions: None,
+                ctx_type: super::root_generated::CompactionContext::NONE,
+                ctx: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);
@@ -2671,7 +2722,8 @@ mod tests {
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
                 worker: None,
-                subcompactions: None,
+                ctx_type: super::root_generated::CompactionContext::NONE,
+                ctx: None,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);

@@ -571,6 +571,93 @@ impl<'a> flatbuffers::Verifiable for CompactionStatus {
 
 impl flatbuffers::SimpleToVerifyInSlice for CompactionStatus {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_COMPACTION_CONTEXT: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_COMPACTION_CONTEXT: u8 = 1;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_COMPACTION_CONTEXT: [CompactionContext; 2] = [
+  CompactionContext::NONE,
+  CompactionContext::TieredCompactionContext,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct CompactionContext(pub u8);
+#[allow(non_upper_case_globals)]
+impl CompactionContext {
+  pub const NONE: Self = Self(0);
+  pub const TieredCompactionContext: Self = Self(1);
+
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 1;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::NONE,
+    Self::TieredCompactionContext,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::NONE => Some("NONE"),
+      Self::TieredCompactionContext => Some("TieredCompactionContext"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for CompactionContext {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for CompactionContext {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for CompactionContext {
+    type Output = CompactionContext;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for CompactionContext {
+  type Scalar = u8;
+  #[inline]
+  fn to_little_endian(self) -> u8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for CompactionContext {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    u8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for CompactionContext {}
+pub struct CompactionContextUnionTableOffset {}
+
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CHECKPOINT_METADATA: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MAX_CHECKPOINT_METADATA: u8 = 1;
@@ -2965,6 +3052,120 @@ impl core::fmt::Debug for WorkerSpec<'_> {
       ds.finish()
   }
 }
+pub enum TieredCompactionContextOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct TieredCompactionContext<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for TieredCompactionContext<'a> {
+  type Inner = TieredCompactionContext<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> TieredCompactionContext<'a> {
+  pub const VT_SUBCOMPACTIONS: flatbuffers::VOffsetT = 4;
+  pub const VT_RETENTION_MIN_SEQ: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    TieredCompactionContext { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args TieredCompactionContextArgs<'args>
+  ) -> flatbuffers::WIPOffset<TieredCompactionContext<'bldr>> {
+    let mut builder = TieredCompactionContextBuilder::new(_fbb);
+    builder.add_retention_min_seq(args.retention_min_seq);
+    if let Some(x) = args.subcompactions { builder.add_subcompactions(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn subcompactions(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction>>>>(TieredCompactionContext::VT_SUBCOMPACTIONS, None)}
+  }
+  #[inline]
+  pub fn retention_min_seq(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(TieredCompactionContext::VT_RETENTION_MIN_SEQ, Some(0)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for TieredCompactionContext<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Subcompaction>>>>("subcompactions", Self::VT_SUBCOMPACTIONS, false)?
+     .visit_field::<u64>("retention_min_seq", Self::VT_RETENTION_MIN_SEQ, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct TieredCompactionContextArgs<'a> {
+    pub subcompactions: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>>>,
+    pub retention_min_seq: u64,
+}
+impl<'a> Default for TieredCompactionContextArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    TieredCompactionContextArgs {
+      subcompactions: None,
+      retention_min_seq: 0,
+    }
+  }
+}
+
+pub struct TieredCompactionContextBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> TieredCompactionContextBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_subcompactions(&mut self, subcompactions: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Subcompaction<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionContext::VT_SUBCOMPACTIONS, subcompactions);
+  }
+  #[inline]
+  pub fn add_retention_min_seq(&mut self, retention_min_seq: u64) {
+    self.fbb_.push_slot::<u64>(TieredCompactionContext::VT_RETENTION_MIN_SEQ, retention_min_seq, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> TieredCompactionContextBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    TieredCompactionContextBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<TieredCompactionContext<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for TieredCompactionContext<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("TieredCompactionContext");
+      ds.field("subcompactions", &self.subcompactions());
+      ds.field("retention_min_seq", &self.retention_min_seq());
+      ds.finish()
+  }
+}
 pub enum CompactionOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -2987,7 +3188,8 @@ impl<'a> Compaction<'a> {
   pub const VT_STATUS: flatbuffers::VOffsetT = 10;
   pub const VT_OUTPUT_SSTS: flatbuffers::VOffsetT = 12;
   pub const VT_WORKER: flatbuffers::VOffsetT = 14;
-  pub const VT_SUBCOMPACTIONS: flatbuffers::VOffsetT = 16;
+  pub const VT_CTX_TYPE: flatbuffers::VOffsetT = 16;
+  pub const VT_CTX: flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2999,11 +3201,12 @@ impl<'a> Compaction<'a> {
     args: &'args CompactionArgs<'args>
   ) -> flatbuffers::WIPOffset<Compaction<'bldr>> {
     let mut builder = CompactionBuilder::new(_fbb);
-    if let Some(x) = args.subcompactions { builder.add_subcompactions(x); }
+    if let Some(x) = args.ctx { builder.add_ctx(x); }
     if let Some(x) = args.worker { builder.add_worker(x); }
     if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
     if let Some(x) = args.spec { builder.add_spec(x); }
     if let Some(x) = args.id { builder.add_id(x); }
+    builder.add_ctx_type(args.ctx_type);
     builder.add_status(args.status);
     builder.add_spec_type(args.spec_type);
     builder.finish()
@@ -3053,11 +3256,18 @@ impl<'a> Compaction<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<WorkerSpec>>(Compaction::VT_WORKER, None)}
   }
   #[inline]
-  pub fn subcompactions(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>> {
+  pub fn ctx_type(&self) -> CompactionContext {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction>>>>(Compaction::VT_SUBCOMPACTIONS, None)}
+    unsafe { self._tab.get::<CompactionContext>(Compaction::VT_CTX_TYPE, Some(CompactionContext::NONE)).unwrap()}
+  }
+  #[inline]
+  pub fn ctx(&self) -> Option<flatbuffers::Table<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Compaction::VT_CTX, None)}
   }
   #[inline]
   #[allow(non_snake_case)]
@@ -3087,6 +3297,21 @@ impl<'a> Compaction<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn ctx_as_tiered_compaction_context(&self) -> Option<TieredCompactionContext<'a>> {
+    if self.ctx_type() == CompactionContext::TieredCompactionContext {
+      self.ctx().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { TieredCompactionContext::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl flatbuffers::Verifiable for Compaction<'_> {
@@ -3107,7 +3332,12 @@ impl flatbuffers::Verifiable for Compaction<'_> {
      .visit_field::<CompactionStatus>("status", Self::VT_STATUS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("output_ssts", Self::VT_OUTPUT_SSTS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<WorkerSpec>>("worker", Self::VT_WORKER, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Subcompaction>>>>("subcompactions", Self::VT_SUBCOMPACTIONS, false)?
+     .visit_union::<CompactionContext, _>("ctx_type", Self::VT_CTX_TYPE, "ctx", Self::VT_CTX, false, |key, v, pos| {
+        match key {
+          CompactionContext::TieredCompactionContext => v.verify_union_variant::<flatbuffers::ForwardsUOffset<TieredCompactionContext>>("CompactionContext::TieredCompactionContext", pos),
+          _ => Ok(()),
+        }
+     })?
      .finish();
     Ok(())
   }
@@ -3119,7 +3349,8 @@ pub struct CompactionArgs<'a> {
     pub status: CompactionStatus,
     pub output_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub worker: Option<flatbuffers::WIPOffset<WorkerSpec<'a>>>,
-    pub subcompactions: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Subcompaction<'a>>>>>,
+    pub ctx_type: CompactionContext,
+    pub ctx: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
 }
 impl<'a> Default for CompactionArgs<'a> {
   #[inline]
@@ -3131,7 +3362,8 @@ impl<'a> Default for CompactionArgs<'a> {
       status: CompactionStatus::Submitted,
       output_ssts: None,
       worker: None,
-      subcompactions: None,
+      ctx_type: CompactionContext::NONE,
+      ctx: None,
     }
   }
 }
@@ -3166,8 +3398,12 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<WorkerSpec>>(Compaction::VT_WORKER, worker);
   }
   #[inline]
-  pub fn add_subcompactions(&mut self, subcompactions: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Subcompaction<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_SUBCOMPACTIONS, subcompactions);
+  pub fn add_ctx_type(&mut self, ctx_type: CompactionContext) {
+    self.fbb_.push_slot::<CompactionContext>(Compaction::VT_CTX_TYPE, ctx_type, CompactionContext::NONE);
+  }
+  #[inline]
+  pub fn add_ctx(&mut self, ctx: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_CTX, ctx);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionBuilder<'a, 'b, A> {
@@ -3214,7 +3450,20 @@ impl core::fmt::Debug for Compaction<'_> {
       ds.field("status", &self.status());
       ds.field("output_ssts", &self.output_ssts());
       ds.field("worker", &self.worker());
-      ds.field("subcompactions", &self.subcompactions());
+      ds.field("ctx_type", &self.ctx_type());
+      match self.ctx_type() {
+        CompactionContext::TieredCompactionContext => {
+          if let Some(x) = self.ctx_as_tiered_compaction_context() {
+            ds.field("ctx", &x)
+          } else {
+            ds.field("ctx", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        _ => {
+          let x: Option<()> = None;
+          ds.field("ctx", &x)
+        },
+      };
       ds.finish()
   }
 }

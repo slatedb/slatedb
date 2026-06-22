@@ -265,12 +265,12 @@ impl CompactionExecuteBench {
             id,
             compaction_id,
             destination: 0,
-            sst_views,
+            l0_sst_views: sst_views,
             sorted_runs: vec![],
-            subcompactions: vec![],
             compaction_clock_tick: manifest.db_state().last_l0_clock_tick,
-            retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
+            retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
+            ctx: None,
         })
     }
 
@@ -305,12 +305,12 @@ impl CompactionExecuteBench {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: job.id(),
             destination: 0,
-            sst_views: vec![],
+            l0_sst_views: vec![],
             sorted_runs: srs,
-            subcompactions: vec![],
             compaction_clock_tick: state.last_l0_clock_tick,
-            retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
+            retention_min_seq: Some(state.recent_snapshot_min_seq),
+            ctx: None,
         }
     }
 
