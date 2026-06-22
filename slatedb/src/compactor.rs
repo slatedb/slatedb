@@ -709,9 +709,9 @@ impl CompactorEventHandler {
     /// Handles a polling tick by refreshing compactions and the manifest, then possibly scheduling compactions.
     async fn handle_ticker(&mut self) -> Result<(), SlateDBError> {
         self.state_writer.refresh().await?;
+        self.reclaim_stale_workers().await?;
         self.update_distributed_compaction_metrics();
         self.commit_compacted_entries().await?;
-        self.reclaim_stale_workers().await?;
         self.maybe_schedule_compactions().await?;
         self.maybe_validate_submitted_compactions().await?;
         Ok(())
@@ -765,9 +765,9 @@ impl CompactorEventHandler {
                 c.set_worker(None);
             });
         }
-        self.stats.jobs_reclaimed.increment(stale.len() as u64);
 
         self.state_writer.write_compactions_safely().await?;
+        self.stats.jobs_reclaimed.increment(stale.len() as u64);
         Ok(())
     }
 

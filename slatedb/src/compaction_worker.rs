@@ -12,9 +12,10 @@
 //!
 //! Workers run in one of two modes:
 //!
-//! 1. **Embedded** a single worker is spawned inside the compaction coordinator's process. (
-//!    The coordinator must have `worker: Some(CompactionWorkerOptions))` in its
-//!    [`crate::config::CompactorOptions`]. This is the default.
+//! 1. **Embedded with Hybrid Optionality** a single worker is spawned inside the compaction coordinator's process. (
+//!    The coordinator must have `worker: Some(CompactionWorkerOptions))` in its [`crate::config::CompactorOptions`].
+//!    This is the default. Additional (non-embedded) workers may be started in addition to the embedded worker to
+//!    satisfy scaling needs. This doesn't cause fencing and is an intended usage pattern.
 //!
 //! 2. **Standalone**: The compaction coordinator runs without an embedded worker and one or
 //!    more separate worker processes each run a [`CompactionWorker`]. The coordinator must
