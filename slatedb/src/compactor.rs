@@ -512,9 +512,9 @@ pub(crate) struct CompactorEventHandler {
     system_clock: Arc<dyn SystemClock>,
     recorder: MetricsRecorderHelper,
     /// Job ids the coordinator has observed claimed by a worker (`Running` or
-    /// `Compacted` with a worker assigned). `None` until the first tick seeds it,
-    /// so jobs already in flight when the coordinator starts are not miscounted
-    /// as freshly claimed. See [`Self::update_distributed_compaction_metrics`].
+    /// `Compacted` with a worker assigned). `None` until the first metrics update;
+    /// that update counts all inherited claims once before establishing the
+    /// set-difference baseline. See [`Self::update_distributed_compaction_metrics`].
     prev_claimed: Option<HashSet<Ulid>>,
     /// Per-worker `worker_last_heartbeat_ms` gauges, pruned to the set of workers
     /// currently owning in-flight jobs so the map cannot grow without bound.
@@ -772,14 +772,11 @@ impl CompactorEventHandler {
     }
 
     /// Updates coordinator-side distributed-compaction metrics after each tick:
-    /// - `jobs_claimed`: counts jobs newly claimed by a worker since the last
-    ///   tick. A job is "claimed" once it carries a worker and is `Running` or
-    ///   `Compacted` (the worker keeps its ownership through `Compacted`), so a
-    ///   job that finishes execution between two ticks is still counted. The set
-    ///   is seeded on the first tick so jobs already in flight when the
-    ///   coordinator starts are not miscounted as fresh claims. (A job that races
-    ///   all the way to a committed/removed state within a single poll interval
-    ///   is not observed; coordinator polling cannot catch sub-tick transitions.)
+    /// - `jobs_claimed`: counts jobs claimed by a worker. A job is "claimed"
+    ///   once it carries a worker and is `Running` or `Compacted` (the worker
+    ///   keeps its ownership through `Compacted`), so a job that finishes
+    ///   execution between two ticks is still counted. The first update counts
+    ///   every inherited claim once; later updates count set differences.
     /// - `worker_last_heartbeat_ms`: a per-worker gauge of the last heartbeat
     ///   timestamp, pruned to the workers that currently own in-flight jobs.
     fn update_distributed_compaction_metrics(&mut self) {
@@ -792,13 +789,16 @@ impl CompactorEventHandler {
             .collect();
 
         let current_ids: HashSet<Ulid> = claimed.iter().map(|(id, _)| *id).collect();
-        // On the first tick `prev_claimed` is `None`: seed it without counting any
-        // claims, since the coordinator never observed those jobs being claimed.
+        // On the first update, count all inherited claims once. This includes
+        // work claimed while the coordinator was unavailable; thereafter the
+        // counter records only newly observed claim ids.
         if let Some(prev) = self.prev_claimed.as_ref() {
             let newly_claimed = current_ids.difference(prev).count() as u64;
             if newly_claimed > 0 {
                 self.stats.jobs_claimed.increment(newly_claimed);
             }
+        } else if !current_ids.is_empty() {
+            self.stats.jobs_claimed.increment(current_ids.len() as u64);
         }
         self.prev_claimed = Some(current_ids);
 
@@ -6095,11 +6095,11 @@ mod tests {
         assert_eq!(reclaimed, 1, "one job should be counted as reclaimed");
     }
 
-    /// `jobs_claimed` seeds on the first tick (so jobs already in flight when the
-    /// coordinator starts are not miscounted), then counts each newly claimed job
-    /// exactly once across the `Running` and `Compacted` states.
+    /// `jobs_claimed` counts every job inherited by the coordinator on its first
+    /// metrics update, then counts each newly claimed job exactly once across the
+    /// `Running` and `Compacted` states.
     #[tokio::test]
-    async fn test_jobs_claimed_metric_seeds_then_counts() {
+    async fn test_jobs_claimed_metric_counts_inherited_then_new_claims() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
 
         let claimed_count = || {
@@ -6118,10 +6118,10 @@ mod tests {
                 .with_worker(Some(WorkerSpec::new("worker-1".to_string(), 0))),
         );
 
-        // when: the first tick seeds the claimed set.
+        // when: the first snapshot inherits the existing claim.
         fixture.handler.update_distributed_compaction_metrics();
-        // then: the pre-existing in-flight job is not counted as a fresh claim.
-        assert_eq!(claimed_count(), 0);
+        // then: the inherited job is counted once.
+        assert_eq!(claimed_count(), 1);
 
         // when: a new job is claimed.
         let id2 = Ulid::new();
@@ -6132,7 +6132,7 @@ mod tests {
         );
         fixture.handler.update_distributed_compaction_metrics();
         // then: it is counted once.
-        assert_eq!(claimed_count(), 1);
+        assert_eq!(claimed_count(), 2);
 
         // when: that job finishes execution (Compacted, worker retained) and we
         // tick again.
@@ -6141,7 +6141,7 @@ mod tests {
         });
         fixture.handler.update_distributed_compaction_metrics();
         // then: a still-claimed job is not recounted.
-        assert_eq!(claimed_count(), 1);
+        assert_eq!(claimed_count(), 2);
     }
 
     /// A Running compaction whose heartbeat is within the timeout must NOT be

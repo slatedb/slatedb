@@ -1836,6 +1836,7 @@ mod tests {
                 let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
                 Arc::new(CompactionStats::new(&recorder))
             },
+            worker_stats: WorkerStats::noop(),
             clock,
             manifest_store,
             merge_operator: None,
