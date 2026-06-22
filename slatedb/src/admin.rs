@@ -727,7 +727,6 @@ fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
 /// | Memory | `memory` | [load_memory] |
 /// | AWS | `aws` | [load_aws] |
 /// | Azure | `azure` | [load_azure] |
-/// | OpenDAL | `opendal` | [load_opendal] |
 pub fn load_object_store_from_env(
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, crate::Error> {
@@ -740,8 +739,6 @@ pub fn load_object_store_from_env(
         "aws" => load_aws(),
         #[cfg(feature = "azure")]
         "azure" => load_azure(),
-        #[cfg(feature = "opendal")]
-        "opendal" => load_opendal(),
         invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
             key: "CLOUD_PROVIDER".to_string(),
             value: Some(invalid_value.to_string()),
@@ -803,60 +800,6 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     })?) as Arc<dyn ObjectStore>)
 }
 
-/// Loads an OpenDAL Object store instance.
-///
-/// | Env Variable | Doc | Required |
-/// |--------------|-----|----------|
-/// | OPENDAL_SCHEME | The OpenDAL scheme to use | Yes |
-/// | OPENDAL_* | The OpenDAL configuration | Yes |
-/// full list of schemes: https://docs.rs/opendal/latest/opendal/services/index.html
-/// for example, to use s3-compatible storage, you can set:
-/// ```bash
-/// OPENDAL_SCHEME=s3
-/// OPENDAL_ENDPOINT=http://localhost:9000
-/// OPENDAL_ACCESS_KEY_ID=minioadmin
-/// OPENDAL_SECRET_ACCESS_KEY=minioadmin
-/// OPENDAL_BUCKET=test
-/// OPENDAL_REGION=us-east-1
-/// OPENDAL_ROOT=/tmp
-/// ```
-/// full list of config: https://docs.rs/opendal/latest/opendal/services/s3/config/struct.S3Config.html
-/// for example, to use oss, you can set:
-/// ```bash
-/// OPENDAL_SCHEME=oss
-/// OPENDAL_ENDPOINT=http://oss-cn-shanghai.aliyuncs.com
-/// OPENDAL_ACCESS_KEY_ID=your-access-key-id
-/// OPENDAL_ACCESS_KEY_SECRET=your-access-key-secret
-/// OPENDAL_BUCKET=your-bucket-name
-/// OPENDAL_ROOT=/your/root/path
-/// ```
-/// full list of config: https://docs.rs/opendal/latest/opendal/services/oss/config/struct.OssConfig.html
-#[cfg(feature = "opendal")]
-pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    use opendal::Operator;
-    use std::collections::HashMap;
-
-    let scheme_value = get_env_variable("OPENDAL_SCHEME")?;
-    let iter = env::vars()
-        .filter_map(|(k, v)| k.strip_prefix("OPENDAL_").map(|k| (k.to_lowercase(), v)))
-        .collect::<HashMap<String, String>>();
-
-    let op = Operator::via_iter(&scheme_value, iter).map_err(|error| {
-        if error.kind() == opendal::ErrorKind::Unsupported {
-            SlateDBError::InvalidEnvironmentVariable {
-                key: "OPENDAL_SCHEME".to_string(),
-                value: Some(scheme_value.clone()),
-            }
-        } else {
-            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
-                store: "OpenDAL",
-                source: Box::new(error),
-            }))
-        }
-    })?;
-    Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
@@ -905,23 +848,6 @@ mod tests {
             let store = r.expect("expected memory object store");
             assert_eq!(store.to_string(), "InMemory");
 
-            Ok(())
-        });
-    }
-
-    #[cfg(feature = "opendal")]
-    #[test]
-    fn test_load_opendal_invalid_scheme_maps_to_invalid_environment_variable() {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("OPENDAL_SCHEME", "not-a-scheme");
-
-            let err = super::load_opendal().expect_err("expected invalid OpenDAL scheme");
-
-            assert_eq!(err.kind(), ErrorKind::Invalid);
-            assert_eq!(
-                err.to_string(),
-                "Invalid error: invalid environment variable OPENDAL_SCHEME value `not-a-scheme`"
-            );
             Ok(())
         });
     }

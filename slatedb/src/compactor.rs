@@ -61,6 +61,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -315,6 +316,7 @@ pub struct Compactor {
     stats: Arc<CompactionStats>,
     recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
     merge_operator: Option<MergeOperatorType>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
@@ -332,6 +334,7 @@ impl Compactor {
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
+        fp_registry: Arc<FailPointRegistry>,
         closed_result: Arc<dyn ClosedResultWriter>,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
@@ -355,6 +358,7 @@ impl Compactor {
             stats,
             recorder: recorder.clone(),
             system_clock,
+            fp_registry,
             merge_operator,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier,
@@ -413,6 +417,7 @@ impl Compactor {
                 self.stats.clone(),
                 self.recorder.clone(),
                 self.system_clock.clone(),
+                self.fp_registry.clone(),
                 self.merge_operator.clone(),
                 #[cfg(feature = "compaction_filters")]
                 self.compaction_filter_supplier.clone(),
@@ -722,7 +727,8 @@ impl CompactorEventHandler {
     /// Reclaims `Running` compactions whose workers have not emitted a heartbeat
     /// within [`CompactorOptions::worker_heartbeat_timeout`], as well as any
     /// `Running` entry with no worker at all. Reclaimed compactions are reset to
-    /// `Submitted` (with no worker) so they can be picked up again.
+    /// `Scheduled` (with no worker) so they can be picked up again while
+    /// preserving any persisted job context needed for resume.
     ///
     /// This is the coordinator-side half of the failure-detection protocol described
     /// in RFC-0025. The worker side emits heartbeats (updating `last_heartbeat_ms`)
@@ -767,7 +773,7 @@ impl CompactorEventHandler {
                 }
             }
             self.state_mut().update_compaction(id, |c| {
-                c.set_status(CompactionStatus::Submitted);
+                c.set_status(CompactionStatus::Scheduled);
                 c.set_worker(None);
             });
         }
@@ -1191,6 +1197,7 @@ impl CompactorEventHandler {
                 self.state_mut().finish_drain_compaction(compaction.id());
             } else {
                 self.state_mut().update_compaction(&compaction.id(), |c| {
+                    c.clear_ctx();
                     c.set_status(CompactionStatus::Scheduled)
                 });
             }
@@ -1408,7 +1415,6 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    use crate::bytes_range::BytesRange;
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
@@ -1435,7 +1441,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::subcompaction::Subcompaction;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, FixedThreeBytePrefixExtractor, GatedObjectStore};
     use crate::types::KeyValue;
@@ -4681,7 +4686,7 @@ mod tests {
             let scheduled = self.get_scheduled_compactions().await;
             for compaction in scheduled {
                 let destination = compaction.spec().destination().expect("tiered spec");
-                let sst_views = compaction.get_l0_sst_views(db_state);
+                let l0_sst_views = compaction.get_l0_sst_views(db_state);
                 let sorted_runs = compaction.get_sorted_runs(db_state);
                 let is_dest_last_run = match db_state.tree_for_segment(compaction.spec().segment())
                 {
@@ -4695,12 +4700,12 @@ mod tests {
                     id: compaction.id(),
                     compaction_id: compaction.id(),
                     destination,
-                    sst_views,
+                    l0_sst_views,
                     sorted_runs,
-                    subcompactions: compaction.subcompactions().clone(),
                     compaction_clock_tick: db_state.last_l0_clock_tick,
-                    retention_min_seq: Some(db_state.recent_snapshot_min_seq),
                     is_dest_last_run,
+                    retention_min_seq: None,
+                    ctx: compaction.ctx().cloned(),
                 };
 
                 self.real_executor.start_compaction_job(args);
@@ -4718,9 +4723,6 @@ mod tests {
                 .await
                 .expect("timeout waiting for compaction result");
 
-                let output_ssts: Vec<SsTableHandle> =
-                    result.sst_views.into_iter().map(|v| v.sst).collect();
-
                 let mut stored = StoredCompactions::try_load(self.compactions_store.clone())
                     .await
                     .unwrap()
@@ -4728,9 +4730,11 @@ mod tests {
                 loop {
                     stored.refresh().await.unwrap();
                     let mut dirty = stored.prepare_dirty().unwrap();
-                    let mut completed = compaction.clone().with_status(CompactionStatus::Compacted);
-                    completed.set_subcompactions(vec![Subcompaction::new(BytesRange::unbounded())
-                        .with_output_ssts(output_ssts.clone())]);
+                    let completed = compaction
+                        .clone()
+                        .with_status(CompactionStatus::Compacted)
+                        .with_output_ssts(result.sst_views.iter().map(|v| v.sst.clone()).collect())
+                        .with_ctx(None);
                     dirty.value.insert(completed);
                     match stored.update(dirty).await {
                         Ok(()) => break,
@@ -5871,11 +5875,9 @@ mod tests {
         spec: CompactionSpec,
         output: Vec<SsTableHandle>,
     ) -> Compaction {
-        let mut compaction = Compaction::new(id, spec).with_status(CompactionStatus::Compacted);
-        compaction.set_subcompactions(vec![
-            Subcompaction::new(BytesRange::unbounded()).with_output_ssts(output)
-        ]);
-        compaction
+        Compaction::new(id, spec)
+            .with_status(CompactionStatus::Compacted)
+            .with_output_ssts(output)
     }
 
     #[tokio::test]
@@ -6028,7 +6030,7 @@ mod tests {
     }
 
     /// A Running compaction whose heartbeat is older than the timeout must be
-    /// reset to Submitted (worker cleared) by `reclaim_stale_workers`.
+    /// reset to Scheduled (worker cleared) by `reclaim_stale_workers`.
     #[tokio::test]
     async fn test_reclaim_stale_running_compaction() {
         // given: clock starts at 0 ms
@@ -6068,15 +6070,15 @@ mod tests {
         system_clock.advance(Duration::from_secs(60)).await;
 
         // when: call reclaim_stale_workers directly to avoid the scheduling
-        // side-effects of handle_ticker (which would try to start the reclaimed
-        // Submitted compaction with an empty spec and mark it Failed).
+        // side-effects of handle_ticker (which would try to claim the reclaimed
+        // Scheduled compaction with an empty spec and mark it Failed).
         fixture
             .handler
             .reclaim_stale_workers()
             .await
             .expect("reclaim_stale_workers failed");
 
-        // then: the compaction is now Submitted with no worker.
+        // then: the compaction is now Scheduled with no worker.
         let stored = fixture
             .compactions_store
             .read_latest_compactions()
@@ -6086,7 +6088,7 @@ mod tests {
         let c = stored.get(&compaction_id).expect("compaction missing");
         assert_eq!(
             c.status(),
-            CompactionStatus::Submitted,
+            CompactionStatus::Scheduled,
             "should be reclaimed"
         );
         assert!(c.worker().is_none(), "worker should be cleared");
@@ -6258,7 +6260,7 @@ mod tests {
             .await
             .expect("reclaim_stale_workers failed");
 
-        // then: the compaction is now Submitted with no worker.
+        // then: the compaction is now Scheduled with no worker.
         let stored = fixture
             .compactions_store
             .read_latest_compactions()
@@ -6268,7 +6270,7 @@ mod tests {
         let c = stored.get(&compaction_id).expect("compaction missing");
         assert_eq!(
             c.status(),
-            CompactionStatus::Submitted,
+            CompactionStatus::Scheduled,
             "should be reclaimed"
         );
         assert!(c.worker().is_none(), "worker should remain cleared");
