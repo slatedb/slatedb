@@ -29,7 +29,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
-use object_store::prefix::PrefixStore;
 use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
@@ -1878,13 +1877,10 @@ impl Db {
         // Lowercase env keys because parse_url_opts only recognizes lower case option keys.
         let env_vars = std::env::vars().map(|(key, value)| (key.to_ascii_lowercase(), value));
         let (object_store, path) = parse_url_opts(&url, env_vars).map_err(SlateDBError::from)?;
-        let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
-            Arc::from(object_store)
-        } else {
-            let object_store: Arc<dyn ObjectStore> = Arc::from(object_store);
-            Arc::new(PrefixStore::new(object_store, path))
-        };
-        Ok(object_store)
+        if !path.as_ref().is_empty() {
+            return Err(SlateDBError::InvalidObjectStorePath(path.to_string()))?;
+        }
+        Ok(Arc::from(object_store))
     }
 }
 
@@ -2109,7 +2105,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, FutureExt, StreamExt};
     use object_store::memory::InMemory;
-    use object_store::{ObjectStore, ObjectStoreExt};
+    use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
@@ -2957,26 +2953,6 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn test_resolve_object_store_local_prefix_store_writes_to_path() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let prefix_path = temp_dir.path().join("prefix-store");
-        let url = format!("file://{}", prefix_path.display());
-
-        let object_store = Db::resolve_object_store(&url).unwrap();
-        let location = object_store::path::Path::from("nested/file.txt");
-        let payload = Bytes::from_static(b"local prefix payload");
-
-        object_store
-            .put(&location, payload.clone().into())
-            .await
-            .unwrap();
-
-        let expected_path = prefix_path.join("nested").join("file.txt");
-        let stored = tokio::fs::read(&expected_path).await.unwrap();
-        assert_eq!(stored, payload.to_vec());
-    }
-
     #[test]
     fn test_get_after_put() {
         let mut runner = new_proptest_runner(None);
@@ -3717,17 +3693,6 @@ mod tests {
             .build()
             .await
             .unwrap();
-        // `cache_puts_enabled` won't take effect until after the first
-        // `resolve_root`. Call head to force the root to be resolved.
-        // Use the first WAL entry since it's guaranteed to exist because
-        // it's the fencing write.
-        cached_object_store
-            .head(&object_store::path::Path::from(format!(
-                "{}/wal/00000000000000000001.sst",
-                db_path
-            )))
-            .await
-            .unwrap();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
@@ -3775,9 +3740,7 @@ mod tests {
     async fn test_get_with_object_store_cache_put_caching_enabled() {
         let expected_cache_parts =
             vec![
-            // not cached because this manifest is put before the root is resolved, which is when
-            // `cache_puts_enabled` starts taking effect.
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 0),
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 1),
             // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
             ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 1),
             // The startup fence WAL is zero bytes, so replay does not cache any object parts.
