@@ -1463,7 +1463,7 @@ mod tests {
             index: 0,
             range: BytesRange::unbounded(),
             destination: 0,
-            l0_sst_views: l0_sst_views,
+            l0_sst_views,
             sorted_runs,
             compaction_clock_tick: 0,
             is_dest_last_run: false,
