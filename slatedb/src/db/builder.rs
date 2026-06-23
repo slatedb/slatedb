@@ -1252,6 +1252,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.rand.clone(),
             stats.clone(),
             self.system_clock.clone(),
+            recorder.clone(),
         )
         .await?;
         let worker = options.worker.clone().map(|worker_options| {
@@ -1263,6 +1264,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
                 self.compaction_runtime,
                 self.rand,
                 stats,
+                recorder.clone(),
                 self.system_clock,
                 self.fp_registry,
                 self.merge_operator,
@@ -1385,6 +1387,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             worker_runtime,
             self.rand,
             stats,
+            recorder,
             self.system_clock,
             self.fp_registry,
             self.merge_operator,

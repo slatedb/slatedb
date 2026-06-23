@@ -38,7 +38,7 @@ use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 
-use crate::compactor::stats::CompactionStats;
+use crate::compactor::stats::{CompactionStats, WorkerStats};
 use crate::utils::{
     build_concurrent, compute_max_parallel, estimate_bytes_before_key, last_written_key_and_seq,
     spawn_bg_task, IdGenerator,
@@ -216,6 +216,7 @@ pub(crate) struct TokioCompactionExecutorOptions {
     pub table_store: Arc<TableStore>,
     pub rand: Arc<DbRand>,
     pub stats: Arc<CompactionStats>,
+    pub worker_stats: WorkerStats,
     pub clock: Arc<dyn SystemClock>,
     pub manifest_store: Arc<ManifestStore>,
     pub merge_operator: Option<MergeOperatorType>,
@@ -246,6 +247,7 @@ impl TokioCompactionExecutor {
                 rand: opts.rand,
                 tasks: Arc::new(Mutex::new(BTreeMap::new())),
                 stats,
+                worker_stats: opts.worker_stats,
                 clock: opts.clock,
                 is_stopped: AtomicBool::new(false),
                 manifest_store: opts.manifest_store,
@@ -294,6 +296,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     tasks: Arc<Mutex<BTreeMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
+    worker_stats: WorkerStats,
     clock: Arc<dyn SystemClock>,
     is_stopped: AtomicBool,
     manifest_store: Arc<ManifestStore>,
@@ -459,7 +462,10 @@ impl TokioCompactionExecutorInner {
                 SlateDBError::BackgroundTaskPanic(name)
             }
         })??;
-        self.stats.bytes_compacted.increment(sst.info.filter_offset);
+        self.worker_stats
+            .bytes_compacted
+            .increment(sst.info.filter_offset);
+        self.worker_stats.ssts_written.increment(1);
         output_ssts.push(sst);
         Ok(())
     }
@@ -760,6 +766,16 @@ impl TokioCompactionExecutorInner {
             before_key.saturating_sub(before_range)
         });
 
+        // Cadence for the time-based progress send below. Caps sends at 1s (the
+        // pre-distributed-compaction default), but never coarser than the
+        // worker's `heartbeat_min_interval`, since the worker can only heartbeat
+        // when the executor sends (see `handle_progress`).
+        let progress_interval = TimeDelta::from_std(
+            self.options
+                .heartbeat_min_interval
+                .min(std::time::Duration::from_secs(1)),
+        )
+        .expect("clamped to <= 1s, which always fits in a TimeDelta");
         // Report the resume point up front so a resumed range surfaces the bytes
         // already processed in prior attempts immediately. A range that resumes
         // already-complete reports its full estimated size here (its resume
@@ -790,7 +806,7 @@ impl TokioCompactionExecutorInner {
 
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
-            if duration_since_last_report > TimeDelta::seconds(1) {
+            if duration_since_last_report > progress_interval {
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 progress(total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
@@ -833,7 +849,10 @@ impl TokioCompactionExecutorInner {
         if !current_writer.is_drained() {
             let sst = current_writer.close().await?;
 
-            self.stats.bytes_compacted.increment(sst.info.filter_offset);
+            self.worker_stats
+                .bytes_compacted
+                .increment(sst.info.filter_offset);
+            self.worker_stats.ssts_written.increment(1);
             output_ssts.push(sst);
         }
 
@@ -847,7 +866,7 @@ impl TokioCompactionExecutorInner {
             return;
         }
         let dst = args.destination;
-        self.stats.running_compactions.increment(1);
+        self.worker_stats.running_compactions.increment(1);
         assert!(!tasks.contains_key(&dst));
 
         let id = args.id;
@@ -878,7 +897,7 @@ impl TokioCompactionExecutorInner {
                         e
                     );
                 }
-                this_cleanup.stats.running_compactions.increment(-1);
+                this_cleanup.worker_stats.running_compactions.increment(-1);
             },
             async move { this.plan_and_execute_compaction_job(args).await },
         );
@@ -1403,6 +1422,7 @@ mod tests {
                 let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
                 Arc::new(CompactionStats::new(&recorder))
             },
+            worker_stats: WorkerStats::noop(),
             clock,
             manifest_store,
             merge_operator,
@@ -1623,6 +1643,7 @@ mod tests {
                         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
                         Arc::new(CompactionStats::new(&recorder))
                     },
+                    worker_stats: WorkerStats::noop(),
                     clock,
                     manifest_store,
                     merge_operator,
@@ -1856,6 +1877,7 @@ mod tests {
                 let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
                 Arc::new(CompactionStats::new(&recorder))
             },
+            worker_stats: WorkerStats::noop(),
             clock,
             manifest_store,
             merge_operator: None,
@@ -2371,6 +2393,7 @@ mod tests {
                 let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
                 Arc::new(CompactionStats::new(&recorder))
             },
+            worker_stats: WorkerStats::noop(),
             clock,
             manifest_store,
             merge_operator: None,
@@ -2563,6 +2586,7 @@ mod tests {
                     let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
                     Arc::new(CompactionStats::new(&recorder))
                 },
+                worker_stats: WorkerStats::noop(),
                 clock,
                 manifest_store,
                 merge_operator: self.merge_operator,
