@@ -440,7 +440,7 @@ Selection](#boundary-selection-heuristic) keeps this as a coarse fallback (one
 As some evidence that the cost of index-based planning is not prohibitive, 
 a 16GB compaction had the following time breakdowns for the subcompaciton phase
 (ran on a `cg8in.8xlarge`) where planning takes only about 3% of the total time
-after parellelizing it 12 ways:
+after splitting it 12 ways:
 ```
 ┌───────────────────────────────────┬────────┬──────────┬─────────┬─────────┬────────────┐
 │                run                │ total  │ manifest │  plan   │  merge  │ planning % │
