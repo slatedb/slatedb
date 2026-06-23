@@ -521,18 +521,54 @@ impl TokioCompactionExecutorInner {
         args: StartCompactionJobArgs,
     ) -> Result<SortedRun, SlateDBError> {
         debug!("executing compaction [job_args={:?}]", args);
-        // Load the manifest's sequence tracker once per job; every range shares
-        // it rather than re-reading the manifest.
+        let id = args.id;
+        let destination = args.destination;
+
+        // Planning (manifest load + input-index reads) runs before
+        // `execute_compaction_job` emits its first progress event, so it would
+        // otherwise go un-heartbeated. On a cold object store with very wide
+        // input it can exceed `worker_heartbeat_timeout`, letting the
+        // coordinator reclaim a healthy job mid-plan and livelock on
+        // re-planning. Emit a liveness-only heartbeat on the
+        // `heartbeat_min_interval` cadence while planning is in flight; planning
+        // that finishes before the first tick (the common case) sends nothing.
+        let plan = self.load_manifest_and_plan(args);
+        tokio::pin!(plan);
+        let (sequence_tracker, planned) = loop {
+            tokio::select! {
+                biased;
+                res = &mut plan => break res?,
+                _ = self.clock.sleep(self.options.heartbeat_min_interval) => {
+                    if self
+                        .worker_tx
+                        .try_send(WorkerMessage::CompactionJobHeartbeat { id })
+                        .is_err()
+                    {
+                        debug!(
+                            "failed to send planning heartbeat (likely DB shutdown) [id={}]",
+                            id
+                        );
+                    }
+                }
+            }
+        };
+
+        self.execute_compaction_job(id, destination, planned, sequence_tracker)
+            .await
+    }
+
+    /// Loads the manifest's shared sequence tracker and plans the job's ranges
+    /// (RFC-0028). Every range shares the one sequence tracker rather than
+    /// re-reading the manifest.
+    async fn load_manifest_and_plan(
+        &self,
+        args: StartCompactionJobArgs,
+    ) -> Result<(Arc<SequenceTracker>, PlannedCompaction), SlateDBError> {
         let stored_manifest =
             StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
         let sequence_tracker = Arc::new(stored_manifest.db_state().sequence_tracker.clone());
-
-        // Plan the job's ranges, then run them concurrently.
-        let id = args.id;
-        let destination = args.destination;
         let planned = self.plan_compaction_job(args).await?;
-        self.execute_compaction_job(id, destination, planned, sequence_tracker)
-            .await
+        Ok((sequence_tracker, planned))
     }
 
     /// Plans the subcompaction ranges for a fresh job (RFC-0028).
@@ -554,7 +590,6 @@ impl TokioCompactionExecutorInner {
             &args.l0_sst_views,
             &args.sorted_runs,
             self.options.max_subcompactions,
-            self.options.max_sst_size as u64,
             self.options.max_fetch_tasks,
         )
         .await?;
@@ -2386,7 +2421,7 @@ mod tests {
         let (l0_sst_views, sorted_runs) = split_inputs(&table_store).await;
 
         // given: a fresh job (no resume context) whose total input far exceeds
-        // the 512-byte max_sst_size floor.
+        // the per-source floor (the largest input SST's worth of bytes).
         let args = StartCompactionJobArgs {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
@@ -2580,6 +2615,135 @@ mod tests {
         }
         let expected: Vec<Bytes> = entries.iter().map(|e| e.key.clone()).collect();
         assert_eq!(read_back, expected);
+    }
+
+    /// Planning (manifest load + input-index reads) runs before the executor
+    /// emits its first progress event. On a cold object store with wide input
+    /// it can outlast `worker_heartbeat_timeout`, so the executor must emit a
+    /// liveness heartbeat while planning is in flight or a healthy job gets
+    /// reclaimed mid-plan. Simulate the stall with a gated object store and
+    /// assert a planning heartbeat lands before any progress.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn should_heartbeat_while_planning_index_reads_block() {
+        // given: the table store reads/writes through a gated object store, but
+        // the manifest store uses the ungated inner store — so we can stall the
+        // planner's input-index reads while the manifest load still completes. A
+        // short heartbeat interval makes the planning heartbeat observable.
+        let handle = tokio::runtime::Handle::current();
+        let options = Arc::new(CompactionWorkerOptions {
+            max_sst_size: SUBCOMPACTION_SST_SIZE,
+            heartbeat_min_interval: Duration::from_millis(20),
+            ..CompactionWorkerOptions::default()
+        });
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner.clone()));
+        let gated_store: Arc<dyn ObjectStore> = gated.clone();
+        let root_path = Path::from("testdb-plan-heartbeat");
+        let clock = Arc::new(DefaultSystemClock::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(gated_store.clone(), None),
+            SsTableFormat {
+                block_size: 256,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+            TableStoreKind::Compactor,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, inner.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle,
+            options,
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: Arc::new(DbRand::new(100u64)),
+            stats: {
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
+            },
+            worker_stats: WorkerStats::noop(),
+            clock,
+            manifest_store,
+            merge_operator: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
+
+        // given: multi-SST input (written with the read gate open).
+        let (l0_sst_views, sorted_runs) = split_inputs(&table_store).await;
+
+        // given: block object-store reads so the planner's index reads stall.
+        // Baseline existing read arrivals so we can wait for the next one.
+        let setup_gets = gated.get_opts_gate.arrivals();
+        gated.get_opts_gate.close();
+
+        // when: a *fresh* job (ctx = None, so it must plan) starts.
+        let id = Ulid::new();
+        executor.start_compaction_job(StartCompactionJobArgs {
+            id,
+            compaction_id: Ulid::new(),
+            destination: 0,
+            l0_sst_views,
+            sorted_runs,
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            ctx: None,
+        });
+
+        // then: planning parks on a blocked index read (the manifest load, on the
+        // ungated store, already succeeded) ...
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            gated.get_opts_gate.wait_for_arrivals(setup_gets + 1),
+        )
+        .await
+        .expect("planning should reach the blocked read gate");
+
+        // ... and while it is parked the executor emits a planning heartbeat for
+        // this job, with no progress/finished yet (planning produced no plan).
+        let heartbeated = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match rx.recv().await.unwrap() {
+                    WorkerMessage::CompactionJobHeartbeat { id: hb_id } => {
+                        assert_eq!(hb_id, id, "heartbeat carried the wrong job id");
+                        break;
+                    }
+                    WorkerMessage::CompactionJobProgress { .. } => {
+                        panic!("progress emitted before planning completed")
+                    }
+                    WorkerMessage::CompactionJobFinished { .. } => {
+                        panic!("job finished while planning reads were blocked")
+                    }
+                    WorkerMessage::PollCompactions => {}
+                }
+            }
+        })
+        .await;
+        assert!(
+            heartbeated.is_ok(),
+            "expected a planning heartbeat while input-index reads were blocked"
+        );
+
+        // when: reads are unblocked, the job plans and runs to completion.
+        gated.get_opts_gate.release();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let WorkerMessage::CompactionJobFinished { result, .. } =
+                    rx.recv().await.unwrap()
+                {
+                    return result;
+                }
+            }
+        })
+        .await
+        .expect("job should finish after reads are unblocked")
+        .expect("compaction should succeed");
     }
 
     /// Test context for compaction executor tests.

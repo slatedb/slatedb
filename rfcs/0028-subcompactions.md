@@ -246,7 +246,11 @@ we want for a single subcompaction and mark those as the boundary range.
 // MAX_ANCHORS_PER_SST anchors: (key, approx_bytes)
 anchors = merge_by_key(sst.index.sampled_anchors(MAX_ANCHORS_PER_SST) for sst in inputs)
 
-target = max(total_input_bytes / max_subcompactions, max_sst_size)
+// floor each range at the largest single input SST's estimated size, so a
+// subcompaction is never smaller than the biggest source SST
+min_range_bytes = max(sst.estimate_size() for sst in inputs)
+
+target = max(total_input_bytes / max_subcompactions, min_range_bytes)
 if target >= total_input_bytes:
   return [(-∞, +∞)]
 
@@ -264,22 +268,22 @@ for (key, approx_bytes) in anchors:
 return covering_ranges(boundaries)         // (-∞,b1),[b1,b2),...,[bk,+∞)
 ```
 
-When `max_subcompactions <= 1`, or the inputs are smaller than `max_sst_size`,
-or no anchor ever crosses the threshold, the sweep emits no boundaries and the
-compaction runs as a single unbounded range.
+When `max_subcompactions <= 1`, or the largest input SST already covers the whole
+compaction (so the floor meets the total), or no anchor ever crosses the
+threshold, the sweep emits no boundaries and the compaction runs as a single
+unbounded range.
 
 ### Configuration
 
 - `max_subcompactions` configures the maximum number of subcompactions for a compaction, with
   any number `<=1` disabling subcompactions. Default `4`. The planner targets ranges of
-  `max(total_input_bytes / max_subcompactions, max_sst_size)`, so a compaction smaller than
-  `max_subcompactions × max_sst_size` is split into fewer (or zero) ranges rather than
+  `max(total_input_bytes / max_subcompactions, max_input_sst_bytes)`, where `max_input_sst_bytes`
+  is the largest single input SST's estimated on-disk size. A compaction whose largest input
+  SST already accounts for most of the total is split into fewer (or zero) ranges rather than
   fragmented into undersized SSTs.
 
-There is deliberately no separate minimum-input knob: the `max_sst_size` floor baked into the
-target subsumes it (each subcompaction covers at least one output SST's worth of input). This
-mirrors RocksDB, which floors its target at `MaxFileSizeForLevel` rather than exposing a
-configurable minimum.
+There is deliberately no separate minimum-input knob: the floor baked into the subcompaction
+to make sure the output SSTs are no smaller than the largest input SST.
 
 We could optionally introduce `max_concurrent_subcompactions` to allow scheduling more
 subcompactions than we run concurrently actively, but until we decide to integrate this
@@ -404,8 +408,9 @@ I opted to default `max_subcompactions = 4` instead of off-by-default because I
 think it's a pretty foundational feature for large compaction jobs. Note that
 this departs from prior art: RocksDB ships with it disabled
 (`max_subcompactions = 1`). Like RocksDB, we expose no dedicated minimum-size
-knob since the per-range `max_sst_size` floor (RocksDB's `MaxFileSizeForLevel`)
-keeps small compactions from fragmenting.
+knob — the per-range floor (the largest input SST's worth of data) keeps small
+compactions from fragmenting, playing the role RocksDB's `MaxFileSizeForLevel`
+plays for it.
 
 See the compatibility section for why this is safe to rollout in one go.
 
@@ -431,6 +436,16 @@ entirely. It is cheaper to plan, but does not work for compactions where data
 is skewed within the SST boundaries. The index-based heuristic in [Boundary
 Selection](#boundary-selection-heuristic) keeps this as a coarse fallback (one
 "block" per SST) for inputs whose indexes we choose not to read.
+
+As some evidence, a 16GB compaction had the following time breakdowns for the
+subcompaciton phase (ran on a `cg8in.8xlarge`):
+```
+┌───────────────────────────────────┬────────┬──────────┬─────────┬─────────┬────────────┐
+│                run                │ total  │ manifest │  plan   │  merge  │ planning % │
+├───────────────────────────────────┼────────┼──────────┼─────────┼─────────┼────────────┤
+│ tiled sub=12 (zstd)               │ 20.2 s │ 50 ms    │ ~0.55 s │ ~19.5 s │ ~3%        │
+└───────────────────────────────────┴────────┴──────────┴─────────┴─────────┴────────────┘
+```
 
 **Sub-block split precision.** Deferred. Boundary selection splits at SST block
 granularity (~4 KiB), which is already fine enough for roughly-equal ranges.

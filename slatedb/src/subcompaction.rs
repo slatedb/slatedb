@@ -10,6 +10,7 @@
 //! `db/compaction/compaction_job.cc`.
 
 use std::ops::Bound::{self, Excluded, Included, Unbounded};
+use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -104,64 +105,86 @@ pub(crate) async fn plan_subcompaction_ranges(
     sst_views: &[SsTableView],
     sorted_runs: &[SortedRun],
     max_subcompactions: usize,
-    max_sst_size: u64,
     max_fetch_tasks: usize,
 ) -> Result<Vec<BytesRange>, SlateDBError> {
     if max_subcompactions <= 1 {
         return Ok(vec![BytesRange::unbounded()]);
     }
 
-    // Collect owned input handles up front. Each read future then owns its
-    // handle and an `Arc<TableStore>` clone rather than borrowing the input
-    // slices, which keeps the enclosing (spawned) compaction future `Send`.
-    let handles: Vec<SsTableHandle> = sst_views
+    // Collect owned input views up front. Each read future then owns its view
+    // (handle + projection) and an `Arc<TableStore>` clone rather than borrowing
+    // the input slices, which keeps the enclosing (spawned) compaction future
+    // `Send`. Keeping the full view (not just `view.sst`) lets sampling clip
+    // anchors to the view's effective range, so a projected input contributes
+    // only its visible keys and bytes (see `sample_anchors`).
+    let views: Vec<SsTableView> = sst_views
         .iter()
-        .map(|view| view.sst.clone())
+        .cloned()
         .chain(
             sorted_runs
                 .iter()
-                .flat_map(|sr| sr.sst_views.iter().map(|view| view.sst.clone())),
+                .flat_map(|sr| sr.sst_views.iter().cloned()),
         )
         .collect();
 
+    // Floor each range at the largest input SST's estimated on-disk size, so a
+    // subcompaction is never smaller than the biggest source SST. Tying the
+    // floor to the inputs' granularity rather than the output `max_sst_size`
+    // lets shallow compactions (e.g. L0, whose inputs are far below
+    // `max_sst_size`) split rather than always running unsplit.
+    let min_range_bytes = views
+        .iter()
+        .map(|view| view.estimate_size())
+        .max()
+        .unwrap_or(0);
+
     // Read and sample every input SST's index concurrently (bounded by
-    // `max_fetch_tasks`). Each SST yields at most MAX_ANCHORS_PER_SST anchors,
-    // so the merged candidate set stays bounded regardless of total data size.
-    let anchors: Vec<(Bytes, u64)> = stream::iter(handles)
-        .map(|handle| {
+    // `max_fetch_tasks` x number of sources). Each SST yields at most
+    // MAX_ANCHORS_PER_SST anchors, so the merged candidate set stays bounded
+    // regardless of total data size. Floor at 1: with no inputs `views` is
+    // empty and `buffer_unordered(0)` never polls its source stream, so it
+    // would hang instead of completing with zero anchors.
+    let concurrency = (views.len() * max_fetch_tasks.max(1)).max(1);
+    let anchors: Vec<(Bytes, u64)> = stream::iter(views)
+        .map(|view| {
             let table_store = table_store.clone();
             async move {
-                let index = table_store.read_index(&handle, true).await?;
+                let index = table_store.read_index(&view.sst, true).await?;
                 // `filter_offset` marks the end of the data-block region: the
                 // filter, index, and stats blocks all follow it, and when the
                 // SST has no filter it aliases `index_offset`. Using
                 // `index_offset` here would charge the filter block's bytes to
                 // the last anchor, skewing boundaries toward high keys (or
-                // pushing a near-floor compaction over the `max_sst_size` line).
+                // pushing a near-floor compaction over the split threshold).
                 Ok::<_, SlateDBError>(sample_anchors(
                     &index,
-                    handle.info.filter_offset,
+                    view.sst.info.filter_offset,
                     MAX_ANCHORS_PER_SST,
+                    view.compacted_effective_range(),
                 ))
             }
         })
-        .buffer_unordered(max_fetch_tasks.max(1))
+        .buffer_unordered(concurrency)
         .try_collect::<Vec<_>>()
         .await?
         .into_iter()
         .flatten()
         .collect();
 
-    Ok(select_boundaries(anchors, max_subcompactions, max_sst_size))
+    Ok(select_boundaries(
+        anchors,
+        max_subcompactions,
+        min_range_bytes,
+    ))
 }
 
 /// Selects covering key ranges from weighted anchors so each range carries a
 /// roughly equal share of the input bytes (RFC-0028).
 ///
-/// The target range size is `max(total_bytes / max_subcompactions, max_sst_size)`:
-/// the `max_sst_size` floor keeps each subcompaction to at least one output
-/// SST's worth of input, so a small compaction is split into fewer (or zero)
-/// ranges rather than fragmented. Anchors are swept in key order, and a
+/// The target range size is `max(total_bytes / max_subcompactions, min_range_bytes)`:
+/// the `min_range_bytes` floor keeps each subcompaction to at least the largest
+/// input SST's worth of input, so a small compaction is split into fewer (or
+/// zero) ranges rather than fragmented. Anchors are swept in key order, and a
 /// boundary opens a new range at the first anchor once the running total of the
 /// ranges already closed reaches the next threshold; a running threshold (rather
 /// than a per-range reset) keeps rounding error from accumulating.
@@ -172,14 +195,14 @@ pub(crate) async fn plan_subcompaction_ranges(
 fn select_boundaries(
     mut anchors: Vec<(Bytes, u64)>,
     max_subcompactions: usize,
-    max_sst_size: u64,
+    min_range_bytes: u64,
 ) -> Vec<BytesRange> {
     if max_subcompactions <= 1 {
         return vec![BytesRange::unbounded()];
     }
 
     let total: u64 = anchors.iter().map(|(_, bytes)| bytes).sum();
-    let target = (total / max_subcompactions as u64).max(max_sst_size);
+    let target = (total / max_subcompactions as u64).max(min_range_bytes);
     // Too small to split: a single range already fits within the target.
     if target == 0 || target >= total {
         return vec![BytesRange::unbounded()];
@@ -206,6 +229,10 @@ fn select_boundaries(
         };
         if cumulative >= threshold && boundaries.len() < max_subcompactions - 1 && distinct {
             boundaries.push(key);
+            // Advance to the next absolute quantile (`+= target`), not
+            // `cumulative + target`: `cumulative` has overshot the threshold by
+            // up to one anchor, and resetting from it would fold that overshoot
+            // into every later threshold, compounding the drift across boundaries.
             threshold += target;
         }
         cumulative += bytes;
@@ -227,7 +254,8 @@ fn select_boundaries(
 }
 
 /// Samples an SST's block index into at most `max_anchors` weighted anchors,
-/// each `(block first key, bytes the anchor represents)`.
+/// each `(block first key, bytes the anchor represents)`, restricted to the
+/// view's `effective_range`.
 ///
 /// A block's on-disk size is the gap between its offset and the next block's;
 /// the last block runs to `data_end_offset`, the end of the data-block region
@@ -235,10 +263,19 @@ fn select_boundaries(
 /// blocks than `max_anchors`, adjacent blocks are grouped so the anchor count
 /// stays bounded: the group's key is its first block's first key and its weight
 /// is the summed size of the grouped blocks.
+///
+/// Anchors whose key falls outside `effective_range` are dropped, so a projected
+/// input (a view with a narrower `visible_range`) only contributes boundaries
+/// and bytes for its visible keys — otherwise the planner could split on keys or
+/// byte totals the compaction never sees, yielding empty or undersized
+/// subcompactions. Filtering happens at the grouped-anchor granularity, so a
+/// group straddling a projection edge is kept or dropped wholesale; the residual
+/// edge error is at most one group, consistent with the byte-quantile heuristic.
 fn sample_anchors(
     index: &SsTableIndexOwned,
     data_end_offset: u64,
     max_anchors: usize,
+    effective_range: &BytesRange,
 ) -> Vec<(Bytes, u64)> {
     let borrowed = index.borrow();
     let blocks = borrowed.block_meta();
@@ -268,7 +305,9 @@ fn sample_anchors(
         // Blocks are contiguous, so the group's size is the gap from its first
         // block's offset to its last block's end offset.
         let bytes = block_end(group_end - 1).saturating_sub(first.offset());
-        anchors.push((key, bytes));
+        if effective_range.contains(&key) {
+            anchors.push((key, bytes));
+        }
         block = group_end;
     }
     anchors
@@ -282,6 +321,36 @@ mod tests {
     /// A key for keyspace position `i`, fixed-width so byte order matches `i`.
     fn k(i: u64) -> Bytes {
         Bytes::copy_from_slice(format!("k{i:010}").as_bytes())
+    }
+
+    /// Builds an `SsTableIndexOwned` from `(first_key, offset)` block entries,
+    /// matching the flatbuffer layout the SST writer produces, so
+    /// `sample_anchors` can be exercised directly.
+    fn build_index(blocks: &[(Bytes, u64)]) -> SsTableIndexOwned {
+        use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs};
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+        let metas: Vec<_> = blocks
+            .iter()
+            .map(|(key, offset)| {
+                let first_key = fbb.create_vector(key);
+                BlockMeta::create(
+                    &mut fbb,
+                    &BlockMetaArgs {
+                        offset: *offset,
+                        first_key: Some(first_key),
+                    },
+                )
+            })
+            .collect();
+        let vector = fbb.create_vector(&metas);
+        let index = SsTableIndex::create(
+            &mut fbb,
+            &SsTableIndexArgs {
+                block_meta: Some(vector),
+            },
+        );
+        fbb.finish(index, None);
+        SsTableIndexOwned::new(Bytes::copy_from_slice(fbb.finished_data())).unwrap()
     }
 
     fn assert_covering_ranges(ranges: &[BytesRange]) {
@@ -318,8 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn test_should_not_split_inputs_below_max_sst_size() {
-        // given: 200 bytes of input but a 1000-byte max_sst_size floor
+    fn test_should_not_split_inputs_below_floor() {
+        // given: 200 bytes of input but a 1000-byte floor
         let anchors = vec![(k(0), 100), (k(100), 100)];
 
         // when: boundaries are selected with the floor above the total size
@@ -343,6 +412,46 @@ mod tests {
         assert_eq!(ranges[0].end_bound(), Excluded(&k(10)));
         assert_eq!(ranges[1].end_bound(), Excluded(&k(20)));
         assert_eq!(ranges[2].end_bound(), Excluded(&k(30)));
+    }
+
+    #[test]
+    fn test_should_divide_evenly_with_many_anchors_per_subcompaction() {
+        // given: 16 equal anchors (total 160) and a floor (25) well below the
+        // keyspace, so the floor never binds and each subcompaction spans
+        // several anchors (target = 160 / 4 = 40, four anchors apiece)
+        let anchors: Vec<(Bytes, u64)> = (0..16).map(|i| (k(i), 10)).collect();
+
+        // when: boundaries are selected for four subcompactions
+        let ranges = select_boundaries(anchors, 4, 25);
+
+        // then: the keyspace divides into four even ranges at the 40/80/120-byte
+        // quantiles (k(4), k(8), k(12)) rather than fragmenting at the floor
+        assert_covering_ranges(&ranges);
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0].end_bound(), Excluded(&k(4)));
+        assert_eq!(ranges[1].end_bound(), Excluded(&k(8)));
+        assert_eq!(ranges[2].end_bound(), Excluded(&k(12)));
+    }
+
+    #[test]
+    fn test_should_split_into_fewer_ranges_when_floor_binds() {
+        // given: 8 anchors (total 400) with a floor (100) above the even-split
+        // size (400 / 8 = 50) but still below the total. The floor binds and
+        // raises the target to 100, so each range must carry a full input SST's
+        // worth of data.
+        let anchors: Vec<(Bytes, u64)> = (0..8).map(|i| (k(i), 50)).collect();
+
+        // when: boundaries are selected for eight subcompactions
+        let ranges = select_boundaries(anchors, 8, 100);
+
+        // then: the floor coarsens the split to total / floor = 4 ranges (each
+        // 100 bytes) rather than the requested 8 — it still splits (unlike the
+        // floor >= total case), just into fewer, larger ranges.
+        assert_covering_ranges(&ranges);
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0].end_bound(), Excluded(&k(2)));
+        assert_eq!(ranges[1].end_bound(), Excluded(&k(4)));
+        assert_eq!(ranges[2].end_bound(), Excluded(&k(6)));
     }
 
     #[test]
@@ -411,5 +520,35 @@ mod tests {
         // here explicitly.
         assert_covering_ranges(&ranges);
         assert!(ranges.len() > 1);
+    }
+
+    #[test]
+    fn test_sample_anchors_keeps_all_blocks_without_projection() {
+        // given: a 4-block index spanning k(0)..k(30), 100 bytes per block
+        let index = build_index(&[(k(0), 0), (k(10), 100), (k(20), 200), (k(30), 300)]);
+
+        // when: sampling with an unbounded effective range (no projection)
+        let anchors = sample_anchors(&index, 400, MAX_ANCHORS_PER_SST, &BytesRange::unbounded());
+
+        // then: every block becomes an anchor weighted by its on-disk size
+        assert_eq!(
+            anchors,
+            vec![(k(0), 100), (k(10), 100), (k(20), 100), (k(30), 100)]
+        );
+    }
+
+    #[test]
+    fn test_sample_anchors_clips_to_projected_effective_range() {
+        // given: the same 4-block index, but a projection that hides the first
+        // and last blocks (effective_range = the view's visible keys)
+        let index = build_index(&[(k(0), 0), (k(10), 100), (k(20), 200), (k(30), 300)]);
+        let effective_range = BytesRange::new(Included(k(10)), Excluded(k(30)));
+
+        // when: sampling the projected view
+        let anchors = sample_anchors(&index, 400, MAX_ANCHORS_PER_SST, &effective_range);
+
+        // then: only the visible blocks contribute anchors and bytes, so the
+        // planner never splits on keys or byte totals the compaction can't see.
+        assert_eq!(anchors, vec![(k(10), 100), (k(20), 100)]);
     }
 }
