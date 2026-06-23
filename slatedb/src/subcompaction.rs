@@ -87,13 +87,11 @@ impl Subcompaction {
 /// millions.
 const MAX_ANCHORS_PER_SST: usize = 128;
 
-/// Plans the key ranges to split a compaction into subcompactions (RFC-0028).
-///
-/// Reads each input SST's block index, samples it into at most
-/// [`MAX_ANCHORS_PER_SST`] weighted anchors, and places boundaries at the keys
-/// that fall on the byte-weight quantiles of the merged anchor stream (see
-/// [`select_boundaries`]). Index reads run concurrently, bounded by
-/// `max_fetch_tasks`, and warm the same block cache the merge will later use.
+/// Hard ceiling for front-loaded planner index reads.
+const MAX_PLANNING_INDEX_READS: usize = 64;
+
+/// Plans the key ranges to split a compaction into subcompactions (see RFC-0028
+/// for a description on the algorithm).
 ///
 /// ## Returns
 /// - Ranges in ascending key order that are non-overlapping and together cover
@@ -138,13 +136,11 @@ pub(crate) async fn plan_subcompaction_ranges(
         .max()
         .unwrap_or(0);
 
-    // Read and sample every input SST's index concurrently (bounded by
-    // `max_fetch_tasks` x number of sources). Each SST yields at most
-    // MAX_ANCHORS_PER_SST anchors, so the merged candidate set stays bounded
-    // regardless of total data size. Floor at 1: with no inputs `views` is
-    // empty and `buffer_unordered(0)` never polls its source stream, so it
-    // would hang instead of completing with zero anchors.
-    let concurrency = (views.len() * max_fetch_tasks.max(1)).max(1);
+    // Mimic the parallelism that the executor has when executing the compaction
+    // itself (which would use one iterator per input L0 + input SR)
+    let sources = (sst_views.len() + sorted_runs.len()).max(1);
+    let concurrency = (sources * max_fetch_tasks.max(1)).min(MAX_PLANNING_INDEX_READS);
+
     let anchors: Vec<(Bytes, u64)> = stream::iter(views)
         .map(|view| {
             let table_store = table_store.clone();
@@ -210,6 +206,7 @@ fn select_boundaries(
 
     // Anchors from different SSTs interleave; sort into one key-ordered stream.
     anchors.sort_by(|a, b| a.0.cmp(&b.0));
+    let first_key = anchors[0].0.clone();
 
     // `cumulative` is the bytes in the ranges already closed (everything strictly
     // before the current anchor). When it reaches the next threshold, the current
@@ -225,7 +222,10 @@ fn select_boundaries(
             // create an empty range. The next distinct key still lands close to
             // the target.
             Some(last) => key > *last,
-            None => true,
+            // No boundary yet: the first one must clear `min_key`, else the
+            // leading range is empty. Overlapping inputs can stack enough weight
+            // on the smallest key to cross the threshold while still on it.
+            None => key > first_key,
         };
         if cumulative >= threshold && boundaries.len() < max_subcompactions - 1 && distinct {
             boundaries.push(key);
@@ -497,6 +497,30 @@ mod tests {
 
         // then: the SST stays whole
         assert_eq!(ranges, vec![BytesRange::unbounded()]);
+    }
+
+    #[test]
+    fn test_should_not_emit_boundary_on_smallest_key() {
+        // given: three overlapping SSTs all anchored at the smallest key k(0),
+        // each below the target (500) but together crossing it. cumulative
+        // reaches the threshold while still sitting on k(0).
+        let anchors = vec![
+            (k(0), 400),
+            (k(0), 400),
+            (k(0), 400),
+            (k(10), 400),
+            (k(20), 400),
+        ];
+
+        // when: boundaries are selected for four subcompactions
+        let ranges = select_boundaries(anchors, 4, 1);
+
+        // then: no boundary lands on k(0), so the leading range is never empty.
+        // The data concentrated at k(0) can't be split below it, so it yields
+        // three covering ranges rather than a wasted (-inf, k(0)) slot.
+        assert_covering_ranges(&ranges);
+        assert_eq!(ranges[0].end_bound(), Excluded(&k(10)));
+        assert!(ranges.len() > 1);
     }
 
     #[test]

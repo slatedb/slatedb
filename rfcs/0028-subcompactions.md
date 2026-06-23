@@ -437,11 +437,15 @@ is skewed within the SST boundaries. The index-based heuristic in [Boundary
 Selection](#boundary-selection-heuristic) keeps this as a coarse fallback (one
 "block" per SST) for inputs whose indexes we choose not to read.
 
-As some evidence, a 16GB compaction had the following time breakdowns for the
-subcompaciton phase (ran on a `cg8in.8xlarge`):
+As some evidence that the cost of index-based planning is not prohibitive, 
+a 16GB compaction had the following time breakdowns for the subcompaciton phase
+(ran on a `cg8in.8xlarge`) where planning takes only about 3% of the total time
+after parellelizing it 12 ways:
 ```
 ┌───────────────────────────────────┬────────┬──────────┬─────────┬─────────┬────────────┐
 │                run                │ total  │ manifest │  plan   │  merge  │ planning % │
+├───────────────────────────────────┼────────┼──────────┼─────────┼─────────┼────────────┤
+│ tiled sub=1 (uncompressed)        │ 157 s  │ 50 ms    │ 0       │ ~157 s  │ ~0%        │
 ├───────────────────────────────────┼────────┼──────────┼─────────┼─────────┼────────────┤
 │ tiled sub=12 (zstd)               │ 20.2 s │ 50 ms    │ ~0.55 s │ ~19.5 s │ ~3%        │
 └───────────────────────────────────┴────────┴──────────┴─────────┴─────────┴────────────┘
