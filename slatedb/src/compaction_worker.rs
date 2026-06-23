@@ -112,6 +112,15 @@ pub(crate) enum WorkerMessage {
         bytes_processed: u64,
         ctx: CompactionContext,
     },
+    /// Liveness-only heartbeat from the [`CompactionExecutor`], emitted while a
+    /// job is still planning (reading input indexes) and so has no progress to
+    /// report yet. Refreshes `last_heartbeat_ms` without touching the persisted
+    /// context, so a slow planning step on a healthy worker is not mistaken for
+    /// a dead one and reclaimed mid-plan.
+    CompactionJobHeartbeat {
+        /// The job id to refresh liveness for.
+        id: Ulid,
+    },
     /// Ticker-triggered message to poll `.compactions` for claimable jobs.
     PollCompactions,
 }
@@ -592,6 +601,26 @@ impl CompactionWorkerHandler {
         Ok(())
     }
 
+    /// Handles a liveness-only heartbeat emitted while a job is still planning,
+    /// before it produces any progress (see
+    /// [`WorkerMessage::CompactionJobHeartbeat`]). Refreshes `last_heartbeat_ms`
+    /// without touching the persisted context, and advances the job's
+    /// `last_hb_ms` on a confirmed write so the bytes-trigger throttle stays
+    /// consistent. A skipped write (entry gone / ownership lost) is a no-op, so
+    /// this never resurrects a job that was already reclaimed mid-plan.
+    async fn handle_planning_heartbeat(&mut self, id: Ulid) -> Result<(), SlateDBError> {
+        if let Some(hb_ms) = self.write_heartbeat(id, None).await? {
+            if let Some(state) = self.job_progress.get_mut(&id) {
+                state.last_hb_ms = hb_ms;
+            }
+            debug!(
+                "planning heartbeat [worker_id={}, id={}, now_ms={}]",
+                self.worker_id, id, hb_ms
+            );
+        }
+        Ok(())
+    }
+
     fn build_job_args(
         compaction: &Compaction,
         db_state: &ManifestCore,
@@ -801,6 +830,9 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
                 ctx,
             } => {
                 self.handle_progress(id, bytes_processed, ctx).await?;
+            }
+            WorkerMessage::CompactionJobHeartbeat { id } => {
+                self.handle_planning_heartbeat(id).await?;
             }
         }
         Ok(())

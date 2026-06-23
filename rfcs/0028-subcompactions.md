@@ -117,10 +117,10 @@ four SSTs.
 generate more SSTs than required, with multiple having a size less than the max
 SST configuration.
 
-**Note 2**: the heuristic proposed later in this RFC actually prevents this specific
-example from happening because it chooses a non-SST boundary for the split. Splitting
-SSTs, however, is still possible with this RFC's approach when merging multiple SRs,
-so I used this example to illustrate that.
+**Note 2**: the heuristic proposed later in this RFC can produce a split like this
+one because it places boundaries at SST *block* boundaries, not just between SSTs.
+It would not cut at an arbitrary key `k`, though — it snaps the boundary to the
+nearest block boundary inside SST(92).
 
 ### Execution Lifecycle
 
@@ -190,9 +190,10 @@ run_subcompaction(spec, sub):
 
 It's worth noting that the main coordinator is still responsible for submitting
 the compaction, but the worker is responsible for computing the subcompaction
-plan (splits). This allows future optimizations where the subcompaction planner can pull
-information like SST indexes to improve the split algorithm without affecting the
-cache on the active serving node in distributed compaction.
+plan (splits). The planner reads the input SST indexes to choose split points
+(see [Boundary Selection](#boundary-selection-heuristic)); doing this on the
+worker rather than the coordinator keeps those index reads off the active
+serving node's cache in distributed compaction.
 
 ### Persistence & Schema
 
@@ -229,41 +230,60 @@ role of keeping old `.compactions` files around long enough to compute that wate
 
 ### Boundary Selection (Heuristic)
 
-The goal of the boundary selection is to make the sub-compactions roughly equally sized
-without spending too much time figuring this out (i.e. only by reading the manifest).
+The goal of boundary selection is to split a compaction into roughly equally
+sized sub-ranges, measured in bytes. 
 
-For v0 of subcompactions, we'll only consider SST boundaries as potential split points
-since the first/last keys are available directly in the manifest alongside the size
-estimates of various SSTs. The algorithm for determining splits is:
+The boundary selection algorithm uses candidates that consist of "anchor points"
+within individual SSTs. These points are sampled from the SST index (as opposed
+to using every block offset as a potential anchor point) to reduce the number
+of candidates.
+
+We then collect the sizes between anchor points until they exceed the threshold
+we want for a single subcompaction and mark those as the boundary range.
 
 ```
-// imagine three SSTs with ranges [a-k],[c-m],[f-z], then the candidates are
-// [a, c, f, k, m, z] and the candidate intervals are [(a,c), (c,f), (f,k),
-// (k,m), (m,z)]
-candidate_keys = union of input SST/view starts and ends
-intervals = adjacent candidate key ranges
+// Per input SST, read its index and sample it down to at most
+// MAX_ANCHORS_PER_SST anchors: (key, approx_bytes)
+anchors = merge_by_key(sst.index.sampled_anchors(MAX_ANCHORS_PER_SST) for sst in inputs)
 
-for interval in intervals:
-  interval.weight = sum size_estimate(sst) for every input sst overlapping interval
+// floor each range at the largest single input SST's estimated size, so a
+// subcompaction is never smaller than the biggest source SST
+min_range_bytes = max(sst.estimate_size() for sst in inputs)
 
-// if the full interval weights are 600MB, and we want three subcompactions
-// then the target range would cover 200MB each so we sum the intervals until
-// we get close to the candidate and select that as the range
-target = sum(interval.weight) / desired_subcompactions
+target = max(total_input_bytes / max_subcompactions, min_range_bytes)
+if target >= total_input_bytes:
+  return [(-∞, +∞)]
 
-for interval in intervals:
-  accumulate interval.weight
-  when accumulated >= target:
-    emit boundary at interval end
-    reset toward next target  
+boundaries = []
+threshold = target
+cumulative = 0
+for (key, approx_bytes) in anchors:
+  cumulative += approx_bytes
+  // the anchor that tips the running total past the next threshold ends the
+  // current range and starts the next; a running threshold avoids drift
+  if cumulative > threshold and len(boundaries) < max_subcompactions - 1:
+    boundaries.append(key)
+    threshold += target
+
+return covering_ranges(boundaries)         // (-∞,b1),[b1,b2),...,[bk,+∞)
 ```
+
+When `max_subcompactions <= 1`, or the largest input SST already covers the whole
+compaction (so the floor meets the total), or no anchor ever crosses the
+threshold, the sweep emits no boundaries and the compaction runs as a single
+unbounded range.
 
 ### Configuration
 
-- `max_subcompactions` configures the desired number of subcompactions for a compaction, with
-  any number `<=1` disabling subcompactions. Default `4`.
-- `min_subcompaction_input_bytes` prevents small subcompaction jobs from running, which can
-  cause the creation of fragmented SSTs. Defaults to `2 x max_sst_size`. 
+- `max_subcompactions` configures the maximum number of subcompactions for a compaction, with
+  any number `<=1` disabling subcompactions. Default `4`. The planner targets ranges of
+  `max(total_input_bytes / max_subcompactions, max_input_sst_bytes)`, where `max_input_sst_bytes`
+  is the largest single input SST's estimated on-disk size. A compaction whose largest input
+  SST already accounts for most of the total is split into fewer (or zero) ranges rather than
+  fragmented into undersized SSTs.
+
+There is deliberately no separate minimum-input knob: the floor baked into the subcompaction
+to make sure the output SSTs are no smaller than the largest input SST.
 
 We could optionally introduce `max_concurrent_subcompactions` to allow scheduling more
 subcompactions than we run concurrently actively, but until we decide to integrate this
@@ -384,11 +404,13 @@ with Fizzbee, but I don't think it's necessary.
 
 ## Rollout
 
-I opted to default to set `max_subcompactions = 4` by default instead of
-off-by-default because I think it's a pretty foundational feature for large
-compaction jobs. Note that this departs from prior art. RocksDB ships with it
-disabled (`max_subcompactions = 1`) but they also do not ship with a
-`min_subcompaction_input_bytes`. 
+I opted to default `max_subcompactions = 4` instead of off-by-default because I
+think it's a pretty foundational feature for large compaction jobs. Note that
+this departs from prior art: RocksDB ships with it disabled
+(`max_subcompactions = 1`). Like RocksDB, we expose no dedicated minimum-size
+knob — the per-range floor (the largest input SST's worth of data) keeps small
+compactions from fragmenting, playing the role RocksDB's `MaxFileSizeForLevel`
+plays for it.
 
 See the compatibility section for why this is safe to rollout in one go.
 
@@ -408,10 +430,32 @@ still one indivisible unit of work on one core, and no amount of
 cross-compaction concurrency speeds it up. Subcompactions parallelize *within*
 that unit, which is the only approach that addresses big SR compactions.
 
-**Index Metadata Split Algorithms.** Deferred. The idea here is to use the index
-metadata on SSTs to determine where we should be splitting instead of the rough
-heuristic that's outlined in this RFC. It's probably worth doing, but I've
-deferred details of that for a v2 implementation.
+**Manifest-only boundaries.** Rejected. An earlier draft restricted split
+points to the per-SST first/last keys in the manifest, avoiding index reads
+entirely. It is cheaper to plan, but does not work for compactions where data
+is skewed within the SST boundaries. The index-based heuristic in [Boundary
+Selection](#boundary-selection-heuristic) keeps this as a coarse fallback (one
+"block" per SST) for inputs whose indexes we choose not to read.
+
+As some evidence that the cost of index-based planning is not prohibitive, 
+a 16GB compaction had the following time breakdowns for the subcompaciton phase
+(ran on a `cg8in.8xlarge`) where planning takes only about 3% of the total time
+after splitting it 12 ways:
+```
+┌───────────────────────────────────┬────────┬──────────┬─────────┬─────────┬────────────┐
+│                run                │ total  │ manifest │  plan   │  merge  │ planning % │
+├───────────────────────────────────┼────────┼──────────┼─────────┼─────────┼────────────┤
+│ tiled sub=1 (uncompressed)        │ 157 s  │ 50 ms    │ 0       │ ~157 s  │ ~0%        │
+├───────────────────────────────────┼────────┼──────────┼─────────┼─────────┼────────────┤
+│ tiled sub=12 (zstd)               │ 20.2 s │ 50 ms    │ ~0.55 s │ ~19.5 s │ ~3%        │
+└───────────────────────────────────┴────────┴──────────┴─────────┴─────────┴────────────┘
+```
+
+**Sub-block split precision.** Deferred. Boundary selection splits at SST block
+granularity (~4 KiB), which is already fine enough for roughly-equal ranges.
+Going finer — splitting within a block at restart points, or sampling actual
+keys to balance skewed value sizes — is possible but not worth the added I/O and
+complexity now; deferred to a later iteration.
 
 **Parallelizing block construction within a single range.** Deferred/Partial
 Rejection. This is a valid alternative to the RFC in that it allows you to have
