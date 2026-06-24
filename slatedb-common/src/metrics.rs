@@ -448,6 +448,7 @@ impl HistogramFn for DefaultHistogram {
 }
 
 // Metadata for a registered metric in the default recorder.
+#[derive(Debug)]
 enum DefaultMetricHandle {
     Counter(Arc<DefaultCounter>),
     Gauge(Arc<DefaultGauge>),
@@ -490,7 +491,7 @@ impl DefaultMetricsRecorder {
             .iter()
             .find(|e| e.name == name && e.labels == labels);
         if entry.is_some() {
-            log::warn!("duplicate metric registration: name={name}, labels={labels:?}");
+            log::debug!("duplicate metric registration: name={name}, labels={labels:?}");
         }
         entry
     }
@@ -554,6 +555,12 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
             if let DefaultMetricHandle::Counter(ref h) = entry.handle {
                 return h.clone();
+            } else {
+                log::warn!(
+                    "duplicate metric registration with different type: name={}, labels={:?}, existing_type={:?}, expected_type=Counter",
+                    name,
+                    labels,
+                    entry.handle);
             }
         }
         let handle = Arc::new(DefaultCounter {
@@ -579,6 +586,12 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
             if let DefaultMetricHandle::Gauge(ref h) = entry.handle {
                 return h.clone();
+            } else {
+                log::warn!(
+                    "duplicate metric registration with different type: name={}, labels={:?}, existing_type={:?}, expected_type=Gauge",
+                    name,
+                    labels,
+                    entry.handle);
             }
         }
         let handle = Arc::new(DefaultGauge {
@@ -604,6 +617,12 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
             if let DefaultMetricHandle::UpDownCounter(ref h) = entry.handle {
                 return h.clone();
+            } else {
+                log::warn!(
+                    "duplicate metric registration with different type: name={}, labels={:?}, existing_type={:?}, expected_type=UpDownCounter",
+                    name,
+                    labels,
+                    entry.handle);
             }
         }
         let handle = Arc::new(DefaultUpDownCounter {
@@ -630,6 +649,12 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
             if let DefaultMetricHandle::Histogram(ref h) = entry.handle {
                 return h.clone();
+            } else {
+                log::warn!(
+                    "duplicate metric registration with different type: name={}, labels={:?}, existing_type={:?}, expected_type=Histogram",
+                    name,
+                    labels,
+                    entry.handle);
             }
         }
         let handle = Arc::new(DefaultHistogram::new(boundaries));
