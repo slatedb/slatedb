@@ -877,7 +877,7 @@ impl CompactorEventHandler {
 
         for compaction in compacted {
             let id = compaction.id();
-            match self.validate_compaction(compaction.spec()) {
+            match self.validate_compaction(&compaction) {
                 Ok(()) => {
                     let destination = compaction
                         .spec()
@@ -917,32 +917,34 @@ impl CompactorEventHandler {
 
     /// Validates a Submitted compaction against the current manifest before starting it.
     ///
-    /// Runs on every Submitted spec regardless of origin (internal scheduler, admin
-    /// submission, reloaded `.compactions`), so this is the canonical gate for
-    /// spec-against-current-state validity. Cross-compaction conflicts (destination
-    /// collisions across active compactions, concurrent drains on the same segment) are
-    /// enforced upstream in [`CompactorState::add_compaction`] and are not re-checked here.
+    /// Runs when a Submitted compaction is accepted and when a Compacted entry is
+    /// committed, so this is the canonical gate for compaction-against-current-state
+    /// validity. Cross-compaction conflicts (destination collisions across active
+    /// compactions, concurrent drains on the same segment) are enforced upstream in
+    /// [`CompactorState::add_compaction`] and are not re-checked here.
     ///
     /// Invariants checked:
     /// - Compaction has sources
     /// - Drain specs do not target the empty-prefix (root) segment
     /// - The target segment exists in the manifest
     /// - All sources exist in the target segment's tree
-    /// - L0-only tiered compactions have a destination > highest SR id across all trees
+    /// - Submitted L0-only tiered compactions have a destination > highest SR id across all trees
+    /// - Compacted L0-only tiered compactions have a destination > highest SR id in their segment
     /// - A tiered destination does not overwrite a committed SR in any tree unless the SR is among sources
     /// - Drain L0 sources cover every L0 at or below the newest drained L0 in the target tree
     /// - At most one L0 compaction is Running per segment
     /// - Scheduler-specific policy via [`CompactionScheduler::validate_compaction`]
-    fn validate_compaction(&self, compaction: &CompactionSpec) -> Result<(), SlateDBError> {
+    fn validate_compaction(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
+        let spec = compaction.spec();
         // Validate compaction sources exist
-        if compaction.sources().is_empty() {
-            warn!("submitted compaction is empty: {:?}", compaction.sources());
+        if spec.sources().is_empty() {
+            warn!("submitted compaction is empty: {:?}", spec.sources());
             return Err(SlateDBError::InvalidCompaction);
         }
 
         // Drain specs cannot target the empty-prefix segment (RFC-0024): the
         // root-tree compatibility encoding is not retired by drain.
-        if compaction.is_drain() && compaction.segment().is_empty() {
+        if spec.is_drain() && spec.segment().is_empty() {
             warn!("rejected drain compaction targeting the empty-prefix segment");
             return Err(SlateDBError::InvalidCompaction);
         }
@@ -951,10 +953,10 @@ impl CompactorEventHandler {
         // RFC-0024: every spec names exactly one segment, and its sources must
         // live in that segment's tree.
         let db_state = self.state().db_state();
-        let Some(tree) = db_state.tree_for_segment(compaction.segment()) else {
+        let Some(tree) = db_state.tree_for_segment(spec.segment()) else {
             warn!(
                 "submitted compaction targets unknown segment: {:?}",
-                compaction.segment()
+                spec.segment()
             );
             return Err(SlateDBError::InvalidCompaction);
         };
@@ -969,7 +971,7 @@ impl CompactorEventHandler {
             .map(|sr| sr.id)
             .collect::<std::collections::HashSet<_>>();
 
-        if let Some(missing) = compaction.sources().iter().find(|source| match source {
+        if let Some(missing) = spec.sources().iter().find(|source| match source {
             SourceId::SstView(id) => !l0_view_ids.contains(id),
             SourceId::SortedRun(id) => !sr_ids.contains(id),
         }) {
@@ -977,19 +979,37 @@ impl CompactorEventHandler {
             return Err(SlateDBError::InvalidCompaction);
         }
 
-        // Validate L0-only compactions create a new SR with id > highest existing
-        // across all segment trees. SR ids are globally unique (RFC-0024) and the
-        // scheduler allocates new L0 → SR destinations strictly above the global
-        // max; admin- or reload-submitted specs must observe the same contract.
-        if compaction.has_l0_sources() && !compaction.has_sr_sources() {
-            let highest_id = db_state
-                .trees()
-                .flat_map(|t| t.compacted.iter())
-                .map(|sr| sr.id)
-                .max()
-                .map_or(0, |id| id + 1);
+        // Validate L0-only compactions create a new SR after every SR that matters
+        // for their lifecycle stage. Submitted specs reserve a fresh globally
+        // unique SR id, so they must be above every committed SR in every segment.
+        // Compacted entries are being committed into one target segment and may
+        // validly finish after a different segment has already committed a higher
+        // SR id, but they still must preserve local SR ordering within the target
+        // segment.
+        if spec.has_l0_sources() && !spec.has_sr_sources() {
+            let highest_id = if compaction.status() == CompactionStatus::Submitted {
+                db_state
+                    .trees()
+                    .flat_map(|t| t.compacted.iter())
+                    .map(|sr| sr.id)
+                    .max()
+                    .map_or(0, |id| id + 1)
+            } else if compaction.status() == CompactionStatus::Compacted {
+                tree.compacted
+                    .iter()
+                    .map(|sr| sr.id)
+                    .max()
+                    .map_or(0, |id| id + 1)
+            } else {
+                warn!(
+                    "validate_compaction called with unexpected compaction status [id={:?}, status={:?}]",
+                    compaction.id(),
+                    compaction.status()
+                );
+                return Err(SlateDBError::InvalidCompaction);
+            };
             // Drain specs have no destination and aren't subject to this check.
-            if let Some(dst) = compaction.destination() {
+            if let Some(dst) = spec.destination() {
                 if dst < highest_id {
                     warn!(
                         "compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
@@ -1000,8 +1020,8 @@ impl CompactorEventHandler {
             }
         }
 
-        Self::validate_destination_overwrite(compaction, db_state)?;
-        Self::validate_drain_watermark_advance(compaction, tree)?;
+        Self::validate_destination_overwrite(spec, db_state)?;
+        Self::validate_drain_watermark_advance(spec, tree)?;
 
         // Reject parallel L0 compactions within the same segment. Each
         // segment owns its own `last_compacted_l0_sst_view_id` watermark
@@ -1009,8 +1029,8 @@ impl CompactorEventHandler {
         // compactions sharing a target tree. L0 compactions in disjoint
         // segments — including drain specs in different segments — are
         // safe to run concurrently.
-        if compaction.has_l0_sources() {
-            let target_segment = compaction.segment();
+        if spec.has_l0_sources() {
+            let target_segment = spec.segment();
             // Only Scheduled and Running represent live claims; Submitted is still
             // being validated (and would see itself), Compacted is pending commit.
             let active_l0_in_same_segment = self
@@ -1027,7 +1047,7 @@ impl CompactorEventHandler {
         }
 
         self.scheduler
-            .validate(&self.state().into(), compaction)
+            .validate(&self.state().into(), spec)
             .map_err(|_e| SlateDBError::InvalidCompaction)
     }
 
@@ -1178,7 +1198,7 @@ impl CompactorEventHandler {
 
         for compaction in &submitted_compactions {
             // Validate the candidate compaction; mark as failed if invalid.
-            if let Err(e) = self.validate_compaction(compaction.spec()) {
+            if let Err(e) = self.validate_compaction(compaction) {
                 error!(
                     "compaction validation failed [error={:?}, compaction={:?}]",
                     compaction, e
@@ -5256,7 +5276,10 @@ mod tests {
     async fn test_validate_compaction_empty_sources_rejected() {
         let fixture = CompactorEventHandlerTestFixture::new().await;
         let c = CompactionSpec::new(Vec::new(), 0);
-        let err = fixture.handler.validate_compaction(&c).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), c))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5265,7 +5288,10 @@ mod tests {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.handler.handle_ticker().await.unwrap();
         let c = CompactionSpec::new(vec![SourceId::SstView(Ulid::new())], 0);
-        let err = fixture.handler.validate_compaction(&c).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), c))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5274,7 +5300,10 @@ mod tests {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.handler.handle_ticker().await.unwrap();
         let c = CompactionSpec::new(vec![SourceId::SortedRun(42)], 42);
-        let err = fixture.handler.validate_compaction(&c).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), c))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5285,7 +5314,10 @@ mod tests {
         fixture.write_l0().await;
         fixture.handler.handle_ticker().await.unwrap();
         let c = fixture.build_l0_compaction().await;
-        fixture.handler.validate_compaction(&c).unwrap();
+        fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), c))
+            .unwrap();
     }
 
     #[tokio::test]
@@ -5303,7 +5335,10 @@ mod tests {
         fixture.write_l0().await;
         fixture.handler.handle_ticker().await.unwrap();
         let c2 = fixture.build_l0_compaction().await; // destination 0
-        let err = fixture.handler.validate_compaction(&c2).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), c2))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5313,8 +5348,6 @@ mod tests {
     /// segment) must be rejected.
     #[tokio::test]
     async fn test_validate_compaction_l0_only_rejects_when_dest_below_global_highest_sr() {
-        use crate::manifest::{LsmTreeState, Segment};
-
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         let prefix = Bytes::from_static(b"seg/");
         let l0_view = Ulid::from_parts(1, 0);
@@ -5350,7 +5383,100 @@ mod tests {
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
-        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), spec))
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    /// Completion validation must not reuse the Submitted-only fresh-SR check.
+    /// Cross-segment L0 compactions can commit out of order: a job submitted
+    /// earlier with destination 3 is still valid even if another segment has
+    /// since committed destination 7.
+    #[tokio::test]
+    async fn test_validate_completed_l0_allows_destination_below_global_highest_sr() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let prefix = Bytes::from_static(b"seg/");
+        let l0_view = Ulid::from_parts(1, 0);
+        let make_view = |id: Ulid| {
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(id),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        };
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
+            id: 7,
+            sst_views: Vec::new(),
+        }];
+        core.segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: Arc::new(LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![make_view(l0_view)]),
+                compacted: Vec::new(),
+            }),
+        }];
+
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
+
+        let submitted_err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), spec.clone()))
+            .unwrap_err();
+        assert!(matches!(submitted_err, SlateDBError::InvalidCompaction));
+        let completed = Compaction::new(Ulid::new(), spec).with_status(CompactionStatus::Compacted);
+        fixture
+            .handler
+            .validate_compaction(&completed)
+            .expect("completed L0 compaction should not require a still-fresh destination");
+    }
+
+    #[tokio::test]
+    async fn test_validate_completed_l0_rejects_destination_below_segment_highest_sr() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let prefix = Bytes::from_static(b"seg/");
+        let l0_view = Ulid::from_parts(1, 0);
+        let make_view = |id: Ulid| {
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(id),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        };
+        fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core
+            .segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: Arc::new(LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![make_view(l0_view)]),
+                compacted: vec![SortedRun {
+                    id: 7,
+                    sst_views: Vec::new(),
+                }],
+            }),
+        }];
+
+        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
+        let completed = Compaction::new(Ulid::new(), spec).with_status(CompactionStatus::Compacted);
+
+        let err = fixture.handler.validate_compaction(&completed).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5376,7 +5502,10 @@ mod tests {
             sr_id,
         );
         // Compactor-level validation should not reject (scheduler default validate returns Ok(()))
-        fixture.handler.validate_compaction(&mixed).unwrap();
+        fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), mixed))
+            .unwrap();
     }
 
     #[tokio::test]
@@ -5402,7 +5531,10 @@ mod tests {
             vec![SourceId::SstView(state.tree.l0.front().unwrap().id)],
             1,
         );
-        let err = fixture.handler.validate_compaction(&second_l0).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), second_l0))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5474,7 +5606,7 @@ mod tests {
             CompactionSpec::for_segment(prefix_b.clone(), vec![SourceId::SstView(l0_b)], 201);
         fixture
             .handler
-            .validate_compaction(&spec_b)
+            .validate_compaction(&Compaction::new(Ulid::new(), spec_b))
             .expect("L0 in disjoint segment must be allowed");
 
         // Sanity check: a second L0 spec in the SAME segment is still rejected.
@@ -5482,7 +5614,7 @@ mod tests {
             CompactionSpec::for_segment(prefix_a.clone(), vec![SourceId::SstView(l0_a)], 202);
         let err = fixture
             .handler
-            .validate_compaction(&spec_a_dup)
+            .validate_compaction(&Compaction::new(Ulid::new(), spec_a_dup))
             .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
@@ -5498,7 +5630,10 @@ mod tests {
             vec![SourceId::SortedRun(0)],
             0,
         );
-        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), spec))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5536,7 +5671,10 @@ mod tests {
         // Segment-targeted spec lists SR(99) as a source — but SR(99) lives in
         // the root tree, not in "seg/". Must be rejected.
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 0);
-        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), spec))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5579,7 +5717,10 @@ mod tests {
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SortedRun(99)], 7);
-        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), spec))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5589,7 +5730,10 @@ mod tests {
     async fn test_validate_compaction_rejects_drain_for_empty_prefix() {
         let fixture = CompactorEventHandlerTestFixture::new().await;
         let spec = CompactionSpec::drain_segment(Bytes::new(), vec![SourceId::SortedRun(0)]);
-        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), spec))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
@@ -5636,7 +5780,10 @@ mod tests {
             prefix,
             vec![SourceId::SstView(l0_3), SourceId::SstView(l0_1)],
         );
-        let err = fixture.handler.validate_compaction(&spec).unwrap_err();
+        let err = fixture
+            .handler
+            .validate_compaction(&Compaction::new(Ulid::new(), spec))
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
