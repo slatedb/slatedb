@@ -1235,6 +1235,22 @@ pub struct CompactionWorkerOptions {
     /// it.
     pub max_subcompactions: usize,
 
+    /// Write SSTables with a bloom filter if the number of keys in the SSTable
+    /// is greater than or equal to this value. Reads on small SSTables might be
+    /// faster without a bloom filter.
+    ///
+    /// Must match the writer's [`Settings::min_filter_keys`] configuration so
+    /// that SSTs rewritten by the worker carry filters consistent with those
+    /// produced by the DB.
+    pub min_filter_keys: u32,
+
+    /// The compression algorithm to use for SSTables the worker writes.
+    ///
+    /// Must match the writer's [`Settings::compression_codec`] configuration so
+    /// that SSTs rewritten by the worker are encoded consistently with those
+    /// produced by the DB.
+    pub compression_codec: Option<CompressionCodec>,
+
     /// Optional metrics reporting level for standalone compaction workers.
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
@@ -1253,6 +1269,8 @@ impl Default for CompactionWorkerOptions {
             max_fetch_tasks: 4,
             bytes_to_fetch: 2 * 1024 * 1024,
             max_subcompactions: 4,
+            min_filter_keys: 1000,
+            compression_codec: None,
             metric_level: None,
         }
     }
