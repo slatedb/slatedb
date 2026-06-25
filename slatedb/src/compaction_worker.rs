@@ -86,7 +86,7 @@ use crate::manifest::ManifestCore;
 use crate::merge_operator::MergeOperatorType;
 use crate::subcompaction::Subcompaction;
 use crate::tablestore::TableStore;
-use crate::utils::IdGenerator;
+use crate::utils::{format_bytes_si, IdGenerator};
 #[cfg(feature = "compaction_filters")]
 use crate::CompactionFilterSupplier;
 use slatedb_common::clock::SystemClock;
@@ -584,7 +584,7 @@ impl CompactionWorkerHandler {
                 "progress heartbeat [worker_id={}, id={}, bytes={}, output_ssts={}, new_output_ssts={}]",
                 self.worker_id,
                 id,
-                bytes_processed,
+                format_bytes_si(bytes_processed),
                 new_sst_count,
                 new_sst_count.saturating_sub(prev_sst_count)
             );
