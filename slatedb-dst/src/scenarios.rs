@@ -214,6 +214,7 @@ fn run_seed_once(
         // explicit memtable flushes will trigger real compaction during the run.
         settings.l0_sst_size_bytes = 1024;
         settings.l0_max_ssts = 4;
+        settings.max_unflushed_bytes = 64 * 1024;
         settings.manifest_poll_interval = Duration::from_millis(10);
         // Disable since we're using the standalone compactor actor.
         settings.compactor_options = None;

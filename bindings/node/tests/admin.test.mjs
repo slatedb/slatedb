@@ -246,3 +246,288 @@ test("admin sequence lookups use persisted tracker", async (t) => {
   );
   assert.match(invalidTimestamp.message, /invalid timestamp seconds/);
 });
+
+test("admin create detached checkpoint without options", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-create");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const options = {
+    lifetime_ms: undefined,
+    source: undefined,
+    name: undefined,
+  };
+  const result = await admin.create_detached_checkpoint(options);
+
+  assert.notEqual(result, undefined);
+  assert.notEqual(result.id, "");
+  assert.ok(BigInt(result.manifest_id) > 0n);
+
+  const checkpoints = await admin.list_checkpoints(undefined);
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0].id, result.id);
+  assert.equal(BigInt(checkpoints[0].manifest_id), BigInt(result.manifest_id));
+  assert.equal(checkpoints[0].name, undefined);
+  assert.equal(checkpoints[0].expire_time_secs, undefined);
+});
+
+test("admin create detached checkpoint with lifetime", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-lifetime");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const lifetimeMs = 60_000n;
+  const options = {
+    lifetime_ms: lifetimeMs,
+    source: undefined,
+    name: undefined,
+  };
+  const result = await admin.create_detached_checkpoint(options);
+
+  assert.notEqual(result, undefined);
+  assert.notEqual(result.id, "");
+
+  const checkpoints = await admin.list_checkpoints(undefined);
+  assert.equal(checkpoints.length, 1);
+  const checkpoint = checkpoints[0];
+  assert.equal(checkpoint.id, result.id);
+  assert.notEqual(checkpoint.expire_time_secs, undefined);
+  assert.ok(BigInt(checkpoint.expire_time_secs) > BigInt(checkpoint.create_time_secs));
+
+  const expectedExpireSecs = BigInt(checkpoint.create_time_secs) + (lifetimeMs / 1000n);
+  const delta = BigInt(checkpoint.expire_time_secs) - expectedExpireSecs;
+  assert.ok(delta >= -2n && delta <= 2n, "Expire time should be approximately create time + lifetime");
+});
+
+test("admin create detached checkpoint with name", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-name");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const checkpointName = "backup-2026-06-25";
+  const options = {
+    lifetime_ms: undefined,
+    source: undefined,
+    name: checkpointName,
+  };
+  const result = await admin.create_detached_checkpoint(options);
+
+  assert.notEqual(result, undefined);
+  assert.notEqual(result.id, "");
+
+  const checkpoints = await admin.list_checkpoints(undefined);
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0].id, result.id);
+  assert.equal(checkpoints[0].name, checkpointName);
+
+  const filteredByName = await admin.list_checkpoints(checkpointName);
+  assert.equal(filteredByName.length, 1);
+  assert.equal(filteredByName[0].id, result.id);
+
+  const filteredOther = await admin.list_checkpoints("other-name");
+  assert.equal(filteredOther.length, 0);
+});
+
+test("admin create detached checkpoint from source", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-source");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const firstOptions = {
+    lifetime_ms: undefined,
+    source: undefined,
+    name: "first-checkpoint",
+  };
+  const firstResult = await admin.create_detached_checkpoint(firstOptions);
+
+  const secondOptions = {
+    lifetime_ms: 120_000n,
+    source: firstResult.id,
+    name: "second-checkpoint",
+  };
+  const secondResult = await admin.create_detached_checkpoint(secondOptions);
+
+  assert.notEqual(secondResult, undefined);
+  assert.notEqual(secondResult.id, "");
+  assert.equal(BigInt(secondResult.manifest_id), BigInt(firstResult.manifest_id));
+
+  const checkpoints = await admin.list_checkpoints(undefined);
+  assert.equal(checkpoints.length, 2);
+});
+
+test("admin refresh checkpoint updates lifetime", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-refresh");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const initialLifetimeMs = 30_000n;
+  const options = {
+    lifetime_ms: initialLifetimeMs,
+    source: undefined,
+    name: "refresh-test",
+  };
+  const result = await admin.create_detached_checkpoint(options);
+
+  const checkpoints = await admin.list_checkpoints(undefined);
+  const initial = checkpoints[0];
+  const initialExpireTime = BigInt(initial.expire_time_secs);
+
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  const newLifetimeMs = 90_000n;
+  await admin.refresh_checkpoint(result.id, newLifetimeMs);
+
+  const updatedCheckpoints = await admin.list_checkpoints(undefined);
+  const refreshed = updatedCheckpoints[0];
+  assert.notEqual(refreshed.expire_time_secs, undefined);
+  assert.ok(
+    BigInt(refreshed.expire_time_secs) > initialExpireTime,
+    "Refreshed expire time should be later than initial"
+  );
+});
+
+test("admin refresh checkpoint without lifetime", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-refresh-no-lifetime");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const options = {
+    lifetime_ms: undefined,
+    source: undefined,
+    name: undefined,
+  };
+  const result = await admin.create_detached_checkpoint(options);
+
+  await admin.refresh_checkpoint(result.id, undefined);
+
+  const checkpoints = await admin.list_checkpoints(undefined);
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0].id, result.id);
+});
+
+test("admin refresh checkpoint with invalid id fails", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-refresh-invalid");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const error = await expectInvalid(() => admin.refresh_checkpoint("invalid-uuid", 60_000n));
+  assert.match(error.message, /invalid checkpoint_id/);
+});
+
+test("admin delete checkpoint removes checkpoint", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-delete");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const options = {
+    lifetime_ms: undefined,
+    source: undefined,
+    name: "delete-test",
+  };
+  const result = await admin.create_detached_checkpoint(options);
+
+  const checkpoints = await admin.list_checkpoints(undefined);
+  assert.equal(checkpoints.length, 1);
+  assert.equal(checkpoints[0].id, result.id);
+
+  await admin.delete_checkpoint(result.id);
+
+  await waitUntil(async () => {
+    return (await admin.list_checkpoints(undefined)).length === 0;
+  });
+});
+
+test("admin delete checkpoint with invalid id fails", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-delete-invalid");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const error = await expectInvalid(() => admin.delete_checkpoint("invalid-uuid"));
+  assert.match(error.message, /invalid checkpoint_id/);
+});
+
+test("admin delete multiple checkpoints", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-checkpoint-delete-multiple");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key1"), bytes("value1"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+
+  const first = await admin.create_detached_checkpoint({
+    lifetime_ms: undefined,
+    source: undefined,
+    name: "checkpoint-1",
+  });
+  const second = await admin.create_detached_checkpoint({
+    lifetime_ms: undefined,
+    source: undefined,
+    name: "checkpoint-2",
+  });
+  const third = await admin.create_detached_checkpoint({
+    lifetime_ms: undefined,
+    source: undefined,
+    name: "checkpoint-3",
+  });
+
+  let checkpoints = await admin.list_checkpoints(undefined);
+  assert.equal(checkpoints.length, 3);
+
+  await admin.delete_checkpoint(first.id);
+  checkpoints = await admin.list_checkpoints(undefined);
+  assert.ok(checkpoints.every((c) => c.id !== first.id));
+
+  await admin.delete_checkpoint(second.id);
+  await admin.delete_checkpoint(third.id);
+
+  await waitUntil(async () => {
+    return (await admin.list_checkpoints(undefined)).length === 0;
+  });
+});

@@ -1,15 +1,15 @@
-use std::ops::Bound;
-use std::sync::Arc;
-
-use chrono::{DateTime, Utc};
-use ulid::Ulid;
-
 use crate::builder::CloneBuilder;
+use crate::config::CheckpointOptions;
 use crate::error::{Error, SlateDbError};
 use crate::types::{
-    Checkpoint, CloneSourceSpec, Compaction, CompactorStateView, VersionedCompactions,
-    VersionedManifest,
+    try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
+    CompactorStateView, VersionedCompactions, VersionedManifest,
 };
+use chrono::{DateTime, Utc};
+use std::ops::Bound;
+use std::sync::Arc;
+use std::time::Duration;
+use ulid::Ulid;
 
 fn into_u64_bounds(
     from: Option<u64>,
@@ -116,6 +116,42 @@ impl Admin {
             .ok_or(SlateDbError::InvalidTimestampSeconds { timestamp_secs })?;
         self.inner
             .get_sequence_for_timestamp(timestamp, round_up)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Creates a checkpoint of the db stored in the object store at the specified path using the
+    /// provided options.
+    pub async fn create_detached_checkpoint(
+        &self,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointCreateResult, Error> {
+        Ok(CheckpointCreateResult::from(
+            self.inner
+                .create_detached_checkpoint(&slatedb::config::CheckpointOptions::try_from(options)?)
+                .await?,
+        ))
+    }
+
+    /// Refresh the lifetime of an existing checkpoint.
+    pub async fn refresh_checkpoint(
+        &self,
+        id: String,
+        lifetime_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.inner
+            .refresh_checkpoint(
+                try_checkpoint_id_from_str(&id)?,
+                lifetime_ms.map(Duration::from_millis),
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Deletes the checkpoint with the specified id.
+    pub async fn delete_checkpoint(&self, id: String) -> Result<(), crate::Error> {
+        self.inner
+            .delete_checkpoint(try_checkpoint_id_from_str(&id)?)
             .await
             .map_err(Into::into)
     }
