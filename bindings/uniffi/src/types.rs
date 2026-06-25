@@ -14,7 +14,10 @@ use slatedb::manifest::{
 };
 use slatedb::CacheTarget as CoreCacheTarget;
 use slatedb::ValueDeletable;
-use slatedb::{Checkpoint as CoreCheckpoint, VersionedCompactions as CoreVersionedCompactions};
+use slatedb::{
+    Checkpoint as CoreCheckpoint, CheckpointCreateResult as CoreCheckpointCreateResult,
+    VersionedCompactions as CoreVersionedCompactions,
+};
 use slatedb_common::object_metadata::IdentifiedObjectMetadata as CoreIdentifiedObjectMetadata;
 use ulid::Ulid;
 
@@ -770,6 +773,11 @@ fn filter_format_from_debug(value: &impl std::fmt::Debug) -> FilterFormat {
     }
 }
 
+pub(crate) fn try_checkpoint_id_from_str(value: &str) -> Result<Uuid, Error> {
+    Uuid::parse_str(&value)
+        .map_err(|err| Error::from(SlateDbError::InvalidCheckpointId { source: err }))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct CloneSourceSpec {
     /// Path to the source database.
@@ -798,5 +806,22 @@ impl TryInto<slatedb::CloneSourceSpec> for CloneSourceSpec {
                 .map(|key_range| key_range.into_range_bounds())
                 .transpose()?,
         })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CheckpointCreateResult {
+    /// The id of the created checkpoint.
+    pub id: String,
+    /// The manifest id referenced by the created checkpoint.
+    pub manifest_id: u64,
+}
+
+impl From<CoreCheckpointCreateResult> for CheckpointCreateResult {
+    fn from(value: CoreCheckpointCreateResult) -> Self {
+        Self {
+            id: value.id.to_string(),
+            manifest_id: value.manifest_id,
+        }
     }
 }
