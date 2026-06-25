@@ -886,10 +886,12 @@ impl CompactorState {
         // conflict, the retry path reloads and merges the persisted `.compactions`
         // object before writing again. At that point, local state may already have
         // committed or pruned an entry while persisted state still contains an older
-        // Compacted/Completed/Failed view. Insert those entries and let the commit
-        // path or combined retain pass resolve them. Scheduled/Running are different:
-        // they carry no finished output and require prior coordinator ownership, so
-        // seeing them absent from local state remains anomalous.
+        // Compacted/Completed/Failed view. Insert those entries, let the commit path
+        // resolve stale Compacted entries via `validate_compaction`, and let the compactions
+        // write path resolve stale terminal entries via `retain_active_and_last_finished`.
+        //
+        // Scheduled/Running are different: they carry no finished output and require prior
+        // coordinator ownership, so seeing them absent from local state remains anomalous.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
                 Entry::Vacant(v) => match compaction.status() {
