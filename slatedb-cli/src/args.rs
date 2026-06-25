@@ -234,7 +234,7 @@ pub(crate) enum CliCommands {
     /// Submit a compaction request.
     #[command(group(
         ArgGroup::new("compaction_request")
-            .args(["full", "spec"])
+            .args(["request"])
             .required(true)
     ))]
     SubmitCompaction {
