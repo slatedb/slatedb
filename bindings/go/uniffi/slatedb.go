@@ -401,6 +401,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_create_detached_checkpoint()
+		})
+		if checksum != 37184 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_create_detached_checkpoint: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_delete_checkpoint()
+		})
+		if checksum != 28193 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_delete_checkpoint: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp()
 		})
 		if checksum != 39670 {
@@ -478,6 +496,15 @@ func uniffiCheckChecksums() {
 		if checksum != 1383 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_read_manifest: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_refresh_checkpoint()
+		})
+		if checksum != 42876 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_refresh_checkpoint: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2121,6 +2148,11 @@ func (ffiObject *FfiObject) freeRustArcPtr() {
 // Administrative read/query handle for SlateDB.
 type AdminInterface interface {
 	CreateCloneBuilderFromSource(source CloneSourceSpec) (*CloneBuilder, error)
+	// Creates a checkpoint of the db stored in the object store at the specified path using the
+	// provided options.
+	CreateDetachedCheckpoint(options CheckpointOptions) (CheckpointCreateResult, error)
+	// Deletes the checkpoint with the specified id.
+	DeleteCheckpoint(id string) error
 	// Looks up a sequence number for the provided Unix UTC timestamp seconds.
 	GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (*uint64, error)
 	// Looks up a timestamp for the provided sequence number.
@@ -2139,6 +2171,8 @@ type AdminInterface interface {
 	ReadCompactorStateView() (CompactorStateView, error)
 	// Reads a specific manifest by ID, or the latest when `id` is `None`.
 	ReadManifest(id *uint64) (*VersionedManifest, error)
+	// Refresh the lifetime of an existing checkpoint.
+	RefreshCheckpoint(id string, lifetimeMs *uint64) error
 }
 
 // Administrative read/query handle for SlateDB.
@@ -2159,6 +2193,75 @@ func (_self *Admin) CreateCloneBuilderFromSource(source CloneSourceSpec) (*Clone
 	} else {
 		return FfiConverterCloneBuilderINSTANCE.Lift(_uniffiRV), nil
 	}
+}
+
+// Creates a checkpoint of the db stored in the object store at the specified path using the
+// provided options.
+func (_self *Admin) CreateDetachedCheckpoint(options CheckpointOptions) (CheckpointCreateResult, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) CheckpointCreateResult {
+			return FfiConverterCheckpointCreateResultINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_create_detached_checkpoint(
+			_pointer, FfiConverterCheckpointOptionsINSTANCE.Lower(options)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Deletes the checkpoint with the specified id.
+func (_self *Admin) DeleteCheckpoint(id string) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_delete_checkpoint(
+			_pointer, FfiConverterStringINSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
 }
 
 // Looks up a sequence number for the provided Unix UTC timestamp seconds.
@@ -2483,6 +2586,38 @@ func (_self *Admin) ReadManifest(id *uint64) (*VersionedManifest, error) {
 	}
 
 	return res, err
+}
+
+// Refresh the lifetime of an existing checkpoint.
+func (_self *Admin) RefreshCheckpoint(id string, lifetimeMs *uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_refresh_checkpoint(
+			_pointer, FfiConverterStringINSTANCE.Lower(id), FfiConverterOptionalUint64INSTANCE.Lower(lifetimeMs)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
 }
 func (object *Admin) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -8682,6 +8817,108 @@ func (c FfiConverterCheckpoint) Write(writer io.Writer, value Checkpoint) {
 type FfiDestroyerCheckpoint struct{}
 
 func (_ FfiDestroyerCheckpoint) Destroy(value Checkpoint) {
+	value.Destroy()
+}
+
+type CheckpointCreateResult struct {
+	// The id of the created checkpoint.
+	Id string
+	// The manifest id referenced by the created checkpoint.
+	ManifestId uint64
+}
+
+func (r *CheckpointCreateResult) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Id)
+	FfiDestroyerUint64{}.Destroy(r.ManifestId)
+}
+
+type FfiConverterCheckpointCreateResult struct{}
+
+var FfiConverterCheckpointCreateResultINSTANCE = FfiConverterCheckpointCreateResult{}
+
+func (c FfiConverterCheckpointCreateResult) Lift(rb RustBufferI) CheckpointCreateResult {
+	return LiftFromRustBuffer[CheckpointCreateResult](c, rb)
+}
+
+func (c FfiConverterCheckpointCreateResult) Read(reader io.Reader) CheckpointCreateResult {
+	return CheckpointCreateResult{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCheckpointCreateResult) Lower(value CheckpointCreateResult) C.RustBuffer {
+	return LowerIntoRustBuffer[CheckpointCreateResult](c, value)
+}
+
+func (c FfiConverterCheckpointCreateResult) LowerExternal(value CheckpointCreateResult) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CheckpointCreateResult](c, value))
+}
+
+func (c FfiConverterCheckpointCreateResult) Write(writer io.Writer, value CheckpointCreateResult) {
+	FfiConverterStringINSTANCE.Write(writer, value.Id)
+	FfiConverterUint64INSTANCE.Write(writer, value.ManifestId)
+}
+
+type FfiDestroyerCheckpointCreateResult struct{}
+
+func (_ FfiDestroyerCheckpointCreateResult) Destroy(value CheckpointCreateResult) {
+	value.Destroy()
+}
+
+// Specify options to provide when creating a checkpoint.
+type CheckpointOptions struct {
+	// Optionally specifies the lifetime of the checkpoint to create. The expire time will be
+	// set to the current wallclock time plus the specified lifetime. If lifetime is None, then
+	// the checkpoint is created without an expiry time.
+	LifetimeMs *uint64
+	// Optionally specifies an existing checkpoint to use as the source for this checkpoint. This
+	// is useful for users to establish checkpoints from existing checkpoints, but with a different
+	// lifecycle and/or metadata.
+	Source *string
+	// Optionally specifies a name for the checkpoint. Can be used to list the checkpoints.
+	Name *string
+}
+
+func (r *CheckpointOptions) Destroy() {
+	FfiDestroyerOptionalUint64{}.Destroy(r.LifetimeMs)
+	FfiDestroyerOptionalString{}.Destroy(r.Source)
+	FfiDestroyerOptionalString{}.Destroy(r.Name)
+}
+
+type FfiConverterCheckpointOptions struct{}
+
+var FfiConverterCheckpointOptionsINSTANCE = FfiConverterCheckpointOptions{}
+
+func (c FfiConverterCheckpointOptions) Lift(rb RustBufferI) CheckpointOptions {
+	return LiftFromRustBuffer[CheckpointOptions](c, rb)
+}
+
+func (c FfiConverterCheckpointOptions) Read(reader io.Reader) CheckpointOptions {
+	return CheckpointOptions{
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCheckpointOptions) Lower(value CheckpointOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[CheckpointOptions](c, value)
+}
+
+func (c FfiConverterCheckpointOptions) LowerExternal(value CheckpointOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CheckpointOptions](c, value))
+}
+
+func (c FfiConverterCheckpointOptions) Write(writer io.Writer, value CheckpointOptions) {
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.LifetimeMs)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Source)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Name)
+}
+
+type FfiDestroyerCheckpointOptions struct{}
+
+func (_ FfiDestroyerCheckpointOptions) Destroy(value CheckpointOptions) {
 	value.Destroy()
 }
 
