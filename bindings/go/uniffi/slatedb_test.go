@@ -1965,6 +1965,476 @@ func TestAdminClone(t *testing.T) {
 	}
 }
 
+func TestAdminCreateDetachedCheckpointWithoutOptions(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       nil,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if result.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(): got empty id")
+	}
+	if result.ManifestId == 0 {
+		t.Fatal("CreateDetachedCheckpoint(): got ManifestId = 0")
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+	if checkpoints[0].ManifestId != result.ManifestId {
+		t.Fatalf("checkpoint manifest_id: got %d, want %d", checkpoints[0].ManifestId, result.ManifestId)
+	}
+	if checkpoints[0].Name != nil {
+		t.Fatalf("checkpoint name: got %v, want nil", *checkpoints[0].Name)
+	}
+	if checkpoints[0].ExpireTimeSecs != nil {
+		t.Fatalf("checkpoint expire_time_secs: got %v, want nil", *checkpoints[0].ExpireTimeSecs)
+	}
+}
+
+func TestAdminCreateDetachedCheckpointWithLifetime(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	lifetimeMs := uint64(60_000)
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: &lifetimeMs,
+		Source:     nil,
+		Name:       nil,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if result.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(): got empty id")
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+
+	checkpoint := checkpoints[0]
+	if checkpoint.Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoint.Id, result.Id)
+	}
+	if checkpoint.ExpireTimeSecs == nil {
+		t.Fatal("checkpoint expire_time_secs: got nil, want non-nil")
+	}
+	if *checkpoint.ExpireTimeSecs <= checkpoint.CreateTimeSecs {
+		t.Fatalf("checkpoint expire_time_secs: got %d, want > %d", *checkpoint.ExpireTimeSecs, checkpoint.CreateTimeSecs)
+	}
+
+	expectedExpireSecs := checkpoint.CreateTimeSecs + int64(lifetimeMs/1000)
+	delta := *checkpoint.ExpireTimeSecs - expectedExpireSecs
+	if delta < -2 || delta > 2 {
+		t.Fatalf("checkpoint expire_time_secs: got %d, want approximately %d", *checkpoint.ExpireTimeSecs, expectedExpireSecs)
+	}
+}
+
+func TestAdminCreateDetachedCheckpointWithName(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	checkpointName := "backup-2026-06-25"
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       &checkpointName,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if result.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(): got empty id")
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+	if checkpoints[0].Name == nil || *checkpoints[0].Name != checkpointName {
+		t.Fatalf("checkpoint name: got %v, want %q", checkpoints[0].Name, checkpointName)
+	}
+
+	filteredByName, err := admin.ListCheckpoints(&checkpointName)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(name): %v", err)
+	}
+	if len(filteredByName) != 1 {
+		t.Fatalf("ListCheckpoints(name): got %d checkpoints, want 1", len(filteredByName))
+	}
+	if filteredByName[0].Id != result.Id {
+		t.Fatalf("filtered checkpoint id: got %q, want %q", filteredByName[0].Id, result.Id)
+	}
+
+	otherName := "other-name"
+	filteredOther, err := admin.ListCheckpoints(&otherName)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(other-name): %v", err)
+	}
+	if len(filteredOther) != 0 {
+		t.Fatalf("ListCheckpoints(other-name): got %d checkpoints, want 0", len(filteredOther))
+	}
+}
+
+func TestAdminCreateDetachedCheckpointFromSource(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	firstCheckpointName := "first-checkpoint"
+	firstOptions := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       &firstCheckpointName,
+	}
+	firstResult, err := admin.CreateDetachedCheckpoint(firstOptions)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(first): %v", err)
+	}
+
+	secondCheckpointName := "second-checkpoint"
+	lifetimeMs := uint64(120_000)
+	secondOptions := slatedb.CheckpointOptions{
+		LifetimeMs: &lifetimeMs,
+		Source:     &firstResult.Id,
+		Name:       &secondCheckpointName,
+	}
+	secondResult, err := admin.CreateDetachedCheckpoint(secondOptions)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(second): %v", err)
+	}
+
+	if secondResult.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(second): got empty id")
+	}
+	if secondResult.ManifestId != firstResult.ManifestId {
+		t.Fatalf("second checkpoint manifest_id: got %d, want %d", secondResult.ManifestId, firstResult.ManifestId)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 2 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 2", len(checkpoints))
+	}
+}
+
+func TestAdminRefreshCheckpointUpdatesLifetime(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	initialLifetimeMs := uint64(30_000)
+	checkpointName := "refresh-test"
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: &initialLifetimeMs,
+		Source:     nil,
+		Name:       &checkpointName,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	initial := checkpoints[0]
+	if initial.ExpireTimeSecs == nil {
+		t.Fatal("initial checkpoint expire_time_secs: got nil")
+	}
+	initialExpireTime := *initial.ExpireTimeSecs
+
+	time.Sleep(1 * time.Second)
+
+	newLifetimeMs := uint64(90_000)
+	if err := admin.RefreshCheckpoint(result.Id, &newLifetimeMs); err != nil {
+		t.Fatalf("RefreshCheckpoint(): %v", err)
+	}
+
+	updatedCheckpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil) after refresh: %v", err)
+	}
+	refreshed := updatedCheckpoints[0]
+	if refreshed.ExpireTimeSecs == nil {
+		t.Fatal("refreshed checkpoint expire_time_secs: got nil")
+	}
+	if *refreshed.ExpireTimeSecs <= initialExpireTime {
+		t.Fatalf("refreshed expire_time_secs: got %d, want > %d", *refreshed.ExpireTimeSecs, initialExpireTime)
+	}
+}
+
+func TestAdminRefreshCheckpointWithoutLifetime(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       nil,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if err := admin.RefreshCheckpoint(result.Id, nil); err != nil {
+		t.Fatalf("RefreshCheckpoint(nil lifetime): %v", err)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+}
+
+func TestAdminRefreshCheckpointWithInvalidIdFails(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	lifetimeMs := uint64(60_000)
+	err := admin.RefreshCheckpoint("invalid-uuid", &lifetimeMs)
+	if !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("RefreshCheckpoint(invalid-uuid): got %v, want invalid error", err)
+	}
+	var invalidErr *slatedb.ErrorInvalid
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("RefreshCheckpoint(invalid-uuid): expected *ErrorInvalid, got %T", err)
+	}
+	if !strings.Contains(invalidErr.Message, "invalid checkpoint_id") {
+		t.Fatalf("RefreshCheckpoint(invalid-uuid): message = %q, want substring %q", invalidErr.Message, "invalid checkpoint_id")
+	}
+}
+
+func TestAdminDeleteCheckpointRemovesCheckpoint(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	checkpointName := "delete-test"
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       &checkpointName,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+
+	if err := admin.DeleteCheckpoint(result.Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(): %v", err)
+	}
+
+	waitUntil(t, 60*time.Second, 25*time.Millisecond, func() (bool, error) {
+		remaining, err := admin.ListCheckpoints(nil)
+		if err != nil {
+			return false, err
+		}
+		return len(remaining) == 0, nil
+	})
+}
+
+func TestAdminDeleteCheckpointWithInvalidIdFails(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	err := admin.DeleteCheckpoint("invalid-uuid")
+	if !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("DeleteCheckpoint(invalid-uuid): got %v, want invalid error", err)
+	}
+	var invalidErr *slatedb.ErrorInvalid
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("DeleteCheckpoint(invalid-uuid): expected *ErrorInvalid, got %T", err)
+	}
+	if !strings.Contains(invalidErr.Message, "invalid checkpoint_id") {
+		t.Fatalf("DeleteCheckpoint(invalid-uuid): message = %q, want substring %q", invalidErr.Message, "invalid checkpoint_id")
+	}
+}
+
+func TestAdminDeleteMultipleCheckpoints(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	var results []slatedb.CheckpointCreateResult
+	for i := 1; i <= 3; i++ {
+		name := fmt.Sprintf("checkpoint-%d", i)
+		options := slatedb.CheckpointOptions{
+			LifetimeMs: nil,
+			Source:     nil,
+			Name:       &name,
+		}
+		result, err := admin.CreateDetachedCheckpoint(options)
+		if err != nil {
+			t.Fatalf("CreateDetachedCheckpoint(%d): %v", i, err)
+		}
+		results = append(results, result)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 3 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 3", len(checkpoints))
+	}
+
+	if err := admin.DeleteCheckpoint(results[0].Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(first): %v", err)
+	}
+	checkpoints, err = admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil) after first delete: %v", err)
+	}
+	for _, c := range checkpoints {
+		if c.Id == results[0].Id {
+			t.Fatalf("found deleted checkpoint %q", results[0].Id)
+		}
+	}
+
+	if err := admin.DeleteCheckpoint(results[1].Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(second): %v", err)
+	}
+	if err := admin.DeleteCheckpoint(results[2].Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(third): %v", err)
+	}
+
+	waitUntil(t, 60*time.Second, 25*time.Millisecond, func() (bool, error) {
+		remaining, err := admin.ListCheckpoints(nil)
+		if err != nil {
+			return false, err
+		}
+		return len(remaining) == 0, nil
+	})
+}
+
 func TestWalReaderEmptyStore(t *testing.T) {
 	store := newMemoryStore(t)
 	reader := openTestWalReader(t, store)

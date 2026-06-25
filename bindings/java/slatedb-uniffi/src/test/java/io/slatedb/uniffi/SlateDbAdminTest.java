@@ -234,4 +234,293 @@ class SlateDbAdminTest {
             assertTrue(invalidTimestamp.getMessage().contains("invalid timestamp seconds"));
         }
     }
+
+    @Test
+    void adminCreateDetachedCheckpointWithoutOptions() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-create");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            CheckpointOptions options = new CheckpointOptions(null, null, null);
+            CheckpointCreateResult result = TestSupport.await(admin.createDetachedCheckpoint(options));
+
+            assertNotNull(result);
+            assertFalse(result.id().isEmpty());
+            assertTrue(result.manifestId() > 0L);
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertEquals(1, checkpoints.size());
+            assertEquals(result.id(), checkpoints.get(0).id());
+            assertEquals(result.manifestId(), checkpoints.get(0).manifestId());
+            assertNull(checkpoints.get(0).name());
+            assertNull(checkpoints.get(0).expireTimeSecs());
+        }
+    }
+
+    @Test
+    void adminCreateDetachedCheckpointWithLifetime() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-lifetime");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            long lifetimeMs = 60_000L;
+            CheckpointOptions options = new CheckpointOptions(lifetimeMs, null, null);
+            CheckpointCreateResult result = TestSupport.await(admin.createDetachedCheckpoint(options));
+
+            assertNotNull(result);
+            assertFalse(result.id().isEmpty());
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertEquals(1, checkpoints.size());
+            Checkpoint checkpoint = checkpoints.get(0);
+            assertEquals(result.id(), checkpoint.id());
+            assertNotNull(checkpoint.expireTimeSecs());
+            assertTrue(checkpoint.expireTimeSecs() > checkpoint.createTimeSecs());
+
+            long expectedExpireSecs = checkpoint.createTimeSecs() + (lifetimeMs / 1000);
+            long delta = Math.abs(checkpoint.expireTimeSecs() - expectedExpireSecs);
+            assertTrue(delta <= 2, "Expire time should be approximately create time + lifetime");
+        }
+    }
+
+    @Test
+    void adminCreateDetachedCheckpointWithName() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-name");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            String checkpointName = "backup-2026-06-25";
+            CheckpointOptions options = new CheckpointOptions(null, null, checkpointName);
+            CheckpointCreateResult result = TestSupport.await(admin.createDetachedCheckpoint(options));
+
+            assertNotNull(result);
+            assertFalse(result.id().isEmpty());
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertEquals(1, checkpoints.size());
+            assertEquals(result.id(), checkpoints.get(0).id());
+            assertEquals(checkpointName, checkpoints.get(0).name());
+
+            List<Checkpoint> filteredByName = TestSupport.await(admin.listCheckpoints(checkpointName));
+            assertEquals(1, filteredByName.size());
+            assertEquals(result.id(), filteredByName.get(0).id());
+
+            List<Checkpoint> filteredOther = TestSupport.await(admin.listCheckpoints("other-name"));
+            assertEquals(0, filteredOther.size());
+        }
+    }
+
+    @Test
+    void adminCreateDetachedCheckpointFromSource() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-source");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            CheckpointOptions firstOptions = new CheckpointOptions(null, null, "first-checkpoint");
+            CheckpointCreateResult firstResult = TestSupport.await(admin.createDetachedCheckpoint(firstOptions));
+
+            CheckpointOptions secondOptions = new CheckpointOptions(120_000L, firstResult.id(), "second-checkpoint");
+            CheckpointCreateResult secondResult = TestSupport.await(admin.createDetachedCheckpoint(secondOptions));
+
+            assertNotNull(secondResult);
+            assertFalse(secondResult.id().isEmpty());
+            assertEquals(firstResult.manifestId(), secondResult.manifestId());
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertEquals(2, checkpoints.size());
+        }
+    }
+
+    @Test
+    void adminRefreshCheckpointUpdatesLifetime() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-refresh");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            long initialLifetimeMs = 30_000L;
+            CheckpointOptions options = new CheckpointOptions(initialLifetimeMs, null, "refresh-test");
+            CheckpointCreateResult result = TestSupport.await(admin.createDetachedCheckpoint(options));
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            Checkpoint initial = checkpoints.get(0);
+            Long initialExpireTime = initial.expireTimeSecs();
+            assertNotNull(initialExpireTime);
+
+            Thread.sleep(1000);
+
+            long newLifetimeMs = 90_000L;
+            TestSupport.await(admin.refreshCheckpoint(result.id(), newLifetimeMs));
+
+            checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            Checkpoint refreshed = checkpoints.get(0);
+            assertNotNull(refreshed.expireTimeSecs());
+            assertTrue(refreshed.expireTimeSecs() > initialExpireTime,
+                    "Refreshed expire time should be later than initial");
+        }
+    }
+
+    @Test
+    void adminRefreshCheckpointWithoutLifetime() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-refresh-no-lifetime");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            CheckpointOptions options = new CheckpointOptions(null, null, null);
+            CheckpointCreateResult result = TestSupport.await(admin.createDetachedCheckpoint(options));
+
+            TestSupport.await(admin.refreshCheckpoint(result.id(), null));
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertEquals(1, checkpoints.size());
+            assertEquals(result.id(), checkpoints.get(0).id());
+        }
+    }
+
+    @Test
+    void adminRefreshCheckpointWithInvalidIdFails() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-refresh-invalid");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            Error.Invalid error = TestSupport.awaitFailure(
+                    Error.Invalid.class,
+                    admin.refreshCheckpoint("invalid-uuid", 60_000L));
+            assertTrue(error.getMessage().contains("invalid checkpoint_id"));
+        }
+    }
+
+    @Test
+    void adminDeleteCheckpointRemovesCheckpoint() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-delete");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            CheckpointOptions options = new CheckpointOptions(null, null, "delete-test");
+            CheckpointCreateResult result = TestSupport.await(admin.createDetachedCheckpoint(options));
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertEquals(1, checkpoints.size());
+            assertEquals(result.id(), checkpoints.get(0).id());
+
+            TestSupport.await(admin.deleteCheckpoint(result.id()));
+
+            TestSupport.waitUntil(
+                    TestSupport.WAIT_TIMEOUT,
+                    TestSupport.WAIT_STEP,
+                    () -> TestSupport.await(admin.listCheckpoints(null)).isEmpty());
+        }
+    }
+
+    @Test
+    void adminDeleteCheckpointWithInvalidIdFails() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-delete-invalid");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            Error.Invalid error = TestSupport.awaitFailure(
+                    Error.Invalid.class,
+                    admin.deleteCheckpoint("invalid-uuid"));
+            assertTrue(error.getMessage().contains("invalid checkpoint_id"));
+        }
+    }
+
+    @Test
+    void adminDeleteMultipleCheckpoints() throws Exception {
+        String path = TestSupport.uniquePath("admin-checkpoint-delete-multiple");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key1"), TestSupport.bytes("value1")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            CheckpointCreateResult first = TestSupport.await(admin.createDetachedCheckpoint(
+                    new CheckpointOptions(null, null, "checkpoint-1")));
+            CheckpointCreateResult second = TestSupport.await(admin.createDetachedCheckpoint(
+                    new CheckpointOptions(null, null, "checkpoint-2")));
+            CheckpointCreateResult third = TestSupport.await(admin.createDetachedCheckpoint(
+                    new CheckpointOptions(null, null, "checkpoint-3")));
+
+            List<Checkpoint> checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertEquals(3, checkpoints.size());
+
+            TestSupport.await(admin.deleteCheckpoint(first.id()));
+            checkpoints = TestSupport.await(admin.listCheckpoints(null));
+            assertTrue(checkpoints.stream().noneMatch(c -> c.id().equals(first.id())));
+
+            TestSupport.await(admin.deleteCheckpoint(second.id()));
+            TestSupport.await(admin.deleteCheckpoint(third.id()));
+
+            TestSupport.waitUntil(
+                    TestSupport.WAIT_TIMEOUT,
+                    TestSupport.WAIT_STEP,
+                    () -> TestSupport.await(admin.listCheckpoints(null)).isEmpty());
+        }
+    }
 }
