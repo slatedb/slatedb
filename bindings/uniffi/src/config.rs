@@ -1,7 +1,7 @@
-use std::time::Duration;
-
 use crate::error::{Error, SlateDbError};
 use crate::filter_policy::FilterContext;
+use crate::types::try_checkpoint_id_from_str;
+use std::time::Duration;
 
 /// Minimum durability level required for data returned by reads and scans.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
@@ -337,5 +337,40 @@ impl From<FlushOptions> for slatedb::config::FlushOptions {
         slatedb::config::FlushOptions {
             flush_type: value.flush_type.into(),
         }
+    }
+}
+
+/// Specify options to provide when creating a checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, Default)]
+pub struct CheckpointOptions {
+    /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be
+    /// set to the current wallclock time plus the specified lifetime. If lifetime is None, then
+    /// the checkpoint is created without an expiry time.
+    pub lifetime_ms: Option<u64>,
+
+    /// Optionally specifies an existing checkpoint to use as the source for this checkpoint. This
+    /// is useful for users to establish checkpoints from existing checkpoints, but with a different
+    /// lifecycle and/or metadata.
+    pub source: Option<String>,
+
+    /// Optionally specifies a name for the checkpoint. Can be used to list the checkpoints.
+    pub name: Option<String>,
+}
+
+impl TryFrom<&CheckpointOptions> for slatedb::config::CheckpointOptions {
+    type Error = Error;
+
+    fn try_from(
+        value: &CheckpointOptions,
+    ) -> Result<slatedb::config::CheckpointOptions, Self::Error> {
+        Ok(slatedb::config::CheckpointOptions {
+            lifetime: value.lifetime_ms.map(Duration::from_millis),
+            source: value
+                .source
+                .as_ref()
+                .map(|v| try_checkpoint_id_from_str(v))
+                .transpose()?,
+            name: value.name.clone(),
+        })
     }
 }
