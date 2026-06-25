@@ -522,9 +522,7 @@ pub(crate) struct CompactorEventHandler {
     /// baseline. See [`Self::update_distributed_compaction_metrics`].
     prev_claimed: HashSet<Ulid>,
     /// Cached handles for per-worker `worker_last_heartbeat_ms` gauges. Handles are
-    /// retained only for workers currently owning in-flight jobs, so this map cannot
-    /// grow without bound. Dropping a handle does not remove its registered metric
-    /// series; that lifecycle is determined by the recorder.
+    /// retained for every worker id observed by this coordinator process.
     worker_heartbeat_gauges: HashMap<String, Arc<dyn GaugeFn>>,
 }
 
@@ -790,9 +788,8 @@ impl CompactorEventHandler {
     ///   execution between two ticks is still counted. The first update counts
     ///   every inherited claim once; later updates count set differences.
     /// - `worker_last_heartbeat_ms`: a per-worker gauge of the last heartbeat
-    ///   timestamp. Gauge handles are cached only for workers that currently own
-    ///   in-flight jobs; a recorder may retain a registered series after its handle
-    ///   is dropped.
+    ///   timestamp. Gauge handles are cached for every worker id observed by this
+    ///   coordinator process.
     fn update_distributed_compaction_metrics(&mut self) {
         use crate::compactor::stats::{WORKER_ID_LABEL, WORKER_LAST_HEARTBEAT_MS};
 
@@ -812,10 +809,7 @@ impl CompactorEventHandler {
         }
         self.prev_claimed = current_ids;
 
-        // Refresh the cached gauge handle for every worker that owns an in-flight
-        // job. Remove handles for workers that no longer do so, keeping worker_heartbeat_gauges
-        // bounded by the current worker count rather than every worker id ever seen.
-        // Recorders may retain the corresponding registered metric series.
+        // Refresh the cached gauge handle for every worker that owns an in-flight job.
         let recorder = self.recorder.clone();
         let mut last_heartbeat_per_worker: HashMap<String, u64> = HashMap::new();
         for (_, w) in &claimed {
@@ -837,8 +831,6 @@ impl CompactorEventHandler {
                 });
             gauge.set(*last_heartbeat_ms as i64);
         }
-        self.worker_heartbeat_gauges
-            .retain(|id, _| last_heartbeat_per_worker.contains_key(id));
     }
 
     /// Commits any compactions in the `Compacted` state to the manifest.
