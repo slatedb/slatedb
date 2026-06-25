@@ -2072,6 +2072,7 @@ impl WriteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cached_object_store::policy::CachePutPolicy;
     use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
@@ -3502,114 +3503,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_with_object_store_cache_metrics() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut opts = test_db_options(0, 1024, None);
-        let temp_dir = tempfile::Builder::new()
-            .prefix("objstore_cache_test_")
-            .tempdir()
-            .unwrap();
-
-        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
-        opts.object_store_cache_options.part_size_bytes = 1024;
-        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
-        let kv_store = Db::builder(
-            "/tmp/test_kv_store_with_cache_metrics",
-            object_store.clone(),
-        )
-        .with_settings(opts)
-        .with_db_cache_disabled()
-        .with_metrics_recorder(metrics_recorder.clone())
-        .build()
-        .await
-        .unwrap();
-
-        let access_count0 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
-        let key = b"test_key";
-        let value = b"test_value";
-        kv_store.put(key, value).await.unwrap();
-        kv_store
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::MemTable,
-            })
-            .await
-            .unwrap();
-
-        let got = kv_store.get(key).await.unwrap();
-        let access_count1 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
-        assert_eq!(got, Some(Bytes::from_static(value)));
-        assert!(access_count1 > 0);
-        assert!(access_count1 >= access_count0);
-        assert!(lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap() >= 1);
-    }
-
-    #[tokio::test]
-    async fn test_db_records_remote_object_store_reads_but_not_cache_hits() {
-        // given:
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut opts = test_db_options(0, 1024, None);
-        let temp_dir = tempfile::Builder::new()
-            .prefix("objstore_metrics_test_")
-            .tempdir()
-            .unwrap();
-
-        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
-        opts.object_store_cache_options.part_size_bytes = 1024;
-        let path = "/tmp/test_db_records_remote_object_store_reads_but_not_cache_hits";
-        let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(opts)
-            .build()
-            .await
-            .unwrap();
-
-        kv_store.put(b"test_key", b"test_value").await.unwrap();
-        kv_store.flush().await.unwrap();
-        kv_store
-            .flush_with_options(FlushOptions {
-                flush_type: FlushType::MemTable,
-            })
-            .await
-            .unwrap();
-        kv_store.close().await.unwrap();
-
-        let mut reopen_opts = test_db_options(0, 1024, None);
-        let reopen_temp_dir = tempfile::Builder::new()
-            .prefix("objstore_metrics_reopen_")
-            .tempdir()
-            .unwrap();
-        reopen_opts.object_store_cache_options.root_folder = Some(reopen_temp_dir.keep());
-        reopen_opts.object_store_cache_options.part_size_bytes = 1024;
-        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
-        let reopened = Db::builder(path, object_store)
-            .with_settings(reopen_opts)
-            .with_metrics_recorder(metrics_recorder.clone())
-            .build()
-            .await
-            .unwrap();
-
-        let requests_before =
-            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
-
-        // when:
-        let _got = reopened.get(b"test_key").await.unwrap();
-        let requests_after_first =
-            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
-        let got = reopened.get(b"test_key").await.unwrap();
-        let requests_after_second =
-            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
-
-        // then:
-        assert!(requests_after_first > requests_before);
-        assert_eq!(got, Some(Bytes::from_static(b"test_value")));
-        assert_eq!(requests_after_second, requests_after_first);
-        assert_eq!(
-            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "get"),
-            requests_after_first as u64
-        );
-        reopened.close().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn test_db_records_main_and_wal_object_store_requests_separately() {
         // given:
         let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -3656,115 +3549,6 @@ mod tests {
         assert!(wal_hist_after > wal_hist_before);
         assert!(main_hist_after > main_hist_before);
         db.close().await.unwrap();
-    }
-
-    async fn test_object_store_cache_helper(
-        cache_puts_enabled: bool,
-        db_path: &str,
-        expected_cache_parts: Vec<(&str, usize)>,
-    ) -> (Arc<CachedObjectStore>, Db) {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut opts = test_db_options(0, 1024, None);
-        // disable manifest polling to avoid caching manifests non-deterministically
-        opts.manifest_poll_interval = Duration::from_millis(u64::MAX);
-        let temp_dir = tempfile::Builder::new()
-            .prefix("objstore_cache_test_")
-            .tempdir()
-            .unwrap();
-
-        let recorder = MetricsRecorderHelper::noop();
-        let cache_stats = Arc::new(CachedObjectStoreStats::new(&recorder));
-        let part_size = 1024;
-        info!("temp_dir: {:?}", temp_dir.path());
-
-        let cache_storage = Arc::new(FsCacheStorage::new(
-            temp_dir.keep(),
-            None,
-            None,
-            cache_stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
-            Arc::new(DbRand::default()),
-            1000,
-        ));
-
-        let cached_object_store = CachedObjectStore::new(
-            object_store.clone(),
-            cache_storage,
-            part_size,
-            cache_puts_enabled,
-            cache_stats.clone(),
-        )
-        .unwrap();
-
-        let kv_store = Db::builder(db_path, cached_object_store.clone())
-            .with_settings(opts)
-            .build()
-            .await
-            .unwrap();
-        let key = b"test_key";
-        let value = b"test_value";
-        kv_store.put(key, value).await.unwrap();
-        kv_store.flush().await.unwrap();
-
-        // Verify cache behavior
-        for (path, expected_parts) in expected_cache_parts {
-            let entry = cached_object_store
-                .cache_storage
-                .entry(&object_store::path::Path::from(path), part_size);
-            assert_eq!(
-                entry.cached_parts().await.unwrap().len(),
-                expected_parts,
-                "Path: {}",
-                path
-            );
-        }
-
-        (cached_object_store, kv_store)
-    }
-
-    #[tokio::test]
-    async fn test_get_with_object_store_cache_stored_files() {
-        let expected_cache_parts =
-            vec![
-            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
-            // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
-            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 1),
-            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
-            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 0),
-            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
-        ];
-
-        let (_cached_object_store, kv_store) = test_object_store_cache_helper(
-            false, // cache_puts disabled
-            "/tmp/test_kv_store_with_cache_stored_files",
-            expected_cache_parts,
-        )
-        .await;
-
-        kv_store.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_get_with_object_store_cache_put_caching_enabled() {
-        let expected_cache_parts =
-            vec![
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 1),
-            // 1 part is cached because fence_writers refreshes the manifest after writing the fence.
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 1),
-            // The startup fence WAL is zero bytes, so replay does not cache any object parts.
-            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 0),
-            // 1 part is cached because the put with cache_puts enabled should cache the test_key put
-            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 1),
-        ];
-
-        let (_cached_object_store, kv_store) = test_object_store_cache_helper(
-            true, // cache_puts enabled
-            "/tmp/test_kv_store_with_put_cache_enabled",
-            expected_cache_parts,
-        )
-        .await;
-
-        kv_store.close().await.unwrap();
     }
 
     async fn build_database_from_table(
@@ -10897,5 +10681,519 @@ mod tests {
 
         let value_b_cached = reader_b.get(b"key1").await.unwrap();
         assert_eq!(value_b_cached, Some(Bytes::from("value_from_db_b")));
+    }
+
+    mod object_store_cache {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_get_with_object_store_cache_metrics() {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let mut opts = test_db_options(0, 1024, None);
+            let temp_dir = tempfile::Builder::new()
+                .prefix("objstore_cache_test_")
+                .tempdir()
+                .unwrap();
+
+            opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
+            opts.object_store_cache_options.part_size_bytes = 1024;
+            let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+            let kv_store = Db::builder(
+                "/tmp/test_kv_store_with_cache_metrics",
+                object_store.clone(),
+            )
+            .with_settings(opts)
+            .with_db_cache_disabled()
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+            let access_count0 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
+            let key = b"test_key";
+            let value = b"test_value";
+            kv_store.put(key, value).await.unwrap();
+            kv_store
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+                .unwrap();
+
+            // First (cold) get. cache_on_flush is off, so the SST is not cached on
+            // the write. The whole SST is a single cache part, read as three
+            // sub-ranges (index, filter and block). The first is a cold read
+            // that fetches and caches the part (a miss) and the next two are
+            // served from the cache (hits). So three accesses, two hits.
+            let val = kv_store.get(key).await.unwrap();
+            assert_eq!(val, Some(Bytes::from_static(value)));
+            let access_count1 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
+            let hit_count1 = lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap();
+            assert_eq!(
+                access_count1 - access_count0,
+                3,
+                "one point get reads the single-part SST in three sub-ranges"
+            );
+            assert_eq!(
+                hit_count1, 2,
+                "the cold read is a miss; the next two reads hit the warm cache"
+            );
+
+            // Second (warm) get: the object is fully cached, so all three reads hit.
+            let got = kv_store.get(key).await.unwrap();
+            assert_eq!(got, Some(Bytes::from_static(value)));
+            let access_count2 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
+            let hit_count2 = lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap();
+            assert_eq!(
+                access_count2 - access_count1,
+                3,
+                "the second get reads the same three sub-ranges"
+            );
+            assert_eq!(
+                hit_count2 - hit_count1,
+                3,
+                "every read in the warm get is a cache hit"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_db_records_remote_object_store_reads_but_not_cache_hits() {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let mut opts = test_db_options(0, 1024, None);
+            let temp_dir = tempfile::Builder::new()
+                .prefix("objstore_metrics_test_")
+                .tempdir()
+                .unwrap();
+
+            opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
+            opts.object_store_cache_options.part_size_bytes = 1024;
+            opts.manifest_poll_interval = Duration::from_secs(3600);
+            let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+            let path = "/tmp/test_db_records_remote_object_store_reads_but_not_cache_hits";
+            // Disable the in-memory block cache so reads reach the object store
+            // cache layer (the subject of this test) instead of being served from
+            // decoded blocks in memory.
+            let kv_store = Db::builder(path, object_store)
+                .with_settings(opts)
+                .with_db_cache_disabled()
+                .with_metrics_recorder(metrics_recorder.clone())
+                .build()
+                .await
+                .unwrap();
+
+            kv_store.put(b"test_key", b"test_value").await.unwrap();
+            kv_store.flush().await.unwrap();
+            kv_store
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+                .unwrap();
+
+            let requests_before =
+                lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+            let _val = kv_store.get(b"test_key").await.unwrap();
+            let requests_after_first =
+                lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+            let got = kv_store.get(b"test_key").await.unwrap();
+            let requests_after_second =
+                lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+
+            // The cold read misses the object store cache and fetches the SST part
+            // from the remote store; the warm read hits the cache and issues no
+            // remote request.
+            assert_eq!(requests_after_first, requests_before + 1);
+            assert_eq!(got, Some(Bytes::from_static(b"test_value")));
+            assert_eq!(requests_after_second, requests_after_first);
+            assert_eq!(
+                lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "get"),
+                requests_after_first as u64
+            );
+            kv_store.close().await.unwrap();
+        }
+
+        /// Fixture for the object store cache tests.
+        struct ObjectStoreCacheTest {
+            db: Db,
+            store: Arc<CachedObjectStore>,
+            db_path: String,
+            part_size: usize,
+            // Present only when the fixture was built with an on demand compactor.
+            compaction_trigger: Option<Arc<AtomicBool>>,
+        }
+
+        /// Builder for [`ObjectStoreCacheTest`]. Defaults: 1 KiB cache parts, a 1 KiB
+        /// L0 size, both cache admission flags off, and no compactor.
+        struct ObjectStoreCacheTestBuilder {
+            db_path: String,
+            cache_put_policy: CachePutPolicy,
+            part_size: usize,
+            l0_sst_size_bytes: usize,
+            l0_max_ssts: Option<usize>,
+            manifest_poll_interval: Option<Duration>,
+            with_compactor: bool,
+        }
+
+        impl ObjectStoreCacheTestBuilder {
+            fn new(db_path: &str) -> Self {
+                Self {
+                    db_path: db_path.to_string(),
+                    cache_put_policy: CachePutPolicy::default(),
+                    part_size: 1024,
+                    l0_sst_size_bytes: 1024,
+                    l0_max_ssts: None,
+                    manifest_poll_interval: None,
+                    with_compactor: false,
+                }
+            }
+
+            fn cache_on_flush(mut self) -> Self {
+                self.cache_put_policy.cache_on_flush = true;
+                self
+            }
+
+            fn cache_on_compaction(mut self) -> Self {
+                self.cache_put_policy.cache_on_compaction = true;
+                self
+            }
+
+            fn part_size(mut self, part_size: usize) -> Self {
+                self.part_size = part_size;
+                self
+            }
+
+            fn l0_sst_size_bytes(mut self, bytes: usize) -> Self {
+                self.l0_sst_size_bytes = bytes;
+                self
+            }
+
+            fn l0_max_ssts(mut self, max: usize) -> Self {
+                self.l0_max_ssts = Some(max);
+                self
+            }
+
+            fn manifest_poll_interval(mut self, interval: Duration) -> Self {
+                self.manifest_poll_interval = Some(interval);
+                self
+            }
+
+            fn with_on_demand_compactor(mut self) -> Self {
+                self.with_compactor = true;
+                self
+            }
+
+            async fn build(self) -> ObjectStoreCacheTest {
+                let Self {
+                    db_path,
+                    cache_put_policy,
+                    part_size,
+                    l0_sst_size_bytes,
+                    l0_max_ssts,
+                    manifest_poll_interval,
+                    with_compactor,
+                } = self;
+
+                let upstream: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let recorder = MetricsRecorderHelper::noop();
+                let cache_stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+                let temp_dir = tempfile::Builder::new()
+                    .prefix("objstore_cache_test_")
+                    .tempdir()
+                    .unwrap();
+                let cache_storage = Arc::new(FsCacheStorage::new(
+                    temp_dir.keep(),
+                    None,
+                    None,
+                    cache_stats.clone(),
+                    Arc::new(DefaultSystemClock::new()),
+                    Arc::new(DbRand::default()),
+                    1000,
+                ));
+                let store = CachedObjectStore::new(
+                    upstream,
+                    cache_storage,
+                    part_size,
+                    cache_put_policy,
+                    cache_stats,
+                )
+                .unwrap();
+
+                let mut settings = test_db_options(0, l0_sst_size_bytes, None);
+                if let Some(interval) = manifest_poll_interval {
+                    settings.manifest_poll_interval = interval;
+                }
+                if let Some(max) = l0_max_ssts {
+                    settings.l0_max_ssts = max;
+                }
+
+                let mut builder =
+                    Db::builder(db_path.as_str(), store.clone()).with_settings(settings);
+                let compaction_trigger = if with_compactor {
+                    let trigger = Arc::new(AtomicBool::new(false));
+                    let trigger_for_scheduler = trigger.clone();
+                    let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+                        move |_state| trigger_for_scheduler.swap(false, Ordering::SeqCst),
+                    )));
+                    builder = builder.with_compactor_builder(
+                        CompactorBuilder::new(db_path.as_str(), store.clone())
+                            .with_scheduler_supplier(scheduler)
+                            .with_options(fast_compactor_options()),
+                    );
+                    Some(trigger)
+                } else {
+                    None
+                };
+                let db = builder.build().await.unwrap();
+
+                ObjectStoreCacheTest {
+                    db,
+                    store,
+                    db_path,
+                    part_size,
+                    compaction_trigger,
+                }
+            }
+        }
+
+        impl ObjectStoreCacheTest {
+            fn builder(db_path: &str) -> ObjectStoreCacheTestBuilder {
+                ObjectStoreCacheTestBuilder::new(db_path)
+            }
+
+            fn db(&self) -> &Db {
+                &self.db
+            }
+
+            /// A path under the db root, e.g. `sub_path("wal/00..002.sst")`.
+            fn sub_path(&self, suffix: &str) -> object_store::path::Path {
+                object_store::path::Path::from(format!("{}/{}", self.db_path, suffix))
+            }
+
+            fn compacted_sst_path(&self, ulid: ulid::Ulid) -> object_store::path::Path {
+                object_store::path::Path::from(format!("{}/compacted/{}.sst", self.db_path, ulid))
+            }
+
+            async fn cached_part_count(&self, path: &object_store::path::Path) -> usize {
+                self.store
+                    .cache_storage
+                    .entry(path, self.part_size)
+                    .cached_parts()
+                    .await
+                    .unwrap()
+                    .len()
+            }
+
+            async fn assert_cached(&self, path: &object_store::path::Path, expected_parts: usize) {
+                assert_eq!(
+                    self.cached_part_count(path).await,
+                    expected_parts,
+                    "expected {path} to be cached as {expected_parts} part(s)"
+                );
+            }
+
+            /// Asserts each of `suffixes` (relative to the db root) is uncached.
+            async fn assert_uncached(&self, suffixes: &[&str]) {
+                for suffix in suffixes {
+                    let path = self.sub_path(suffix);
+                    assert_eq!(
+                        self.cached_part_count(&path).await,
+                        0,
+                        "expected {suffix} to be uncached"
+                    );
+                }
+            }
+
+            /// Lists the compacted SSTs currently in the object store.
+            async fn compacted_locations(&self) -> Vec<object_store::path::Path> {
+                let prefix = self.sub_path("compacted");
+                self.store
+                    .list(Some(&prefix))
+                    .map(|meta| meta.unwrap().location)
+                    .collect()
+                    .await
+            }
+
+            /// The compaction output SSTs (sorted run members) in the db's state.
+            fn compacted_sst_ulids(&self) -> Vec<ulid::Ulid> {
+                let state = self.db.inner.state.read();
+                state
+                    .state()
+                    .core()
+                    .tree
+                    .compacted
+                    .iter()
+                    .flat_map(|sr| sr.sst_views.iter())
+                    .map(|v| v.sst.id.unwrap_compacted_id())
+                    .collect()
+            }
+
+            /// Signals the on demand compactor to run once.
+            fn trigger_compaction(&self) {
+                self.compaction_trigger
+                    .as_ref()
+                    .expect("fixture built without an on demand compactor")
+                    .store(true, Ordering::SeqCst);
+            }
+
+            /// Waits until a sorted run lands in the db's state, or panics on timeout.
+            async fn wait_for_compacted_run(&self, timeout: Duration) {
+                tokio::time::timeout(timeout, async {
+                    loop {
+                        let has_run = !self
+                            .db
+                            .inner
+                            .state
+                            .read()
+                            .state()
+                            .core()
+                            .tree
+                            .compacted
+                            .is_empty();
+                        if has_run {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("compaction did not produce a sorted run in time");
+            }
+
+            async fn close(self) {
+                self.db.close().await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn test_get_with_object_store_cache_stored_files() {
+            // cache_on_flush admits the L0 SST produced by a memtable flush, so the
+            // compacted SST is stored in the cache. Manifest reads are untagged and
+            // bypass the cache, and WAL writes are never cached.
+            let fixture =
+                ObjectStoreCacheTest::builder("/tmp/test_kv_store_with_cache_stored_files")
+                    .cache_on_flush()
+                    .cache_on_compaction()
+                    .build()
+                    .await;
+
+            // A foreground write plus a flush, so the asserted WAL and manifest
+            // objects exist.
+            fixture.db().put(b"test_key", b"test_value").await.unwrap();
+            fixture.db().flush().await.unwrap();
+
+            fixture
+                .assert_uncached(&[
+                    "manifest/00000000000000000001.manifest",
+                    // The fence_writers manifest refresh (read) bypasses the cache.
+                    "manifest/00000000000000000002.manifest",
+                    // The startup fence WAL is zero bytes, so replay caches nothing.
+                    "wal/00000000000000000001.sst",
+                    // WAL writes are skipped by policy regardless of the admission flags.
+                    "wal/00000000000000000002.sst",
+                ])
+                .await;
+
+            // Flush the memtable to L0 so a compacted SST is written. With
+            // cache_on_flush enabled, that write is admitted to the cache.
+            fixture
+                .db()
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+                .unwrap();
+
+            // The single explicit memtable flush produces exactly one L0 SST,
+            // cached as one part (the key/value is well under the 1 KiB part size).
+            let compacted = fixture.compacted_locations().await;
+            assert_eq!(compacted.len(), 1, "expected exactly one compacted SST");
+            fixture.assert_cached(&compacted[0], 1).await;
+            fixture.close().await;
+        }
+
+        #[tokio::test]
+        async fn test_object_store_cache_caches_compaction_output() {
+            let fixture =
+                ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_compaction_output")
+                    .cache_on_compaction()
+                    .manifest_poll_interval(Duration::from_millis(50))
+                    .with_on_demand_compactor()
+                    .build()
+                    .await;
+
+            // Write enough that the memtable crosses l0_sst_size_bytes and flushes
+            // to L0
+            for i in 0..100u32 {
+                let key = format!("k{:04}", i);
+                fixture.db().put(key.as_bytes(), &[7u8; 64]).await.unwrap();
+            }
+            fixture.db().flush().await.unwrap();
+
+            // Trigger compaction and wait for a sorted run to land in the state.
+            fixture.trigger_compaction();
+            fixture
+                .wait_for_compacted_run(Duration::from_secs(10))
+                .await;
+
+            // The compaction merges the L0 SSTs into a single output SST, cached
+            // as 7 parts.
+            let ulids = fixture.compacted_sst_ulids();
+            assert_eq!(ulids.len(), 1, "expected exactly one compaction output SST");
+            fixture
+                .assert_cached(&fixture.compacted_sst_path(ulids[0]), 7)
+                .await;
+
+            fixture.close().await;
+        }
+
+        /// End to end check that a compaction output larger than BufWriter's 10 MiB
+        /// multipart threshold is cached through the multipart path (precisely, by
+        /// tag, not via the single-PUT path fallback).
+        #[tokio::test]
+        async fn test_object_store_cache_caches_large_multipart_compaction_output() {
+            const MIB: usize = 1024 * 1024;
+
+            // 1 MiB cache parts so a ~20 MiB output yields ~20 part files (not 20k).
+            // 4 MiB L0 SSTs and a high l0_max_ssts so writing ~20 MiB across several
+            // L0s does not hit write backpressure before the (on demand) compaction.
+            let fixture =
+                ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_large_multipart")
+                    .cache_on_compaction()
+                    .part_size(MIB)
+                    .l0_sst_size_bytes(4 * MIB)
+                    .l0_max_ssts(100)
+                    .manifest_poll_interval(Duration::from_millis(50))
+                    .with_on_demand_compactor()
+                    .build()
+                    .await;
+
+            // 20 distinct keys with 1 MiB values: ~20 MiB of non-overlapping data
+            // that compacts into a single output SST above the 10 MiB threshold.
+            for i in 0..20u32 {
+                let key = format!("k{:04}", i);
+                fixture
+                    .db()
+                    .put(key.as_bytes(), &vec![i as u8; MIB])
+                    .await
+                    .unwrap();
+            }
+            fixture.db().flush().await.unwrap();
+
+            fixture.trigger_compaction();
+            fixture
+                .wait_for_compacted_run(Duration::from_secs(30))
+                .await;
+
+            // The ~20 MiB of data compacts into one output SST cached as 21 parts
+            // confirms the multipart path was taken, since a single PUT is capped
+            // at 10 MiB.
+            let ulids = fixture.compacted_sst_ulids();
+            assert_eq!(ulids.len(), 1, "expected exactly one compaction output SST");
+            fixture
+                .assert_cached(&fixture.compacted_sst_path(ulids[0]), 21)
+                .await;
+
+            fixture.close().await;
+        }
     }
 }

@@ -7,5 +7,6 @@ pub mod admission;
 pub mod stats;
 
 mod object_store;
+pub(crate) mod policy;
 mod storage;
 mod storage_fs;
