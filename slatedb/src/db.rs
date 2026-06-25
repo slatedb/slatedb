@@ -5946,6 +5946,175 @@ mod tests {
         reader.close().await.unwrap();
     }
 
+    // Reproduces a lost-write race: a batch is acked durable (its WAL is
+    // flushed) yet is dropped on restart, because a concurrent memtable
+    // freeze/flush advances `replay_after_wal_id` past the batch's WAL *before*
+    // the batch is applied to the memtable.
+    //
+    // Timeline (W = the racing write batch):
+    //   1. The write task appends W to the WAL (making it flushable) and then
+    //      pauses, via failpoint, *before* applying W to the memtable.
+    //   2. A concurrent flush (e.g. an explicit `flush()`/`create_checkpoint`)
+    //      flushes the WAL -- advancing recent_flushed_wal_id to cover W and
+    //      acking W as durable -- and then freezes+flushes the memtable. The
+    //      frozen memtable does NOT contain W, yet it is stamped with
+    //      recent_flushed_wal_id, so the persisted manifest advances
+    //      replay_after_wal_id past W's WAL.
+    //   3. The write task resumes and applies W to the *new* memtable; the write
+    //      completes and is reported durable.
+    //   4. Crash + restart: replay begins after W's WAL, so W is gone.
+    //
+    // The final assertion (W survives restart) FAILS on the buggy code,
+    // demonstrating the data loss.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_write_lost_when_freeze_races_wal_flush() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_write_loss_race");
+
+        // Disable automatic flushing so the test drives the race deterministically:
+        // no flush timer (flush_interval = None) and a large size threshold so a
+        // couple of tiny writes never trigger a size-based WAL flush or memtable
+        // freeze on their own.
+        let mut options = test_db_options(0, 64 * 1024 * 1024, None);
+        options.flush_interval = None;
+
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(options)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key_base = b"base";
+        let val_base = b"base-value";
+        let key_w = b"lost";
+        let val_w = b"lost-value";
+
+        let non_durable = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        let durable = WriteOptions {
+            await_durable: true,
+            ..Default::default()
+        };
+
+        // Baseline write: leaves the active memtable non-empty (but WITHOUT W) so
+        // the freeze during the race produces a real immutable memtable to flush.
+        // Flush its WAL so the durable WAL boundary is settled before W is issued.
+        db.put_with_options(key_base, val_base, &PutOptions::default(), &non_durable)
+            .await
+            .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+        let wal_boundary_before_w = db.inner.wal_buffer.recent_flushed_wal_id();
+
+        // Park the write task after it appends W to the WAL but before it applies
+        // W to the memtable.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-batch-before-memtable-apply",
+            "pause",
+        )
+        .unwrap();
+
+        // Issue W on a background task; it blocks until we lift the pause.
+        let db_writer = db.clone();
+        let join = tokio::spawn(async move {
+            db_writer
+                .put_with_options(key_w, val_w, &PutOptions::default(), &durable)
+                .await
+        });
+
+        // W is being parked at the failpoint, after it is appended to the WAL but
+        // before it is applied to the memtable. Drive WAL flushes until the
+        // durable WAL boundary advances past its pre-W value. That boundary --
+        // recent_flushed_wal_id, the same value copied into replay_after_wal_id --
+        // only moves when a WAL SST is flushed, so once it advances we know W's
+        // append was captured in a flushed WAL (and W is acked durable). A
+        // FlushType::Wal flush is a no-op until W has actually been appended.
+        let mut wal_id_covering_w = wal_boundary_before_w;
+        for _ in 0..3000 {
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+            let flushed = db.inner.wal_buffer.recent_flushed_wal_id();
+            if flushed > wal_boundary_before_w {
+                wal_id_covering_w = flushed;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            wal_id_covering_w > wal_boundary_before_w,
+            "timed out waiting for W's WAL to be flushed"
+        );
+
+        // Now freeze + flush the memtable through the PUBLIC flush API. The frozen
+        // memtable holds key_base but NOT W, yet it is stamped with
+        // recent_flushed_wal_id, so the manifest's replay boundary is advanced to
+        // (and including) W's WAL. (The WAL flush this performs internally is a
+        // no-op -- W's WAL was already flushed above.) This freeze-after-WAL-flush
+        // is the exact sequence `flush_with_options(MemTable)` and
+        // `create_checkpoint(All)` run concurrently with writes.
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let replay_after = db.inner.state.read().state().core().replay_after_wal_id;
+        assert_eq!(
+            replay_after, wal_id_covering_w,
+            "replay boundary was advanced to (and including) the WAL that holds W"
+        );
+
+        // Resume the write task: W lands in the new memtable and the write
+        // completes -- and is acked durable.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-batch-before-memtable-apply",
+            "off",
+        )
+        .unwrap();
+        join.await.unwrap().expect("W was acked durable");
+
+        // --- Crash + restart. Do NOT close `db` -- closing would flush the live
+        // memtable and persist W, masking the bug. Reopen on the same store and
+        // let it replay from the manifest. ---
+        let mut reopen_options = test_db_options(0, 64 * 1024 * 1024, None);
+        reopen_options.flush_interval = None;
+        let reopened = Db::builder(path.clone(), object_store.clone())
+            .with_settings(reopen_options)
+            .build()
+            .await
+            .unwrap();
+
+        // key_base survived: it was flushed to L0.
+        assert_eq!(
+            reopened.get(key_base).await.unwrap(),
+            Some(Bytes::copy_from_slice(val_base)),
+            "key_base should survive restart via L0"
+        );
+
+        // W was acked durable but is gone after restart: replay skipped its WAL.
+        // This assertion FAILS on the buggy code, reproducing the lost write.
+        assert_eq!(
+            reopened.get(key_w).await.unwrap(),
+            Some(Bytes::copy_from_slice(val_w)),
+            "acked-durable write W must survive restart, but it was lost: the \
+             memtable freeze advanced replay_after_wal_id past W's WAL before W \
+             was applied to the memtable"
+        );
+
+        reopened.close().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_recover_imm_from_wal_after_flush_error() {
         let fp_registry = Arc::new(FailPointRegistry::new());

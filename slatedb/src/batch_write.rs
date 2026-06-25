@@ -202,6 +202,16 @@ impl DbInner {
             self.wal_buffer.maybe_trigger_flush()?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
+            // Test-only sync point: the batch is now durable-able (appended to the
+            // WAL and flushable) but has NOT been applied to the memtable yet. A
+            // test pauses here to let a concurrent freeze/flush advance
+            // `replay_after_wal_id` past this batch's WAL before the entry lands in
+            // the memtable, exercising the write-loss race.
+            fail_point!(
+                Arc::clone(&self.fp_registry),
+                "write-batch-before-memtable-apply",
+                |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
+            );
             self.write_entries_to_memtable(entries, touched_segments);
             wal_watcher
         } else {
