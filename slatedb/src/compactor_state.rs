@@ -281,7 +281,7 @@ impl CompactionStatus {
     /// State transitions made by CompactionWorker that should be accepted into local state
     /// during [`CompactorState::merge_remote_compactions`]
     ///
-    /// For known compactions (Occupied), accept these remote transitions:
+    /// For known active compactions (Occupied), accept these remote transitions:
     ///   - `Compacted`: the worker's signal that execution finished; the
     ///     coordinator must commit the output SSTs to the manifest.
     ///   - `Scheduled → Running`: a worker has claimed the job; adopt the
@@ -297,15 +297,21 @@ impl CompactionStatus {
     ///   - `Running -> Running`: should accept heartbeat updates when heartbeats
     ///     land for a job that is already in local state
     ///
+    /// Terminal local states are not overwritten by a remote `Compacted` entry.
+    /// The coordinator writes the manifest before `.compactions`, so local
+    /// `Completed`/`Failed` can be ahead of a stale persisted `Compacted` result.
+    ///
     /// All other remote updates are ignored.
     fn should_adopt_state_transition(&self, updated_status: CompactionStatus) -> bool {
         match self {
+            Self::Submitted => matches!(updated_status, Self::Compacted),
             Self::Scheduled => matches!(updated_status, Self::Running | Self::Compacted),
             Self::Running => matches!(
                 updated_status,
                 Self::Scheduled | Self::Running | Self::Compacted
             ),
-            _ => matches!(updated_status, Self::Compacted),
+            Self::Compacted => matches!(updated_status, Self::Compacted),
+            Self::Completed | Self::Failed => false,
         }
     }
 }
@@ -875,27 +881,25 @@ impl CompactorState {
             merged.insert(compaction.id(), compaction.clone());
         }
 
-        // For compactions not in local state (Vacant), accept new submissions and
-        // retained terminal entries. On a write conflict, the retry path reloads and
-        // merges the persisted `.compactions` object before writing again. At that
-        // point, local state may already have completed a newer compaction and pruned
-        // the previous terminal entry, while persisted state still contains that older
-        // Completed/Failed entry. Treat it as retained history and let the combined
-        // retain pass choose the newest terminal entry. Active states beyond Submitted
-        // are different: the coordinator must have seen those entries before workers
-        // can claim, run, or compact them, so a vacant Scheduled/Running/Compacted
-        // entry is anomalous.
+        // For compactions not in local state (Vacant), accept new submissions,
+        // worker-completed results, and retained terminal entries. On a write
+        // conflict, the retry path reloads and merges the persisted `.compactions`
+        // object before writing again. At that point, local state may already have
+        // committed or pruned an entry while persisted state still contains an older
+        // Compacted/Completed/Failed view. Insert those entries and let the commit
+        // path or combined retain pass resolve them. Scheduled/Running are different:
+        // they carry no finished output and require prior coordinator ownership, so
+        // seeing them absent from local state remains anomalous.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
                 Entry::Vacant(v) => match compaction.status() {
                     CompactionStatus::Submitted
+                    | CompactionStatus::Compacted
                     | CompactionStatus::Completed
                     | CompactionStatus::Failed => {
                         v.insert(compaction.clone());
                     }
-                    CompactionStatus::Scheduled
-                    | CompactionStatus::Running
-                    | CompactionStatus::Compacted => {
+                    CompactionStatus::Scheduled | CompactionStatus::Running => {
                         error!(
                             "skipping remote active compaction absent from local state [compaction={:?}]",
                             compaction,
