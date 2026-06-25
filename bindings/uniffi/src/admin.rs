@@ -142,7 +142,7 @@ impl Admin {
         self.inner
             .refresh_checkpoint(
                 try_checkpoint_id_from_str(&id)?,
-                lifetime_ms.map(|v| Duration::from_millis(v)),
+                lifetime_ms.map(Duration::from_millis),
             )
             .await
             .map_err(Into::into)

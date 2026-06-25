@@ -364,11 +364,11 @@ impl TryFrom<&CheckpointOptions> for slatedb::config::CheckpointOptions {
         value: &CheckpointOptions,
     ) -> Result<slatedb::config::CheckpointOptions, Self::Error> {
         Ok(slatedb::config::CheckpointOptions {
-            lifetime: value.lifetime_ms.map(|v| Duration::from_millis(v)),
+            lifetime: value.lifetime_ms.map(Duration::from_millis),
             source: value
                 .source
                 .as_ref()
-                .map(|v| try_checkpoint_id_from_str(&v))
+                .map(|v| try_checkpoint_id_from_str(v))
                 .transpose()?,
             name: value.name.clone(),
         })

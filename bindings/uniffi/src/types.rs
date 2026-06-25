@@ -774,7 +774,7 @@ fn filter_format_from_debug(value: &impl std::fmt::Debug) -> FilterFormat {
 }
 
 pub(crate) fn try_checkpoint_id_from_str(value: &str) -> Result<Uuid, Error> {
-    Uuid::parse_str(&value)
+    Uuid::parse_str(value)
         .map_err(|err| Error::from(SlateDbError::InvalidCheckpointId { source: err }))
 }
 
