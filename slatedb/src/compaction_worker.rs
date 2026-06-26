@@ -359,24 +359,56 @@ impl CompactionWorkerHandler {
 
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
-            let mut to_claim: Vec<Compaction> = Vec::new();
+
+            // It's possible this worker tries to claim a job that it's already running.
+            // This can happen if coordinator hasn't seen this worker's heartbeat yet,
+            // and transitions the job back to `Submitted`. This worker can reclaim the
+            // job (which it does in the dirty_compactions insert, above), but should
+            // not dispatch it to the executor again. To prevent this, we skip jobs
+            // that are already in `active_jobs`. The `bool` here is true if the job is
+            // already running.
+            let mut to_claim: Vec<(Compaction, bool)> = Vec::new();
+
             for c in dirty_compactions
                 .value
                 .iter_with_status(&[CompactionStatus::Scheduled])
                 .filter(|c| c.worker().is_none())
             {
-                if to_claim.len() >= capacity {
+                // Don't count already running jobs toward new capacity, since they're already included.
+                if to_claim
+                    .iter()
+                    .filter(|(_, already_running)| !already_running)
+                    .count()
+                    >= capacity
+                {
                     break;
                 }
+
+                let already_running = if let Some(existing) = self.active_jobs.get(&c.id()) {
+                    // We should never see two compactions with the same ID but different specs.
+                    assert_eq!(
+                        existing.spec(),
+                        c.spec(),
+                        "compaction spec changed between claims [id={}, existing_spec={:?}, new_spec={:?}]",
+                        c.id(),
+                        existing.spec(),
+                        c.spec()
+                    );
+                    true
+                } else {
+                    false
+                };
+
                 // Drain specs are coordinator-local, and a tiered spec without
                 // a destination can never be executed; neither can become
                 // valid later, so skip them rather than claim and release.
                 if !c.spec().is_drain() && c.spec().destination().is_some() {
-                    to_claim.push(
+                    to_claim.push((
                         c.clone()
                             .with_status(CompactionStatus::Running)
                             .with_worker(Some(worker_spec.clone())),
-                    );
+                        already_running,
+                    ));
                 } else {
                     warn!("skipping unrunnable compaction spec [id={}]", c.id());
                 }
@@ -390,12 +422,23 @@ impl CompactionWorkerHandler {
                 return Ok(());
             }
 
-            for c in &to_claim {
+            for (c, _) in to_claim.iter() {
                 dirty_compactions.value.insert(c.clone());
             }
 
             match stored.update(dirty_compactions).await {
-                Ok(()) => break to_claim,
+                Ok(()) => {
+                    break to_claim
+                        .iter()
+                        .filter_map(|(c, already_running)| {
+                            if *already_running {
+                                None
+                            } else {
+                                Some(c.clone())
+                            }
+                        })
+                        .collect::<Vec<Compaction>>()
+                }
                 Err(e) if e.is_sequenced_write_conflict() => {
                     debug!("claim conflict on .compactions; refreshing and retrying");
                     continue;
@@ -415,25 +458,6 @@ impl CompactionWorkerHandler {
         let manifest = self.manifest_store.read_latest_manifest().await?;
 
         for compaction in claimed {
-            // It's possible this worker is claiming a job that it's already running.
-            // This can happen if coordinator hasn't seen this worker's heartbeat yet,
-            // and transitions the job back to `Submitted`. This worker can reclaim the
-            // job (which it does in the dirty_compactions insert, above), but should
-            // not dispatch it to the executor again. To prevent this, we skip jobs
-            // that are already in `active_jobs`.
-            if let Some(existing) = self.active_jobs.get(&compaction.id()) {
-                // We should never see two compactions with the same ID but different specs.
-                assert_eq!(
-                    existing.spec(),
-                    compaction.spec(),
-                    "compaction spec changed between claims [id={}, existing_spec={:?}, new_spec={:?}]",
-                    compaction.id(),
-                    existing.spec(),
-                    compaction.spec()
-                );
-                continue;
-            }
-
             match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
                 Ok(args) => {
                     info!(
