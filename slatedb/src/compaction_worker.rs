@@ -395,19 +395,7 @@ impl CompactionWorkerHandler {
             }
 
             match stored.update(dirty_compactions).await {
-                Ok(()) => {
-                    // It's possible this worker is claiming a job that it's already running.
-                    // This can happen if coordinator hasn't seen this worker's heartbeat yet,
-                    // and transitions the job back to `Submitted`. This worker should reclaim
-                    // the job (which it does in the dirty_compactions insert, above), but
-                    // should not dispatch it to the executor again. To prevent this, we filter
-                    // jobs that are already in `active_jobs` before returning to `claimed`,
-                    // which would result in a double-dispatch to the executor.
-                    break to_claim
-                        .into_iter()
-                        .filter(|c| !self.active_jobs.contains_key(&c.id()))
-                        .collect::<Vec<_>>();
-                }
+                Ok(()) => break to_claim,
                 Err(e) if e.is_sequenced_write_conflict() => {
                     debug!("claim conflict on .compactions; refreshing and retrying");
                     continue;
@@ -427,6 +415,25 @@ impl CompactionWorkerHandler {
         let manifest = self.manifest_store.read_latest_manifest().await?;
 
         for compaction in claimed {
+            // It's possible this worker is claiming a job that it's already running.
+            // This can happen if coordinator hasn't seen this worker's heartbeat yet,
+            // and transitions the job back to `Submitted`. This worker can reclaim the
+            // job (which it does in the dirty_compactions insert, above), but should
+            // not dispatch it to the executor again. To prevent this, we skip jobs
+            // that are already in `active_jobs`.
+            if let Some(existing) = self.active_jobs.get(&compaction.id()) {
+                // We should never see two compactions with the same ID but different specs.
+                assert_eq!(
+                    existing.spec(),
+                    compaction.spec(),
+                    "compaction spec changed between claims [id={}, existing_spec={:?}, new_spec={:?}]",
+                    compaction.id(),
+                    existing.spec(),
+                    compaction.spec()
+                );
+                continue;
+            }
+
             match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
                 Ok(args) => {
                     info!(
