@@ -762,7 +762,6 @@ pub struct AdminBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
-    compactor_builder: Option<CompactorBuilder<P>>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -776,7 +775,6 @@ impl<P: Into<Path>> AdminBuilder<P> {
             rand: Arc::new(DbRand::default()),
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
-            compactor_builder: None,
         }
     }
 
@@ -815,11 +813,6 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
-    pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
-        self.compactor_builder = Some(compactor_builder);
-        self
-    }
-
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         // No retrying object stores here, since we don't want to retry admin operations
@@ -830,9 +823,6 @@ impl<P: Into<Path>> AdminBuilder<P> {
             rand: self.rand,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
-            compactor_builder: self
-                .compactor_builder
-                .map(|builder| builder.into_path_builder()),
         }
     }
 }
@@ -1017,7 +1007,6 @@ pub(crate) struct CompactorHandlers {
 /// Builder for creating new Compactor instances.
 ///
 /// This provides a fluent API for configuring a Compactor object.
-#[derive(Clone)]
 pub struct CompactorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,

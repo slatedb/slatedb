@@ -51,7 +51,6 @@ pub struct Admin {
     #[cfg(feature = "compaction_filters")]
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
-    pub(crate) compactor_builder: Option<crate::CompactorBuilder<Path>>,
 }
 
 impl Admin {
@@ -366,19 +365,14 @@ impl Admin {
         cancellation_token: CancellationToken,
         options: crate::config::CompactorOptions,
     ) -> Result<(), crate::Error> {
-        let builder = match self.compactor_builder.as_ref() {
-            Some(builder) => builder.clone(),
-            None => crate::CompactorBuilder::new(
-                self.path.clone(),
-                self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            ),
-        };
-
         #[allow(unused_mut)]
-        let mut builder = builder
-            .with_options(options)
-            .with_system_clock(self.system_clock.clone())
-            .with_seed(self.rand.rng().next_u64());
+        let mut builder = crate::CompactorBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_options(options)
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.rng().next_u64());
 
         #[cfg(feature = "compaction_filters")]
         if let Some(supplier) = &self.compaction_filter_supplier {
