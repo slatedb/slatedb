@@ -59,7 +59,7 @@
 //! The coordinator emits complementary metrics (`jobs_claimed`, `jobs_reclaimed`,
 //! `worker_last_heartbeat_ms`) on its own recorder.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -214,7 +214,7 @@ pub(crate) struct CompactionWorkerHandler {
     /// Compactions currently being executed by this worker (claimed but not
     /// yet `Compacted`). Used to gate capacity and to know what to reset on
     /// graceful shutdown.
-    active_jobs: BTreeSet<Ulid>,
+    active_jobs: BTreeMap<Ulid, Compaction>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
     /// absence on early ticks.
@@ -243,7 +243,7 @@ impl CompactionWorkerHandler {
             manifest_store,
             executor,
             clock,
-            active_jobs: BTreeSet::new(),
+            active_jobs: BTreeMap::new(),
             stored: None,
             rand,
             fp_registry,
@@ -357,6 +357,8 @@ impl CompactionWorkerHandler {
             stored.refresh().await?;
             let mut dirty_compactions = stored.prepare_dirty()?;
 
+            let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
+            let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
             let mut to_claim: Vec<Compaction> = Vec::new();
             for c in dirty_compactions
                 .value
@@ -370,7 +372,11 @@ impl CompactionWorkerHandler {
                 // a destination can never be executed; neither can become
                 // valid later, so skip them rather than claim and release.
                 if !c.spec().is_drain() && c.spec().destination().is_some() {
-                    to_claim.push(c.clone());
+                    to_claim.push(
+                        c.clone()
+                            .with_status(CompactionStatus::Running)
+                            .with_worker(Some(worker_spec.clone())),
+                    );
                 } else {
                     warn!("skipping unrunnable compaction spec [id={}]", c.id());
                 }
@@ -383,15 +389,8 @@ impl CompactionWorkerHandler {
                 return Ok(());
             }
 
-            let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
-            let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
-
             for c in &to_claim {
-                dirty_compactions.value.insert(
-                    c.clone()
-                        .with_status(CompactionStatus::Running)
-                        .with_worker(Some(worker_spec.clone())),
-                );
+                dirty_compactions.value.insert(c.clone());
             }
             match stored.update(dirty_compactions).await {
                 Ok(()) => break to_claim,
@@ -421,7 +420,7 @@ impl CompactionWorkerHandler {
                         self.worker_id,
                         compaction.id()
                     );
-                    self.active_jobs.insert(compaction.id());
+                    self.active_jobs.insert(compaction.id(), compaction.clone());
                     self.job_progress.insert(
                         compaction.id(),
                         JobProgressState {
@@ -447,7 +446,7 @@ impl CompactionWorkerHandler {
     }
 
     /// Writes a heartbeat for `compaction_id`, updating `last_heartbeat_ms`
-    /// and (when provided) the current context snapshot.
+    /// and (when provided) the current byte count and context snapshot.
     /// Only writes if this worker still owns the entry.
     ///
     /// Returns `Ok(Some(ms))` with the persisted heartbeat timestamp iff a
@@ -463,6 +462,7 @@ impl CompactionWorkerHandler {
     async fn write_heartbeat(
         &mut self,
         compaction_id: Ulid,
+        bytes_processed: Option<u64>,
         ctx: Option<CompactionContext>,
     ) -> Result<Option<u64>, SlateDBError> {
         loop {
@@ -487,7 +487,10 @@ impl CompactionWorkerHandler {
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
             let new_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
-            let mut updated_compaction = existing.with_worker(Some(new_spec));
+            let mut updated_compaction = existing.with_worker(Some(new_spec.clone()));
+            if let Some(bytes_processed) = bytes_processed {
+                updated_compaction.set_bytes_processed(bytes_processed);
+            }
             if let Some(ctx) = ctx.clone() {
                 updated_compaction.set_ctx(Some(ctx));
             }
@@ -498,6 +501,9 @@ impl CompactionWorkerHandler {
                         "wrote heartbeat [worker_id={}, id={}, now_ms={}]",
                         self.worker_id, compaction_id, now_ms
                     );
+                    if let Some(active_job) = self.active_jobs.get_mut(&compaction_id) {
+                        active_job.set_worker(Some(new_spec));
+                    }
                     return Ok(Some(now_ms));
                 }
                 Err(e) if e.is_sequenced_write_conflict() => continue,
@@ -560,6 +566,11 @@ impl CompactionWorkerHandler {
             )
         };
 
+        if let Some(active_job) = self.active_jobs.get_mut(&id) {
+            active_job.set_bytes_processed(bytes_processed);
+            active_job.set_ctx(Some(ctx.clone()));
+        }
+
         if !bytes_trigger && !ctx_changed {
             return Ok(());
         }
@@ -570,7 +581,10 @@ impl CompactionWorkerHandler {
         // in-memory throttling stays consistent with the durable entry.
         let new_sst_count = total_output_ssts(ctx.subcompactions());
         let new_ctx = ctx_changed.then(|| ctx.clone());
-        if let Some(hb_ms) = self.write_heartbeat(id, new_ctx).await? {
+        if let Some(hb_ms) = self
+            .write_heartbeat(id, Some(bytes_processed), new_ctx)
+            .await?
+        {
             let state = self
                 .job_progress
                 .get_mut(&id)
@@ -609,7 +623,7 @@ impl CompactionWorkerHandler {
     /// consistent. A skipped write (entry gone / ownership lost) is a no-op, so
     /// this never resurrects a job that was already reclaimed mid-plan.
     async fn handle_planning_heartbeat(&mut self, id: Ulid) -> Result<(), SlateDBError> {
-        if let Some(hb_ms) = self.write_heartbeat(id, None).await? {
+        if let Some(hb_ms) = self.write_heartbeat(id, None, None).await? {
             if let Some(state) = self.job_progress.get_mut(&id) {
                 state.last_hb_ms = hb_ms;
             }
@@ -850,7 +864,7 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         self.executor.stop();
         self.job_progress.clear();
         let claimed = std::mem::take(&mut self.active_jobs);
-        for id in claimed {
+        for (id, _) in claimed {
             if let Err(e) = self.release_claim(id).await {
                 error!(
                     "failed to release claim on shutdown [worker_id={}, id={}, error={:?}]",
@@ -1034,8 +1048,10 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].compaction_id, id);
 
-        // And the worker tracks the job locally.
-        assert!(fx.handler.active_jobs.contains(&id));
+        // And the worker tracks the full running compaction locally.
+        let active = fx.handler.active_jobs.get(&id).expect("active job missing");
+        assert_eq!(active.status(), CompactionStatus::Running);
+        assert_eq!(active.worker().unwrap().worker_id, fx.worker_id);
     }
 
     #[tokio::test]
@@ -1098,8 +1114,8 @@ mod tests {
         assert_eq!(c.output_ssts()[0].id, output_handle.id);
         // worker_id is still attached (the coordinator clears it on commit).
         assert_eq!(c.worker().unwrap().worker_id, fx.worker_id);
-        // Active set is drained on finish.
-        assert!(!fx.handler.active_jobs.contains(&id));
+        // Active jobs are drained on finish.
+        assert!(!fx.handler.active_jobs.contains_key(&id));
     }
 
     #[tokio::test]
@@ -1119,7 +1135,7 @@ mod tests {
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
-        assert!(!fx.handler.active_jobs.contains(&id));
+        assert!(!fx.handler.active_jobs.contains_key(&id));
     }
 
     #[tokio::test]
@@ -1147,8 +1163,24 @@ mod tests {
         let id2 = Ulid::from_parts(2, 0);
         let id3 = Ulid::from_parts(3, 0);
 
-        let active_jobs = BTreeSet::from([id3, id1, id2]);
-        let release_order = active_jobs.into_iter().collect::<Vec<_>>();
+        let active_jobs = BTreeMap::from([
+            (
+                id3,
+                Compaction::new(id3, CompactionSpec::new(vec![], 0))
+                    .with_status(CompactionStatus::Running),
+            ),
+            (
+                id1,
+                Compaction::new(id1, CompactionSpec::new(vec![], 0))
+                    .with_status(CompactionStatus::Running),
+            ),
+            (
+                id2,
+                Compaction::new(id2, CompactionSpec::new(vec![], 0))
+                    .with_status(CompactionStatus::Running),
+            ),
+        ]);
+        let release_order = active_jobs.into_keys().collect::<Vec<_>>();
 
         assert_eq!(release_order, vec![id1, id2, id3]);
     }
@@ -1252,6 +1284,13 @@ mod tests {
             worker.last_heartbeat_ms
         );
         assert_eq!(c.ctx(), Some(&ctx));
+        let active = fx.handler.active_jobs.get(&id).expect("active job missing");
+        assert_eq!(active.bytes_processed(), 1000);
+        assert_eq!(active.ctx(), Some(&ctx));
+        assert_eq!(
+            active.worker().unwrap().last_heartbeat_ms,
+            worker.last_heartbeat_ms
+        );
         let ctx = c.ctx().unwrap();
         assert_eq!(
             0,
@@ -1260,6 +1299,49 @@ mod tests {
                 .map(|s| s.output_ssts().len())
                 .sum::<usize>()
         );
+    }
+
+    #[tokio::test]
+    async fn test_worker_updates_active_job_on_planning_heartbeat() {
+        use tokio::time::pause;
+        pause();
+
+        let mock_clock = Arc::new(MockSystemClock::new());
+        mock_clock.set(1000);
+        let clock: Arc<dyn SystemClock> = mock_clock.clone();
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-planning-hb",
+            clock,
+            CompactionWorkerOptions::default(),
+        )
+        .await;
+        let id = Ulid::from_parts(5, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        let initial_hb = fx
+            .handler
+            .active_jobs
+            .get(&id)
+            .expect("active job missing")
+            .worker()
+            .expect("worker spec missing")
+            .last_heartbeat_ms;
+        mock_clock.advance(Duration::from_secs(2)).await;
+
+        fx.handler.handle_planning_heartbeat(id).await.unwrap();
+
+        let active_hb = fx
+            .handler
+            .active_jobs
+            .get(&id)
+            .expect("active job missing")
+            .worker()
+            .expect("worker spec missing")
+            .last_heartbeat_ms;
+        assert!(active_hb > initial_hb);
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.worker().unwrap().last_heartbeat_ms, active_hb);
     }
 
     /// When the executor reports per-range subcompaction progress (RFC-0028),
