@@ -2050,8 +2050,6 @@ mod tests {
         assert_eq!(cache_storage.file_handle_cache_population(), 3);
     }
 
-    // ---- RFC 0027 part 2: tag driven cache policy ----
-
     fn policy_test_store(
         upstream: Arc<dyn ObjectStore>,
         policy: CachePutPolicy,
