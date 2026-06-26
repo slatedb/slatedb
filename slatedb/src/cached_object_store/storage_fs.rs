@@ -893,8 +893,8 @@ impl FsCacheEvictorInner {
             if self.cache_size_bytes.load(Ordering::Relaxed) > target_size {
                 warn!(
                     "cache_size_bytes still exceeds max_cache_size_bytes but no more entries can be evicted(cache_size_bytes={}, max_cache_size_bytes={})",
-                    self.cache_size_bytes.load(Ordering::Relaxed),
-                    self.max_cache_size_bytes
+                    format_bytes_si(self.cache_size_bytes.load(Ordering::Relaxed)),
+                    format_bytes_si(self.max_cache_size_bytes as u64)
                 );
             }
             return 0;
