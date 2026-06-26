@@ -75,7 +75,9 @@ use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
     TokioCompactionExecutorOptions,
 };
-use crate::compactor_state::{Compaction, CompactionContext, CompactionStatus, WorkerSpec};
+use crate::compactor_state::{
+    Compaction, CompactionContext, CompactionSpec, CompactionStatus, WorkerSpec,
+};
 use crate::config::CompactionWorkerOptions;
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
@@ -181,6 +183,8 @@ impl CompactionWorker {
 /// Per-job state used to detect when the per-range subcompaction progress has
 /// advanced and when the bytes threshold has been crossed.
 struct JobProgressState {
+    /// Spec this worker claimed for the active executor attempt.
+    spec: CompactionSpec,
     /// Total bytes processed as of the last bytes-based heartbeat write.
     last_hb_bytes: u64,
     /// Wall-clock timestamp (ms) of this job's most recent heartbeat write
@@ -419,6 +423,7 @@ impl CompactionWorkerHandler {
                     self.job_progress.insert(
                         compaction.id(),
                         JobProgressState {
+                            spec: compaction.spec().clone(),
                             last_hb_bytes: 0,
                             last_hb_ms: self.clock.now().timestamp_millis() as u64,
                             last_hb_ctx: compaction.ctx().cloned(),
@@ -459,6 +464,17 @@ impl CompactionWorkerHandler {
         compaction_id: Ulid,
         ctx: Option<CompactionContext>,
     ) -> Result<Option<u64>, SlateDBError> {
+        let Some(claimed_spec) = self
+            .job_progress
+            .get(&compaction_id)
+            .map(|state| state.spec.clone())
+        else {
+            debug!(
+                "heartbeat: no local progress state for compaction [worker_id={}, compaction_id={}]; skipping",
+                self.worker_id, compaction_id
+            );
+            return Ok(None);
+        };
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
@@ -479,9 +495,16 @@ impl CompactionWorkerHandler {
                 );
                 return Ok(None);
             }
+            if existing.spec() != &claimed_spec {
+                error!(
+                    "heartbeat: compaction spec changed since claim [worker_id={}, compaction_id={}]; skipping",
+                    self.worker_id, compaction_id
+                );
+                return Ok(None);
+            }
             let now_ms = self.clock.now().timestamp_millis() as u64;
-            let new_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
-            let mut updated_compaction = existing.with_worker(Some(new_spec));
+            let new_worker = WorkerSpec::new(self.worker_id.clone(), now_ms);
+            let mut updated_compaction = existing.with_worker(Some(new_worker));
             if let Some(ctx) = ctx.clone() {
                 updated_compaction.set_ctx(Some(ctx));
             }
@@ -1143,6 +1166,7 @@ mod tests {
             (
                 id3,
                 JobProgressState {
+                    spec: CompactionSpec::new(vec![], 0),
                     last_hb_bytes: 0,
                     last_hb_ms: 0,
                     last_hb_ctx: None,
@@ -1151,6 +1175,7 @@ mod tests {
             (
                 id1,
                 JobProgressState {
+                    spec: CompactionSpec::new(vec![], 0),
                     last_hb_bytes: 0,
                     last_hb_ms: 0,
                     last_hb_ctx: None,
@@ -1159,6 +1184,7 @@ mod tests {
             (
                 id2,
                 JobProgressState {
+                    spec: CompactionSpec::new(vec![], 0),
                     last_hb_bytes: 0,
                     last_hb_ms: 0,
                     last_hb_ctx: None,
@@ -1190,6 +1216,46 @@ mod tests {
         assert!(fx.handler.job_progress.is_empty());
         // No job was dispatched to the executor either.
         assert!(fx.executor.jobs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_ignores_stale_progress_when_spec_changed() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let replacement_spec = CompactionSpec::new(vec![SourceId::SstView(fx.l0_view.id)], 1);
+        let persisted_ctx =
+            CompactionContext::new(vec![Subcompaction::new(BytesRange::unbounded())], Some(0));
+        let replacement = Compaction::new(id, replacement_spec.clone())
+            .with_status(CompactionStatus::Running)
+            .with_worker(Some(WorkerSpec::new(fx.worker_id.clone(), 12345)))
+            .with_ctx(Some(persisted_ctx.clone()));
+        let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(replacement);
+        stored.update(dirty).await.unwrap();
+
+        // This is stale progress from the original executor attempt. Without
+        // the claimed-spec check, writing it into the replacement compaction
+        // would panic because the persisted plan has a different shape.
+        let stale_ctx = CompactionContext::new(
+            vec![
+                Subcompaction::new(BytesRange::unbounded()),
+                Subcompaction::new(BytesRange::unbounded()),
+            ],
+            Some(0),
+        );
+        fx.handler.handle_progress(id, 1, stale_ctx).await.unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.spec(), &replacement_spec);
+        assert_eq!(c.ctx(), Some(&persisted_ctx));
     }
 
     #[tokio::test(start_paused = true)]
