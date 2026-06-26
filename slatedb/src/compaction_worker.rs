@@ -369,6 +369,12 @@ impl CompactionWorkerHandler {
                         c.spec(),
                     );
                 } else if self.job_progress.contains_key(&c.id()) {
+                    // It's possible this worker tries to claim a job that it's already running.
+                    // This can happen if coordinator hasn't seen this worker's heartbeat yet,
+                    // and transitions the job back to `Submitted`. This worker can reclaim the
+                    // job (which it does in the dirty_compactions insert, below), but should
+                    // not dispatch it to the executor again. To prevent this, we skip jobs
+                    // that are already in `active_jobs`.
                     to_reclaim.push(c.clone());
                 } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
