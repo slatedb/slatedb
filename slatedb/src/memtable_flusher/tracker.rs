@@ -518,7 +518,7 @@ enum TrackedImmState {
 
 #[cfg(test)]
 mod tests {
-    use crate::batch_write::WriteBatchMessage;
+    use crate::batch_write::BatchWriterMessage;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
@@ -602,7 +602,7 @@ mod tests {
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
-            SafeSender::<WriteBatchMessage>::unbounded_channel(status_manager.result_reader());
+            SafeSender::<BatchWriterMessage>::unbounded_channel(status_manager.result_reader());
         let inner = Arc::new(
             DbInner::new(
                 settings,
