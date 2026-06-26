@@ -1076,6 +1076,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_worker_reclaims_already_active_compaction_without_duplicate_dispatch() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        let sources = vec![SourceId::SstView(fx.l0_view.id)];
+        fx.seed_scheduled_compaction(id, sources.clone()).await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let active_before = fx
+            .handler
+            .active_jobs
+            .get(&id)
+            .expect("active job missing")
+            .clone();
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert_eq!(fx.handler.job_progress.len(), 1);
+
+        // Simulate the coordinator reclaiming this worker's still-running job
+        // before observing its heartbeat.
+        fx.seed_scheduled_compaction(id, sources).await;
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Running);
+        assert_eq!(c.worker().unwrap().worker_id, fx.worker_id);
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert_eq!(fx.handler.active_jobs.len(), 1);
+        assert_eq!(fx.handler.job_progress.len(), 1);
+        assert_eq!(
+            fx.handler.active_jobs.get(&id).unwrap().spec(),
+            active_before.spec()
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "compaction spec changed between claims")]
+    async fn test_worker_panics_when_active_compaction_reclaimed_with_different_spec() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let changed_source = Ulid::from_parts(u64::MAX, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(changed_source)])
+            .await;
+
+        fx.handler.poll_and_claim().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_worker_skips_compactions_owned_by_other_workers() {
         let mut fx = WorkerFixture::new("worker-A").await;
         // Pre-claim a compaction as "worker-B".
