@@ -363,7 +363,7 @@ impl CompactionWorkerHandler {
             // It's possible this worker tries to claim a job that it's already running.
             // This can happen if coordinator hasn't seen this worker's heartbeat yet,
             // and transitions the job back to `Submitted`. This worker can reclaim the
-            // job (which it does in the dirty_compactions insert, above), but should
+            // job (which it does in the dirty_compactions insert, below), but should
             // not dispatch it to the executor again. To prevent this, we skip jobs
             // that are already in `active_jobs`. The `bool` here is true if the job is
             // already running.
@@ -430,13 +430,7 @@ impl CompactionWorkerHandler {
                 Ok(()) => {
                     break to_claim
                         .iter()
-                        .filter_map(|(c, already_running)| {
-                            if *already_running {
-                                None
-                            } else {
-                                Some(c.clone())
-                            }
-                        })
+                        .filter_map(|(c, already_running)| (!*already_running).then(|| c.clone()))
                         .collect::<Vec<Compaction>>()
                 }
                 Err(e) if e.is_sequenced_write_conflict() => {
