@@ -381,6 +381,7 @@ impl CompactionWorkerHandler {
                     warn!("skipping unrunnable compaction spec [id={}]", c.id());
                 }
             }
+
             if to_claim.is_empty() {
                 debug!(
                     "No claimable compactions; skipping .compactions CAS write and executor dispatch [worker_id={}]",
@@ -392,8 +393,21 @@ impl CompactionWorkerHandler {
             for c in &to_claim {
                 dirty_compactions.value.insert(c.clone());
             }
+
             match stored.update(dirty_compactions).await {
-                Ok(()) => break to_claim,
+                Ok(()) => {
+                    // It's possible this worker is claiming a job that it's already running.
+                    // This can happen if coordinator hasn't seen this worker's heartbeat yet,
+                    // and transitions the job back to `Submitted`. This worker should reclaim
+                    // the job (which it does in the dirty_compactions insert, above), but
+                    // should not dispatch it to the executor again. To prevent this, we filter
+                    // jobs that are already in `active_jobs` before returning to `claimed`,
+                    // which would result in a double-dispatch to the executor.
+                    break to_claim
+                        .into_iter()
+                        .filter(|c| !self.active_jobs.contains_key(&c.id()))
+                        .collect::<Vec<_>>();
+                }
                 Err(e) if e.is_sequenced_write_conflict() => {
                     debug!("claim conflict on .compactions; refreshing and retrying");
                     continue;
