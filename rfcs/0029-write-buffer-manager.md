@@ -257,9 +257,10 @@ Writer                  DbInner                 WalBuffer                KVTable
   │                       │  (internally calls force_acquire(estimated_size))
   │                       ├─ dispatch to writer ──►│                       │
   │                       │                        ├─ append(entries)      │
-  │                       │                        │  (force_expand for    │
-  │                       │                        │   VecDeque growth     │
-  │                       │                        │   only; NOT kv bytes) │
+  │                       │                        │  (force_expand to     │
+  │                       │                        │   record growth;      │
+  │                       │                        │   currently metadata  │
+  │                       │                        │   + pointers)         │
   │                       ├────────────────────────┼──────────────────────►│
   │                       │                        │                       ├─ add_write_permit
   │                       │                        │                       │  (merge kv permit)
@@ -271,8 +272,8 @@ Writer                  DbInner                 WalBuffer                KVTable
   │                       │                        │                       │
   │                       │  flush WAL to storage ►│ drop WalBuffer        │
   │                       │                        │ └─ permit.drop()      │
-  │                       │                        │   (releases struct    │
-  │                       │                        │    overhead only)     │
+  │                       │                        │   (releases WAL       │
+  │                       │                        │    buffer overhead)   │
   │                       │                        │                       │
   │                       │           flush to L0 ─┼──────────────────────►│ drop KVTable
   │                       │                        │                       │ └─ permit.drop()
