@@ -430,7 +430,7 @@ impl CompactionWorkerHandler {
                 Ok(()) => {
                     break to_claim
                         .iter()
-                        .filter(|&(c, already_running)| !*already_running)
+                        .filter(|&(_, already_running)| !*already_running)
                         .map(|(c, _)| c.clone())
                         .collect::<Vec<Compaction>>()
                 }
