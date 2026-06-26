@@ -10934,10 +10934,15 @@ mod tests {
                     let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
                         move |_state| trigger_for_scheduler.swap(false, Ordering::SeqCst),
                     )));
+                    // Disable subcompactions to make the tests simpler.
+                    let mut compactor_options = fast_compactor_options();
+                    if let Some(worker) = compactor_options.worker.as_mut() {
+                        worker.max_subcompactions = 1;
+                    }
                     builder = builder.with_compactor_builder(
                         CompactorBuilder::new(db_path.as_str(), store.clone())
                             .with_scheduler_supplier(scheduler)
-                            .with_options(fast_compactor_options()),
+                            .with_options(compactor_options),
                     );
                     Some(trigger)
                 } else {
