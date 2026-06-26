@@ -368,14 +368,37 @@ impl CompactionWorkerHandler {
                         c.id(),
                         c.spec(),
                     );
-                } else if self.job_progress.contains_key(&c.id()) {
+                } else if let Some(state) = self.job_progress.get(&c.id()) {
                     // It's possible this worker tries to claim a job that it's already running.
                     // This can happen if coordinator hasn't seen this worker's heartbeat yet,
                     // and transitions the job back to `Scheduled`. This worker can reclaim the
                     // job (which it does in the dirty_compactions insert, below), but should
-                    // not dispatch it to the executor again. To prevent this, we skip jobs
-                    // that are already in `job_progress`.
-                    to_reclaim.push(c.clone());
+                    // not dispatch it to the executor again. To prevent this, we separate the
+                    // reclaim jobs in `to_reclaim`, which updates the compaction entry to
+                    // `Running` but does not dispatch it to the executor. We also validate that
+                    // the spec and retention_min_seq match the local job state, for safety (these
+                    // should never differ).
+                    let compaction_retention_min_seq =
+                        c.ctx().and_then(CompactionContext::retention_min_seq);
+                    let local_retention_min_seq = state
+                        .last_hb_ctx
+                        .as_ref()
+                        .and_then(CompactionContext::retention_min_seq);
+                    if c.spec() == &state.spec
+                        && compaction_retention_min_seq == local_retention_min_seq
+                    {
+                        to_reclaim.push(c.clone());
+                    } else {
+                        error!(
+                            "should never happen: skipping already-running compaction reclaim because persisted state doesn't match local job [worker_id={}, id={}, compaction_spec={:?}, local_spec={:?}, compaction_retention_min_seq={:?}, local_retention_min_seq={:?}]",
+                            self.worker_id,
+                            c.id(),
+                            c.spec(),
+                            state.spec,
+                            compaction_retention_min_seq,
+                            local_retention_min_seq,
+                        );
+                    }
                 } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
                 } else {
@@ -387,6 +410,7 @@ impl CompactionWorkerHandler {
                     );
                 }
             }
+
             if to_claim.is_empty() && to_reclaim.is_empty() {
                 debug!(
                     "No claimable or reclaimable compactions; skipping .compactions CAS write and executor dispatch [worker_id={}]",
@@ -405,6 +429,7 @@ impl CompactionWorkerHandler {
                         .with_worker(Some(worker_spec.clone())),
                 );
             }
+
             match stored.update(dirty_compactions).await {
                 Ok(()) => break to_claim,
                 Err(e) if e.is_sequenced_write_conflict() => {
@@ -1155,6 +1180,67 @@ mod tests {
         assert_eq!(fx.executor.jobs().len(), 1);
         assert_eq!(fx.handler.job_progress.len(), 1);
         assert!(fx.handler.job_progress.contains_key(&active_id));
+    }
+
+    #[tokio::test]
+    async fn test_worker_does_not_reclaim_already_running_compaction_with_changed_spec() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let replacement_spec = CompactionSpec::new(vec![SourceId::SstView(fx.l0_view.id)], 1);
+        fx.write_compaction(
+            Compaction::new(id, replacement_spec.clone()).with_status(CompactionStatus::Scheduled),
+        )
+        .await;
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
+        assert_eq!(c.spec(), &replacement_spec);
+        assert!(c.worker().is_none());
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert!(fx.handler.job_progress.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn test_worker_does_not_reclaim_already_running_compaction_with_changed_retention() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let local_ctx =
+            CompactionContext::new(vec![Subcompaction::new(BytesRange::unbounded())], Some(0));
+        fx.handler.handle_progress(id, 0, local_ctx).await.unwrap();
+
+        let spec = fx
+            .read_compaction(id)
+            .await
+            .expect("compaction missing")
+            .spec()
+            .clone();
+        let replacement_ctx =
+            CompactionContext::new(vec![Subcompaction::new(BytesRange::unbounded())], Some(1));
+        fx.write_compaction(
+            Compaction::new(id, spec)
+                .with_status(CompactionStatus::Scheduled)
+                .with_ctx(Some(replacement_ctx.clone())),
+        )
+        .await;
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
+        assert_eq!(c.ctx(), Some(&replacement_ctx));
+        assert!(c.worker().is_none());
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert!(fx.handler.job_progress.contains_key(&id));
     }
 
     #[tokio::test]
