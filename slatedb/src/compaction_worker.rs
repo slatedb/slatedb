@@ -430,7 +430,8 @@ impl CompactionWorkerHandler {
                 Ok(()) => {
                     break to_claim
                         .iter()
-                        .filter_map(|(c, already_running)| (!*already_running).then(|| c.clone()))
+                        .filter(|&(c, already_running)| !*already_running)
+                        .map(|(c, _)| c.clone())
                         .collect::<Vec<Compaction>>()
                 }
                 Err(e) if e.is_sequenced_write_conflict() => {
