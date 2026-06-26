@@ -342,10 +342,6 @@ impl CompactionWorkerHandler {
     /// Claims that fail validation are released back to `Scheduled`.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
         let capacity = self.capacity();
-        if capacity == 0 {
-            return Ok(());
-        }
-
         // CAS loop: read latest, identify candidates, attempt write.
         // Candidates are filtered on their spec alone here; validating the
         // spec's sources against the manifest happens after the claim
@@ -355,23 +351,34 @@ impl CompactionWorkerHandler {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let mut dirty_compactions = stored.prepare_dirty()?;
-
             let mut to_claim: Vec<Compaction> = Vec::new();
+            let mut to_reclaim: Vec<Compaction> = Vec::new();
+
             for c in dirty_compactions
                 .value
                 .iter_with_status(&[CompactionStatus::Scheduled])
                 .filter(|c| c.worker().is_none())
             {
-                if to_claim.len() >= capacity {
-                    break;
-                }
                 // Drain specs are coordinator-local, and a tiered spec without
                 // a destination can never be executed; neither can become
                 // valid later, so skip them rather than claim and release.
-                if !c.spec().is_drain() && c.spec().destination().is_some() {
+                if c.spec().is_drain() || c.spec().destination().is_none() {
+                    warn!(
+                        "skipping unrunnable compaction spec [id={}, spec={:?}]",
+                        c.id(),
+                        c.spec(),
+                    );
+                } else if self.job_progress.contains_key(&c.id()) {
+                    to_reclaim.push(c.clone());
+                } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
                 } else {
-                    warn!("skipping unrunnable compaction spec [id={}]", c.id());
+                    debug!(
+                        "skipping compaction claim due to capacity limit [worker_id={}, id={}, capacity={}]",
+                        self.worker_id,
+                        c.id(),
+                        capacity
+                    );
                 }
             }
             if to_claim.is_empty() {
@@ -385,7 +392,7 @@ impl CompactionWorkerHandler {
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
 
-            for c in &to_claim {
+            for c in to_claim.iter().chain(to_reclaim.iter()) {
                 dirty_compactions.value.insert(
                     c.clone()
                         .with_status(CompactionStatus::Running)
