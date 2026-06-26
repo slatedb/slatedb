@@ -371,10 +371,10 @@ impl CompactionWorkerHandler {
                 } else if self.job_progress.contains_key(&c.id()) {
                     // It's possible this worker tries to claim a job that it's already running.
                     // This can happen if coordinator hasn't seen this worker's heartbeat yet,
-                    // and transitions the job back to `Submitted`. This worker can reclaim the
+                    // and transitions the job back to `Scheduled`. This worker can reclaim the
                     // job (which it does in the dirty_compactions insert, below), but should
                     // not dispatch it to the executor again. To prevent this, we skip jobs
-                    // that are already in `active_jobs`.
+                    // that are already in `job_progress`.
                     to_reclaim.push(c.clone());
                 } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
@@ -387,9 +387,9 @@ impl CompactionWorkerHandler {
                     );
                 }
             }
-            if to_claim.is_empty() {
+            if to_claim.is_empty() && to_reclaim.is_empty() {
                 debug!(
-                    "No claimable compactions; skipping .compactions CAS write and executor dispatch [worker_id={}]",
+                    "No claimable or reclaimable compactions; skipping .compactions CAS write and executor dispatch [worker_id={}]",
                     self.worker_id
                 );
                 return Ok(());
@@ -414,6 +414,9 @@ impl CompactionWorkerHandler {
                 Err(e) => return Err(e),
             }
         };
+        if claimed.is_empty() {
+            return Ok(());
+        }
 
         // Build job args against a manifest read *after* the claim CAS. The
         // coordinator writes the manifest before `.compactions` (see
@@ -1022,6 +1025,10 @@ mod tests {
         async fn seed_scheduled_compaction(&self, id: Ulid, sources: Vec<SourceId>) {
             let spec = CompactionSpec::new(sources, 0);
             let compaction = Compaction::new(id, spec).with_status(CompactionStatus::Scheduled);
+            self.write_compaction(compaction).await;
+        }
+
+        async fn write_compaction(&self, compaction: Compaction) {
             let mut stored = StoredCompactions::try_load(self.compactions_store.clone())
                 .await
                 .unwrap()
@@ -1064,6 +1071,90 @@ mod tests {
 
         // And the worker tracks the job locally.
         assert!(fx.handler.job_progress.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn test_worker_reclaims_already_running_scheduled_compaction_without_redispatch() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert_eq!(fx.executor.jobs().len(), 1);
+
+        // Simulate the coordinator reclaiming the job after missing this
+        // worker's heartbeat, while the local executor attempt is still active.
+        let reclaimed = fx
+            .read_compaction(id)
+            .await
+            .expect("compaction missing")
+            .with_status(CompactionStatus::Scheduled)
+            .with_worker(None);
+        fx.write_compaction(reclaimed).await;
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Running);
+        assert_eq!(
+            c.worker().expect("worker spec missing").worker_id,
+            fx.worker_id
+        );
+        assert_eq!(
+            fx.executor.jobs().len(),
+            1,
+            "already-running reclaim must not dispatch a duplicate job"
+        );
+        assert!(fx.handler.job_progress.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn test_worker_reclaims_already_running_compaction_at_capacity() {
+        let options = CompactionWorkerOptions {
+            max_concurrent_compactions: 1,
+            ..CompactionWorkerOptions::default()
+        };
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let mut fx = WorkerFixture::new_with_clock("worker-A", clock, options).await;
+        let active_id = Ulid::from_parts(1, 0);
+        let pending_id = Ulid::from_parts(2, 0);
+        fx.seed_scheduled_compaction(active_id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert_eq!(fx.handler.capacity(), 0);
+
+        let reclaimed = fx
+            .read_compaction(active_id)
+            .await
+            .expect("compaction missing")
+            .with_status(CompactionStatus::Scheduled)
+            .with_worker(None);
+        fx.write_compaction(reclaimed).await;
+        fx.seed_scheduled_compaction(pending_id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let active = fx
+            .read_compaction(active_id)
+            .await
+            .expect("active compaction missing");
+        assert_eq!(active.status(), CompactionStatus::Running);
+        assert_eq!(
+            active.worker().expect("worker spec missing").worker_id,
+            fx.worker_id
+        );
+
+        let pending = fx
+            .read_compaction(pending_id)
+            .await
+            .expect("pending compaction missing");
+        assert_eq!(pending.status(), CompactionStatus::Scheduled);
+        assert!(pending.worker().is_none());
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert_eq!(fx.handler.job_progress.len(), 1);
+        assert!(fx.handler.job_progress.contains_key(&active_id));
     }
 
     #[tokio::test]
