@@ -319,7 +319,9 @@ impl WalBufferManager {
         flush_tx.send(WalFlushWork { result_tx })
     }
 
-    pub(crate) fn flush(&self) -> Result<oneshot::Receiver<Result<(), SlateDBError>>, SlateDBError> {
+    pub(crate) fn flush(
+        &self,
+    ) -> Result<oneshot::Receiver<Result<(), SlateDBError>>, SlateDBError> {
         let (result_tx, result_rx) = oneshot::channel();
         self.send_flush_request(Some(result_tx))?;
         Ok(result_rx)

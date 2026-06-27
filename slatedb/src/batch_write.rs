@@ -36,17 +36,17 @@ use tracing::instrument;
 
 use std::collections::BTreeSet;
 
-use bytes::Bytes;
-use parking_lot::RwLockWriteGuard;
 use crate::config::WriteOptions;
+use crate::db_state::DbState;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
+use bytes::Bytes;
+use parking_lot::RwLockWriteGuard;
 use slatedb_common::clock::SystemClock;
-use crate::db_state::DbState;
 use tokio::sync::oneshot;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
@@ -60,6 +60,7 @@ pub(crate) type WriteBatchResult = Result<
 >;
 
 /// A message processed by the batch writer event loop.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BatchWriterMessage {
     /// Apply a write batch to the WAL and memtable. This may trigger freezing the memtable.
     WriteBatch(WriteBatchRequest),
@@ -68,7 +69,11 @@ pub(crate) enum BatchWriterMessage {
 }
 
 pub(crate) struct BatchWriterFlush {
+    /// If true, then also freeze the current active memtable.
     freeze_memtable: bool,
+    /// Sends a message when the writer has processed the flush message. On successful receipt
+    /// of a message, the caller should wait on the received Receiver to get the result of the
+    /// wal flush.
     done: oneshot::Sender<Result<oneshot::Receiver<Result<(), SlateDBError>>, SlateDBError>>,
 }
 
@@ -90,11 +95,12 @@ impl std::fmt::Debug for BatchWriterMessage {
                 .field("batch", batch)
                 .field("options", options)
                 .finish(),
-            BatchWriterMessage::Flush (BatchWriterFlush { freeze_memtable, .. }) => {
-                f.debug_struct("Flush")
-                    .field("freeze_memtable", freeze_memtable)
-                    .finish()
-            }
+            BatchWriterMessage::Flush(BatchWriterFlush {
+                freeze_memtable, ..
+            }) => f
+                .debug_struct("Flush")
+                .field("freeze_memtable", freeze_memtable)
+                .finish(),
         }
     }
 }
@@ -142,14 +148,10 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 _ = done.send(result);
                 Ok(())
             }
-            // Run the freeze on the writer thread so it is totally ordered with
-            // write batches: it cannot land between a batch's WAL append and its
-            // memtable apply. The freeze resolves `replay_after_wal_id` from the
-            // WAL buffer here, where it is guaranteed consistent with the memtable.
             BatchWriterMessage::Flush(flush_msg) => {
                 let BatchWriterFlush {
                     freeze_memtable,
-                    done
+                    done,
                 } = flush_msg;
                 let result = self.db_inner.flush_batch_writer(freeze_memtable);
                 let _ = done.send(result);
@@ -172,7 +174,7 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 BatchWriterMessage::Flush(flush_msg) => {
                     let BatchWriterFlush {
                         freeze_memtable: _,
-                        done
+                        done,
                     } = flush_msg;
                     let _ = done.send(Err(error.clone()));
                 }
@@ -333,12 +335,17 @@ impl DbInner {
         Ok(())
     }
 
-    fn flush_batch_writer(&self, freeze_memtable: bool) -> Result<oneshot::Receiver<Result<(), SlateDBError>>, SlateDBError> {
+    fn flush_batch_writer(
+        &self,
+        freeze_memtable: bool,
+    ) -> Result<oneshot::Receiver<Result<(), SlateDBError>>, SlateDBError> {
         let flush_rx = if self.wal_enabled {
             self.wal_buffer.flush()?
         } else {
             let (flush_tx, flush_rx) = oneshot::channel();
-            flush_tx.send(Ok(())).expect("unexpected oneshot send failure");
+            flush_tx
+                .send(Ok(()))
+                .expect("unexpected oneshot send failure");
             flush_rx
         };
         if freeze_memtable {
@@ -369,15 +376,16 @@ impl DbInner {
 
     /// Request a memtable freeze from the writer task. Sends a
     /// [`BatchWriterMessage::Flush`] to the writer event loop and waits for it to complete.
-    pub(crate) async fn request_batch_writer_flush(&self, freeze_memtable: bool) -> Result<(), SlateDBError> {
+    pub(crate) async fn request_batch_writer_flush(
+        &self,
+        freeze_memtable: bool,
+    ) -> Result<(), SlateDBError> {
         let (done, rx) = tokio::sync::oneshot::channel();
         self.write_notifier
-            .send(BatchWriterMessage::Flush(
-                BatchWriterFlush {
-                    freeze_memtable,
-                    done
-                }
-            ))?;
+            .send(BatchWriterMessage::Flush(BatchWriterFlush {
+                freeze_memtable,
+                done,
+            }))?;
         rx.await??.await?
     }
 

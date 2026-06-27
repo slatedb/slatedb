@@ -1,9 +1,6 @@
 use bytes::Bytes;
-use parking_lot::RwLockWriteGuard;
 
-use crate::batch_write::BatchWriterMessage;
 use crate::db::DbInner;
-use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::oracle::Oracle;
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};

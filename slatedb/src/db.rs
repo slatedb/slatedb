@@ -469,9 +469,7 @@ impl DbInner {
                 }
                 self.request_batch_writer_flush(false).await
             }
-            FlushType::MemTable => {
-                self.flush_memtables(FlushTarget::All).await.map(|_| ())
-            }
+            FlushType::MemTable => self.flush_memtables(FlushTarget::All).await.map(|_| ()),
         }
     }
 
@@ -4871,9 +4869,7 @@ mod tests {
         // flusher is paused at the failpoint above.
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
-            tokio::spawn(async move {
-                inner.flush_memtables(FlushTarget::All).await
-            })
+            tokio::spawn(async move { inner.flush_memtables(FlushTarget::All).await })
         };
 
         let mut wrote_l0_sst = false;
