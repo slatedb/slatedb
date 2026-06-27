@@ -937,8 +937,6 @@ impl TokioCompactionExecutorInner {
         assert!(!tasks.values().any(|task| task.destination == dst));
         self.worker_stats.running_compactions.increment(1);
 
-        // TODO(sujeetsawala): Add compaction plan to object store with InProgress status
-
         let this = self.clone();
         let this_cleanup = self.clone();
         let task = spawn_bg_task(
