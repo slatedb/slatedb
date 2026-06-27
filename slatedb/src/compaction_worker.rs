@@ -896,17 +896,23 @@ mod tests {
     /// worker handler can be exercised without spinning up actual SST writers.
     struct NoopExecutor {
         jobs: Mutex<Vec<StartCompactionJobArgs>>,
+        stopped_jobs: Mutex<Vec<Ulid>>,
     }
 
     impl NoopExecutor {
         fn new() -> Self {
             Self {
                 jobs: Mutex::new(Vec::new()),
+                stopped_jobs: Mutex::new(Vec::new()),
             }
         }
 
         fn jobs(&self) -> Vec<StartCompactionJobArgs> {
             self.jobs.lock().clone()
+        }
+
+        fn stopped_jobs(&self) -> Vec<Ulid> {
+            self.stopped_jobs.lock().clone()
         }
     }
 
@@ -914,8 +920,9 @@ mod tests {
         fn start_compaction_job(&self, args: StartCompactionJobArgs) {
             self.jobs.lock().push(args);
         }
-        fn stop_compaction_job(&self, _id: Ulid) -> bool {
-            false
+        fn stop_compaction_job(&self, id: Ulid) -> bool {
+            self.stopped_jobs.lock().push(id);
+            true
         }
         fn stop(&self) {}
     }
@@ -1074,6 +1081,97 @@ mod tests {
         assert_eq!(c.worker().unwrap().worker_id, "worker-B");
         assert!(fx.executor.jobs().is_empty());
         assert!(fx.handler.active_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_skips_rescheduled_job_already_active_locally() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                max_concurrent_compactions: 1,
+                ..CompactionWorkerOptions::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert!(fx.handler.active_jobs.contains(&id));
+
+        // Simulate the coordinator reclaiming this worker's still-running job:
+        // the persisted entry is Scheduled again while the local executor still
+        // has it active. The worker should not re-claim or stop it here; the
+        // heartbeat path handles ownership loss.
+        let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        stored.refresh().await.unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        let rescheduled = dirty
+            .value
+            .get(&id)
+            .cloned()
+            .expect("claimed compaction missing")
+            .with_status(CompactionStatus::Scheduled)
+            .with_worker(None);
+        dirty.value.insert(rescheduled);
+        stored.update(dirty).await.unwrap();
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        assert_eq!(
+            fx.executor.jobs().len(),
+            1,
+            "worker must not dispatch a duplicate execution"
+        );
+        assert!(
+            fx.executor.stopped_jobs().is_empty(),
+            "polling should not stop the active job"
+        );
+        assert!(fx.handler.active_jobs.contains(&id));
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
+        assert!(c.worker().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_worker_stops_active_job_when_heartbeat_loses_ownership() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert!(fx.handler.active_jobs.contains(&id));
+
+        // Simulate another worker taking ownership before this worker's next
+        // heartbeat. The heartbeat must not rewrite the entry; it should just
+        // request local execution stop.
+        let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        stored.refresh().await.unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        let stolen = dirty
+            .value
+            .get(&id)
+            .cloned()
+            .expect("claimed compaction missing")
+            .with_worker(Some(WorkerSpec::new("worker-B".to_string(), 12345)));
+        dirty.value.insert(stolen);
+        stored.update(dirty).await.unwrap();
+
+        fx.handler.handle_planning_heartbeat(id).await.unwrap();
+
+        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Running);
+        assert_eq!(c.worker().unwrap().worker_id, "worker-B");
+        assert_eq!(c.worker().unwrap().last_heartbeat_ms, 12345);
     }
 
     #[tokio::test]
