@@ -845,8 +845,8 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
     ) -> Result<(), SlateDBError> {
         // Stop accepting new work, then release any active claims so other
         // workers can pick them up immediately rather than waiting for the
-        // heartbeat-timeout reclamation path. Stopping the executor runs each
-        // in-flight task's cleanup, which decrements `running_compactions`.
+        // heartbeat-timeout reclamation path. Stopping the executor also
+        // decrements `running_compactions` for cancelled tasks.
         self.executor.stop();
         self.job_progress.clear();
         let claimed = std::mem::take(&mut self.active_jobs);
@@ -905,6 +905,9 @@ mod tests {
     impl CompactionExecutor for NoopExecutor {
         fn start_compaction_job(&self, args: StartCompactionJobArgs) {
             self.jobs.lock().push(args);
+        }
+        fn stop_compaction_job(&self, _id: Ulid) -> bool {
+            false
         }
         fn stop(&self) {}
     }
