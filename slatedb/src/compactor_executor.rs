@@ -208,7 +208,6 @@ pub(crate) trait CompactionExecutor {
     ///
     /// Returns true if the job was active and a stop was requested. This does
     /// not wait for the task to finish winding down.
-    #[allow(dead_code)]
     fn stop_compaction_job(&self, id: Ulid) -> bool;
 
     /// Stops the executor and requests cancellation of any in-flight tasks.

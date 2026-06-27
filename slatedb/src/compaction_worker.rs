@@ -343,9 +343,6 @@ impl CompactionWorkerHandler {
     /// Claims that fail validation are released back to `Scheduled`.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
         let capacity = self.capacity();
-        if capacity == 0 {
-            return Ok(());
-        }
 
         // CAS loop: read latest, identify candidates, attempt write.
         // Candidates are filtered on their spec alone here; validating the
@@ -363,16 +360,26 @@ impl CompactionWorkerHandler {
                 .iter_with_status(&[CompactionStatus::Scheduled])
                 .filter(|c| c.worker().is_none())
             {
-                if to_claim.len() >= capacity {
-                    break;
-                }
-                // Drain specs are coordinator-local, and a tiered spec without
-                // a destination can never be executed; neither can become
-                // valid later, so skip them rather than claim and release.
-                if !c.spec().is_drain() && c.spec().destination().is_some() {
+                if c.spec().is_drain() || c.spec().destination().is_none() {
+                    // Drain specs are coordinator-local, and a tiered spec without
+                    // a destination can never be executed; neither can become
+                    // valid later, so skip them rather than claim and release.
+                    warn!("skipping unrunnable compaction spec [id={}]", c.id());
+                } else if self.active_jobs.contains(&c.id()) {
+                    // It's possible this worker tries to claim a job that it's already running.
+                    // This can happen if coordinator hasn't seen this worker's heartbeat yet,
+                    // and transitions the job back to `Scheduled`. We don't attempt to reclaim
+                    // the job since its context might have diverged or this worker might be
+                    // misbehaving. Instead, we allow the worker's next heartbeat to see it no
+                    // longer owns the job and stop the local execution.
+                    debug!(
+                        "skipping this compactor is running but doesn't own [worker_id={}, id={}]",
+                        self.worker_id,
+                        c.id()
+                    );
+                } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
                 } else {
-                    warn!("skipping unrunnable compaction spec [id={}]", c.id());
                 }
             }
             if to_claim.is_empty() {
@@ -479,10 +486,11 @@ impl CompactionWorkerHandler {
             };
             if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
                 debug!(
-                    "heartbeat: no longer owner of compaction [worker_id={} compaction_id={}]; skipping",
+                    "heartbeat: no longer owner of compaction, stopping execution [worker_id={} compaction_id={}]; skipping",
                     self.worker_id,
                     compaction_id
                 );
+                self.executor.stop_compaction_job(compaction_id);
                 return Ok(None);
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
