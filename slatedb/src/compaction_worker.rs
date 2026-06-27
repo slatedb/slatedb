@@ -379,8 +379,7 @@ impl CompactionWorkerHandler {
                     );
                 } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
-                } else {
-                }
+                } 
             }
             if to_claim.is_empty() {
                 debug!(
