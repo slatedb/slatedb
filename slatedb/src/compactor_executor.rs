@@ -2624,7 +2624,9 @@ mod tests {
         // completion after cancellation won ownership of task accounting.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let WorkerMessage::CompactionJobFinished { id, result } = rx.recv().await.unwrap() {
+                if let WorkerMessage::CompactionJobFinished { id, result } =
+                    rx.recv().await.unwrap()
+                {
                     assert_ne!(id, stopped_id, "stopped job reported completion");
                     if id == second_id {
                         return result;

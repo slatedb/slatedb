@@ -379,7 +379,7 @@ impl CompactionWorkerHandler {
                     );
                 } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
-                } 
+                }
             }
             if to_claim.is_empty() {
                 debug!(
@@ -490,6 +490,8 @@ impl CompactionWorkerHandler {
                     compaction_id
                 );
                 self.executor.stop_compaction_job(compaction_id);
+                self.active_jobs.remove(&compaction_id);
+                self.job_progress.remove(&compaction_id);
                 return Ok(None);
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
@@ -1139,16 +1141,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_stops_active_job_when_heartbeat_loses_ownership() {
-        let mut fx = WorkerFixture::new("worker-A").await;
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                max_concurrent_compactions: 1,
+                ..CompactionWorkerOptions::default()
+            },
+        )
+        .await;
         let id = Ulid::from_parts(1, 0);
         fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
         assert!(fx.handler.active_jobs.contains(&id));
+        assert!(fx.handler.job_progress.contains_key(&id));
 
         // Simulate another worker taking ownership before this worker's next
         // heartbeat. The heartbeat must not rewrite the entry; it should just
-        // request local execution stop.
+        // request local execution stop and clear local capacity bookkeeping.
         let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
             .await
             .unwrap()
@@ -1167,10 +1178,23 @@ mod tests {
         fx.handler.handle_planning_heartbeat(id).await.unwrap();
 
         assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert!(!fx.handler.active_jobs.contains(&id));
+        assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Running);
         assert_eq!(c.worker().unwrap().worker_id, "worker-B");
         assert_eq!(c.worker().unwrap().last_heartbeat_ms, 12345);
+
+        let next_id = Ulid::from_parts(2, 0);
+        fx.seed_scheduled_compaction(next_id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let jobs = fx.executor.jobs();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[1].compaction_id, next_id);
+        assert!(fx.handler.active_jobs.contains(&next_id));
+        assert!(fx.handler.job_progress.contains_key(&next_id));
     }
 
     #[tokio::test]
