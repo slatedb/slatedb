@@ -32,6 +32,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
+use crate::merge_operator::MergeOperatorType;
 use slatedb_txn_obj::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
@@ -51,6 +52,7 @@ pub struct Admin {
     #[cfg(feature = "compaction_filters")]
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
+    pub(crate) merge_operator: Option<MergeOperatorType>,
 }
 
 impl Admin {
@@ -377,6 +379,10 @@ impl Admin {
         #[cfg(feature = "compaction_filters")]
         if let Some(supplier) = &self.compaction_filter_supplier {
             builder = builder.with_compaction_filter_supplier(supplier.clone());
+        }
+
+        if let Some(merge_operator) = &self.merge_operator {
+            builder = builder.with_merge_operator(merge_operator.clone());
         }
 
         let compactor = builder.build();
@@ -808,7 +814,7 @@ mod tests {
     use crate::config::{CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions};
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
-    use crate::test_utils::FlakyObjectStore;
+    use crate::test_utils::{FlakyObjectStore, StringConcatMergeOperator};
     use crate::ErrorKind;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -1282,6 +1288,16 @@ mod tests {
             .build();
 
         assert!(admin.compaction_filter_supplier.is_some());
+    }
+
+    #[test]
+    fn test_admin_builder_with_merge_operator() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/test_merge_operator", object_store)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build();
+
+        assert!(admin.merge_operator.is_some());
     }
 
     #[tokio::test]
