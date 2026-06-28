@@ -343,9 +343,6 @@ impl CompactionWorkerHandler {
     /// Claims that fail validation are released back to `Scheduled`.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
         let capacity = self.capacity();
-        if capacity == 0 {
-            return Ok(());
-        }
 
         // CAS loop: read latest, identify candidates, attempt write.
         // Candidates are filtered on their spec alone here; validating the
@@ -363,16 +360,31 @@ impl CompactionWorkerHandler {
                 .iter_with_status(&[CompactionStatus::Scheduled])
                 .filter(|c| c.worker().is_none())
             {
-                if to_claim.len() >= capacity {
-                    break;
-                }
-                // Drain specs are coordinator-local, and a tiered spec without
-                // a destination can never be executed; neither can become
-                // valid later, so skip them rather than claim and release.
-                if !c.spec().is_drain() && c.spec().destination().is_some() {
-                    to_claim.push(c.clone());
-                } else {
+                if c.spec().is_drain() || c.spec().destination().is_none() {
+                    // Drain specs are coordinator-local, and a tiered spec without
+                    // a destination can never be executed; neither can become
+                    // valid later, so skip them rather than claim and release.
                     warn!("skipping unrunnable compaction spec [id={}]", c.id());
+                } else if self.active_jobs.contains(&c.id()) {
+                    // It's possible this worker tries to claim a job that it's already running.
+                    // This can happen if coordinator hasn't seen this worker's heartbeat yet,
+                    // and transitions the job back to `Scheduled`. We don't attempt to reclaim
+                    // the job since its context might have diverged or this worker might be
+                    // misbehaving. Instead, stop the local execution so a subsequent poll can
+                    // claim only after local bookkeeping has been cleared.
+                    debug!(
+                        "skipping this compactor is running but doesn't own [worker_id={}, id={}]",
+                        self.worker_id,
+                        c.id()
+                    );
+                    Self::stop_compaction_job(
+                        &self.executor,
+                        &mut self.active_jobs,
+                        &mut self.job_progress,
+                        c.id(),
+                    );
+                } else if to_claim.len() < capacity {
+                    to_claim.push(c.clone());
                 }
             }
             if to_claim.is_empty() {
@@ -479,9 +491,15 @@ impl CompactionWorkerHandler {
             };
             if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
                 debug!(
-                    "heartbeat: no longer owner of compaction [worker_id={} compaction_id={}]; skipping",
+                    "heartbeat: no longer owner of compaction, stopping execution [worker_id={} compaction_id={}]; skipping",
                     self.worker_id,
                     compaction_id
+                );
+                Self::stop_compaction_job(
+                    &self.executor,
+                    &mut self.active_jobs,
+                    &mut self.job_progress,
+                    compaction_id,
                 );
                 return Ok(None);
             }
@@ -738,6 +756,24 @@ impl CompactionWorkerHandler {
         }
     }
 
+    // Stops a compaction job that is currently executing on this worker, removing
+    // it from the active jobs and progress bookkeeping. This is used when a
+    // job is no longer owned by this worker (e.g., it was reclaimed by the
+    // coordinator due to a heartbeat timeout). The function returns without waiting
+    // for the executor to finish stopping the job.
+    //
+    // To release ownership of a job, use `release_claim` instead.
+    fn stop_compaction_job(
+        executor: &Arc<dyn CompactionExecutor + Send + Sync>,
+        active_jobs: &mut BTreeSet<Ulid>,
+        job_progress: &mut HashMap<Ulid, JobProgressState>,
+        compaction_id: Ulid,
+    ) {
+        executor.stop_compaction_job(compaction_id);
+        active_jobs.remove(&compaction_id);
+        job_progress.remove(&compaction_id);
+    }
+
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
@@ -845,8 +881,8 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
     ) -> Result<(), SlateDBError> {
         // Stop accepting new work, then release any active claims so other
         // workers can pick them up immediately rather than waiting for the
-        // heartbeat-timeout reclamation path. Stopping the executor runs each
-        // in-flight task's cleanup, which decrements `running_compactions`.
+        // heartbeat-timeout reclamation path. Stopping the executor also
+        // decrements `running_compactions` for cancelled tasks.
         self.executor.stop();
         self.job_progress.clear();
         let claimed = std::mem::take(&mut self.active_jobs);
@@ -888,23 +924,33 @@ mod tests {
     /// worker handler can be exercised without spinning up actual SST writers.
     struct NoopExecutor {
         jobs: Mutex<Vec<StartCompactionJobArgs>>,
+        stopped_jobs: Mutex<Vec<Ulid>>,
     }
 
     impl NoopExecutor {
         fn new() -> Self {
             Self {
                 jobs: Mutex::new(Vec::new()),
+                stopped_jobs: Mutex::new(Vec::new()),
             }
         }
 
         fn jobs(&self) -> Vec<StartCompactionJobArgs> {
             self.jobs.lock().clone()
         }
+
+        fn stopped_jobs(&self) -> Vec<Ulid> {
+            self.stopped_jobs.lock().clone()
+        }
     }
 
     impl CompactionExecutor for NoopExecutor {
         fn start_compaction_job(&self, args: StartCompactionJobArgs) {
             self.jobs.lock().push(args);
+        }
+        fn stop_compaction_job(&self, id: Ulid) -> bool {
+            self.stopped_jobs.lock().push(id);
+            true
         }
         fn stop(&self) {}
     }
@@ -1063,6 +1109,117 @@ mod tests {
         assert_eq!(c.worker().unwrap().worker_id, "worker-B");
         assert!(fx.executor.jobs().is_empty());
         assert!(fx.handler.active_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_stops_rescheduled_job_already_active_locally_on_poll() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                max_concurrent_compactions: 1,
+                ..CompactionWorkerOptions::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert_eq!(fx.executor.jobs().len(), 1);
+        assert!(fx.handler.active_jobs.contains(&id));
+
+        // Simulate the coordinator reclaiming this worker's still-running job:
+        // the persisted entry is Scheduled again while the local executor still
+        // has it active. The worker should not re-claim it in the same poll,
+        // but it should stop local execution and clear local bookkeeping.
+        let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        stored.refresh().await.unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        let rescheduled = dirty
+            .value
+            .get(&id)
+            .cloned()
+            .expect("claimed compaction missing")
+            .with_status(CompactionStatus::Scheduled)
+            .with_worker(None);
+        dirty.value.insert(rescheduled);
+        stored.update(dirty).await.unwrap();
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        assert_eq!(
+            fx.executor.jobs().len(),
+            1,
+            "worker must not dispatch a duplicate execution"
+        );
+        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert!(!fx.handler.active_jobs.contains(&id));
+        assert!(!fx.handler.job_progress.contains_key(&id));
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Scheduled);
+        assert!(c.worker().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_worker_stops_active_job_when_heartbeat_loses_ownership() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                max_concurrent_compactions: 1,
+                ..CompactionWorkerOptions::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert!(fx.handler.active_jobs.contains(&id));
+        assert!(fx.handler.job_progress.contains_key(&id));
+
+        // Simulate another worker taking ownership before this worker's next
+        // heartbeat. The heartbeat must not rewrite the entry; it should just
+        // request local execution stop and clear local capacity bookkeeping.
+        let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        stored.refresh().await.unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        let stolen = dirty
+            .value
+            .get(&id)
+            .cloned()
+            .expect("claimed compaction missing")
+            .with_worker(Some(WorkerSpec::new("worker-B".to_string(), 12345)));
+        dirty.value.insert(stolen);
+        stored.update(dirty).await.unwrap();
+
+        fx.handler.handle_planning_heartbeat(id).await.unwrap();
+
+        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert!(!fx.handler.active_jobs.contains(&id));
+        assert!(!fx.handler.job_progress.contains_key(&id));
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Running);
+        assert_eq!(c.worker().unwrap().worker_id, "worker-B");
+        assert_eq!(c.worker().unwrap().last_heartbeat_ms, 12345);
+
+        let next_id = Ulid::from_parts(2, 0);
+        fx.seed_scheduled_compaction(next_id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let jobs = fx.executor.jobs();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[1].compaction_id, next_id);
+        assert!(fx.handler.active_jobs.contains(&next_id));
+        assert!(fx.handler.job_progress.contains_key(&next_id));
     }
 
     #[tokio::test]

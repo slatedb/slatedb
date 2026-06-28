@@ -204,7 +204,13 @@ pub(crate) trait CompactionExecutor {
     /// Starts executing a compaction job asynchronously.
     fn start_compaction_job(&self, compaction: StartCompactionJobArgs);
 
-    /// Stops the executor and cancels any in-flight tasks, waiting for them to finish.
+    /// Requests that an executing compaction job stop.
+    ///
+    /// Returns true if the job was active and a stop was requested. This does
+    /// not wait for the task to finish winding down.
+    fn stop_compaction_job(&self, id: Ulid) -> bool;
+
+    /// Stops the executor and requests cancellation of any in-flight tasks.
     fn stop(&self);
 }
 
@@ -264,12 +270,17 @@ impl CompactionExecutor for TokioCompactionExecutor {
         self.inner.start_compaction_job(compaction);
     }
 
+    fn stop_compaction_job(&self, id: Ulid) -> bool {
+        self.inner.stop_compaction_job(id)
+    }
+
     fn stop(&self) {
         self.inner.stop()
     }
 }
 
 struct TokioCompactionTask {
+    destination: u32,
     task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
@@ -293,7 +304,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     handle: tokio::runtime::Handle,
     worker_tx: async_channel::Sender<WorkerMessage>,
     table_store: Arc<TableStore>,
-    tasks: Arc<Mutex<BTreeMap<u32, TokioCompactionTask>>>,
+    tasks: Arc<Mutex<BTreeMap<Ulid, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     worker_stats: WorkerStats,
@@ -920,13 +931,11 @@ impl TokioCompactionExecutorInner {
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
             return;
         }
-        let dst = args.destination;
-        self.worker_stats.running_compactions.increment(1);
-        assert!(!tasks.contains_key(&dst));
-
         let id = args.id;
-
-        // TODO(sujeetsawala): Add compaction plan to object store with InProgress status
+        let dst = args.destination;
+        assert!(!tasks.contains_key(&id));
+        assert!(!tasks.values().any(|task| task.destination == dst));
+        self.worker_stats.running_compactions.increment(1);
 
         let this = self.clone();
         let this_cleanup = self.clone();
@@ -934,11 +943,18 @@ impl TokioCompactionExecutorInner {
             "compactor_executor".to_string(),
             &self.handle,
             move |result| {
-                let result = result.clone();
-                {
+                let removed = {
                     let mut tasks = this_cleanup.tasks.lock();
-                    tasks.remove(&dst);
+                    tasks.remove(&id).is_some()
+                };
+
+                // If the task was already removed (e.g., by `stop_compaction_job`), don't
+                // send a completion message or update metrics.
+                if !removed {
+                    return;
                 }
+
+                let result = result.clone();
                 // Allow send() because we are treating the executor like an external
                 // component. They can do what they want. If the send fails (e.g., during
                 // DB shutdown), we log it and continue with cleanup.
@@ -956,40 +972,81 @@ impl TokioCompactionExecutorInner {
             },
             async move { this.plan_and_execute_compaction_job(args).await },
         );
-        tasks.insert(dst, TokioCompactionTask { task });
+        tasks.insert(
+            id,
+            TokioCompactionTask {
+                destination: dst,
+                task,
+            },
+        );
     }
 
-    /// Cancels all active compaction tasks and waits for their termination.
-    fn stop(&self) {
-        // Drain all tasks and abort them, then release tasks lock so
-        // the cleanup function in spawn_bg_task (above) can take the
-        // lock and remove the task from the map.
-        let task_handles = {
+    /// Requests cancellation of one active compaction job.
+    #[allow(dead_code)]
+    fn stop_compaction_job(&self, id: Ulid) -> bool {
+        let task = {
             let mut tasks = self.tasks.lock();
-            // BTreeMap keeps abort/join order stable by destination. HashMap
-            // iteration order is randomized, which can feed the DST runtime a
-            // process-dependent shutdown order.
-            let mut task_handles = Vec::with_capacity(tasks.len());
-            while let Some((_, task)) = tasks.pop_first() {
-                task.task.abort();
-                task_handles.push(task.task);
-            }
-            task_handles
+            tasks.remove(&id)
+        };
+        let Some(task) = task else {
+            return false;
         };
 
+        task.task.abort();
+        self.worker_stats.running_compactions.increment(-1);
+        self.spawn_task_termination_logger(vec![(id, task.task)]);
+        true
+    }
+
+    fn spawn_task_termination_logger(
+        &self,
+        task_handles: Vec<(Ulid, JoinHandle<Result<SortedRun, SlateDBError>>)>,
+    ) {
+        if task_handles.is_empty() {
+            return;
+        }
         let wait_for_task_termination = async move {
-            let results = join_all(task_handles).await;
-            for result in results {
+            let results = join_all(
+                task_handles
+                    .into_iter()
+                    .map(|(id, task)| async move { (id, task.await) }),
+            )
+            .await;
+            for (id, result) in results {
                 match result {
                     Err(e) if !e.is_cancelled() => {
-                        error!("shutdown error in compaction task [error={:?}]", e);
+                        error!(
+                            "compaction job failed to stop cleanly [id={}, error={:?}]",
+                            id, e
+                        );
                     }
                     _ => {}
                 }
             }
         };
-
         self.handle.spawn(wait_for_task_termination);
+    }
+
+    /// Requests cancellation of all active compaction tasks.
+    fn stop(&self) {
+        // Drain all tasks and abort them, then release tasks lock. Draining
+        // takes ownership of cancellation accounting, so task cleanup skips
+        // completion messages and metric updates for these jobs.
+        let task_handles = {
+            let mut tasks = self.tasks.lock();
+            // BTreeMap keeps abort/join order stable by job id. HashMap
+            // iteration order is randomized, which can feed the DST runtime a
+            // process-dependent shutdown order.
+            let mut task_handles = Vec::with_capacity(tasks.len());
+            while let Some((id, task)) = tasks.pop_first() {
+                task.task.abort();
+                self.worker_stats.running_compactions.increment(-1);
+                task_handles.push((id, task.task));
+            }
+            task_handles
+        };
+
+        self.spawn_task_termination_logger(task_handles);
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
     }
 }
@@ -2449,6 +2506,138 @@ mod tests {
     /// still makes progress (emits a progress message) while that flush is in
     /// flight. Before `close()` was pipelined off the loop, the loop would be
     /// parked inside `close()` and emit nothing until the flush completed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn should_stop_single_compaction_job_without_stopping_executor() {
+        // given: an executor writing through a gated object store, with a tiny
+        // max_sst_size so the first compaction parks while flushing output.
+        let handle = tokio::runtime::Handle::current();
+        let options = Arc::new(CompactionWorkerOptions {
+            max_sst_size: 1,
+            ..CompactionWorkerOptions::default()
+        });
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner));
+        let object_store: Arc<dyn ObjectStore> = gated.clone();
+        let root_path = Path::from("testdb-stop-single-job");
+        let clock = Arc::new(DefaultSystemClock::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat {
+                block_size: 64,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+            TableStoreKind::Compactor,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle,
+            options,
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: Arc::new(DbRand::new(100u64)),
+            stats: {
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
+            },
+            worker_stats: WorkerStats::noop(),
+            clock,
+            manifest_store,
+            merge_operator: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
+
+        let entries: Vec<RowEntry> = (0u64..64)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:04}").as_bytes(),
+                    format!("val{i:04}").as_bytes(),
+                    i + 1,
+                )
+            })
+            .collect();
+        let input_ssts = write_sst(&table_store, &entries, usize::MAX).await;
+        let l0_sst_views: Vec<SsTableView> =
+            input_ssts.into_iter().map(SsTableView::identity).collect();
+
+        let setup_puts = gated.put_opts_gate.arrivals();
+        gated.put_opts_gate.close();
+
+        // when: the first job runs and reaches a blocked output flush.
+        let stopped_id = Ulid::new();
+        executor.start_compaction_job(StartCompactionJobArgs {
+            id: stopped_id,
+            compaction_id: stopped_id,
+            destination: 0,
+            l0_sst_views: l0_sst_views.clone(),
+            sorted_runs: vec![],
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            ctx: Some(CompactionContext::new(
+                vec![Subcompaction::new(BytesRange::unbounded())],
+                Some(0),
+            )),
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            gated.put_opts_gate.wait_for_arrivals(setup_puts + 1),
+        )
+        .await
+        .expect("a close() should reach the blocked put gate");
+        assert!(executor.inner.tasks.lock().contains_key(&stopped_id));
+
+        // then: stopping that job clears executor bookkeeping immediately.
+        assert!(executor.stop_compaction_job(stopped_id));
+        assert!(executor.inner.tasks.lock().is_empty());
+        assert!(!executor.stop_compaction_job(stopped_id));
+
+        // when: the gate is reopened and a second job is started on the same
+        // executor and destination.
+        gated.put_opts_gate.release();
+        let second_id = Ulid::new();
+        executor.start_compaction_job(StartCompactionJobArgs {
+            id: second_id,
+            compaction_id: second_id,
+            destination: 0,
+            l0_sst_views,
+            sorted_runs: vec![],
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            ctx: Some(CompactionContext::new(
+                vec![Subcompaction::new(BytesRange::unbounded())],
+                Some(0),
+            )),
+        });
+
+        // then: the second job completes, and the stopped job never reports a
+        // completion after cancellation won ownership of task accounting.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let WorkerMessage::CompactionJobFinished { id, result } =
+                    rx.recv().await.unwrap()
+                {
+                    assert_ne!(id, stopped_id, "stopped job reported completion");
+                    if id == second_id {
+                        return result;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("second job should finish after the gate is released")
+        .expect("second compaction should succeed");
+        assert!(executor.inner.tasks.lock().is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn should_keep_processing_while_sst_flush_is_blocked() {
         // given: an executor writing through a gated object store, with a tiny
