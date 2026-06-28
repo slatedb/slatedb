@@ -370,12 +370,18 @@ impl CompactionWorkerHandler {
                     // This can happen if coordinator hasn't seen this worker's heartbeat yet,
                     // and transitions the job back to `Scheduled`. We don't attempt to reclaim
                     // the job since its context might have diverged or this worker might be
-                    // misbehaving. Instead, we allow the worker's next heartbeat to see it no
-                    // longer owns the job and stop the local execution.
+                    // misbehaving. Instead, stop the local execution so a subsequent poll can
+                    // claim only after local bookkeeping has been cleared.
                     debug!(
                         "skipping this compactor is running but doesn't own [worker_id={}, id={}]",
                         self.worker_id,
                         c.id()
+                    );
+                    Self::stop_compaction_job(
+                        &self.executor,
+                        &mut self.active_jobs,
+                        &mut self.job_progress,
+                        c.id(),
                     );
                 } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
@@ -489,9 +495,12 @@ impl CompactionWorkerHandler {
                     self.worker_id,
                     compaction_id
                 );
-                self.executor.stop_compaction_job(compaction_id);
-                self.active_jobs.remove(&compaction_id);
-                self.job_progress.remove(&compaction_id);
+                Self::stop_compaction_job(
+                    &self.executor,
+                    &mut self.active_jobs,
+                    &mut self.job_progress,
+                    compaction_id,
+                );
                 return Ok(None);
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
@@ -745,6 +754,24 @@ impl CompactionWorkerHandler {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    // Stops a compaction job that is currently executing on this worker, removing
+    // it from the active jobs and progress bookkeeping. This is used when a
+    // job is no longer owned by this worker (e.g., it was reclaimed by the
+    // coordinator due to a heartbeat timeout). The function returns without waiting
+    // for the executor to finish stopping the job.
+    //
+    // To release ownership of a job, use `release_claim` instead.
+    fn stop_compaction_job(
+        executor: &Arc<dyn CompactionExecutor + Send + Sync>,
+        active_jobs: &mut BTreeSet<Ulid>,
+        job_progress: &mut HashMap<Ulid, JobProgressState>,
+        compaction_id: Ulid,
+    ) {
+        executor.stop_compaction_job(compaction_id);
+        active_jobs.remove(&compaction_id);
+        job_progress.remove(&compaction_id);
     }
 
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
@@ -1085,7 +1112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_worker_skips_rescheduled_job_already_active_locally() {
+    async fn test_worker_stops_rescheduled_job_already_active_locally_on_poll() {
         let mut fx = WorkerFixture::new_with_clock(
             "worker-A",
             Arc::new(DefaultSystemClock::new()),
@@ -1104,8 +1131,8 @@ mod tests {
 
         // Simulate the coordinator reclaiming this worker's still-running job:
         // the persisted entry is Scheduled again while the local executor still
-        // has it active. The worker should not re-claim or stop it here; the
-        // heartbeat path handles ownership loss.
+        // has it active. The worker should not re-claim it in the same poll,
+        // but it should stop local execution and clear local bookkeeping.
         let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
             .await
             .unwrap()
@@ -1129,11 +1156,9 @@ mod tests {
             1,
             "worker must not dispatch a duplicate execution"
         );
-        assert!(
-            fx.executor.stopped_jobs().is_empty(),
-            "polling should not stop the active job"
-        );
-        assert!(fx.handler.active_jobs.contains(&id));
+        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert!(!fx.handler.active_jobs.contains(&id));
+        assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
