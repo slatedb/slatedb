@@ -367,7 +367,7 @@ impl CompactionWorkerHandler {
                     // misbehaving. Instead, stop the local execution so a subsequent poll can
                     // claim only after local bookkeeping has been cleared.
                     debug!(
-                        "skipping this compactor is running but doesn't own [worker_id={}, id={}]",
+                        "skipping; this compaction is already running [worker_id={}, id={}]",
                         self.worker_id,
                         c.id()
                     );
@@ -758,7 +758,6 @@ impl CompactionWorkerHandler {
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
-        self.job_progress.remove(&compaction_id);
         let worker_id = self.worker_id.as_str();
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);

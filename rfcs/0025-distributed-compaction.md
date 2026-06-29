@@ -330,7 +330,8 @@ On coordinator restart, the recovery logic is:
 
 ### Deployment Patterns
 
-In all cases the coordinator uses `RemoteCompactionExecutor`. `compactor_options: None` in `Settings` means no coordinator runs in that process; a standalone `Compactor` process owns coordination instead.
+`compactor_options: None` in `Settings` means no coordinator runs in that process; a standalone `Compactor` process owns coordination instead.
+`compactor_options.worker: None` in `Settings` means no worker runs in that process; a standalone `CompactionWorker` process owns claiming and execution instead.
 
 1. **Coordinator + embedded worker:** coordinator and worker run together in the DB process.
 
