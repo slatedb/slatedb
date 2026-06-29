@@ -376,6 +376,7 @@ impl DbInner {
 
     /// Request a memtable freeze from the writer task. Sends a
     /// [`BatchWriterMessage::Flush`] to the writer event loop and waits for it to complete.
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     pub(crate) async fn request_batch_writer_flush(
         &self,
         freeze_memtable: bool,
