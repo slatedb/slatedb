@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { generateRfcWrappers } from './scripts/generate-rfcs.js';
 import { generateMdMirrors } from './scripts/generate-md-mirrors.js';
 import mermaid from 'astro-mermaid';
+import remarkDirective from 'remark-directive';
+import remarkAdmonitions from './src/plugins/remark-admonitions.mjs';
 
 const site = 'https://slatedb.io';
 const ogUrl = new URL('/img/slatedb-opengraph.jpg', site).href;
@@ -16,6 +18,22 @@ const ogImageAlt = 'SlateDB - An embedded database built on object storage';
 // https://astro.build/config
 export default defineConfig({
 	site,
+	// Applies to plain Astro markdown/MDX (e.g. the blog). Starlight docs use
+	// Expressive Code instead, so this only affects our bespoke pages.
+	markdown: {
+		shikiConfig: {
+			theme: 'github-light',
+			// `ascii-art` isn't a real grammar; treat it as plain text so Shiki
+			// doesn't error. Astro keeps `data-language="ascii-art"` on the
+			// rendered <pre>, which the blog styles as tightly-spaced ASCII art
+			// (box-drawing characters that connect vertically).
+			langAlias: { 'ascii-art': 'text' },
+		},
+		// `:::note` admonitions for the blog. remark-directive parses the syntax;
+		// remarkAdmonitions transforms it (and self-scopes to blog files so it
+		// doesn't touch Starlight docs' own native asides).
+		remarkPlugins: [remarkDirective, remarkAdmonitions],
+	},
 	integrations: [
 		mermaid(),
 		starlight({
@@ -98,7 +116,10 @@ export default defineConfig({
 				},
 			],
 			plugins: [
-				starlightLinksValidator(),
+				// The blog lives in custom (non-Starlight) Astro pages, which the
+				// link validator can't resolve — exclude them so links from docs
+				// or RFCs into /blog/* aren't reported as invalid.
+				starlightLinksValidator({ exclude: ['/blog', '/blog/', '/blog/**'] }),
 				starlightLlmsTxt(),
 			],
 			sidebar: [

@@ -1,0 +1,209 @@
+---
+import { getCollection } from 'astro:content';
+import Blog from '../../layouts/Blog.astro';
+
+const posts = (await getCollection('blog')).sort(
+	(a, b) => b.data.pubDate.getTime() - a.data.pubDate.getTime(),
+);
+
+const fmt = (d: Date) =>
+	d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+// Roman numerals for the hanging index gutter (restarts per section).
+const roman = (n: number): string => {
+	const map: [number, string][] = [
+		[10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I'],
+	];
+	let out = '';
+	for (const [v, s] of map) {
+		while (n >= v) { out += s; n -= v; }
+	}
+	return out;
+};
+
+// Talks are external recordings; sourced from the project README. Newest first.
+const talks = [
+	{ title: 'SlateDB — Object native LSM tree', speaker: 'Almog Gavra', year: 2026, href: 'https://www.youtube.com/watch?v=KEtVKZMPY0Q' },
+	{ title: 'Internals of SlateDB (AI Council)', speaker: 'Vignesh Chandramohan', year: 2025, href: 'https://www.youtube.com/watch?v=gcTRXZeKbNg' },
+	{ title: 'Internals of SlateDB (Rust Seattle Group)', speaker: 'Vignesh Chandramohan', year: 2025, href: 'https://www.youtube.com/watch?v=qqF_zFWqFYk' },
+	{ title: 'Database Internals — SlateDB', speaker: 'Chris Riccomini', year: 2024, href: 'https://www.youtube.com/watch?v=wEAcNoJOBFI' },
+	{ title: 'Building a Cloud Native LSM on Object Storage', speaker: 'Rohan Desai & Chris Riccomini', year: 2024, href: 'https://www.p99conf.io/session/building-a-cloud-native-lsm-on-object-storage/' },
+];
+---
+
+<Blog title="Blog — SlateDB" description="News, releases, and engineering notes from the SlateDB project.">
+	<div class="index">
+		<div class="content">
+			<section class="group">
+				<h2 class="group-label">Blog</h2>
+				<div class="group-meta">
+					<span class="group-count">{posts.length} {posts.length === 1 ? 'post' : 'posts'}</span>
+					<a class="group-rss" href="/blog/rss.xml">rss</a>
+				</div>
+				{posts.length === 0 ? (
+					<p class="empty">No posts yet.</p>
+				) : (
+					<ul class="rows">
+						{posts.map((post, i) => (
+							<li>
+								<a class="row" href={`/blog/${post.id}/`}>
+									<span class="row-num">{roman(i + 1)}</span>
+									<span class="row-title">{post.data.title}</span>
+										<time class="row-date" datetime={post.data.pubDate.toISOString()}>{fmt(post.data.pubDate)}</time>
+									<span class="row-arrow" aria-hidden="true">→</span>
+								</a>
+							</li>
+						))}
+					</ul>
+				)}
+			</section>
+
+			<section class="group">
+				<h2 class="group-label">Talks</h2>
+				<div class="group-meta">
+					<span class="group-count">{talks.length} talks</span>
+				</div>
+				<ul class="rows">
+					{talks.map((talk, i) => (
+						<li>
+							<a class="row" href={talk.href} target="_blank" rel="noopener noreferrer">
+								<span class="row-num">{roman(i + 1)}</span>
+								<span class="row-title">
+									{talk.title}
+									<span class="row-speaker">{talk.speaker}</span>
+								</span>
+								<span class="row-date">{talk.year}</span>
+								<span class="row-arrow" aria-hidden="true">↗</span>
+							</a>
+						</li>
+					))}
+				</ul>
+			</section>
+		</div>
+	</div>
+</Blog>
+
+<style>
+	.index {
+		max-width: 44rem;
+		margin: 0 auto;
+		padding: 5rem 0 2rem;
+	}
+
+	.group + .group { margin-top: 3.5rem; }
+	.group { position: relative; }
+
+	/* Mono labels straddling the ruled divider — left = section name, right =
+	   count + rss. Mirrors the homepage "used by / + add your logo" bar. */
+	.group-label,
+	.group-meta {
+		position: absolute;
+		top: -0.6rem;
+		background-color: var(--surface-0);
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.7rem;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		line-height: 1.2;
+	}
+	.group-label {
+		left: 0;
+		margin: 0;
+		padding: 0 0.6rem 0 0;
+		font-weight: 500;
+		color: var(--ink-4);
+	}
+	.group-meta {
+		right: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.85rem;
+		padding: 0 0 0 0.6rem;
+		font-size: 0.68rem;
+		letter-spacing: 0.1em;
+		color: var(--ink-5);
+	}
+	.group-rss {
+		color: var(--accent);
+		text-decoration: none;
+		transition: color 0.15s ease;
+	}
+	.group-rss:hover { color: var(--accent-high); }
+
+	.rows {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		border-top: 1px solid var(--ink-6);
+	}
+
+	/* Row = table-of-contents line: numeral · title · date · arrow */
+	.row {
+		display: flex;
+		align-items: center;
+		padding: 0.7rem 0.25rem 0.7rem 0;
+		text-decoration: none;
+	}
+
+	.row-num {
+		flex: 0 0 2.25rem;
+		font-family: 'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+		font-size: 0.9rem;
+		letter-spacing: 0.06em;
+		color: var(--ink-5);
+		transition: color 0.15s ease;
+	}
+
+	.row-title {
+		flex: 0 1 auto;
+		font-family: 'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+		font-size: 1rem;
+		line-height: 1.3;
+		color: var(--ink-1);
+		min-width: 0;
+		transition: color 0.15s ease;
+	}
+	.row-speaker {
+		display: block;
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.66rem;
+		letter-spacing: 0.02em;
+		color: var(--ink-4);
+		margin-top: 0.25rem;
+	}
+
+	.row-date {
+		flex: 0 0 auto;
+		margin-left: auto;
+		padding-left: 1.5rem;
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.68rem;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--ink-4);
+		white-space: nowrap;
+		transition: color 0.15s ease;
+	}
+
+	.row-arrow {
+		flex: 0 0 auto;
+		margin-left: 0.85rem;
+		color: var(--ink-5);
+		font-size: 0.95rem;
+		transition: transform 0.15s ease, color 0.15s ease;
+	}
+
+	.row:hover .row-num { color: var(--accent); }
+	.row:hover .row-title { color: var(--accent-high); }
+	.row:hover .row-date { color: var(--accent); }
+	.row:hover .row-arrow { color: var(--accent); transform: translateX(0.3rem); }
+
+	.empty {
+		font-family: 'Source Serif 4', ui-serif, Georgia, serif;
+		color: var(--ink-3);
+	}
+
+	@media (max-width: 560px) {
+		.row-num { flex-basis: 1.75rem; }
+	}
+</style>
