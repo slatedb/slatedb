@@ -25,10 +25,13 @@ pub(crate) enum GetAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeadAction {
     /// Read the head straight from upstream, with no cache lookup or save.
-    /// Used for non compated SST reads (WAL, manifest, etc.)
+    /// Used for non compacted SST reads (WAL, manifest, etc.)
     Bypass,
-    /// Read the head through the cache: serve a saved head, or from upstream
-    /// and save it on a miss.
+    /// Serve a cached head if present. on a miss fetch from upstream but do not
+    /// save it.
+    ReadWithoutAdmission,
+    /// Read the head through the cache: serve a saved head, or fetch from
+    /// upstream and save it on a miss.
     ReadThrough,
 }
 
@@ -83,11 +86,12 @@ pub(crate) fn head_action(tag: Option<&ObjectStoreCallTag>) -> HeadAction {
     match tag {
         None => HeadAction::Bypass,
         Some(t) if t.sst_type == SstType::Wal => HeadAction::Bypass,
-        // GC never serves reads, so a cached head is useless to it. Bypass so a
-        // GC HEAD cannot populate the cache.
+        // GC never serves reads, so a cached head is useless to it.
         Some(t) if t.kind == TableStoreKind::GC => HeadAction::Bypass,
-        // We read through the cache for all other tagged HEADs, including
-        // compactor reads because HEAD is cheap metadata.
+        // A compactor HEAD may serve a cached head but must not create a
+        // head-only entry, which would defeat a later foreground range prefetch.
+        Some(t) if t.kind == TableStoreKind::Compactor => HeadAction::ReadWithoutAdmission,
+        // Main and reader HEADs read through the cache.
         Some(_) => HeadAction::ReadThrough,
     }
 }
@@ -210,11 +214,17 @@ mod tests {
         )),
         HeadAction::Bypass
     )]
-    // Tagged non-WAL HEADs read through the cache, the compactor included,
-    // except GC which bypasses (it never serves reads).
     #[case(
         Some(tag(TableStoreKind::Compactor, SstType::Compacted, None)),
-        HeadAction::ReadThrough
+        HeadAction::ReadWithoutAdmission
+    )]
+    #[case(
+        Some(tag(
+            TableStoreKind::Compactor,
+            SstType::Compacted,
+            Some(RetryReason::CrcMismatch)
+        )),
+        HeadAction::ReadWithoutAdmission
     )]
     #[case(
         Some(tag(TableStoreKind::Main, SstType::Compacted, None)),

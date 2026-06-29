@@ -276,8 +276,7 @@ impl FsCacheEntry {
             // correctness. The tmp file plus atomic rename means a reader never
             // observes a partially written part. If a crash leaves a renamed but
             // not yet flushed part that reads back corrupt, block validation
-            // fails on read, the reissued (retry) GET drops the entry, and the
-            // cache refetches the part from the object store.
+            // fails on read, the retried GET will override the cached entry.
             std::fs::rename(tmp_path, path).map_err(wrap_io_err)
         })
         .await?

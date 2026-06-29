@@ -175,7 +175,11 @@ impl CachedObjectStore {
         Ok(())
     }
 
-    pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<GetResult> {
+    pub(crate) async fn cached_head(
+        &self,
+        location: &Path,
+        admit_on_miss: bool,
+    ) -> object_store::Result<GetResult> {
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
         if let Ok(Some((meta, attributes))) = entry.read_head().await {
             return Ok(head_only_get_result(meta, attributes, Extensions::new()));
@@ -199,7 +203,9 @@ impl CachedObjectStore {
                 let meta = result.meta.clone();
                 let attributes = result.attributes.clone();
                 let extensions = result.extensions.clone();
-                self.save_get_result(location, result).await.ok();
+                if admit_on_miss {
+                    self.save_get_result(location, result).await.ok();
+                }
                 Ok::<_, object_store::Error>((meta, attributes, extensions))
             })
             .await?;
@@ -210,6 +216,7 @@ impl CachedObjectStore {
         &self,
         location: &Path,
         opts: GetOptions,
+        force_refresh: bool,
     ) -> object_store::Result<GetResult> {
         let PrefetchedHead {
             meta,
@@ -231,8 +238,9 @@ impl CachedObjectStore {
                 let location = location.clone();
                 async move {
                     this.stats.object_store_cache_part_access.increment(1);
-                    let (bytes, part_source) =
-                        this.read_part(&location, part_id, range_in_part).await?;
+                    let (bytes, part_source) = this
+                        .read_part(&location, part_id, range_in_part, force_refresh)
+                        .await?;
                     if head_source == ReadResultSource::Disk
                         && part_source == ReadResultSource::Disk
                     {
@@ -472,15 +480,16 @@ impl CachedObjectStore {
         location: &Path,
         part_id: PartID,
         range_in_part: Range<usize>,
+        force_refresh: bool,
     ) -> BoxFuture<'static, object_store::Result<(Bytes, ReadResultSource)>> {
         let this = self.clone();
         let location = location.clone();
         Box::pin(async move {
-            // Try local cache first.
             let entry = this.cache_storage.entry(&location, this.part_size_bytes);
-            // Cache hit, so return immediately.
-            if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
-                return Ok((bytes, ReadResultSource::Disk));
+            if !force_refresh {
+                if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
+                    return Ok((bytes, ReadResultSource::Disk));
+                }
             }
 
             // Cache miss, so we need to fetch from the object store.
@@ -654,19 +663,14 @@ impl ObjectStore for CachedObjectStore {
         if options.head {
             return match policy::head_action(tag.as_ref()) {
                 HeadAction::Bypass => self.object_store.get_opts(location, options).await,
-                HeadAction::ReadThrough => self.cached_head(location).await,
+                HeadAction::ReadWithoutAdmission => self.cached_head(location, false).await,
+                HeadAction::ReadThrough => self.cached_head(location, true).await,
             };
         }
         match policy::get_action(tag.as_ref()) {
             GetAction::Bypass => self.object_store.get_opts(location, options).await,
-            GetAction::Refetch => {
-                self.cache_storage
-                    .entry(location, self.part_size_bytes)
-                    .delete()
-                    .await;
-                self.cached_get_opts(location, options).await
-            }
-            GetAction::ReadThrough => self.cached_get_opts(location, options).await,
+            GetAction::Refetch => self.cached_get_opts(location, options, true).await,
+            GetAction::ReadThrough => self.cached_get_opts(location, options, false).await,
         }
     }
 
@@ -1159,6 +1163,7 @@ mod tests {
                     range: Some(GetRange::Bounded(0..5)),
                     ..Default::default()
                 },
+                false,
             )
             .await
             .expect("cache miss should fetch from inner store");
@@ -1185,7 +1190,7 @@ mod tests {
         let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
         let cached_store = new_cached_store(marking);
         let result = cached_store
-            .cached_head(&location)
+            .cached_head(&location, true)
             .await
             .expect("cache miss should fetch head from inner store");
 
@@ -1424,6 +1429,7 @@ mod tests {
                         range: range.clone(),
                         ..Default::default()
                     },
+                    false,
                 )
                 .await;
             match (want, got) {
@@ -1635,7 +1641,9 @@ mod tests {
         for _ in 0..10 {
             let store = cached_store.clone();
             let p = path.clone();
-            handles.push(tokio::spawn(async move { store.cached_head(&p).await }));
+            handles.push(tokio::spawn(
+                async move { store.cached_head(&p, true).await },
+            ));
         }
 
         // Wait until exactly 1 caller arrives at the gate (SingleFlight dedup
@@ -1685,7 +1693,7 @@ mod tests {
                     range: Some(GetRange::Bounded(0..1024)),
                     ..Default::default()
                 };
-                let result = store.cached_get_opts(&p, opts).await?;
+                let result = store.cached_get_opts(&p, opts, false).await?;
                 result.bytes().await
             }));
         }
@@ -1735,7 +1743,9 @@ mod tests {
         for p in &paths {
             let store = cached_store.clone();
             let p = p.clone();
-            handles.push(tokio::spawn(async move { store.cached_head(&p).await }));
+            handles.push(tokio::spawn(
+                async move { store.cached_head(&p, true).await },
+            ));
         }
 
         // Each distinct path has its own SingleFlight key, so all 5 should arrive.
@@ -1790,7 +1800,7 @@ mod tests {
                     range,
                     ..Default::default()
                 };
-                store.cached_get_opts(&p, opts).await
+                store.cached_get_opts(&p, opts, false).await
             }));
         }
 
@@ -1836,7 +1846,9 @@ mod tests {
         for _ in 0..5 {
             let store = cached_store.clone();
             let p = path.clone();
-            handles.push(tokio::spawn(async move { store.cached_head(&p).await }));
+            handles.push(tokio::spawn(
+                async move { store.cached_head(&p, true).await },
+            ));
         }
 
         // Wait for the single winning caller to arrive at the gate.
@@ -1876,7 +1888,7 @@ mod tests {
         // First call — configure failure.
         let store = cached_store.clone();
         let p = path.clone();
-        let handle = tokio::spawn(async move { store.cached_head(&p).await });
+        let handle = tokio::spawn(async move { store.cached_head(&p, true).await });
 
         gated.head_gate.wait_for_arrivals(1).await;
         gated.head_gate.set_error(|| object_store::Error::Generic {
@@ -1895,7 +1907,7 @@ mod tests {
         gated.head_gate.clear_error();
         let store = cached_store.clone();
         let p = path.clone();
-        let handle = tokio::spawn(async move { store.cached_head(&p).await });
+        let handle = tokio::spawn(async move { store.cached_head(&p, true).await });
 
         gated.head_gate.wait_for_arrivals(2).await;
         gated.head_gate.release();
@@ -1925,7 +1937,7 @@ mod tests {
             ..Default::default()
         };
         let result = cached_store
-            .cached_get_opts(&path, prime_opts)
+            .cached_get_opts(&path, prime_opts, false)
             .await
             .unwrap();
         let _ = result.bytes().await.unwrap();
@@ -1936,7 +1948,7 @@ mod tests {
             range: Some(GetRange::Bounded(0..512)),
             ..Default::default()
         };
-        let result = cached_store.cached_get_opts(&path, opts).await;
+        let result = cached_store.cached_get_opts(&path, opts, false).await;
         assert!(result.is_ok());
         let bytes = result.unwrap().bytes().await.unwrap();
         assert_eq!(&bytes[..], &payload[..512]);
@@ -2217,14 +2229,36 @@ mod tests {
         assert_eq!(cached_part_count(&store, &location).await, 2);
     }
 
+    #[rstest]
+    #[case::no_evictor(None)]
+    #[case::with_evictor(Some(64 * 1024 * 1024))]
     #[tokio::test]
-    async fn test_retry_get_drops_stale_part_and_refetches() {
+    async fn test_retry_get_refetches_stale_part(#[case] max_cache_size_bytes: Option<usize>) {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let store = policy_test_store(upstream.clone(), CachePutPolicy::default());
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            new_test_cache_folder(),
+            max_cache_size_bytes,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let store = CachedObjectStore::new(
+            upstream.clone(),
+            cache_storage,
+            1024,
+            CachePutPolicy::default(),
+            stats,
+        )
+        .unwrap();
+        store.start_evictor().await;
 
         let location = Path::from("compacted/01.sst");
-        // 512 bytes is below policy_test_store's 1024 byte part size, so the
-        // object is a single part (part 0) and `cached_part_count` is 1.
+        // 512 bytes is below the 1024 byte part size, so the object is a single
+        // part (part 0) and `cached_part_count` is 1.
         let good = gen_rand_bytes(512);
         upstream
             .put(&location, PutPayload::from_bytes(good.clone()))
@@ -2263,7 +2297,7 @@ mod tests {
             .unwrap();
         assert_eq!(served, bad);
 
-        // A reissued (retry) read drops the entry and refetches the durable bytes.
+        // A reissued (retry) read force-refreshes from upstream, healing the part.
         let retry_tag = ObjectStoreCallTag {
             kind: TableStoreKind::Main,
             sst_type: SstType::Compacted,
@@ -2293,36 +2327,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compactor_head_uses_cache() {
+    async fn test_compactor_head_reads_without_admitting() {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let store = policy_test_store(upstream.clone(), CachePutPolicy::default());
 
         let location = Path::from("compacted/01.sst");
+        let payload = gen_rand_bytes(512);
         upstream
-            .put(&location, PutPayload::from_bytes(gen_rand_bytes(512)))
+            .put(&location, PutPayload::from_bytes(payload.clone()))
             .await
             .unwrap();
         let cache_location = location.clone();
-
-        // Unlike data reads, a compactor HEAD reads through the cache: it is
-        // cheap metadata that caches no data blocks, so it populates the head
-        // (read through) and lets later reads skip the upstream HEAD.
-        let compactor_head = GetOptions {
+        let read_head = || {
+            let entry = store
+                .cache_storage
+                .entry(&cache_location, store.part_size_bytes);
+            async move { entry.read_head().await.unwrap() }
+        };
+        let compactor_head = || GetOptions {
             head: true,
             extensions: ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted)
                 .into(),
             ..Default::default()
         };
-        store.get_opts(&location, compactor_head).await.unwrap();
-        let head = store
-            .cache_storage
-            .entry(&cache_location, store.part_size_bytes)
-            .read_head()
-            .await
-            .unwrap();
+
+        // On a miss the compactor HEAD serves the metadata but must not admit a
+        // head-only entry, which would defeat a later foreground range prefetch.
+        let result = store.get_opts(&location, compactor_head()).await.unwrap();
+        assert_eq!(result.meta.size, payload.len() as u64);
         assert!(
-            head.is_some(),
-            "compactor HEAD should read through and populate the cache head"
+            read_head().await.is_none(),
+            "compactor HEAD must not admit a head-only entry on a miss"
+        );
+
+        // But it still serves an already-cached head: populate via a main HEAD,
+        // then the compactor HEAD is served from it.
+        let main_head = GetOptions {
+            head: true,
+            extensions: ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted).into(),
+            ..Default::default()
+        };
+        store.get_opts(&location, main_head).await.unwrap();
+        assert!(
+            read_head().await.is_some(),
+            "a main HEAD reads through and populates the cache head"
+        );
+        let served = store.get_opts(&location, compactor_head()).await.unwrap();
+        assert_eq!(
+            served.meta.size,
+            payload.len() as u64,
+            "compactor HEAD should serve the already-cached head"
         );
     }
 
