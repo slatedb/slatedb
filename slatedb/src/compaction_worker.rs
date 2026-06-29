@@ -24,20 +24,19 @@
 //! # Heartbeat and failure detection
 //!
 //! Workers emit heartbeats to prove liveness. A heartbeat is a CAS write that
-//! bumps `last_heartbeat_ms` in the worker's `.compactions` entry. Two triggers:
+//! bumps `last_heartbeat_ms` in the worker's `.compactions` entry. Three paths
+//! can refresh it:
 //!
-//! 1. **Bytes trigger**: when the cumulative bytes processed since the last
+//! 1. **Worker ticker**: every `heartbeat_min_interval`, the worker refreshes
+//!    liveness for every active job it still owns.
+//! 2. **Bytes trigger**: when the cumulative bytes processed since the last
 //!    bytes-based heartbeat exceeds `CompactionWorkerOptions::heartbeat_bytes`
 //!    *and* at least `heartbeat_min_interval` has elapsed since the last such
 //!    write, the worker emits a cheap heartbeat that just refreshes liveness.
-//! 2. **Subcompaction trigger**: whenever the per-range subcompaction progress
+//! 3. **Subcompaction trigger**: whenever the per-range subcompaction progress
 //!    (RFC-0028) advances — a range produces new output SSTs — the worker
 //!    writes a heartbeat carrying the latest progress report, so a reclaiming
 //!    worker can resume completed ranges.
-//!
-//! Both triggers are strictly per-job: a job that stops making progress stops
-//! heartbeating and is reclaimed independently of its siblings on the same
-//! worker, so a stalled job can be handed off to a less-loaded worker.
 //!
 //! The coordinator reclaims stale Running compactions whose
 //! `last_heartbeat_ms` is older than
@@ -111,17 +110,11 @@ pub(crate) enum WorkerMessage {
         bytes_processed: u64,
         ctx: CompactionContext,
     },
-    /// Liveness-only heartbeat from the [`CompactionExecutor`], emitted while a
-    /// job is still planning (reading input indexes) and so has no progress to
-    /// report yet. Refreshes `last_heartbeat_ms` without touching the persisted
-    /// context, so a slow planning step on a healthy worker is not mistaken for
-    /// a dead one and reclaimed mid-plan.
-    CompactionJobHeartbeat {
-        /// The job id to refresh liveness for.
-        id: Ulid,
-    },
     /// Ticker-triggered message to poll `.compactions` for claimable jobs.
     PollCompactions,
+    /// Ticker-triggered message to refresh liveness for all jobs this worker
+    /// currently owns.
+    HeartbeatOwnedJobs,
 }
 
 /// Stateless executor of compaction jobs claimed from `.compactions`.
@@ -534,10 +527,10 @@ impl CompactionWorkerHandler {
         // `write_heartbeat`; state is advanced afterwards only on a confirmed
         // durable write.
         //
-        // Bytes-trigger liveness is tied to *this job's own* progress: both the
+        // Bytes-trigger writes are tied to *this job's own* progress: both the
         // threshold (`last_hb_bytes`) and the throttle (`last_hb_ms`) are
-        // per-job, so a job that stops making byte progress stops heartbeating
-        // and is reclaimed even while its siblings on this worker stay busy.
+        // per-job. The worker-level heartbeat ticker handles liveness for
+        // active jobs that are temporarily not reporting byte progress.
         let now_ms = self.clock.now().timestamp_millis() as u64;
         let (bytes_trigger, ctx_changed, prev_sst_count) = {
             let Some(state) = self.job_progress.get(&id) else {
@@ -598,26 +591,6 @@ impl CompactionWorkerHandler {
                     |_| { Err(SlateDBError::Fenced) }
                 );
             }
-        }
-        Ok(())
-    }
-
-    /// Handles a liveness-only heartbeat emitted while a job is still planning,
-    /// before it produces any progress (see
-    /// [`WorkerMessage::CompactionJobHeartbeat`]). Refreshes `last_heartbeat_ms`
-    /// without touching the persisted context, and advances the job's
-    /// `last_hb_ms` on a confirmed write so the bytes-trigger throttle stays
-    /// consistent. A skipped write (entry gone / ownership lost) is a no-op, so
-    /// this never resurrects a job that was already reclaimed mid-plan.
-    async fn handle_planning_heartbeat(&mut self, id: Ulid) -> Result<(), SlateDBError> {
-        if let Some(hb_ms) = self.write_heartbeat(id, None).await? {
-            if let Some(state) = self.job_progress.get_mut(&id) {
-                state.last_hb_ms = hb_ms;
-            }
-            debug!(
-                "planning heartbeat [worker_id={}, id={}, now_ms={}]",
-                self.worker_id, id, hb_ms
-            );
         }
         Ok(())
     }
@@ -693,6 +666,72 @@ impl CompactionWorkerHandler {
         args: StartCompactionJobArgs,
     ) {
         executor.start_compaction_job(args);
+    }
+
+    /// Refreshes liveness for every active job this worker still owns. The
+    /// heartbeat-only write preserves compaction status, context, and output
+    /// progress, and only updates `worker.last_heartbeat_ms`.
+    async fn heartbeat_owned_jobs(&mut self) -> Result<(), SlateDBError> {
+        if self.job_progress.is_empty() {
+            return Ok(());
+        }
+
+        let ids: Vec<Ulid> = self.job_progress.keys().copied().collect();
+        loop {
+            let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
+            stored.refresh().await?;
+            let mut dirty = stored.prepare_dirty()?;
+            let now_ms = self.clock.now().timestamp_millis() as u64;
+            let worker_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
+            let mut heartbeated = Vec::with_capacity(ids.len());
+            let mut lost = Vec::new();
+
+            for id in &ids {
+                let Some(existing) = dirty.value.get(id).cloned() else {
+                    lost.push(*id);
+                    continue;
+                };
+                if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str())
+                {
+                    lost.push(*id);
+                    continue;
+                }
+
+                dirty
+                    .value
+                    .insert(existing.with_worker(Some(worker_spec.clone())));
+                heartbeated.push(*id);
+            }
+
+            if heartbeated.is_empty() {
+                for id in lost {
+                    Self::stop_compaction_job(&self.executor, &mut self.job_progress, id);
+                }
+                return Ok(());
+            }
+
+            match stored.update(dirty).await {
+                Ok(()) => {
+                    for id in lost {
+                        Self::stop_compaction_job(&self.executor, &mut self.job_progress, id);
+                    }
+                    for id in &heartbeated {
+                        if let Some(state) = self.job_progress.get_mut(id) {
+                            state.last_hb_ms = now_ms;
+                        }
+                    }
+                    debug!(
+                        "worker heartbeat refreshed owned compactions [worker_id={}, count={}, now_ms={}]",
+                        self.worker_id,
+                        heartbeated.len(),
+                        now_ms
+                    );
+                    return Ok(());
+                }
+                Err(e) if e.is_sequenced_write_conflict() => continue,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Writes `Compacted` (with the produced output recorded on the job's
@@ -817,11 +856,17 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // synchronize on the same read cadence. Each poll waits a random
         // duration centered on `compactions_poll_interval` (the interval plus or
         // minus half), so the mean poll rate is unchanged.
-        vec![MessageTickerDef::new(
-            self.options.compactions_poll_interval,
-            Box::new(|| WorkerMessage::PollCompactions),
-        )
-        .with_jitter(0.5, self.rand.clone())]
+        vec![
+            MessageTickerDef::new(
+                self.options.compactions_poll_interval,
+                Box::new(|| WorkerMessage::PollCompactions),
+            )
+            .with_jitter(0.5, self.rand.clone()),
+            MessageTickerDef::new(
+                self.options.heartbeat_min_interval,
+                Box::new(|| WorkerMessage::HeartbeatOwnedJobs),
+            ),
+        ]
     }
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
@@ -836,6 +881,9 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
             WorkerMessage::PollCompactions => {
                 self.poll_and_claim().await?;
             }
+            WorkerMessage::HeartbeatOwnedJobs => {
+                self.heartbeat_owned_jobs().await?;
+            }
             WorkerMessage::CompactionJobFinished { id, result } => {
                 self.handle_finished(id, result).await?;
             }
@@ -845,9 +893,6 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
                 ctx,
             } => {
                 self.handle_progress(id, bytes_processed, ctx).await?;
-            }
-            WorkerMessage::CompactionJobHeartbeat { id } => {
-                self.handle_planning_heartbeat(id).await?;
             }
         }
         Ok(())
@@ -1176,7 +1221,7 @@ mod tests {
         dirty.value.insert(stolen);
         stored.update(dirty).await.unwrap();
 
-        fx.handler.handle_planning_heartbeat(id).await.unwrap();
+        fx.handler.heartbeat_owned_jobs().await.unwrap();
 
         assert_eq!(fx.executor.stopped_jobs(), vec![id]);
         assert!(!fx.handler.job_progress.contains_key(&id));
@@ -1360,6 +1405,126 @@ mod tests {
                 ..SsTableInfo::default()
             },
         )
+    }
+
+    #[tokio::test]
+    async fn test_worker_heartbeat_ticker_refreshes_all_owned_jobs() {
+        let mock_clock = Arc::new(MockSystemClock::new());
+        mock_clock.set(1000);
+        let options = CompactionWorkerOptions {
+            max_concurrent_compactions: 2,
+            heartbeat_min_interval: Duration::from_millis(1),
+            ..CompactionWorkerOptions::default()
+        };
+        let clock: Arc<dyn SystemClock> = mock_clock.clone();
+        let mut fx = WorkerFixture::new_with_clock("worker-hb-all", clock, options).await;
+
+        let id1 = Ulid::from_parts(1, 0);
+        let id2 = Ulid::from_parts(2, 0);
+        fx.seed_scheduled_compaction(id1, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.seed_scheduled_compaction(id2, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert_eq!(fx.handler.job_progress.len(), 2);
+
+        let sst = fake_output_handle(Ulid::from_parts(9000, 0));
+        let ctx = CompactionContext::new(
+            vec![Subcompaction::new(BytesRange::unbounded()).with_output_ssts(vec![sst])],
+            Some(7),
+        );
+        fx.handler
+            .handle_progress(id1, 123, ctx.clone())
+            .await
+            .unwrap();
+        let before_id1 = fx
+            .read_compaction(id1)
+            .await
+            .expect("compaction missing")
+            .worker()
+            .expect("worker missing")
+            .last_heartbeat_ms;
+        let before_id2 = fx
+            .read_compaction(id2)
+            .await
+            .expect("compaction missing")
+            .worker()
+            .expect("worker missing")
+            .last_heartbeat_ms;
+
+        mock_clock.advance(Duration::from_secs(5)).await;
+        fx.handler.heartbeat_owned_jobs().await.unwrap();
+
+        let c1 = fx.read_compaction(id1).await.expect("compaction missing");
+        let c2 = fx.read_compaction(id2).await.expect("compaction missing");
+        let hb1 = c1.worker().expect("worker missing").last_heartbeat_ms;
+        let hb2 = c2.worker().expect("worker missing").last_heartbeat_ms;
+
+        assert_eq!(c1.status(), CompactionStatus::Running);
+        assert_eq!(c1.ctx(), Some(&ctx));
+        assert!(c1.output_ssts().is_empty());
+        assert!(hb1 > before_id1);
+        assert!(hb2 > before_id2);
+        assert_eq!(fx.handler.job_progress.get(&id1).unwrap().last_hb_ms, hb1);
+        assert_eq!(fx.handler.job_progress.get(&id2).unwrap().last_hb_ms, hb2);
+    }
+
+    #[tokio::test]
+    async fn test_worker_heartbeat_ticker_stops_lost_jobs_and_refreshes_remaining_jobs() {
+        let mock_clock = Arc::new(MockSystemClock::new());
+        mock_clock.set(1000);
+        let options = CompactionWorkerOptions {
+            max_concurrent_compactions: 2,
+            heartbeat_min_interval: Duration::from_millis(1),
+            ..CompactionWorkerOptions::default()
+        };
+        let clock: Arc<dyn SystemClock> = mock_clock.clone();
+        let mut fx = WorkerFixture::new_with_clock("worker-hb-lost", clock, options).await;
+
+        let lost_id = Ulid::from_parts(1, 0);
+        let kept_id = Ulid::from_parts(2, 0);
+        fx.seed_scheduled_compaction(lost_id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.seed_scheduled_compaction(kept_id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        assert_eq!(fx.handler.job_progress.len(), 2);
+
+        let mut stored = StoredCompactions::try_load(fx.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        stored.refresh().await.unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        let stolen = dirty
+            .value
+            .get(&lost_id)
+            .cloned()
+            .expect("claimed compaction missing")
+            .with_worker(Some(WorkerSpec::new("worker-B".to_string(), 12345)));
+        dirty.value.insert(stolen);
+        stored.update(dirty).await.unwrap();
+
+        mock_clock.advance(Duration::from_secs(5)).await;
+        fx.handler.heartbeat_owned_jobs().await.unwrap();
+
+        assert_eq!(fx.executor.stopped_jobs(), vec![lost_id]);
+        assert!(!fx.handler.job_progress.contains_key(&lost_id));
+        assert!(fx.handler.job_progress.contains_key(&kept_id));
+
+        let lost = fx
+            .read_compaction(lost_id)
+            .await
+            .expect("compaction missing");
+        assert_eq!(lost.worker().unwrap().worker_id, "worker-B");
+        assert_eq!(lost.worker().unwrap().last_heartbeat_ms, 12345);
+
+        let kept = fx
+            .read_compaction(kept_id)
+            .await
+            .expect("compaction missing");
+        assert_eq!(kept.worker().unwrap().worker_id, fx.worker_id);
+        assert!(kept.worker().unwrap().last_heartbeat_ms > 1000);
     }
 
     /// When the bytes-processed counter crosses `heartbeat_bytes` and enough
