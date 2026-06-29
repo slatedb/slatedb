@@ -763,6 +763,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
+    merge_operator: Option<MergeOperatorType>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -776,6 +777,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             rand: Arc::new(DbRand::default()),
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
+            merge_operator: None,
         }
     }
 
@@ -814,6 +816,12 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the merge operator to use when running a compactor.
+    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
+        self.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         // No retrying object stores here, since we don't want to retry admin operations
@@ -824,6 +832,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             rand: self.rand,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
+            merge_operator: self.merge_operator,
         }
     }
 }

@@ -162,15 +162,15 @@ impl WritableKVTable {
 }
 
 pub(crate) struct ImmutableMemtable {
-    /// The recent flushed WAL ID when this IMM is freezed. This is used to determine the starting
-    /// position of WAL replay during recovery. After an IMM is flushed to L0, we do not need to
-    /// care about the earlier WALs which produced this IMM, all we need to know is the recent
-    /// WAL ID of the last L0 compacted.
+    /// A WAL ID for which it is guaranteed that all writes in the contained WAL object are present
+    /// in this memtable. This is used to determine a safe replay point when this IMM is flushed to
+    /// a new L0. On a restart, only WALs after this id may contain data that is not present in the
+    /// tree.
     ///
-    /// Please note that this recent flushed WAL ID might not exactly match the last WAL ID that
-    /// produced this IMM, we still need to take the last l0's `last_seq` to filter out the entries
-    /// that already contained in the last L0 SST.
-    recent_flushed_wal_id: u64,
+    /// Please note that this WAL ID might not exactly match the last WAL ID that produced this
+    /// IMM, so we still need to take the last l0's `last_seq` to filter out the entries that are
+    /// already contained in the last L0 SST.
+    replay_after_wal_id: u64,
     table: Arc<KVTable>,
     /// Notified when the memtable's SST has been uploaded to object storage.
     /// Used to release backpressure on writers when unflushed bytes are too high.
@@ -289,11 +289,11 @@ impl MemTableIterator {
 }
 
 impl ImmutableMemtable {
-    pub(crate) fn new(table: WritableKVTable, recent_flushed_wal_id: u64) -> Self {
+    pub(crate) fn new(table: WritableKVTable, replay_after_wal_id: u64) -> Self {
         let sequence_tracker = table.table.sequence_tracker_snapshot();
         Self {
             table: table.table,
-            recent_flushed_wal_id,
+            replay_after_wal_id,
             uploaded: WatchableOnceCell::new(),
             sequence_tracker,
         }
@@ -310,7 +310,7 @@ impl ImmutableMemtable {
     }
 
     pub(crate) fn recent_flushed_wal_id(&self) -> u64 {
-        self.recent_flushed_wal_id
+        self.replay_after_wal_id
     }
 
     pub(crate) async fn await_uploaded(&self) -> Result<(), SlateDBError> {
@@ -355,7 +355,7 @@ impl ImmutableMemtable {
             }
         }
         new_table.record_touched_segments(surviving_segments);
-        Ok(Self::new(new_table, self.recent_flushed_wal_id))
+        Ok(Self::new(new_table, self.replay_after_wal_id))
     }
 }
 
