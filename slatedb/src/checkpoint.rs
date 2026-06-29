@@ -34,10 +34,7 @@ impl Db {
     ) -> Result<CheckpointCreateResult, crate::Error> {
         let target = match scope {
             CheckpointScope::All => {
-                if self.inner.wal_enabled {
-                    self.inner.flush_wals().await?;
-                }
-                self.inner.freeze_current_memtable()?;
+                self.inner.request_batch_writer_flush(true).await?;
                 FlushTarget::All
             }
             CheckpointScope::Durable => FlushTarget::CurrentDurable,

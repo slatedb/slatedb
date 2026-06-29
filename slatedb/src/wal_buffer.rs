@@ -319,11 +319,12 @@ impl WalBufferManager {
         flush_tx.send(WalFlushWork { result_tx })
     }
 
-    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
-    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
+    pub(crate) fn flush(
+        &self,
+    ) -> Result<oneshot::Receiver<Result<(), SlateDBError>>, SlateDBError> {
         let (result_tx, result_rx) = oneshot::channel();
         self.send_flush_request(Some(result_tx))?;
-        result_rx.await?
+        Ok(result_rx)
     }
 
     /// Returns the list of immutable WALs that need to be flushed.
@@ -895,7 +896,7 @@ mod tests {
         wal_buffer.append(std::slice::from_ref(&entry2)).unwrap();
 
         // Flush the buffer
-        wal_buffer.flush().await.unwrap();
+        wal_buffer.flush().unwrap().await.unwrap().unwrap();
 
         // Verify entries were written to storage
         let sst_iter_options = SstIteratorOptions {
@@ -951,7 +952,7 @@ mod tests {
             let seq = i + 1;
             let entry = make_entry(&format!("key{}", i), &format!("value{}", i), seq, None);
             wal_buffer.append(&[entry]).unwrap();
-            wal_buffer.flush().await.unwrap();
+            wal_buffer.flush().unwrap().await.unwrap().unwrap();
         }
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
@@ -969,7 +970,7 @@ mod tests {
             let seq = i + 1;
             let entry = make_entry(&format!("key{}", i), &format!("value{}", i), seq, None);
             wal_buffer.append(&[entry]).unwrap();
-            wal_buffer.flush().await.unwrap();
+            wal_buffer.flush().unwrap().await.unwrap().unwrap();
         }
         wal_buffer.track_last_applied_seq(50);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
@@ -1004,7 +1005,7 @@ mod tests {
             lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSH_REQUESTS).unwrap();
 
         // Explicitly flush to drain everything, including any partial current WAL.
-        wal_buffer.flush().await.unwrap();
+        wal_buffer.flush().unwrap().await.unwrap().unwrap();
 
         let actual_flushes = lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap();
 
