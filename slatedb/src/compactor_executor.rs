@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::mem;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{self, AtomicBool};
@@ -457,6 +458,35 @@ impl TokioCompactionExecutorInner {
         }
     }
 
+    async fn await_with_heartbeat<F, T>(&self, id: Ulid, future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                res = &mut future => break res,
+                _ = self.clock.sleep(self.options.heartbeat_min_interval) => {
+                    // Allow send() because we are treating the executor like an
+                    // external component. If the send fails (e.g., during DB
+                    // shutdown), log it and continue with the compaction work.
+                    #[allow(clippy::disallowed_methods)]
+                    if self
+                        .worker_tx
+                        .try_send(WorkerMessage::CompactionJobHeartbeat { id })
+                        .is_err()
+                    {
+                        debug!(
+                            "failed to send compaction heartbeat (likely DB shutdown) [id={}]",
+                            id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Awaits an in-flight SST close, records its stats, and appends the
     /// resulting handle to `output_ssts`. Handles are appended in spawn order,
     /// which preserves the ascending-key ordering required within a sorted run.
@@ -543,26 +573,9 @@ impl TokioCompactionExecutorInner {
         // re-planning. Emit a liveness-only heartbeat on the
         // `heartbeat_min_interval` cadence while planning is in flight; planning
         // that finishes before the first tick (the common case) sends nothing.
-        let plan = self.load_manifest_and_plan(args);
-        tokio::pin!(plan);
-        let (sequence_tracker, planned) = loop {
-            tokio::select! {
-                biased;
-                res = &mut plan => break res?,
-                _ = self.clock.sleep(self.options.heartbeat_min_interval) => {
-                    if self
-                        .worker_tx
-                        .try_send(WorkerMessage::CompactionJobHeartbeat { id })
-                        .is_err()
-                    {
-                        debug!(
-                            "failed to send planning heartbeat (likely DB shutdown) [id={}]",
-                            id
-                        );
-                    }
-                }
-            }
-        };
+        let (sequence_tracker, planned) = self
+            .await_with_heartbeat(id, self.load_manifest_and_plan(args))
+            .await?;
 
         self.execute_compaction_job(id, destination, planned, sequence_tracker)
             .await
@@ -698,7 +711,7 @@ impl TokioCompactionExecutorInner {
                             output_ssts: output_ssts.to_vec(),
                         });
                     };
-                    this.run_subcompaction_merge(args, sequence_tracker, &progress)
+                    this.run_subcompaction_merge(id, args, sequence_tracker, &progress)
                         .await
                 },
             );
@@ -806,11 +819,14 @@ impl TokioCompactionExecutorInner {
     /// unbounded range) and subcompactions (RFC-0028).
     async fn run_subcompaction_merge(
         &self,
+        id: Ulid,
         args: SubcompactionArgs,
         sequence_tracker: Arc<SequenceTracker>,
         progress: &(dyn Fn(u64, &[SsTableHandle]) + Send + Sync),
     ) -> Result<Vec<SsTableHandle>, SlateDBError> {
-        let mut all_iter = self.load_iterators(&args, sequence_tracker).await?;
+        let mut all_iter = self
+            .await_with_heartbeat(id, self.load_iterators(&args, sequence_tracker))
+            .await?;
         let mut output_ssts = args.output_ssts.clone();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
@@ -2920,6 +2936,133 @@ mod tests {
         );
 
         // when: reads are unblocked, the job plans and runs to completion.
+        gated.get_opts_gate.release();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let WorkerMessage::CompactionJobFinished { result, .. } =
+                    rx.recv().await.unwrap()
+                {
+                    return result;
+                }
+            }
+        })
+        .await
+        .expect("job should finish after reads are unblocked")
+        .expect("compaction should succeed");
+    }
+
+    /// A pre-planned job can still stall before its first byte-progress report
+    /// while subcompactions initialize their input iterators. Simulate that
+    /// blocked object-store read and assert the executor keeps the job live
+    /// using the same heartbeat path as planning.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn should_heartbeat_while_subcompaction_iterator_load_blocks() {
+        let handle = tokio::runtime::Handle::current();
+        let options = Arc::new(CompactionWorkerOptions {
+            max_sst_size: SUBCOMPACTION_SST_SIZE,
+            heartbeat_min_interval: Duration::from_millis(20),
+            ..CompactionWorkerOptions::default()
+        });
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner.clone()));
+        let gated_store: Arc<dyn ObjectStore> = gated.clone();
+        let root_path = Path::from("testdb-load-iterators-heartbeat");
+        let clock = Arc::new(DefaultSystemClock::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(gated_store.clone(), None),
+            SsTableFormat {
+                block_size: 256,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+            TableStoreKind::Compactor,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, inner.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle,
+            options,
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: Arc::new(DbRand::new(100u64)),
+            stats: {
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
+            },
+            worker_stats: WorkerStats::noop(),
+            clock,
+            manifest_store,
+            merge_operator: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
+
+        let (l0_sst_views, sorted_runs) = split_inputs(&table_store).await;
+
+        // Block table-store reads after setup. The supplied context means the
+        // job skips planning and reaches subcompaction iterator loading.
+        let setup_gets = gated.get_opts_gate.arrivals();
+        gated.get_opts_gate.close();
+
+        let id = Ulid::new();
+        executor.start_compaction_job(StartCompactionJobArgs {
+            id,
+            compaction_id: Ulid::new(),
+            destination: 0,
+            l0_sst_views,
+            sorted_runs,
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            ctx: Some(CompactionContext::new(
+                vec![Subcompaction::new(BytesRange::unbounded())],
+                Some(0),
+            )),
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            gated.get_opts_gate.wait_for_arrivals(setup_gets + 1),
+        )
+        .await
+        .expect("subcompaction iterator loading should reach the blocked read gate");
+
+        let heartbeated = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match rx.recv().await.unwrap() {
+                    WorkerMessage::CompactionJobHeartbeat { id: hb_id } => {
+                        assert_eq!(hb_id, id, "heartbeat carried the wrong job id");
+                        break;
+                    }
+                    WorkerMessage::CompactionJobProgress {
+                        id: progress_id,
+                        bytes_processed,
+                        ..
+                    } => {
+                        assert_eq!(progress_id, id, "progress carried the wrong job id");
+                        assert_eq!(
+                            bytes_processed, 0,
+                            "only initial plan progress is expected while reads are blocked"
+                        );
+                    }
+                    WorkerMessage::CompactionJobFinished { .. } => {
+                        panic!("job finished while iterator reads were blocked")
+                    }
+                    WorkerMessage::PollCompactions => {}
+                }
+            }
+        })
+        .await;
+        assert!(
+            heartbeated.is_ok(),
+            "expected a heartbeat while subcompaction iterator loading was blocked"
+        );
+
         gated.get_opts_gate.release();
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
