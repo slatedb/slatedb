@@ -1803,10 +1803,7 @@ mod tests {
             let id = crate::db_state::SsTableId::Compacted(
                 inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
             );
-            let sst_handle = inner
-                .upload_sst(&id, imm_memtable.table(), &encoded_sst, false)
-                .await
-                .unwrap();
+            let sst_handle = inner.upload_sst(&id, &encoded_sst, false).await.unwrap();
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,
