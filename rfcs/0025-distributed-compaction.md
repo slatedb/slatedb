@@ -330,7 +330,7 @@ On coordinator restart, the recovery logic is:
 
 ### Deployment Patterns
 
-In all cases the coordinator uses `RemoteCompactionExecutor`. `compactor_options: None` in `Settings` means no coordinator runs in that process; a standalone `Compactor` process owns coordination instead.
+`compactor_options: None` in `Settings` means no coordinator runs in that process; a standalone `Compactor` process owns coordination instead.
 
 1. **Coordinator + embedded worker:** coordinator and worker run together in the DB process.
 
@@ -346,6 +346,8 @@ let db = Db::builder("db", object_store)
     .build()
     .await?;
 ```
+
+`compactor_options.worker: None` in `Settings` means no worker runs in that process; a standalone `CompactionWorker` process owns claiming and execution instead.
 
 2. **Coordinator + remote workers:** coordinator runs in the DB process; workers are separate processes.
 

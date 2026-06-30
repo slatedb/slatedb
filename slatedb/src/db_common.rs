@@ -1,8 +1,6 @@
 use bytes::Bytes;
-use parking_lot::RwLockWriteGuard;
 
 use crate::db::DbInner;
-use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::oracle::Oracle;
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
@@ -28,55 +26,6 @@ pub(crate) fn extract_segment_prefix(
 }
 
 impl DbInner {
-    pub(crate) fn maybe_freeze_current_memtable(&self) -> Result<(), SlateDBError> {
-        let wal_id = self.wal_buffer.recent_flushed_wal_id();
-        let mut guard = self.state.write();
-        let meta = guard.memtable().metadata();
-
-        let last_freeze_wal_id = guard
-            .state()
-            .imm_memtable
-            .front()
-            .map(|imm| imm.recent_flushed_wal_id())
-            .unwrap_or(guard.state().core().replay_after_wal_id);
-
-        let l0_sst_size_est = self
-            .table_store
-            .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
-
-        let wal_id_gap = wal_id
-            .checked_sub(last_freeze_wal_id)
-            .ok_or_else(|| SlateDBError::InvalidDBState)?;
-
-        if wal_id_gap < self.settings.max_wal_flushes_before_l0_flush
-            && l0_sst_size_est < self.settings.l0_sst_size_bytes
-        {
-            Ok(())
-        } else {
-            self.freeze_memtable(&mut guard, wal_id)
-        }
-    }
-
-    pub(crate) fn freeze_current_memtable(&self) -> Result<(), SlateDBError> {
-        let wal_id = self.wal_buffer.recent_flushed_wal_id();
-        let mut guard = self.state.write();
-        self.freeze_memtable(&mut guard, wal_id)
-    }
-
-    pub(crate) fn freeze_memtable(
-        &self,
-        guard: &mut RwLockWriteGuard<'_, DbState>,
-        wal_id: u64,
-    ) -> Result<(), SlateDBError> {
-        if guard.memtable().is_empty() {
-            return Ok(());
-        }
-
-        guard.freeze_memtable(wal_id);
-        let _ = self.memtable_flusher().notify_memtable_frozen();
-        Ok(())
-    }
-
     pub(crate) fn replay_memtable(
         &self,
         replayed_memtable: ReplayedMemtable,
@@ -88,7 +37,7 @@ impl DbInner {
         // durable WAL boundary is the WAL buffer's current boundary. Stamp the
         // frozen table with that boundary before advancing the buffer for the new
         // replayed memtable.
-        self.freeze_memtable(&mut guard, current_memtable_wal_id)?;
+        self.freeze_current_memtable_with_state_guard(&mut guard, current_memtable_wal_id);
 
         let last_wal = replayed_memtable.last_wal_id;
         guard.modify(|modifier| modifier.state.manifest.value.core.next_wal_sst_id = last_wal + 1);

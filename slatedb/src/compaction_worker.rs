@@ -59,8 +59,7 @@
 //! The coordinator emits complementary metrics (`jobs_claimed`, `jobs_reclaimed`,
 //! `worker_last_heartbeat_ms`) on its own recorder.
 
-use std::collections::BTreeSet;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -211,10 +210,6 @@ pub(crate) struct CompactionWorkerHandler {
     manifest_store: Arc<ManifestStore>,
     executor: Arc<dyn CompactionExecutor + Send + Sync>,
     clock: Arc<dyn SystemClock>,
-    /// Compactions currently being executed by this worker (claimed but not
-    /// yet `Compacted`). Used to gate capacity and to know what to reset on
-    /// graceful shutdown.
-    active_jobs: BTreeSet<Ulid>,
     /// Lazily-initialized handle for CAS reads/writes on `.compactions`. The
     /// coordinator creates the file on first run; the worker tolerates its
     /// absence on early ticks.
@@ -222,7 +217,7 @@ pub(crate) struct CompactionWorkerHandler {
     rand: Arc<DbRand>,
     fp_registry: Arc<FailPointRegistry>,
     /// Per-job heartbeat bookkeeping. Entry present iff the job is active.
-    job_progress: HashMap<Ulid, JobProgressState>,
+    job_progress: BTreeMap<Ulid, JobProgressState>,
 }
 
 impl CompactionWorkerHandler {
@@ -243,11 +238,10 @@ impl CompactionWorkerHandler {
             manifest_store,
             executor,
             clock,
-            active_jobs: BTreeSet::new(),
             stored: None,
             rand,
             fp_registry,
-            job_progress: HashMap::new(),
+            job_progress: BTreeMap::new(),
         }
     }
 
@@ -334,7 +328,7 @@ impl CompactionWorkerHandler {
     fn capacity(&self) -> usize {
         self.options
             .max_concurrent_compactions
-            .saturating_sub(self.active_jobs.len())
+            .saturating_sub(self.job_progress.len())
     }
 
     /// Scans `.compactions` for `Scheduled` entries without a worker, claims up
@@ -365,7 +359,7 @@ impl CompactionWorkerHandler {
                     // a destination can never be executed; neither can become
                     // valid later, so skip them rather than claim and release.
                     warn!("skipping unrunnable compaction spec [id={}]", c.id());
-                } else if self.active_jobs.contains(&c.id()) {
+                } else if self.job_progress.contains_key(&c.id()) {
                     // It's possible this worker tries to claim a job that it's already running.
                     // This can happen if coordinator hasn't seen this worker's heartbeat yet,
                     // and transitions the job back to `Scheduled`. We don't attempt to reclaim
@@ -373,16 +367,11 @@ impl CompactionWorkerHandler {
                     // misbehaving. Instead, stop the local execution so a subsequent poll can
                     // claim only after local bookkeeping has been cleared.
                     debug!(
-                        "skipping this compactor is running but doesn't own [worker_id={}, id={}]",
+                        "skipping; this compaction is already running [worker_id={}, id={}]",
                         self.worker_id,
                         c.id()
                     );
-                    Self::stop_compaction_job(
-                        &self.executor,
-                        &mut self.active_jobs,
-                        &mut self.job_progress,
-                        c.id(),
-                    );
+                    Self::stop_compaction_job(&self.executor, &mut self.job_progress, c.id());
                 } else if to_claim.len() < capacity {
                     to_claim.push(c.clone());
                 }
@@ -433,7 +422,6 @@ impl CompactionWorkerHandler {
                         self.worker_id,
                         compaction.id()
                     );
-                    self.active_jobs.insert(compaction.id());
                     self.job_progress.insert(
                         compaction.id(),
                         JobProgressState {
@@ -495,12 +483,7 @@ impl CompactionWorkerHandler {
                     self.worker_id,
                     compaction_id
                 );
-                Self::stop_compaction_job(
-                    &self.executor,
-                    &mut self.active_jobs,
-                    &mut self.job_progress,
-                    compaction_id,
-                );
+                Self::stop_compaction_job(&self.executor, &mut self.job_progress, compaction_id);
                 return Ok(None);
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
@@ -765,19 +748,16 @@ impl CompactionWorkerHandler {
     // To release ownership of a job, use `release_claim` instead.
     fn stop_compaction_job(
         executor: &Arc<dyn CompactionExecutor + Send + Sync>,
-        active_jobs: &mut BTreeSet<Ulid>,
-        job_progress: &mut HashMap<Ulid, JobProgressState>,
+        job_progress: &mut BTreeMap<Ulid, JobProgressState>,
         compaction_id: Ulid,
     ) {
         executor.stop_compaction_job(compaction_id);
-        active_jobs.remove(&compaction_id);
         job_progress.remove(&compaction_id);
     }
 
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
-        self.active_jobs.remove(&compaction_id);
         let worker_id = self.worker_id.as_str();
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
@@ -818,7 +798,6 @@ impl CompactionWorkerHandler {
         id: Ulid,
         result: Result<SortedRun, SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        self.active_jobs.remove(&id);
         self.job_progress.remove(&id);
         match result {
             Ok(sorted_run) => self.write_compacted(id, sorted_run).await?,
@@ -884,9 +863,8 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // heartbeat-timeout reclamation path. Stopping the executor also
         // decrements `running_compactions` for cancelled tasks.
         self.executor.stop();
-        self.job_progress.clear();
-        let claimed = std::mem::take(&mut self.active_jobs);
-        for id in claimed {
+        let claimed = std::mem::take(&mut self.job_progress);
+        for id in claimed.into_keys() {
             if let Err(e) = self.release_claim(id).await {
                 error!(
                     "failed to release claim on shutdown [worker_id={}, id={}, error={:?}]",
@@ -1081,7 +1059,7 @@ mod tests {
         assert_eq!(jobs[0].compaction_id, id);
 
         // And the worker tracks the job locally.
-        assert!(fx.handler.active_jobs.contains(&id));
+        assert!(fx.handler.job_progress.contains_key(&id));
     }
 
     #[tokio::test]
@@ -1108,7 +1086,7 @@ mod tests {
         assert_eq!(c.status(), CompactionStatus::Running);
         assert_eq!(c.worker().unwrap().worker_id, "worker-B");
         assert!(fx.executor.jobs().is_empty());
-        assert!(fx.handler.active_jobs.is_empty());
+        assert!(fx.handler.job_progress.is_empty());
     }
 
     #[tokio::test]
@@ -1127,7 +1105,7 @@ mod tests {
             .await;
         fx.handler.poll_and_claim().await.unwrap();
         assert_eq!(fx.executor.jobs().len(), 1);
-        assert!(fx.handler.active_jobs.contains(&id));
+        assert!(fx.handler.job_progress.contains_key(&id));
 
         // Simulate the coordinator reclaiming this worker's still-running job:
         // the persisted entry is Scheduled again while the local executor still
@@ -1157,7 +1135,6 @@ mod tests {
             "worker must not dispatch a duplicate execution"
         );
         assert_eq!(fx.executor.stopped_jobs(), vec![id]);
-        assert!(!fx.handler.active_jobs.contains(&id));
         assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
@@ -1179,7 +1156,6 @@ mod tests {
         fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
-        assert!(fx.handler.active_jobs.contains(&id));
         assert!(fx.handler.job_progress.contains_key(&id));
 
         // Simulate another worker taking ownership before this worker's next
@@ -1203,7 +1179,6 @@ mod tests {
         fx.handler.handle_planning_heartbeat(id).await.unwrap();
 
         assert_eq!(fx.executor.stopped_jobs(), vec![id]);
-        assert!(!fx.handler.active_jobs.contains(&id));
         assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Running);
@@ -1218,7 +1193,6 @@ mod tests {
         let jobs = fx.executor.jobs();
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[1].compaction_id, next_id);
-        assert!(fx.handler.active_jobs.contains(&next_id));
         assert!(fx.handler.job_progress.contains_key(&next_id));
     }
 
@@ -1256,7 +1230,7 @@ mod tests {
         // worker_id is still attached (the coordinator clears it on commit).
         assert_eq!(c.worker().unwrap().worker_id, fx.worker_id);
         // Active set is drained on finish.
-        assert!(!fx.handler.active_jobs.contains(&id));
+        assert!(!fx.handler.job_progress.contains_key(&id));
     }
 
     #[tokio::test]
@@ -1276,7 +1250,7 @@ mod tests {
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
-        assert!(!fx.handler.active_jobs.contains(&id));
+        assert!(!fx.handler.job_progress.contains_key(&id));
     }
 
     #[tokio::test]
@@ -1286,7 +1260,7 @@ mod tests {
         fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
             .await;
         fx.handler.poll_and_claim().await.unwrap();
-        assert_eq!(fx.handler.active_jobs.len(), 1);
+        assert_eq!(fx.handler.job_progress.len(), 1);
 
         // cleanup mirrors graceful shutdown.
         let empty: BoxStream<'_, WorkerMessage> = futures::stream::empty().boxed();
@@ -1295,7 +1269,7 @@ mod tests {
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
-        assert!(fx.handler.active_jobs.is_empty());
+        assert!(fx.handler.job_progress.is_empty());
     }
 
     #[test]
@@ -1304,8 +1278,33 @@ mod tests {
         let id2 = Ulid::from_parts(2, 0);
         let id3 = Ulid::from_parts(3, 0);
 
-        let active_jobs = BTreeSet::from([id3, id1, id2]);
-        let release_order = active_jobs.into_iter().collect::<Vec<_>>();
+        let job_progress = BTreeMap::from([
+            (
+                id3,
+                JobProgressState {
+                    last_hb_bytes: 0,
+                    last_hb_ms: 0,
+                    last_hb_ctx: None,
+                },
+            ),
+            (
+                id1,
+                JobProgressState {
+                    last_hb_bytes: 0,
+                    last_hb_ms: 0,
+                    last_hb_ctx: None,
+                },
+            ),
+            (
+                id2,
+                JobProgressState {
+                    last_hb_bytes: 0,
+                    last_hb_ms: 0,
+                    last_hb_ctx: None,
+                },
+            ),
+        ]);
+        let release_order = job_progress.into_keys().collect::<Vec<_>>();
 
         assert_eq!(release_order, vec![id1, id2, id3]);
     }
@@ -1327,7 +1326,7 @@ mod tests {
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         // No active job retained.
-        assert!(fx.handler.active_jobs.is_empty());
+        assert!(fx.handler.job_progress.is_empty());
         // No job was dispatched to the executor either.
         assert!(fx.executor.jobs().is_empty());
     }

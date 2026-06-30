@@ -721,7 +721,7 @@ impl DbState {
         &self.memtable
     }
 
-    pub(crate) fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) {
+    pub(crate) fn freeze_memtable(&mut self, replay_after_wal_id: u64) {
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         self.modify(|modifier| {
             modifier
@@ -729,7 +729,7 @@ impl DbState {
                 .imm_memtable
                 .push_front(Arc::new(ImmutableMemtable::new(
                     old_memtable,
-                    recent_flushed_wal_id,
+                    replay_after_wal_id,
                 )))
         });
     }
