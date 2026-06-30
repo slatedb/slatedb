@@ -697,7 +697,7 @@ impl CompactionWorkerHandler {
                 };
                 if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str())
                 {
-                    debug!(
+                    info!(
                         "heartbeat: lost ownership [worker_id={}, compaction_id={}]; stopping execution",
                         self.worker_id,
                         id
