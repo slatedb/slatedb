@@ -41,6 +41,10 @@ const isoDate = pubDate.toISOString();
 		<div class="post-body">
 			<Content />
 		</div>
+
+		<footer class="post-foot">
+			<a class="post-back" href="/blog/">← all posts</a>
+		</footer>
 	</article>
 </Blog>
 
@@ -198,6 +202,15 @@ const isoDate = pubDate.toISOString();
 	.post-meta a:hover { color: var(--accent-high); }
 	.post-meta-sep { color: var(--ink-6); }
 
+	/* Footer "back" link shares the ~40rem text measure and is set off from the
+	   prose with a top rule, mirroring the meta divider above the body. */
+	.post-foot {
+		max-width: 40rem;
+		margin: 3rem auto 0;
+		padding-top: 2rem;
+		border-top: 1px solid var(--ink-6);
+	}
+
 	/* ---------- Long-form prose (injected MDX) ---------- */
 	.post-body {
 		margin-top: 2.5rem;
@@ -296,22 +309,40 @@ const isoDate = pubDate.toISOString();
 	.post-body :global(.heading-anchor:focus) { opacity: 1; }
 	.post-body :global(.heading-anchor:hover) { color: var(--accent); }
 
-	/* Hanging indent: the marker (number/bullet) sits flush with the paragraph
-	   text's left edge, and wrapped lines align under the item text. The default
-	   `list-style-position: outside` right-aligns the marker to the content edge,
-	   which left the numbers hanging slightly left of the prose; `inside` + a
-	   negative text-indent puts the marker exactly at the column edge instead. */
+	/* Hanging indent, done with a hand-drawn marker so all three constraints
+	   hold at once: (1) the marker's left edge lines up with the paragraph text
+	   edge, (2) the item text sits at a fixed indent, and (3) the first line and
+	   every wrapped line share that indent. The native marker can't do this —
+	   `inside` makes the first line start at the marker's width (which never
+	   equals the indent, so the first line drifts), and `outside` puts the marker
+	   in a browser-dependent spot that can't be pinned to the paragraph edge. So
+	   we drop the native marker (`list-style: none`), put the whole indent on the
+	   <li> as padding (applies equally to every line), and draw the marker in an
+	   absolutely-positioned ::before at left:0 — out of flow, so its width can
+	   never push the text. */
 	.post-body :global(ul),
 	.post-body :global(ol) {
 		margin-block: 0 1.4rem;
 		padding-left: 0;
-		list-style-position: inside;
+		list-style: none;
 	}
+	.post-body :global(ol) { counter-reset: li-marker; }
 	.post-body :global(li) {
+		position: relative;
 		margin: 0.4rem 0;
 		padding-left: 1.5em;
-		text-indent: -1.5em;
 	}
+	.post-body :global(li)::before {
+		position: absolute;
+		left: 0;
+		color: var(--ink-3);
+	}
+	/* Ordered: per-list counter so nested lists restart at 1. */
+	.post-body :global(ol) > :global(li)::before {
+		counter-increment: li-marker;
+		content: counter(li-marker) ".";
+	}
+	.post-body :global(ul) > :global(li)::before { content: "•"; }
 	/* Nested lists indent one level from their parent item's text. */
 	.post-body :global(li) :global(ul),
 	.post-body :global(li) :global(ol) { margin-block: 0.4rem 0; }

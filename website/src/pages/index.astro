@@ -20,7 +20,7 @@ const starsLabel = await getStarsLabel();
 // The "used by" companies — even row, all logos rendered at the same height.
 const usedBy = [
     { name: 'Dropbox',    href: 'https://www.dropbox.com/',     logo: '/img/logos/dropbox.svg',    scale: 1.2 },
-    { name: 'HelixDB',    href: 'https://www.helix-db.com/',      logo: '/img/logos/helixdb.png' },
+    { name: 'HelixDB',    href: 'https://www.helix-db.com/',      logo: '/img/logos/helixdb.png',    scale: 0.8 },
     { name: 'TensorLake', href: 'https://www.tensorlake.ai/',   logo: '/img/logos/tensorlake.svg', scale: 1.2 },
     { name: 'S2',         href: 'https://s2.dev/',                logo: '/img/logos/s2.svg' },
     { name: 'Goldsky',    href: 'https://goldsky.com/',           logo: '/img/logos/goldsky.svg' },
@@ -254,13 +254,6 @@ const osLinks = [
                 <section class="prose">
                     <div class="os-panel">
                         <div class="usedby" aria-label="Used by">
-                            <a
-                                class="add-logo"
-                                href="https://github.com/slatedb/slatedb/issues/new?title=add%20%3Cmy%20company%3E%27s%20logo%20to%20used%20by&body=Please%20add%20%3Cmy%20company%3E%27s%20logo%20to%20the%20slatedb%20website.%0A%0A**Logo%20SVG%3A**%0A%0A**Company%20Link%3A**%0A%0A**How%20you%20use%20slatedb%3A**%0A"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                            >+ add your logo</a>
-                            <div class="usedby-label">used by</div>
                             <div class="usedby-row">
                                 {usedBy.map((c) => (
                                     <a href={c.href} target="_blank" rel="noopener noreferrer" class="usedby-logo" style={c.scale ? `--logo-scale: ${c.scale}` : undefined}>
@@ -270,7 +263,7 @@ const osLinks = [
                             </div>
                         </div>
                         <p class="prose-lead">
-                        Use SlateDB to bring the durability, consistency and economics of object storage to your online systems without sacrificing performance or paying per-request API costs. 
+                        SlateDB brings the durability, consistency, and economics of object storage to your online systems without sacrificing performance or paying per-request API costs.
                         </p>
                         <div class="os-stats" aria-label="SlateDB at a glance">
                             {osLinks.map((l) => (
@@ -569,7 +562,7 @@ const osLinks = [
         padding: 0.12rem 0.45rem;
         background-color: var(--surface-1);
         border: 1px solid var(--ink-6);
-        border-radius: 0.4rem;
+        border-radius: 0;
         color: var(--ink-2);
         font-size: 0.72rem;
         font-weight: 500;
@@ -798,36 +791,6 @@ const osLinks = [
         backdrop-filter: blur(14px) saturate(140%);
         -webkit-backdrop-filter: blur(14px) saturate(140%);
     }
-
-    /* "used by" sits inline with the top border (left), "+ add your logo" mirrors
-       it on the right. Both visually break the border line, like ruled labels on
-       an engineering drawing. */
-    .usedby-label,
-    .add-logo {
-        position: absolute;
-        top: -0.65rem;
-        font-family:
-            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 0.7rem;
-        background-color: var(--surface-0);
-        padding: 0 0.5rem;
-        text-decoration: none;
-        line-height: 1.2;
-    }
-
-    .usedby-label {
-        left: 0;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--ink-4);
-    }
-
-    .add-logo {
-        right: 0;
-        color: var(--ink-3);
-        transition: color 0.15s ease;
-    }
-    .add-logo:hover { color: var(--accent); }
 
     /* Even-width cells via grid; each logo fills its cell at uniform height.
        auto-fit packs as many ~100px cells as the viewport allows. */

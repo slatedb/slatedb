@@ -1,7 +1,7 @@
 ---
 title: "SlateDB: An Object-Native LSM for Online Systems"
-pubDate: 2026-06-26
-author: Chris, Almog, Rohan & Team
+pubDate: 2026-06-30
+author: Almog, Chris, Rohan & Team
 # authorGithub: slatedb 
 # ogImage: /img/some-custom-card.jpg   # optional per-post override
 ---
@@ -47,7 +47,7 @@ slate.get(b"key").await?;
 
 ## Object Storage Laws of Physics
 
-Despite the numerous benefits, object storage has three characteristics that have hindered its adoption for online workloads
+Despite the numerous benefits, object storage has three characteristics that have hindered its adoption for online workloads:
 
 1. Request latencies are an order of magnitude slower (50-100ms) than typical online systems
 2. Every `GET` and `PUT` request are individually metered at ~$0.40/million reads and ~$5/million writes
@@ -142,7 +142,7 @@ Beyond the lack of a nice API mapping to object storage, assuming that state is 
 
 ## Introducing SlateDB
 
-If you've followed along this far, you won't be surprised to learn that SlateDB is the natural, object-native successor to RocksDB. SlateDB is an Apache 2.0 licensed, embedded key-value database built as an object-store native LSM tree. It is built in async rust with bindings for many major languages and supports transactional workloads, multi-reader deployments, and many additional novel features such as checkpoints and forks.
+If you've followed along this far, you won't be surprised to learn that SlateDB is the natural, object-native successor to RocksDB. SlateDB is an Apache 2.0 licensed, embedded key-value database built as an object-store native LSM tree. It is built in async Rust with bindings for many major languages and supports transactional workloads, multi-reader deployments, and many additional novel features such as checkpoints and forks.
 
 ```ascii-art
 ┌Server────────────────┐       ┌object storage────────┐       ┌Read Replica──────────┐
@@ -218,7 +218,7 @@ The following charts show the cost comparing SlateDB with RocksDB, assuming you 
 
 ### Decomposable Architecture
 
-Since SlateDB writes all data to object storage, nodes other than the designated writer can see that data and even modify it in a non-transactional way.
+Since SlateDB writes all data to object storage, nodes other than the designated writer can see that data and even modify it in non-functional ways (compact and prune orphaned data).
 
 This means SlateDB supports opening as many readers as you want pointing to the same bucket the writer produces data to, allowing you to scale reads completed isolated with writes. 
 
