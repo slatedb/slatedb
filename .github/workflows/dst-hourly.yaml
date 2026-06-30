@@ -1,0 +1,30 @@
+name: Hourly DST
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-simulation-test:
+    runs-on: warp-ubuntu-latest-x64-16x
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.98
+      - name: Install gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdb
+      - name: Run DST Tests
+        run: cargo nextest run -p slatedb-dst --all-features --profile dst-nightly --no-capture
+        env:
+          RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
+          RUST_LOG: "info"
+          RUST_BACKTRACE: "1"
+          SLATEDB_DST_ROOT: "./"
