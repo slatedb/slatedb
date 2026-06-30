@@ -1,0 +1,228 @@
+---
+import type { MarkdownHeading } from 'astro';
+
+interface Props {
+	headings: MarkdownHeading[];
+}
+
+const { headings } = Astro.props;
+const items = headings.filter((h) => h.depth >= 2 && h.depth <= 4);
+---
+
+{items.length > 0 && (
+	<div class="post-toc-wrap">
+		<nav
+			aria-label="Table of contents"
+			aria-expanded="false"
+			data-post-toc
+			data-open="false"
+			class="post-toc"
+		>
+			<ul class="toc-list">
+				{items.map((h) => (
+					<li class={`toc-item depth-${h.depth}`}>
+						<a
+							href={`#${h.slug}`}
+							data-toc-link
+							data-slug={h.slug}
+							data-depth={h.depth}
+							class="toc-link"
+						>
+							<span class="toc-line"></span>
+							<span class="toc-label">{h.text}</span>
+						</a>
+					</li>
+				))}
+			</ul>
+		</nav>
+	</div>
+)}
+
+<style>
+	/* Fixed outline pinned to the card's top-right gutter. Collapsed it shows
+	   only depth-scaled tick lines; click to expand into a labeled panel. The
+	   right anchor tracks the post card's right edge: the card is centered with
+	   an 80rem cap, so its edge sits at `50% - 40rem`, clamped to the main
+	   wrapper's side padding so it never drifts off-screen on narrower desktops.
+	   `top` is set in JS to line up with the H1 at the top of the page (the 8rem
+	   fallback only applies before the script runs). Desktop only — there isn't
+	   room in the margin below ~lg. */
+	.post-toc-wrap {
+		position: fixed;
+		top: 8rem;
+		right: max(clamp(1.5rem, 4vw, 4rem), calc(50% - 40rem));
+		z-index: 40;
+		pointer-events: none;
+	}
+	@media (max-width: 1023px) {
+		.post-toc-wrap { display: none; }
+	}
+
+	.post-toc {
+		pointer-events: auto;
+		margin-right: 0.25rem;
+		display: inline-flex;
+		flex-direction: column;
+		align-items: flex-start;
+		border-radius: 0.5rem;
+		padding: 0.5rem;
+		cursor: pointer;
+		transition: background-color 0.15s ease, box-shadow 0.15s ease, padding 0.15s ease;
+	}
+	.post-toc[data-open='false']:hover {
+		background-color: var(--surface-2);
+	}
+	.post-toc[data-open='true'] {
+		cursor: default;
+		/* Fixed width so long headings wrap onto multiple lines instead of
+		   widening the panel. */
+		width: 15rem;
+		padding: 1.25rem;
+		background-color: var(--surface-1);
+		box-shadow:
+			0 10px 15px -3px rgba(15, 22, 32, 0.1),
+			0 4px 6px -4px rgba(15, 22, 32, 0.1),
+			0 0 0 1px var(--ink-6);
+	}
+
+	.toc-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+	.post-toc[data-open='true'] .toc-list { gap: 0.125rem; }
+
+	.toc-item.depth-2 { padding-left: 0; }
+	.toc-item.depth-3 { padding-left: 0.25rem; }
+	.toc-item.depth-4 { padding-left: 0.5rem; }
+
+	.toc-link {
+		display: flex;
+		align-items: flex-start;
+		padding: 0.1rem 0;
+		text-decoration: none;
+	}
+	.post-toc[data-open='true'] .toc-link { cursor: pointer; }
+
+	.toc-line {
+		height: 2px;
+		border-radius: 9999px;
+		background-color: var(--ink-6);
+		transition: width 0.15s ease, opacity 0.15s ease, background-color 0.15s ease;
+	}
+	.depth-2 .toc-line { width: 0.75rem; }
+	.depth-3 .toc-line { width: 0.5rem; }
+	.depth-4 .toc-line { width: 0.375rem; }
+	.post-toc[data-open='true'] .toc-line { width: 0; opacity: 0; }
+
+	.toc-label {
+		font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+		font-size: 0;
+		line-height: 1;
+		color: var(--ink-3);
+		opacity: 0;
+		transition: opacity 0.15s ease, font-size 0.15s ease, color 0.15s ease;
+	}
+	.post-toc[data-open='true'] .toc-label {
+		font-size: 0.75rem;
+		line-height: 1.35;
+		opacity: 1;
+	}
+	.post-toc[data-open='true'] [data-toc-link][data-depth='3'] .toc-label { margin-left: 1rem; }
+	.post-toc[data-open='true'] [data-toc-link][data-depth='4'] .toc-label { margin-left: 2rem; }
+	.post-toc[data-open='true'] [data-toc-link]:hover .toc-label { color: var(--ink-1); }
+
+	/* Scroll-spy active state */
+	.post-toc [data-toc-link][data-active='true'] .toc-line {
+		background-color: var(--accent);
+	}
+	.post-toc[data-open='true'] [data-toc-link][data-active='true'] .toc-label {
+		color: var(--ink-1);
+		font-weight: 600;
+	}
+</style>
+
+<script>
+	const toc = document.querySelector<HTMLElement>('[data-post-toc]');
+	if (toc) {
+		// Pin the (fixed) outline so its top lines up with the H1 when the page
+		// is scrolled to the top. rect.top + scrollY is the title's offset from
+		// the document top — scroll-independent — so setting it as the fixed
+		// `top` keeps the TOC aligned with the title at scroll 0 and parked
+		// there as the reader scrolls down.
+		const wrap = toc.closest<HTMLElement>('.post-toc-wrap');
+		const title = document.querySelector<HTMLElement>('.post-title');
+		if (wrap && title) {
+			const alignTop = () => {
+				const top = title.getBoundingClientRect().top + window.scrollY;
+				wrap.style.top = `${top}px`;
+			};
+			alignTop();
+			window.addEventListener('resize', alignTop, { passive: true });
+		}
+
+		const links = Array.from(toc.querySelectorAll<HTMLAnchorElement>('[data-toc-link]'));
+		const slugs = links.map((l) => l.dataset.slug!).filter(Boolean);
+		const headings = slugs
+			.map((s) => document.getElementById(s))
+			.filter((el): el is HTMLElement => el !== null);
+
+		const setActive = (slug: string | null) => {
+			for (const link of links) {
+				link.dataset.active = link.dataset.slug === slug ? 'true' : 'false';
+			}
+		};
+
+		const setOpen = (open: boolean) => {
+			toc.dataset.open = open ? 'true' : 'false';
+			toc.setAttribute('aria-expanded', open ? 'true' : 'false');
+		};
+
+		toc.addEventListener('click', (e) => {
+			const target = e.target as HTMLElement;
+			const link = target.closest<HTMLAnchorElement>('[data-toc-link]');
+			const isOpen = toc.dataset.open === 'true';
+			if (!isOpen) {
+				// Closed: clicking anywhere opens the panel; suppress navigation.
+				e.preventDefault();
+				setOpen(true);
+			} else if (link) {
+				// Open: link clicks navigate normally and close the panel.
+				setOpen(false);
+			}
+		});
+
+		document.addEventListener('click', (e) => {
+			if (toc.dataset.open !== 'true') return;
+			if (!toc.contains(e.target as Node)) setOpen(false);
+		});
+
+		document.addEventListener('keydown', (e) => {
+			if (e.key === 'Escape' && toc.dataset.open === 'true') setOpen(false);
+		});
+
+		// Active heading = last one scrolled above the trigger line (30% from top).
+		const update = () => {
+			const triggerY = window.innerHeight * 0.3;
+			let activeSlug: string | null = null;
+			for (const h of headings) {
+				if (h.getBoundingClientRect().top <= triggerY) {
+					activeSlug = h.id;
+				} else {
+					break;
+				}
+			}
+			if (!activeSlug && headings.length > 0) {
+				activeSlug = headings[0].id;
+			}
+			setActive(activeSlug);
+		};
+
+		window.addEventListener('scroll', update, { passive: true });
+		window.addEventListener('resize', update, { passive: true });
+		update();
+	}
+</script>

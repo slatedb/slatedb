@@ -1,0 +1,313 @@
+---
+title: "SlateDB: An Object-Native LSM for Online Systems"
+pubDate: 2026-06-30
+author: Almog, Chris, Rohan & Team
+# authorGithub: slatedb 
+# ogImage: /img/some-custom-card.jpg   # optional per-post override
+---
+
+import ChartEmbed from '../../components/ChartEmbed.astro';
+
+"Diskless" systems that delegate durability to object storage are the future of database systems:
+
+1. The economics are phenomenal. Storage is priced at a fraction of block storage or NVMe and inter-AZ data transfers are offered at $0.
+2. Object storage handles replication and provides 99.999999999% durability, handling the most notoriously challenging problem in distributed systems.
+3. Once data is written to Object Storage, it can be read by an arbitrary number of readers without any additional ETL pipelines.
+4. There are hundreds of competent engineers dedicated to keeping it online and highly available, despite the low unit economics.
+
+These properties have made object storage standard for offline workloads while recent successes (e.g. [Turbopuffer](https://turbopuffer.com/), [Warpstream](https://www.warpstream.com/), [Quickwit](https://quickwit.io/) etc…) demonstrate its potential for online systems.
+
+To accelerate the adoption of object storage for online systems, we've spent the last few years building SlateDB: an OSS object native LSM implementation with an embedded key-value interface.
+
+:::note[What is SlateDB?]
+SlateDB is an embedded key-value store, implemented as an LSM tree, that
+depends on object storage alone for durability. It supports:
+ 
+- transactions and snapshot isolation
+- native single-writer, multi-reader deployments
+- rescaling via unions and projections
+- checkpoints & forks
+- pluggable, distributed compaction
+:::
+
+Despite never being officially "announced" until today, SlateDB is already used in production by [Dropbox](https://www.dropbox.com/), [ZeroFS](https://www.zerofs.net/), [HelixDB](https://www.helix-db.com/), [Opendata](https://www.opendata.dev/) and others.
+
+If you prefer getting your hands dirty to reading a blog, SlateDB is [available today](https://slatedb.io/docs/get-started/quickstart/) with bindings in Rust, Go, Java, Node and Python.
+
+```rust
+use slatedb::Db;
+
+// open a SlateDB instance backed by an object storage bucket
+let slate = Db::open("/dir", object_store).await?;
+
+// use SlateDB as a key value store
+slate.put(b"key", b"value").await?
+slate.get(b"key").await?;
+```
+
+## Object Storage Laws of Physics
+
+Despite the numerous benefits, object storage has three characteristics that have hindered its adoption for online workloads:
+
+1. Request latencies are an order of magnitude slower (50-100ms) than typical online systems
+2. Every `GET` and `PUT` request are individually metered at ~$0.40/million reads and ~$5/million writes
+3. Objects are immutable and can only be entirely overwritten
+
+A naive system that uses S3 directly as a key-value store for a modest 10K ops/sec split even between reads and writes would cost $70K/mo and perform poorly. 
+
+To solve this, object native systems batch writes and cache reads.
+
+For writes, the available tradeoff is between [latency, cost, and durability](https://materializedview.io/p/cloud-storage-triad-latency-cost-durability). If you require writes to be durable then you may either issue more frequent `PUT` requests to drive down the latency or save costs by batching a window of writes into less frequent request. If you can risk losing data you may acknowledge writes eagerly and still batch together many into a single `PUT`.
+
+```ascii-art
+╭─────────────────────────────────────────╮   ╭─────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░ Pick Two (Writes) ░░░░░░░░│   │ ◎ ○ ○ ░░░░░░░░ Pick Two (Reads) ░░░░░░░░│
+├─────────────────────────────────────────┤   ├─────────────────────────────────────────┤
+│                                         │   │                                         │
+│                                         │   │                                         │
+│   ┌─────────────────────────────────┐   │   │   ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐   │
+│   │● LATENCY                        │   │   │    ○ LATENCY                            │
+│   └─────────────────────────────────┘   │   │   └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘   │
+│   ┌─────────────────────────────────┐   │   │   ┌─────────────────────────────────┐   │
+│   │● DURABILITY                     │   │   │   │● CONSISTENCY                    │   │
+│   └─────────────────────────────────┘   │   │   └─────────────────────────────────┘   │
+│   ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐   │   │   ┌─────────────────────────────────┐   │
+│    ○ COST                               │   │   │● COST                           │   │
+│   └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘   │   │   └─────────────────────────────────┘   │
+│                                         │   │                                         │
+│                                         │   │                                         │
+│                                         │   │                                         │
+└─────────────────────────────────────────┘   └─────────────────────────────────────────┘
+```
+
+<p class="fig-caption">The pick-two tradeoffs that govern writes and reads on object storage.</p>
+
+For reads across multiple replicas, the equation trades between latency, cost and consistency and boils down to how you handle your cache. If you need low latency, consistent readers then you must pay to actively replicate your writes between machines and invalidate caches (either via frequent `GET` requests or via network calls). If you can accept eventual consistency, then you can serve data from your stale cache until a certain poll interval where you batch `GET` from object storage to reduce costs.
+
+Any online system that builds on object storage is subject to these "laws of object physics."
+
+## Why LSMs for Object Storage
+
+The two laws of object physics map nicely onto mechanisms for maintaining two data structures: logs and sorted arrays.
+
+Trading off between latency, durability and cost is easily projected onto a log where the lever is how often you flush the tail of the log to object storage. The problem with logs is that queries need to scan the entire log to find a specific piece of data, which is why logs are only used for “write ahead” use cases.
+
+On the other end of the spectrum are sorted arrays, which let you trade off between read latency, consistency and cost by determining how often you merge data from the log into the sorted array. With object storage, the cost of merging data frequently is amplified by its limitation that all objects are immutable and must be entirely rewritten on update.
+
+Modeling writes using one data structure and reads with another requires some way to reconcile the two. Unsurprisingly, we’re not the first database engineers to stumble on this realization and there’s been [decades of research](https://nivdayan.github.io/dostoevsky.pdf) dedicated to this exact subject. The result is a data structure called an LSM tree, which we use as the foundations for SlateDB.
+
+```ascii-art
+╭──────────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░ Bytewise Data Structures ░░░░░░░░░░░░░░░░░░│
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│                                                              │
+│     cheap writes                              cheap reads    │
+│     slow reads                                slow writes    │
+│    ◀──────○───────────────────────────────────────○─────▶    │
+│           │                                       │          │
+│      ┌────◎───┐        ┌────────┐        ┌────────◎──────┐   │
+│      │  logs  │◀───────┤LSM Tree├───────▶│ sorted arrays │   │
+│      └────────┘        └────────┘        └───────────────┘   │
+│                                                              │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+LSM trees are especially well suited for object storage because they batch mutations into immutable objects. Instead of constantly rewriting data blocks within a single sorted array, they produce sorted files called SSTs and organize them into a tree structure that can be maintained by a background process called compaction.
+
+To summarize, LSM trees map nicely to the limitations of object storage:
+
+| Limitation | Property of LSM Tree |
+| --- | --- |
+| Objects must be immutable | SSTs are immutable and merged together into new SSTs in batch |
+| PUT requests are expensive | PUTs are batched in the log and compaction happens in the background on data in bulk |
+| GET latencies are high | Knobs are exposed for tuning read and write amplification to meet workload requirements |
+
+If you’re curious to read more about LSM trees, you can read [this post](https://www.bitsxpages.com/p/understanding-lsm-trees-via-read) by one of SlateDB's committers.
+
+## We Need a New LSM Engine
+
+The previous generation of database systems were built on key-value engines such as Facebook's [RocksDB](https://github.com/facebook/rocksdb), Mongo's [WiredTiger](https://github.com/wiredtiger/wiredtiger) and Cockroach's [PebbleDB](https://github.com/cockroachdb/pebble). These foundations served us well for over a decade, but a ground up redesign of key-value storage to work around the limitations of object storage is necessary to take us into the next.
+
+When we set out to build SlateDB, we first tried to see if implementing RocksDB's storage API on top of S3 would get us what we wanted. It did not: the object store laws of physics don't constrain systems that rely on local disks in the same way. Local disks do not have per-request costs, the unit of mutability is much smaller and each operation has much lower latency.
+
+In addition to the "physics" limitations, file system APIs are not 1:1 with object storage APIs and any translation layer is lossy. We have a few examples of this playing out with RocksDB specifically:
+
+1. RocksDB relies on file locks provided by the Filesystem API to ensure exclusive access. Object Stores don't support file locks. SlateDB implements [it's own write protocol](https://github.com/slatedb/slatedb/blob/main/rfcs/0001-manifest.md) that's based on conditional write `IF-MATCH` APIs to ensure writer isolation across nodes.
+2. RocksDB relies heavily on the filesystem cache. Object storage provides no caching mechanism, so a write-through cache with active maintenance (especially on compaction) needs to be built and plugged in.
+3. Object Stores don't support file linking which is used by RocksDB to retain checkpoints. RocksDB also relies on the file system to clean up data when links are removed. Object storage requires a more active approach to garbage collection.
+
+Beyond the lack of a nice API mapping to object storage, assuming that state is local hamstrings the architectural options. Disaggregating storage allows you to decompose the architecture and run separate machines for readers, writers and compactors — splitting the deployment to flexibly scale much beyond what a single RocksDB node can handle.
+
+## Introducing SlateDB
+
+If you've followed along this far, you won't be surprised to learn that SlateDB is the natural, object-native successor to RocksDB. SlateDB is an Apache 2.0 licensed, embedded key-value database built as an object-store native LSM tree. It is built in async Rust with bindings for many major languages and supports transactional workloads, multi-reader deployments, and many additional novel features such as checkpoints and forks.
+
+```ascii-art
+┌Server────────────────┐       ┌object storage────────┐       ┌Read Replica──────────┐
+│    ╔═════════════╗   │       │██████████████████████│▒      │    ╔═════════════╗   │
+│    ║   SlateDB   ║───┼──────▶│██████████████████████│───────┼───▶║   SlateDB   ║   │
+│    ╚══════════╦══╝   │       │██████████████████████│▒      │    ╚═══════════╦═╝   │
+│               ║      │       └──────────────────────┘▒      │                ║     │
+│┌disk cache────▼─────┐│        ▒▒▒▒▒▒▒▒▒▒▒▒│▒▒▒▒▒▒▒▒▒▒▒      │┌disk cache─────▼────┐│
+││████████████████████││                    ▼                 ││████████████████████││
+│└────────────────────┘│       ┌────────────────────────┐     │└────────────────────┘│
+└──────────────────────┘       │slate/                  │     └──────────────────────┘
+                               │├── manifest/           │
+                               ││   ├── 000005.manifest │
+                               ││   └── 000006.manifest │
+                               │├── wal/                │
+                               ││   └── 00012.sst       │
+                               │└── compacted/          │
+                               │    ├── 01J53Z.sst      │
+                               │    ├── CCPENT.sst      │
+                               │    └── 543X3B.sst      │
+                               └────────────────────────┘
+```
+
+
+<p class="fig-caption">SlateDB's single-writer, multi-reader architecture over object storage.</p>
+
+That's a lot to break down, so we'll take it piece by piece.
+
+### Embedded Key-Value Engine
+
+SlateDB is an embedded key-value engine, meaning it ships as a library with no HTTP server. It provides a basic API surface area and does not enforce schemas or serdes:
+
+```rust
+// main methods to retrieve data
+async get(key_bytes) -> value_bytes;
+async scan(bytes_start..bytes_end) -> [bytes];
+
+// main methods to modify data
+async put(key_bytes, value_bytes);
+async delete(key_bytes);
+async merge(key_bytes, value_bytes);
+```
+
+The graphs below ran a similar workload to the [RocksDB benchmarks](https://github.com/facebook/rocksdb/wiki/performance-benchmarks) against SlateDB to give you a sense of the read/write throughput you can expect with SlateDB. This ran with 50M keys (20-byte keys, 400-byte values) on an AWS `m5d.2xlarge` with SlateDB on S3 plus a 6GiB in-memory block cache (matching RocksDB's CACHE_SIZE for their benchmark). The three workloads (a) randomly write data with no ongoing reads, (b) read data with a random key distribution and (c) read data randomly while writing a fixed 5k ops/s.
+
+<ChartEmbed
+	src="/charts/db-bench.html"
+	title="SlateDB RocksDB-style db_bench: throughput and tail latency"
+	minHeight={720}
+/>
+
+In aggregate, SlateDB's write throughput is comparable to RocksDB while we still have some work to do to match the read performance. Write latencies are not directly comparable since SlateDB persists data durable to S3 while RocksDB benchmarks are single-NVMe. Our p50 read latencies are comparable, but p99 latencies drag our throughput well below RocksDB (which maxes out north of 100k QPS on a similar workload).
+
+The bencher is available on [GitHub](https://github.com/slatedb/slatedb/tree/main/slatedb-bencher) if you want to run it for yourself.
+
+### Object Store Native
+
+SlateDB relies exclusively on object storage for durability and does not require a disk, though we recommend deploying with disk for additional cache capacity. The immediate effect is that a system built on SlateDB can run significantly cheaper than an equivalent clustered RocksDB deployment with far less operational overhead.
+
+Beyond the raw storage and network cost savings:
+
+1. You don't need to manage replication yourself or run additional replicas for durability. Availability becomes only a matter of detecting failures instead of maintaining live replicas.
+2. Since compaction can run on separate machines you don't need to over-provision expensive NVMe to hold duplicate data during compaction
+3. You don't have to provision NVMe for your full data set, relying on cache sizing to tier cold data to object storage if you can accept high p99 latencies for cold queries.
+
+The following charts show the cost comparing SlateDB with RocksDB, assuming you replicate RocksDB 3x across availability zones for similar durability guarantees, provision with 1.5x headroom for compaction and NVMe. The "small cache" vs "large cache" demonstrate that you can choose to cache less than 100% of data on disk — the small cache workload only provisions enough NVMe for 30% of the data.
+
+<ChartEmbed
+	src="/charts/cost-scaling.html"
+	title="SlateDB vs. replicated RocksDB: cost scaling and component breakdown"
+	minHeight={430}
+/>
+
+### Decomposable Architecture
+
+Since SlateDB writes all data to object storage, nodes other than the designated writer can see that data and even modify it in non-functional ways (compact and prune orphaned data).
+
+This means SlateDB supports opening as many readers as you want pointing to the same bucket the writer produces data to, allowing you to scale reads completed isolated with writes. 
+
+In addition, SlateDB allows you to run compaction on a separate machine from your active writer so you can compact without contending for resources with production traffic.
+
+```ascii-art
+┌Server────────────────┐       ┌object storage────────┐       ┌Read Replica──────────┐
+│    ╔═════════════╗   │       │██████████████████████│▒      │    ╔═════════════╗   │
+│    ║   SlateDB   ║───┼──────▶│██████████████████████│───┬───┼───▶║   SlateDB   ║   │
+│    ╚══════════╦══╝   │       │██████████████████████│▒  │   │    ╚═══════════╦═╝   │
+│               ║      │       └──────────▲┬──────────┘▒  │   │                ║     │
+│┌disk cache────▼─────┐│        ▒▒▒▒▒▒▒▒▒▒││▒▒▒▒▒▒▒▒▒▒▒▒  │   │┌disk cache─────▼────┐│
+││████████████████████││                  ││              │   ││████████████████████││
+│└────────────────────┘│                  ││              │   │└────────────────────┘│
+└──────────────────────┘                  ││              │   └──────────────────────┘
+                               ┌Compactor─┴▼──────────┐   │   ┌Read Replica──────────┐
+                               │    ╔═════════════╗   │   │   │    ╔═════════════╗   │
+                               │    ║  Compactor  ║   │   │   │    ║   SlateDB   ║   │
+                               │    ╚═════════════╝   │   │   │    ╚═══════════╦═╝   │
+                               └──────────────────────┘   └──▶│                ║     │
+                                                              │┌disk cache─────▼────┐│
+                                                              ││████████████████████││
+                                                              │└────────────────────┘│
+                                                              └──────────────────────┘
+```
+
+### Checkpoints & Branches
+
+SlateDB separates metadata and data in object storage. The metadata file is called the "manifest", which holds pointers to all the data files (that also reside in object storage). This enables some interesting, cheap operations. One such operation is checkpointing and branching.
+
+SlateDB only ever deletes data files that are not referenced by the manifest. This means that branching your database is an O(1) operation that just marks an older manifest as excluded from garbage collection. When the new database writes enough data that the old data is no longer referenced (or a major compaction is triggered that creates a new stable set of SSTs) the old manifest can be deleted and the corresponding data can be deleted.
+
+This is particularly well suited for use cases where you want to reprocess data or explore different decision trees that result in new data.
+
+```ascii-art
+                             ┌manifest A──┐    ┌manifest B──┐
+┌Main──────────────────┐     │████████████│▒   │████████████│▒    ┌Fork──────────────────┐
+│    ╔═════════════╗   │     │████████████│▒   │████████████│◀─┐  │    ╔═════════════╗   │
+│    ║   SlateDB   ║   │     │████████████│▒   └────────────┘▒ │  │    ║   SlateDB   ║   │
+│    ╚══════════╦══╝   │     │████████████│▒    ▒▒▒▒▒▒│▒▒▒▒▒▒▒ │  │    ╚═══════════╦═╝   │
+│               ║      │────▶│████████████│◀──────────┘        └──│                ║     │
+│┌disk cache────▼─────┐│     │████████████│▒                      │┌disk cache─────▼────┐│
+││████████████████████││     │████████████│▒                      ││████████████████████││
+│└────────────────────┘│     │████████████│▒                      │└────────────────────┘│
+└──────────────────────┘     └────────────┘▒                      └──────────────────────┘
+                              ▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+```
+
+
+<p class="fig-caption">Forking from a checkpoint shares immutable data with the parent until it diverges.</p>
+
+### Rescaling & Views
+
+An additional benefit of the immutable nature of SlateDB is that databases can be easily split by key range in an O(1) operation by applying a "view" on to a manifest. Rescaling operates similarly to checkpoints, but instead of the new database referencing the entire parent it applies a filter on the underlying data. This only pays the cost of larger indexes and bloom filters, as opposed to paying the cost for copying data around, and over time compactions will compact the SSTs and remove the unreachable data.
+
+```ascii-art
+┌key range──────────────────────────────────────────────┐
+│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+├──────────────────────────┬─┬──────────────────────────┤
+└──────┬───────────────────┘ └───────────────────┬──────┘
+       │                                         │
+       │             ┌manifest A──┐              │
+       │             │████████████│▒             │
+       │             │████████████│▒             │
+┌manifest B──┐       │████████████│▒      ┌manifest C──┐
+│▓▓▓▓▓▓▓▓▓▓▓▓│▒      │████████████│▒      │░░░░░░░░░░░░│▒
+│▓▓▓▓▓▓▓▓▓▓▓▓│──────▶│████████████│◀──────│░░░░░░░░░░░░│▒
+└────────────┘▒      │████████████│▒      └────────────┘▒
+ ▒▒▒▒▒▒▲▒▒▒▒▒▒▒      │████████████│▒       ▒▒▒▒▒▒▲▒▒▒▒▒▒▒
+       ║             │████████████│▒             ║
+       ║             └────────────┘▒             ║
+╔═════════════╗       ▒▒▒▒▒▒▒▒▒▒▒▒▒▒      ╔═════════════╗
+║   SlateDB   ║                           ║   SlateDB   ║
+╚═════════════╝                           ╚═════════════╝
+```
+
+<p class="fig-caption">Rescaling splits a database by key range using manifest views over shared data.</p>
+
+## What's Next?
+
+SlateDB is nearing it's 1.0 release and is already widely used in production, making it one of the best choices for building online systems that leverage object storage.
+
+In addition, the SlateDB contributors and committers have significant production experience with RocksDB and similar systems. As a consequence, we are striving to make SlateDB not just an excellent object-native LSM, but avoid some of the pitfalls of its predecessors: opaque configurations, significant complexity, and performance at all costs. This product philosophy is outlined on our [CLEAN_SLATE](https://github.com/slatedb/slatedb/blob/main/CLEAN_SLATE.md) document.
+
+The next technical pushes for SlateDB involve expanding the feature set to further leverage the unique disaggregated architecture. Some ideas we are excited about:
+
+- Allowing separate WAL implementations so that you can further reduce the time-to-durable latency for writes.
+- Support for higher cache availability by allowing users to natively promote read replicas to active writers.
+- We want to build a SlateDB native caching layer that's more intelligent and predictive to actively avoid cold object store lookups.
+- Multi-writer support, so that SlateDB can accept writes from multiple instances in multiple availability zones
+
+In the meantime, you can check out the SlateDB [quickstart](https://slatedb.io/docs/get-started/quickstart/) in whichever language you prefer to get your application leveraging object storage today.

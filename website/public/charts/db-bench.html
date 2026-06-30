@@ -1,0 +1,216 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SlateDB — RocksDB-style db_bench (50M keys, S3 + local cache)</title>
+<style>
+  :root{color-scheme:light}
+  :root{
+    --bg:#fcfcfa; --panel:#fff; --ink:#1f242b; --muted:#6b7280;
+    --line:#1f242b; --grid:#e1e3e5; --soft:#9aa1a9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:transparent;color:var(--ink);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace;
+    line-height:1.55}
+  img{max-width:100%}
+  .wrap{max-width:780px;margin:0 auto;padding:0 20px 20px}
+  h1{font-size:21px;margin:0 0 8px;letter-spacing:-0.01em}
+  p.sub{margin:0 0 4px;color:#3b4047;font-size:13.5px;max-width:700px}
+  .params{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.65}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+    font-weight:700;margin:34px 0 0}
+  .wrap > h2:first-child{margin-top:0}
+  svg text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .legend{display:flex;flex-wrap:wrap;gap:7px 18px;margin:14px 0 4px;font-size:12.5px;color:var(--ink)}
+  .legend .item{display:flex;align-items:center;gap:7px}
+  .legend svg{flex:none}
+  .chartbox{background:var(--panel);border:1px solid var(--line);padding:12px 14px 8px;margin-top:12px;overflow-x:auto}
+  .chartbox svg{width:100%;height:auto;display:block;overflow:visible;min-width:540px}
+  #tip{position:fixed;pointer-events:none;background:#1f242b;color:#fff;padding:7px 10px;
+    font-size:12px;line-height:1.5;opacity:0;transition:opacity .08s;white-space:nowrap;z-index:9;
+    font-family:ui-monospace,Menlo,monospace}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <rect width="6" height="6" fill="#fff"/><line x1="0" y1="0" x2="0" y2="6" stroke="#1f242b" stroke-width="1.6"/>
+  </pattern>
+</defs></svg>
+
+<div class="wrap">
+  <h2>Throughput</h2>
+  <div class="legend" id="legTput"></div>
+  <div class="chartbox"><svg id="tput" viewBox="0 0 780 380"></svg></div>
+
+  <h2>Read latency &mdash; per-operation, log scale</h2>
+  <div class="legend" id="legLat"></div>
+  <div class="chartbox"><svg id="lat" viewBox="0 0 780 200"></svg></div>
+  <div id="tip"></div>
+</div>
+
+<script>
+// ---- data: normal-mode (50M keys); read-random on a fully-compacted DB -----
+const ROWS = [
+  {key:'load', label:'Write (load, normal mode)', s:'write', kind:'write', ops:79107, mibs:31.69, hit:null,
+   p50:134, p99:823,  p999:7327,   p9999:61471,  max:1424383},
+  {key:'read', label:'Read-random (compacted)', s:'read-random', kind:'read', ops:30386, mibs:12.17, hit:100,
+   p50:330, p99:1063, p999:49951,  p9999:296447, max:681983},
+  {key:'rwwr', label:'Read-while-writing · reads', s:'rww reads', kind:'read', ops:23472, mibs:9.40, hit:100,
+   p50:595, p99:1785, p999:4459,   p9999:54175,  max:496639},
+  {key:'rwww', label:'Read-while-writing · writer', s:'rww writer', kind:'write', ops:4992, mibs:2.00, hit:null,
+   p50:29,  p99:929,  p999:1816,   p9999:7339,   max:446207},
+];
+
+const $=id=>document.getElementById(id);
+const fillFor = k => k==='write' ? '#1f242b' : 'url(#hatch)';
+
+const fmtOps = v => v.toLocaleString('en-US')+' ops/s';
+function fmtLat(us){
+  if(us < 1000) return us+'µs';
+  if(us < 1e6)  return (us/1000>=10 ? Math.round(us/1000) : (us/1000).toFixed(2).replace(/\.?0+$/,''))+'ms';
+  return (us/1e6).toFixed(2).replace(/\.?0+$/,'')+'s';
+}
+function niceNum(x){const e=Math.pow(10,Math.floor(Math.log10(x)));const f=x/e;
+  for(const c of [1,1.5,2,2.5,3,4,5,7.5,10]) if(f<=c+1e-9) return c*e; return 10*e;}
+
+// ---- tooltip helpers ------------------------------------------------------
+function bindTip(el, html){
+  el.addEventListener('mousemove',e=>{const t=$('tip');
+    t.innerHTML=html; t.style.opacity=1;
+    // Measure the real tooltip box and keep it inside the iframe; flip it to
+    // the left of the cursor when it would otherwise run off the right edge.
+    const pad=8, tw=t.offsetWidth, th=t.offsetHeight;
+    let left=e.clientX+12;
+    if(left+tw > innerWidth-pad) left=e.clientX-12-tw;
+    left=Math.max(pad, Math.min(left, innerWidth-pad-tw));
+    let top=Math.max(pad, Math.min(e.clientY-12, innerHeight-pad-th));
+    t.style.left=left+'px'; t.style.top=top+'px';});
+  el.addEventListener('mouseleave',()=>$('tip').style.opacity=0);
+}
+
+// ---- swatches -------------------------------------------------------------
+function barSwatch(kind){
+  const W=18,H=12;
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:-2px">
+    <rect x="0.5" y="0.5" width="${W-1}" height="${H-1}" fill="${fillFor(kind)}" stroke="#1f242b"/></svg>`;
+}
+// percentile marker glyphs (monochrome, distinct shapes)
+function glyph(kind, cx, cy){
+  const f='#1f242b';
+  if(kind==='p50')  return `<circle cx="${cx}" cy="${cy}" r="4" fill="${f}"/>`;
+  if(kind==='p99')  return `<rect x="${cx-3.4}" y="${cy-3.4}" width="6.8" height="6.8" fill="#fff" stroke="${f}" stroke-width="1.4"/>`;
+  if(kind==='p999') return `<path d="M${cx},${cy-4.6} L${cx+4.3},${cy} L${cx},${cy+4.6} L${cx-4.3},${cy} Z" fill="${f}"/>`;
+  if(kind==='p9999')return `<path d="M${cx-3.6},${cy-3.6} L${cx+3.6},${cy+3.6} M${cx-3.6},${cy+3.6} L${cx+3.6},${cy-3.6}" stroke="${f}" stroke-width="1.5"/>`;
+  return '';
+}
+function glyphSwatch(kind){
+  return `<svg width="14" height="14" viewBox="0 0 14 14" style="vertical-align:-3px">${glyph(kind,7,7)}</svg>`;
+}
+
+// ---- throughput bar chart -------------------------------------------------
+function drawTput(){
+  const VW=780,VH=380,ML=64,MR=20,MT=40,MB=86,PW=VW-ML-MR,PH=VH-MT-MB;
+  const rww0=ROWS.findIndex(r=>r.key.startsWith('rww')); // first read-while-writing bar
+  const n=ROWS.length, gap=22, extra=26; // extra gap before the RWW pair
+  const barW=(PW-(n-1)*gap-extra)/n;
+  const xs=[]; let x=ML;
+  ROWS.forEach((r,i)=>{ if(i===rww0) x+=extra; xs.push(x); x+=barW+gap; });
+
+  const max=Math.max(...ROWS.map(r=>r.ops));
+  const step=niceNum(max*1.10/4), yMax=Math.ceil(max*1.10/step)*step, nt=Math.round(yMax/step);
+  const yS=v=>MT+PH-(v/yMax)*PH;
+
+  let g='';
+  for(let i=0;i<=nt;i++){const v=i*step,y=yS(v);
+    g+=`<line x1="${ML}" y1="${y}" x2="${ML+PW}" y2="${y}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+    g+=`<text x="${ML-9}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--soft)">${(v/1000)+'K'}</text>`;}
+  g+=`<text transform="translate(16,${MT+PH/2}) rotate(-90)" text-anchor="middle" font-size="12" font-weight="700">ops / second</text>`;
+
+  ROWS.forEach((r,i)=>{
+    const bx=xs[i], y1=yS(r.ops), h=MT+PH-y1;
+    g+=`<rect class="tbar" data-i="${i}" x="${bx}" y="${y1.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${fillFor(r.kind)}" stroke="#1f242b" stroke-width="1"/>`;
+    g+=`<text x="${bx+barW/2}" y="${y1-8}" text-anchor="middle" font-size="12.5" font-weight="700">${r.ops.toLocaleString('en-US')}</text>`;
+    // workload label below — drop the redundant "rww" prefix (the bracket carries it)
+    const words = r.key.startsWith('rww') ? r.s.split(' ').slice(1) : r.s.split(' ');
+    words.forEach((part,li)=>{
+      g+=`<text x="${bx+barW/2}" y="${MT+PH+17+li*14}" text-anchor="middle" font-size="11.5">${part}</text>`;});
+  });
+  // bracket grouping the read-while-writing pair
+  const x1=xs[rww0], x2=xs[rww0+1]+barW, cx=(x1+x2)/2, by=MT+PH+46;
+  g+=`<line x1="${x1}" y1="${by}" x2="${x2}" y2="${by}" stroke="#1f242b"/>`;
+  g+=`<text x="${cx}" y="${by+16}" text-anchor="middle" font-size="11.5" font-weight="700">[ read-while-writing ]</text>`;
+  $('tput').innerHTML=g;
+
+  document.querySelectorAll('.tbar').forEach(el=>{const r=ROWS[+el.dataset.i];
+    bindTip(el,`<b>${r.label.replace(/ · /g,' · ')}</b><br>${fmtOps(r.ops)} · ${r.mibs} MiB/s`);});
+}
+
+// ---- latency log-scale spread plot ---------------------------------------
+function drawLat(){
+  const VW=780,VH=200,ML=148,MR=72,MT=46,MB=26,PW=VW-ML-MR,PH=VH-MT-MB;
+  const LO=30, HI=1e6; // 30us .. 1s
+  const lx=us=>ML+(Math.log10(Math.max(us,LO))-Math.log10(LO))/(Math.log10(HI)-Math.log10(LO))*PW;
+  const decs=[{v:100,l:'100µs'},{v:1000,l:'1ms'},{v:1e4,l:'10ms'},{v:1e5,l:'100ms'},{v:1e6,l:'1s'}];
+
+  let g='';
+  decs.forEach(d=>{const x=lx(d.v);
+    g+=`<line x1="${x}" y1="${MT-6}" x2="${x}" y2="${MT+PH}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+    g+=`<text x="${x}" y="${MT-12}" text-anchor="middle" font-size="11" fill="var(--soft)">${d.l}</text>`;});
+
+  // Reads only — write latency is async (memtable-insert, not durability), so
+  // it isn't a meaningful per-op number here; throughput is the write metric.
+  const LR=ROWS.filter(r=>r.kind==='read');
+  const rowH=PH/LR.length;
+  const pk=['p50','p99','p999','p9999'];
+  LR.forEach((r,i)=>{
+    const cy=MT+rowH*i+rowH/2;
+    g+=`<text x="${ML-14}" y="${cy+4}" text-anchor="end" font-size="11.5">${r.s}</text>`;
+    // spread line p50 -> p99.99
+    g+=`<line x1="${lx(r.p50)}" y1="${cy}" x2="${lx(r.p9999)}" y2="${cy}" stroke="var(--soft)" stroke-width="1"/>`;
+    // markers + an invisible hit-target per point
+    pk.forEach(p=>{const x=lx(r[p]);
+      g+=glyph(p,x,cy);
+      g+=`<circle class="lpt" data-r="${i}" data-p="${p}" cx="${x}" cy="${cy}" r="9" fill="transparent"/>`;});
+    // p99.99 value annotation at the right end
+    g+=`<text x="${lx(r.p9999)+10}" y="${cy+4}" font-size="10.5" fill="var(--muted)">${fmtLat(r.p9999)}</text>`;
+  });
+  $('lat').innerHTML=g;
+
+  const NAME={p50:'p50',p99:'p99',p999:'p99.9',p9999:'p99.99'};
+  document.querySelectorAll('.lpt').forEach(el=>{const r=LR[+el.dataset.r],p=el.dataset.p;
+    bindTip(el,`<b>${r.label}</b><br>${NAME[p]}: <b>${fmtLat(r[p])}</b>`);});
+}
+
+// ---- legends --------------------------------------------------------------
+$('legTput').innerHTML =
+  `<span class="item">${barSwatch('write')} write throughput</span>`+
+  `<span class="item">${barSwatch('read')} read throughput (served from local cache)</span>`;
+$('legLat').innerHTML = [['p50','p50'],['p99','p99'],['p999','p99.9'],['p9999','p99.99']]
+  .map(([k,l])=>`<span class="item">${glyphSwatch(k)} ${l}</span>`).join('')+
+  `<span class="item" style="color:var(--muted)">reads only &mdash; writes are async (throughput above)</span>`;
+
+drawTput();
+drawLat();
+</script>
+
+<script>
+/* report content height to the embedding page so the iframe can size itself */
+(function(){
+  var wrap=document.querySelector('.wrap');
+  function postHeight(){
+    var h=Math.ceil((wrap?wrap.offsetHeight:document.body.scrollHeight));
+    parent.postMessage({chartHeight:h},'*');
+  }
+  window.addEventListener('load',postHeight);
+  window.addEventListener('resize',postHeight);
+  setTimeout(postHeight,250);
+  if(window.ResizeObserver&&wrap){new ResizeObserver(postHeight).observe(wrap);}
+})();
+</script>
+
+</body>
+</html>
