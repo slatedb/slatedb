@@ -263,7 +263,7 @@ impl GcTask for CompactedGcTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cached_object_store::policy::CachePutPolicy;
+    use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
@@ -859,7 +859,7 @@ mod tests {
             main_store.clone(),
             cache_storage,
             part_size,
-            CachePutPolicy {
+            CachePutConfig {
                 cache_on_flush: true,
                 cache_on_compaction: false,
             },

@@ -46,7 +46,7 @@ pub(crate) enum PutAction {
 
 /// Which compacted SST write sources are cached.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CachePutPolicy {
+pub(crate) struct CachePutConfig {
     /// Cache compacted SSTs written by a memtable flush.
     ///
     /// Default is false.
@@ -57,58 +57,81 @@ pub(crate) struct CachePutPolicy {
     pub(crate) cache_on_compaction: bool,
 }
 
-/// Decides the GET action for a data read from the call tag.
-pub(crate) fn get_action(tag: Option<&ObjectStoreCallTag>) -> GetAction {
-    // Untagged reads (manifest, WAL existence probes, other coordination I/O)
-    // are never cached.
-    let Some(tag) = tag else {
-        return GetAction::Bypass;
-    };
+/// Decides the read routing for a GET or HEAD from the call tag.
+pub(crate) trait ReadPolicy: Send + Sync + 'static + std::fmt::Debug {
+    fn get_action(&self, tag: Option<&ObjectStoreCallTag>) -> GetAction;
+    fn head_action(&self, tag: Option<&ObjectStoreCallTag>) -> HeadAction;
+}
 
-    // Compactor reads are one shot large scans that are not worth caching
-    // and GC doesn't issue any reads that would benefit from caching.
-    // Both bypass the cache. WAL reads are mainly during startup so they bypass
-    // the cache.
-    if matches!(tag.kind, TableStoreKind::Compactor | TableStoreKind::GC)
-        || tag.sst_type == SstType::Wal
-    {
-        GetAction::Bypass
-    } else if tag.retry.is_some() {
-        // A reissued, non-bypassed read refetches.
-        GetAction::Refetch
-    } else {
-        GetAction::ReadThrough
+/// The built-in read policy.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DefaultReadPolicy;
+
+impl ReadPolicy for DefaultReadPolicy {
+    fn get_action(&self, tag: Option<&ObjectStoreCallTag>) -> GetAction {
+        // Untagged reads (manifest, WAL existence probes, other coordination I/O)
+        // are never cached.
+        let Some(tag) = tag else {
+            return GetAction::Bypass;
+        };
+
+        // Compactor reads are one shot large scans that are not worth caching
+        // and GC doesn't issue any reads that would benefit from caching.
+        // Both bypass the cache. WAL reads are mainly during startup so they
+        // bypass the cache.
+        if matches!(tag.kind, TableStoreKind::Compactor | TableStoreKind::GC)
+            || tag.sst_type == SstType::Wal
+        {
+            GetAction::Bypass
+        } else if tag.retry.is_some() {
+            // A reissued, non-bypassed read refetches.
+            GetAction::Refetch
+        } else {
+            GetAction::ReadThrough
+        }
+    }
+
+    fn head_action(&self, tag: Option<&ObjectStoreCallTag>) -> HeadAction {
+        match tag {
+            None => HeadAction::Bypass,
+            Some(t) if t.sst_type == SstType::Wal => HeadAction::Bypass,
+            // GC never serves reads, so a cached head is useless to it.
+            Some(t) if t.kind == TableStoreKind::GC => HeadAction::Bypass,
+            // A compactor HEAD may serve a cached head but must not create a
+            // head-only entry, which would defeat a later foreground range prefetch.
+            Some(t) if t.kind == TableStoreKind::Compactor => HeadAction::ReadWithoutAdmission,
+            // Main and reader HEADs read through the cache.
+            Some(_) => HeadAction::ReadThrough,
+        }
     }
 }
 
-/// Decides the HEAD action for a data read from the call tag.
-pub(crate) fn head_action(tag: Option<&ObjectStoreCallTag>) -> HeadAction {
-    match tag {
-        None => HeadAction::Bypass,
-        Some(t) if t.sst_type == SstType::Wal => HeadAction::Bypass,
-        // GC never serves reads, so a cached head is useless to it.
-        Some(t) if t.kind == TableStoreKind::GC => HeadAction::Bypass,
-        // A compactor HEAD may serve a cached head but must not create a
-        // head-only entry, which would defeat a later foreground range prefetch.
-        Some(t) if t.kind == TableStoreKind::Compactor => HeadAction::ReadWithoutAdmission,
-        // Main and reader HEADs read through the cache.
-        Some(_) => HeadAction::ReadThrough,
-    }
+/// Decides whether a write source PUT is cached in the on-disk object cache.
+pub(crate) trait PutPolicy: Send + Sync + 'static + std::fmt::Debug {
+    /// Decide whether a write source PUT or multipart upload is cached.
+    fn put_action(&self, tag: Option<&ObjectStoreCallTag>) -> PutAction;
 }
 
-/// Decides the PUT action from the call tag and the configured policy.
-pub(crate) fn put_action(tag: Option<&ObjectStoreCallTag>, policy: &CachePutPolicy) -> PutAction {
-    let Some(tag) = tag else {
-        // Untagged writes (manifest, compaction state) are never cached.
-        return PutAction::Skip;
-    };
-    match tag.sst_type {
-        SstType::Wal => PutAction::Skip,
-        SstType::Compacted => match tag.kind {
-            TableStoreKind::Main if policy.cache_on_flush => PutAction::Cache,
-            TableStoreKind::Compactor if policy.cache_on_compaction => PutAction::Cache,
-            _ => PutAction::Skip,
-        },
+/// The built-in put policy, configured by [`CachePutPolicy`].
+#[derive(Debug, Clone)]
+pub(crate) struct DefaultPutPolicy {
+    pub(crate) put: CachePutConfig,
+}
+
+impl PutPolicy for DefaultPutPolicy {
+    fn put_action(&self, tag: Option<&ObjectStoreCallTag>) -> PutAction {
+        let Some(tag) = tag else {
+            // Untagged writes (manifest, compaction state) are never cached.
+            return PutAction::Skip;
+        };
+        match tag.sst_type {
+            SstType::Wal => PutAction::Skip,
+            SstType::Compacted => match tag.kind {
+                TableStoreKind::Main if self.put.cache_on_flush => PutAction::Cache,
+                TableStoreKind::Compactor if self.put.cache_on_compaction => PutAction::Cache,
+                _ => PutAction::Skip,
+            },
+        }
     }
 }
 
@@ -191,7 +214,7 @@ mod tests {
     // Untagged reads (coordination I/O) bypass.
     #[case(None, GetAction::Bypass)]
     fn test_get_action(#[case] tag: Option<ObjectStoreCallTag>, #[case] expected: GetAction) {
-        assert_eq!(get_action(tag.as_ref()), expected);
+        assert_eq!(DefaultReadPolicy.get_action(tag.as_ref()), expected);
     }
 
     #[rstest]
@@ -248,66 +271,69 @@ mod tests {
         HeadAction::ReadThrough
     )]
     fn test_head_action(#[case] tag: Option<ObjectStoreCallTag>, #[case] expected: HeadAction) {
-        assert_eq!(head_action(tag.as_ref()), expected);
+        assert_eq!(DefaultReadPolicy.head_action(tag.as_ref()), expected);
     }
 
     #[rstest]
     // WAL writes are never cached, even with both flags on.
     #[case(
         Some(tag(TableStoreKind::Main, SstType::Wal, None)),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
     // Untagged writes (manifest, compaction state) are never cached.
     #[case(
         None,
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
     // Flush writes (main store, compacted) gated by cache_on_flush.
     #[case(
         Some(tag(TableStoreKind::Main, SstType::Compacted, None)),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: false },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: false },
         PutAction::Cache
     )]
     #[case(
         Some(tag(TableStoreKind::Main, SstType::Compacted, None)),
-        CachePutPolicy { cache_on_flush: false, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: false, cache_on_compaction: true },
         PutAction::Skip
     )]
     // Compaction writes (compactor store, compacted) gated by cache_on_compaction.
     #[case(
         Some(tag(TableStoreKind::Compactor, SstType::Compacted, None)),
-        CachePutPolicy { cache_on_flush: false, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: false, cache_on_compaction: true },
         PutAction::Cache
     )]
     #[case(
         Some(tag(TableStoreKind::Compactor, SstType::Compacted, None)),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: false },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: false },
         PutAction::Skip
     )]
     // Reader/GC never write compacted SSTs, but if they did the policy is Skip.
     #[case(
         Some(tag(TableStoreKind::Reader, SstType::Compacted, None)),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
     #[case(
         Some(tag(TableStoreKind::GC, SstType::Compacted, None)),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
     fn test_put_action(
         #[case] tag: Option<ObjectStoreCallTag>,
-        #[case] policy: CachePutPolicy,
+        #[case] policy: CachePutConfig,
         #[case] expected: PutAction,
     ) {
-        assert_eq!(put_action(tag.as_ref(), &policy), expected);
+        assert_eq!(
+            DefaultPutPolicy { put: policy }.put_action(tag.as_ref()),
+            expected
+        );
     }
 
     #[test]
     fn test_default_put_policy_caches_nothing() {
-        let policy = CachePutPolicy::default();
+        let policy = CachePutConfig::default();
         assert!(!policy.cache_on_flush);
         assert!(!policy.cache_on_compaction);
         for kind in [
@@ -317,7 +343,11 @@ mod tests {
             TableStoreKind::GC,
         ] {
             assert_eq!(
-                put_action(Some(&tag(kind, SstType::Compacted, None)), &policy),
+                DefaultPutPolicy { put: policy }.put_action(Some(&tag(
+                    kind,
+                    SstType::Compacted,
+                    None
+                ))),
                 PutAction::Skip
             );
         }

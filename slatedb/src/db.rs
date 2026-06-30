@@ -2063,7 +2063,7 @@ impl WriteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cached_object_store::policy::CachePutPolicy;
+    use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
@@ -10814,7 +10814,7 @@ mod tests {
         /// L0 size, both cache admission flags off, and no compactor.
         struct ObjectStoreCacheTestBuilder {
             db_path: String,
-            cache_put_policy: CachePutPolicy,
+            cache_put_policy: CachePutConfig,
             part_size: usize,
             l0_sst_size_bytes: usize,
             l0_max_ssts: Option<usize>,
@@ -10826,7 +10826,7 @@ mod tests {
             fn new(db_path: &str) -> Self {
                 Self {
                     db_path: db_path.to_string(),
-                    cache_put_policy: CachePutPolicy::default(),
+                    cache_put_policy: CachePutConfig::default(),
                     part_size: 1024,
                     l0_sst_size_bytes: 1024,
                     l0_max_ssts: None,

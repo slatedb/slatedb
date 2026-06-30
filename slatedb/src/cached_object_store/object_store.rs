@@ -1,4 +1,7 @@
-use crate::cached_object_store::policy::{self, CachePutPolicy, GetAction, HeadAction, PutAction};
+use crate::cached_object_store::policy::{
+    CachePutConfig, DefaultPutPolicy, DefaultReadPolicy, GetAction, HeadAction, PutAction,
+    PutPolicy, ReadPolicy,
+};
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::storage_fs::FsCacheStorage;
 use crate::cached_object_store::LocalCacheEntry;
@@ -18,7 +21,6 @@ use std::{ops::Range, sync::Arc};
 
 use crate::single_flight::SingleFlight;
 
-use crate::cached_object_store::admission::AdmissionPicker;
 use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
 use crate::error::SlateDBError;
 use log::warn;
@@ -31,9 +33,8 @@ pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     part_size_bytes: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
-    admission_picker: AdmissionPicker,
-    /// Which compacted SST write sources are cached on PUT.
-    cache_put_policy: CachePutPolicy,
+    read_policy: Arc<dyn ReadPolicy>,
+    put_policy: Arc<dyn PutPolicy>,
     stats: Arc<CachedObjectStoreStats>,
     // Deduplicates concurrent HEAD requests for the same path after a cache miss.
     head_flights: SingleFlight<Path, (ObjectMeta, Attributes, Extensions)>,
@@ -50,8 +51,31 @@ impl CachedObjectStore {
         object_store: Arc<dyn ObjectStore>,
         cache_storage: Arc<dyn LocalCacheStorage>,
         part_size_bytes: usize,
-        cache_put_policy: CachePutPolicy,
+        cache_put_config: CachePutConfig,
         stats: Arc<CachedObjectStoreStats>,
+    ) -> Result<Arc<Self>, SlateDBError> {
+        Self::new_with_policies(
+            object_store,
+            cache_storage,
+            part_size_bytes,
+            stats,
+            Arc::new(DefaultReadPolicy),
+            Arc::new(DefaultPutPolicy {
+                put: cache_put_config,
+            }),
+        )
+    }
+
+    /// Like [`Self::new`], but with caller supplied read and put policies.
+    /// `new` installs [`DefaultReadPolicy`] and [`DefaultPutPolicy`].
+    #[allow(unused)]
+    pub(crate) fn new_with_policies(
+        object_store: Arc<dyn ObjectStore>,
+        cache_storage: Arc<dyn LocalCacheStorage>,
+        part_size_bytes: usize,
+        stats: Arc<CachedObjectStoreStats>,
+        read_policy: Arc<dyn ReadPolicy>,
+        put_policy: Arc<dyn PutPolicy>,
     ) -> Result<Arc<Self>, SlateDBError> {
         if part_size_bytes == 0 || !part_size_bytes.is_multiple_of(1024) {
             return Err(SlateDBError::InvalidCachePartSize);
@@ -61,9 +85,9 @@ impl CachedObjectStore {
             object_store,
             part_size_bytes,
             cache_storage,
+            read_policy,
+            put_policy,
             stats,
-            admission_picker: AdmissionPicker::default(),
-            cache_put_policy,
             head_flights: SingleFlight::new(),
             prefetch_flights: SingleFlight::new(),
             part_flights: SingleFlight::new(),
@@ -98,7 +122,7 @@ impl CachedObjectStore {
             rand,
             options.max_open_file_handles,
         ));
-        let cache_put_policy = CachePutPolicy {
+        let cache_put_policy = CachePutConfig {
             cache_on_flush: options.cache_on_flush,
             cache_on_compaction: options.cache_on_compaction,
         };
@@ -267,12 +291,9 @@ impl CachedObjectStore {
         payload: object_store::PutPayload,
         opts: object_store::PutOptions,
     ) -> object_store::Result<PutResult> {
-        // The per-call tag plus the configured policy decide whether this write
-        // is cached (see `policy::put_action`).
+        // The per-call tag decides whether this write is cached.
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
-        let action = policy::put_action(tag.as_ref(), &self.cache_put_policy);
-
-        if action == PutAction::Skip {
+        if self.put_policy.put_action(tag.as_ref()) == PutAction::Skip {
             // Write directly to upstream without caching the payload.
             return self.object_store.put_opts(location, payload, opts).await;
         }
@@ -288,19 +309,15 @@ impl CachedObjectStore {
             .put_opts(location, payload.clone(), opts)
             .await?;
 
-        // Then, save to local cache if admission policy allows it
+        // Convert PutPayload to stream and save parts to cache.
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
-        if self.admission_picker.pick(entry.as_ref()).admitted() {
-            // Convert PutPayload to stream and save parts to cache.
-            let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
-            // Save parts, ignoring errors (cache failures must not fail the PUT).
-            self.save_parts_stream(entry.as_ref(), stream, 0).await.ok();
+        let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
+        // Save parts, ignoring errors (cache failures must not fail the PUT).
+        self.save_parts_stream(entry.as_ref(), stream, 0).await.ok();
 
-            // Make the write committed and visible to reads by writing the
-            // head.
-            let meta = build_head(location, payload_size, &result);
-            entry.save_head((&meta, &attributes)).await.ok();
-        }
+        // Make the write committed and visible to reads by writing the head.
+        let meta = build_head(location, payload_size, &result);
+        entry.save_head((&meta, &attributes)).await.ok();
 
         Ok(result)
     }
@@ -387,17 +404,17 @@ impl CachedObjectStore {
             .entry(cache_location, self.part_size_bytes);
         let object_size = result.meta.size;
 
-        if self.admission_picker.pick(entry.as_ref()).admitted() {
-            entry.save_head((&result.meta, &result.attributes)).await?;
+        // Reaching here means the read policy already chose to fill the cache
+        // so always save.
+        entry.save_head((&result.meta, &result.attributes)).await?;
 
-            let start_part_number = usize::try_from(result.range.start / part_size_bytes_u64)
-                .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
+        let start_part_number = usize::try_from(result.range.start / part_size_bytes_u64)
+            .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
 
-            let stream = result.into_stream();
+        let stream = result.into_stream();
 
-            self.save_parts_stream(entry.as_ref(), stream, start_part_number)
-                .await?;
-        }
+        self.save_parts_stream(entry.as_ref(), stream, start_part_number)
+            .await?;
 
         Ok(object_size)
     }
@@ -661,13 +678,13 @@ impl ObjectStore for CachedObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
 
         if options.head {
-            return match policy::head_action(tag.as_ref()) {
+            return match self.read_policy.head_action(tag.as_ref()) {
                 HeadAction::Bypass => self.object_store.get_opts(location, options).await,
                 HeadAction::ReadWithoutAdmission => self.cached_head(location, false).await,
                 HeadAction::ReadThrough => self.cached_head(location, true).await,
             };
         }
-        match policy::get_action(tag.as_ref()) {
+        match self.read_policy.get_action(tag.as_ref()) {
             GetAction::Bypass => self.object_store.get_opts(location, options).await,
             GetAction::Refetch => self.cached_get_opts(location, options, true).await,
             GetAction::ReadThrough => self.cached_get_opts(location, options, false).await,
@@ -689,22 +706,15 @@ impl ObjectStore for CachedObjectStore {
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
-        let should_cache =
-            policy::put_action(tag.as_ref(), &self.cache_put_policy) == PutAction::Cache;
         let attributes = opts.attributes.clone();
 
         let inner = self.object_store.put_multipart_opts(location, opts).await?;
 
-        if !should_cache {
+        // Wrap the upload to mirror its parts into the cache, unless skipped.
+        if self.put_policy.put_action(tag.as_ref()) == PutAction::Skip {
             return Ok(inner);
         }
-
-        // Wrap the upload to mirror its parts into the cache.
         let cache_location = location.clone();
-        let entry = self.cache_storage.entry(location, self.part_size_bytes);
-        if !self.admission_picker.pick(entry.as_ref()).admitted() {
-            return Ok(inner);
-        }
 
         Ok(Box::new(CachingMultipartUpload {
             inner,
@@ -949,7 +959,7 @@ mod tests {
     use std::time::Duration;
 
     use super::CachedObjectStore;
-    use crate::cached_object_store::policy::CachePutPolicy;
+    use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
     use crate::cached_object_store::storage_fs::FsCacheEntry;
@@ -990,7 +1000,7 @@ mod tests {
             object_store,
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap()
@@ -1027,7 +1037,7 @@ mod tests {
             object_store.clone(),
             cache_storage,
             part_size,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1110,7 +1120,7 @@ mod tests {
             object_store,
             cache_storage,
             part_size,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1217,7 +1227,7 @@ mod tests {
             object_store,
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1313,7 +1323,7 @@ mod tests {
             object_store,
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1343,7 +1353,7 @@ mod tests {
             object_store,
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1381,7 +1391,7 @@ mod tests {
             object_store.clone(),
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1472,7 +1482,7 @@ mod tests {
             object_store.clone(),
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1529,7 +1539,7 @@ mod tests {
             object_store.clone(),
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1598,7 +1608,7 @@ mod tests {
             instrumented as Arc<dyn ObjectStore>,
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -1995,7 +2005,7 @@ mod tests {
             object_store,
             Arc::clone(&cache_storage) as Arc<dyn LocalCacheStorage>,
             PART_SIZE,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -2064,7 +2074,7 @@ mod tests {
 
     fn policy_test_store(
         upstream: Arc<dyn ObjectStore>,
-        policy: CachePutPolicy,
+        policy: CachePutConfig,
     ) -> Arc<CachedObjectStore> {
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
@@ -2109,35 +2119,35 @@ mod tests {
     // WAL writes are never cached, even with both flags enabled.
     #[case(
         ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Wal),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         0
     )]
     // Flush writes (main store, compacted) cached only when cache_on_flush is set.
     #[case(
         ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: false },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: false },
         2
     )]
     #[case(
         ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted),
-        CachePutPolicy { cache_on_flush: false, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: false, cache_on_compaction: true },
         0
     )]
     // Compaction writes (compactor store, compacted) cached only when cache_on_compaction is set.
     #[case(
         ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted),
-        CachePutPolicy { cache_on_flush: false, cache_on_compaction: true },
+        CachePutConfig { cache_on_flush: false, cache_on_compaction: true },
         2
     )]
     #[case(
         ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: false },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: false },
         0
     )]
     #[tokio::test]
     async fn test_put_caching_by_tag(
         #[case] tag: ObjectStoreCallTag,
-        #[case] policy: CachePutPolicy,
+        #[case] policy: CachePutConfig,
         #[case] expected_parts: usize,
     ) {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
@@ -2162,7 +2172,7 @@ mod tests {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let store = policy_test_store(
             upstream.clone(),
-            CachePutPolicy {
+            CachePutConfig {
                 cache_on_flush: true,
                 cache_on_compaction: true,
             },
@@ -2186,7 +2196,7 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_get_bypasses_cache() {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let store = policy_test_store(upstream.clone(), CachePutPolicy::default());
+        let store = policy_test_store(upstream.clone(), CachePutConfig::default());
 
         let location = Path::from("compacted/01.sst");
         let payload = gen_rand_bytes(2048);
@@ -2250,7 +2260,7 @@ mod tests {
             upstream.clone(),
             cache_storage,
             1024,
-            CachePutPolicy::default(),
+            CachePutConfig::default(),
             stats,
         )
         .unwrap();
@@ -2329,7 +2339,7 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_head_reads_without_admitting() {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let store = policy_test_store(upstream.clone(), CachePutPolicy::default());
+        let store = policy_test_store(upstream.clone(), CachePutConfig::default());
 
         let location = Path::from("compacted/01.sst");
         let payload = gen_rand_bytes(512);
@@ -2383,7 +2393,7 @@ mod tests {
     #[tokio::test]
     async fn test_wal_read_bypasses_cache() {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let store = policy_test_store(upstream.clone(), CachePutPolicy::default());
+        let store = policy_test_store(upstream.clone(), CachePutConfig::default());
 
         let location = Path::from("wal/00000000000000000001.sst");
         let payload = gen_rand_bytes(2048);
@@ -2433,7 +2443,7 @@ mod tests {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let store = policy_test_store(
             upstream.clone(),
-            CachePutPolicy {
+            CachePutConfig {
                 cache_on_flush: false,
                 cache_on_compaction: true,
             },
@@ -2478,17 +2488,17 @@ mod tests {
     // A compacted multipart upload is not cached when its source is disabled.
     #[case(
         ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted),
-        CachePutPolicy { cache_on_flush: false, cache_on_compaction: false }
+        CachePutConfig { cache_on_flush: false, cache_on_compaction: false }
     )]
     // An untagged multipart upload is never cached (no path fallback here).
     #[case(
         ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Wal),
-        CachePutPolicy { cache_on_flush: true, cache_on_compaction: true }
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true }
     )]
     #[tokio::test]
     async fn test_multipart_upload_not_cached(
         #[case] tag: ObjectStoreCallTag,
-        #[case] policy: CachePutPolicy,
+        #[case] policy: CachePutConfig,
     ) {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let store = policy_test_store(upstream.clone(), policy);
@@ -2509,7 +2519,7 @@ mod tests {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let store = policy_test_store(
             upstream.clone(),
-            CachePutPolicy {
+            CachePutConfig {
                 cache_on_flush: true,
                 cache_on_compaction: false,
             },
@@ -2560,7 +2570,7 @@ mod tests {
         let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let store = policy_test_store(
             upstream.clone(),
-            CachePutPolicy {
+            CachePutConfig {
                 cache_on_flush: false,
                 cache_on_compaction: true,
             },
