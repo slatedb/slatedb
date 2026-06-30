@@ -932,9 +932,14 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView};
-    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+    use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::StoredManifest;
     use crate::manifest::ManifestCore;
+    use crate::object_stores::ObjectStores;
+    use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::test_utils::{build_sorted_runs, write_ssts, GatedObjectStore};
+    use crate::types::RowEntry;
+    use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
     use futures::stream::StreamExt;
     use object_store::memory::InMemory;
@@ -1470,6 +1475,190 @@ mod tests {
         assert!(hb2 > before_id2);
         assert_eq!(fx.handler.job_progress.get(&id1).unwrap().last_hb_ms, hb1);
         assert_eq!(fx.handler.job_progress.get(&id2).unwrap().last_hb_ms, hb2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_worker_heartbeat_ticker_refreshes_job_while_planning_reads_block() {
+        // given: real compaction input SSTs behind a gated table store, while
+        // manifest and `.compactions` reads/writes use the ungated inner store.
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let planning_heartbeat_sst_size = 512;
+        let options = Arc::new(CompactionWorkerOptions {
+            max_concurrent_compactions: 1,
+            compactions_poll_interval: Duration::from_millis(5),
+            heartbeat_min_interval: Duration::from_millis(5),
+            max_sst_size: planning_heartbeat_sst_size,
+            ..CompactionWorkerOptions::default()
+        });
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner.clone()));
+        let gated_store: Arc<dyn ObjectStore> = gated.clone();
+        let root_path = Path::from("testdb-worker-planning-heartbeat");
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(gated_store, None),
+            SsTableFormat {
+                block_size: 256,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+            TableStoreKind::Compactor,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, inner.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(&root_path, inner.clone()));
+        // Build a few L0 SSTs and a single sorted run to seed the manifest.
+        let rows = |range: std::ops::Range<u64>,
+                    step: usize,
+                    value_prefix: &str,
+                    seq_base: u64|
+         -> Vec<RowEntry> {
+            range
+                .step_by(step)
+                .map(|i| {
+                    RowEntry::new_value(
+                        format!("key{i:05}").as_bytes(),
+                        format!("{value_prefix}-{i}").as_bytes(),
+                        seq_base + i,
+                    )
+                })
+                .collect()
+        };
+        let mut l0_sst_views = Vec::new();
+        for entries in [
+            rows(0..160, 2, "l0a", 10_000),
+            rows(1..160, 2, "l0b", 20_000),
+        ] {
+            let ssts = write_ssts(&table_store, &entries, planning_heartbeat_sst_size).await;
+            l0_sst_views.extend(ssts.into_iter().map(SsTableView::identity));
+        }
+        let sorted_runs = build_sorted_runs(
+            &table_store,
+            &[vec![rows(0..160, 1, "sr", 1)]],
+            planning_heartbeat_sst_size,
+        )
+        .await;
+        let mut core = ManifestCore::new();
+        {
+            let tree = Arc::make_mut(&mut core.tree);
+            tree.l0.extend(l0_sst_views.clone());
+            tree.compacted = sorted_runs.clone();
+        }
+        StoredManifest::create_new_db(manifest_store.clone(), core, clock.clone())
+            .await
+            .unwrap();
+        StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        // Wire up the executor and handler.
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let executor: Arc<dyn CompactionExecutor + Send + Sync> = Arc::new(
+            TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+                handle: tokio::runtime::Handle::current(),
+                options: options.clone(),
+                worker_tx: tx,
+                table_store: table_store.clone(),
+                rand: Arc::new(DbRand::new(100u64)),
+                stats: {
+                    let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                    Arc::new(CompactionStats::new(&recorder))
+                },
+                worker_stats: WorkerStats::noop(),
+                clock: clock.clone(),
+                manifest_store: manifest_store.clone(),
+                merge_operator: None,
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: None,
+            }),
+        );
+        let handler = CompactionWorkerHandler::new(
+            "worker-plan-hb".to_string(),
+            options.clone(),
+            compactions_store.clone(),
+            manifest_store,
+            executor.clone(),
+            clock.clone(),
+            Arc::new(DbRand::new(0)),
+            Arc::new(FailPointRegistry::new()),
+        );
+        let id = Ulid::from_parts(42, 0);
+        let sources = l0_sst_views
+            .iter()
+            .map(|sst| SourceId::SstView(sst.id))
+            .chain(sorted_runs.iter().map(|sr| SourceId::SortedRun(sr.id)))
+            .collect();
+        let compaction = Compaction::new(id, CompactionSpec::new(sources, 0))
+            .with_status(CompactionStatus::Scheduled);
+        let mut stored = StoredCompactions::try_load(compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(compaction);
+        stored.update(dirty).await.unwrap();
+
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            Arc::new(WatchableOnceCell::new()),
+            clock,
+        ));
+        task_executor
+            .add_handler(
+                COMPACTION_WORKER_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &tokio::runtime::Handle::current(),
+            )
+            .unwrap();
+        let worker = CompactionWorker::new(task_executor);
+
+        // when: the worker's poll ticker claims the job and executor planning
+        // blocks on the first SST index read.
+        let setup_gets = gated.get_opts_gate.arrivals();
+        gated.get_opts_gate.close();
+        worker.start().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            gated.get_opts_gate.wait_for_arrivals(setup_gets + 1),
+        )
+        .await
+        .expect("planning should reach the blocked read gate");
+
+        let before = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions
+            .get(&id)
+            .expect("compaction missing")
+            .worker()
+            .expect("worker missing")
+            .last_heartbeat_ms;
+
+        // then: the worker-level heartbeat ticker refreshes the persisted
+        // liveness timestamp without requiring executor progress.
+        let after = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let compaction = compactions_store
+                    .read_latest_compactions()
+                    .await
+                    .unwrap()
+                    .compactions
+                    .get(&id)
+                    .expect("compaction missing")
+                    .clone();
+                if compaction.worker().unwrap().last_heartbeat_ms > before {
+                    break compaction;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("worker heartbeat ticker should refresh planning job");
+        assert_eq!(after.status(), CompactionStatus::Running);
+        assert_eq!(after.ctx(), None);
+        assert!(after.worker().unwrap().last_heartbeat_ms > before);
+
+        worker.stop().await.unwrap();
+        gated.get_opts_gate.release();
     }
 
     #[tokio::test]
