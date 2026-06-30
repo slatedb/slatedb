@@ -3716,6 +3716,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"seg"),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 l0: VecDeque::from(vec![segment_l0.clone()]),
                 compacted: vec![segment_sr.clone()],
                 ..LsmTreeState::default()
@@ -4187,6 +4188,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"key"),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -4343,6 +4345,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"a/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4359,6 +4362,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"b/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4436,6 +4440,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"l0only/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
@@ -4450,6 +4455,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"none/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -5367,6 +5373,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_view)]),
@@ -5412,6 +5419,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_view)]),
@@ -5455,6 +5463,7 @@ mod tests {
             .segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_view)]),
@@ -5553,6 +5562,7 @@ mod tests {
         let make_segment = |prefix: Bytes, l0_view_id: Ulid| Segment {
             prefix,
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
@@ -5653,6 +5663,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -5698,6 +5709,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -5761,6 +5773,7 @@ mod tests {
             .segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_3), make_view(l0_2), make_view(l0_1)]),

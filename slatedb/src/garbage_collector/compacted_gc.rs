@@ -718,6 +718,7 @@ mod tests {
         let segment_sr = view_at(3);
         let manifest = manifest_with(
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![unsegmented_l0.clone()]),
@@ -726,6 +727,7 @@ mod tests {
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![segment_l0.clone()]),
@@ -751,6 +753,7 @@ mod tests {
         // Segment L0 newer than unsegmented L0; barrier should reflect it.
         let manifest = manifest_with(
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![view_at(1_000)]),
@@ -759,6 +762,7 @@ mod tests {
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![view_at(5_000)]),
@@ -781,6 +785,7 @@ mod tests {
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: Some(ulid_at(7_000)),
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -800,6 +805,7 @@ mod tests {
         // Mix of an unsegmented watermark and a newer segment L0.
         let manifest = manifest_with(
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: Some(ulid_at(2_000)),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -808,6 +814,7 @@ mod tests {
             vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![view_at(9_000)]),

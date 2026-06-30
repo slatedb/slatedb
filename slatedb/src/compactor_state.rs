@@ -1049,7 +1049,7 @@ impl CompactorState {
                 .destination()
                 .expect("finish_compaction with output SR called on a non-tiered spec");
             let segment = spec.segment().clone();
-            // reconstruct l0
+            // The L0 view ids this compaction folds in.
             let compaction_l0s: HashSet<Ulid> = spec
                 .sources()
                 .iter()
@@ -1080,6 +1080,15 @@ impl CompactorState {
                 return;
             };
 
+            // Resolve the folded L0s to their SST ids while l0 is still intact. The writer
+            // merge drops by SST id, not view id: a view id is local to one writer/compactor
+            // instance, but the SST id is the shared physical identity that survives takeover.
+            let compacted_sst_ids: Vec<Ulid> = tree
+                .l0
+                .iter()
+                .filter(|l0| compaction_l0s.contains(&l0.id))
+                .map(|l0| l0.sst.id.unwrap_compacted_id())
+                .collect();
             let new_l0: VecDeque<SsTableView> = tree
                 .l0
                 .iter()
@@ -1114,6 +1123,7 @@ impl CompactorState {
             }
             tree.l0 = new_l0;
             tree.compacted = new_compacted;
+            tree.record_compacted_l0_ids(compacted_sst_ids);
             self.manifest.value.core = db_state;
             self.manifest.value.prune_external_sst_ids();
             self.update_compaction(&compaction_id, |c| {
@@ -1196,8 +1206,17 @@ impl CompactorState {
             tree.last_compacted_l0_sst_id = Some(view.sst.id.unwrap_compacted_id());
         }
 
+        // Resolve to SST ids (the takeover-stable identity the writer merge matches on)
+        // before the retain drops the views.
+        let drained_sst_ids: Vec<Ulid> = tree
+            .l0
+            .iter()
+            .filter(|view| drained_l0_ids.contains(&view.id))
+            .map(|view| view.sst.id.unwrap_compacted_id())
+            .collect();
         tree.l0.retain(|view| !drained_l0_ids.contains(&view.id));
         tree.compacted.retain(|sr| !drained_sr_ids.contains(&sr.id));
+        tree.record_compacted_l0_ids(drained_sst_ids);
 
         self.manifest.value.core = db_state;
         self.manifest.value.prune_external_sst_ids();
@@ -1871,6 +1890,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v_b.clone()]),
@@ -1880,6 +1900,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v_a.clone()]),
@@ -1928,6 +1949,7 @@ mod tests {
         let writer_v0 = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![v1.clone()]),
@@ -1941,6 +1963,7 @@ mod tests {
         let compactor_post_drain = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![v1.sst.id.unwrap_compacted_id()],
                 last_compacted_l0_sst_view_id: Some(v1.id),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -2123,6 +2146,7 @@ mod tests {
         let segment = Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -2176,6 +2200,7 @@ mod tests {
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -2228,6 +2253,7 @@ mod tests {
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -2296,6 +2322,7 @@ mod tests {
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_b.clone(), l0_a.clone()]),
@@ -2332,6 +2359,7 @@ mod tests {
             Segment {
                 prefix: prefix_a.clone(),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![l0_a.clone()]),
@@ -2341,6 +2369,7 @@ mod tests {
             Segment {
                 prefix: prefix_b.clone(),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![l0_b.clone()]),
@@ -2374,6 +2403,7 @@ mod tests {
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0.clone()]),
@@ -2429,6 +2459,7 @@ mod tests {
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_newer.clone(), l0_older.clone()]),
@@ -2480,6 +2511,7 @@ mod tests {
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![l0_late.clone(), l0_observed.clone()]),

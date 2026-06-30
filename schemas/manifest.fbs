@@ -148,6 +148,11 @@ table ManifestV2 {
     // (RFC-0024). Persisted so the writer can detect accidental reconfiguration
     // on startup. Absent when no extractor is configured.
     segment_extractor_name: string;
+
+    // SST ids of top-level L0s that have been folded into a sorted run. See
+    // `Segment.compacted_l0_ids`; this is the same set for the compatibility
+    // `prefix=""` tree. Appended last for vtable stability; optional.
+    compacted_l0_ids: [Ulid];
 }
 
 // Per-segment LSM state. Structurally mirrors the top-level `l0` / `compacted` /
@@ -167,6 +172,12 @@ table Segment {
     // Sorted runs for this segment, ordered by descending id (list position
     // encodes read precedence within the segment).
     compacted: [SortedRunV2] (required);
+
+    // SST ids of L0s folded into a sorted run in this segment. The writer's merge drops
+    // exactly these (matched by stable SST id, not instance-local view id), so a stale
+    // watermark across a takeover cannot drop a still-uncompacted L0. Appended last
+    // (vtable-stable); optional, defaults to empty.
+    compacted_l0_ids: [Ulid];
 }
 
 table WriterCheckpoint {

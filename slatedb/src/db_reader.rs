@@ -2746,6 +2746,7 @@ mod tests {
         }
         fn tree_l0(views: Vec<SsTableView>) -> LsmTreeState {
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(views),
@@ -2793,6 +2794,7 @@ mod tests {
         latest.segments = vec![segment_with(
             b"hour=12/",
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![view(1)]),
@@ -2812,6 +2814,7 @@ mod tests {
         latest.segments = vec![segment_with(
             b"hour=12/",
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: Some(ulid::Ulid::from_parts(99, 0)),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),

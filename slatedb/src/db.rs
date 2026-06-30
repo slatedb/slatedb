@@ -2921,6 +2921,7 @@ mod tests {
                 Segment {
                     prefix: Bytes::from_static(b"hour=12/"),
                     tree: Arc::new(LsmTreeState {
+                        compacted_l0_ids: vec![],
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::new(),
@@ -2930,6 +2931,7 @@ mod tests {
                 Segment {
                     prefix: Bytes::from_static(b"hour=13/"),
                     tree: Arc::new(LsmTreeState {
+                        compacted_l0_ids: vec![],
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::new(),

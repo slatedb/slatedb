@@ -982,6 +982,7 @@ mod tests {
         ManifestCore {
             initialized: true,
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0,
@@ -1022,6 +1023,7 @@ mod tests {
         Segment {
             prefix: Bytes::copy_from_slice(prefix),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0,

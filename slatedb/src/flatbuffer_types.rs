@@ -332,6 +332,8 @@ impl FlatBufferManifestCodec {
                 last_compacted_l0_sst_id: l0_last_compacted,
                 l0,
                 compacted,
+                // V1 has no explicit compacted-l0-id set.
+                compacted_l0_ids: Vec::new(),
             }),
             // Segmentation is V2-only. V1 manifests are always unsegmented.
             segments: vec![],
@@ -386,6 +388,10 @@ impl FlatBufferManifestCodec {
             manifest.last_compacted_l0_sst_view_id(),
             manifest.l0(),
             manifest.compacted(),
+            manifest
+                .compacted_l0_ids()
+                .map(|v| v.iter().map(|id| id.ulid()).collect())
+                .unwrap_or_default(),
             &sst_lookup,
         )?;
         let mut segments = manifest
@@ -496,6 +502,10 @@ impl FlatBufferManifestCodec {
             fb_segment.last_compacted_l0_sst_view_id(),
             fb_segment.l0(),
             fb_segment.compacted(),
+            fb_segment
+                .compacted_l0_ids()
+                .map(|v| v.iter().map(|id| id.ulid()).collect())
+                .unwrap_or_default(),
             sst_lookup,
         )?;
         Ok(Segment {
@@ -511,6 +521,7 @@ impl FlatBufferManifestCodec {
         last_compacted_l0_sst_view_id: Option<FbUlid>,
         l0: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableView<'_>>>,
         compacted: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2<'_>>>,
+        compacted_l0_ids: Vec<Ulid>,
         sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
     ) -> Result<LsmTreeState, Box<dyn std::error::Error + Send + Sync>> {
         let last_compacted_l0_sst_view_id = last_compacted_l0_sst_view_id.map(|id| id.ulid());
@@ -526,6 +537,7 @@ impl FlatBufferManifestCodec {
             last_compacted_l0_sst_id: None,
             l0,
             compacted,
+            compacted_l0_ids,
         })
     }
 
@@ -544,7 +556,12 @@ impl FlatBufferManifestCodec {
     /// Whether `manifest` carries state that V1 cannot represent:
     /// a configured segment extractor, or any named segment.
     fn requires_v2(manifest: &Manifest) -> bool {
-        manifest.core.segment_extractor_name.is_some() || !manifest.core.segments.is_empty()
+        // `compacted_l0_ids` only exists on the V2 wire shape, so a manifest that carries it
+        // must encode as V2 or the set is silently dropped on persist (then the writer-side
+        // merge can no longer drop those L0s). Segments imply V2 already and so carry theirs.
+        manifest.core.segment_extractor_name.is_some()
+            || !manifest.core.segments.is_empty()
+            || !manifest.core.tree.compacted_l0_ids.is_empty()
     }
 }
 
@@ -771,6 +788,7 @@ struct LsmTreeV2Offsets<'b> {
     l0: WIPOffset<Vector<'b, ForwardsUOffset<CompactedSsTableView<'b>>>>,
     last_compacted_l0_sst_view_id: Option<WIPOffset<FbUlid<'b>>>,
     compacted: WIPOffset<Vector<'b, ForwardsUOffset<SortedRunV2<'b>>>>,
+    compacted_l0_ids: Option<WIPOffset<Vector<'b, ForwardsUOffset<FbUlid<'b>>>>>,
 }
 
 impl<'b> DbFlatBufferBuilder<'b> {
@@ -986,6 +1004,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_compacted_l0_sst_view_id: tree.last_compacted_l0_sst_view_id,
                 l0: Some(tree.l0),
                 compacted: Some(tree.compacted),
+                compacted_l0_ids: tree.compacted_l0_ids,
             },
         )
     }
@@ -1001,10 +1020,13 @@ impl<'b> DbFlatBufferBuilder<'b> {
             .as_ref()
             .map(|ulid| self.add_compacted_sst_id(ulid));
         let compacted = self.add_sorted_runs_v2(&tree.compacted);
+        let compacted_l0_ids = (!tree.compacted_l0_ids.is_empty())
+            .then(|| self.add_ulids(tree.compacted_l0_ids.iter()));
         LsmTreeV2Offsets {
             l0,
             last_compacted_l0_sst_view_id,
             compacted,
+            compacted_l0_ids,
         }
     }
 
@@ -1351,6 +1373,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 ssts: Some(ssts),
                 l0: Some(tree.l0),
                 compacted: Some(tree.compacted),
+                compacted_l0_ids: tree.compacted_l0_ids,
                 last_l0_clock_tick: core.last_l0_clock_tick,
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
@@ -1923,6 +1946,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -1935,6 +1959,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![new_sst_view(), new_sst_view()]),

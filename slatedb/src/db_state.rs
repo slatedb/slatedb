@@ -865,15 +865,14 @@ mod tests {
         // given:
         let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
-        // mimic the compactor popping off l0s
+        // mimic the compactor compacting the oldest l0: pop it, advance the watermark, and
+        // record its SST id in the compacted set the writer merge drops by.
         let mut compactor_state = new_dirty_manifest();
         compactor_state.value.core = db_state.state.core().clone();
-        let last_compacted = Arc::make_mut(&mut compactor_state.value.core.tree)
-            .l0
-            .pop_back()
-            .unwrap();
-        Arc::make_mut(&mut compactor_state.value.core.tree).last_compacted_l0_sst_view_id =
-            Some(last_compacted.id);
+        let tree = Arc::make_mut(&mut compactor_state.value.core.tree);
+        let last_compacted = tree.l0.pop_back().unwrap();
+        tree.last_compacted_l0_sst_view_id = Some(last_compacted.id);
+        tree.record_compacted_l0_ids([last_compacted.sst.id.unwrap_compacted_id()]);
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());
@@ -922,6 +921,55 @@ mod tests {
     }
 
     #[test]
+    fn merge_must_not_drop_uncompacted_l0_after_watermark() {
+        fn view(seq: u64) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(seq, 0);
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(ulid),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo::default(),
+            ))
+        }
+        // merge_writer_and_compactor's position-based trim drops every writer L0 from the
+        // watermark onward, ASSUMING the l0 list is in flush order so the watermark marks
+        // the compacted boundary. Across an HA takeover the writer's deque is rebuilt and
+        // that order diverges: an L0 the compactor KEPT uncompacted (still listed in
+        // compactor.l0) can land positioned after the watermark, and the position trim
+        // drops it -> a durably-committed write is lost. The merge must rescue it because
+        // the compactor still lists it as live.
+        let watermark_l0 = view(1); // compacted -> recorded as last_compacted_l0_sst_view_id
+        let kept_l0 = view(2); // kept uncompacted by the compactor; must survive the merge
+
+        // Writer L0 deque in DIVERGED order: the compacted watermark L0 ahead of the kept
+        // L0 (in flush order the newer kept L0 would precede the watermark).
+        let mut db_state = DbState::new(new_dirty_manifest());
+        db_state.modify(|m| {
+            Arc::make_mut(&mut m.state.manifest.value.core.tree).l0 =
+                VecDeque::from(vec![watermark_l0.clone(), kept_l0.clone()]);
+        });
+
+        // Compactor-authored remote: it compacted watermark_l0 (setting the watermark) and
+        // KEPT kept_l0 uncompacted, so kept_l0 is still listed in its l0.
+        let mut compactor = new_dirty_manifest();
+        compactor.value.core = db_state.state.core().clone();
+        {
+            let tree = Arc::make_mut(&mut compactor.value.core.tree);
+            tree.l0 = VecDeque::from(vec![kept_l0.clone()]);
+            tree.last_compacted_l0_sst_view_id = Some(watermark_l0.id);
+        }
+
+        db_state.merge_remote_manifest(compactor);
+
+        let merged: Vec<_> = db_state.state.core().tree.l0.iter().map(|v| v.id).collect();
+        assert!(
+            merged.contains(&kept_l0.id),
+            "merge dropped the kept, uncompacted L0 {} (positioned after the watermark) -> lost write; merged l0 = {:?}",
+            kept_l0.id,
+            merged
+        );
+    }
+
+    #[test]
     fn test_should_keep_local_segments_on_merge() {
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
@@ -941,6 +989,7 @@ mod tests {
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v1.clone()]),
@@ -995,6 +1044,7 @@ mod tests {
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![v2.clone(), v1.clone()]),
@@ -1009,6 +1059,7 @@ mod tests {
         remote_state.value.core.segments = vec![Segment {
             prefix: Bytes::from_static(b"hour=12/"),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![v1.sst.id.unwrap_compacted_id()],
                 last_compacted_l0_sst_view_id: Some(v1.id),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),

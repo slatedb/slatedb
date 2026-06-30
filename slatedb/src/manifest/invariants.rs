@@ -226,6 +226,7 @@ mod tests {
         current_core.segments.push(Segment {
             prefix: bytes::Bytes::from_static(b"seg"),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 l0: VecDeque::from(vec![l0_view(400, 0)]),
                 ..LsmTreeState::default()
             }),
@@ -238,6 +239,7 @@ mod tests {
         dirty_core.segments.push(Segment {
             prefix: bytes::Bytes::from_static(b"seg"),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 l0: VecDeque::from(vec![l0_view(400, 0)]),
                 ..LsmTreeState::default()
             }),

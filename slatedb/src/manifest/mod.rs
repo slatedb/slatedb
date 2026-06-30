@@ -39,6 +39,12 @@ pub(crate) struct LsmTreeState {
 
     /// A list of the sorted runs that are valid to read in the `compacted` folder.
     pub compacted: Vec<SortedRun>,
+
+    /// SST ids of L0s folded into a sorted run. The writer-side merge drops exactly these
+    /// (matched by stable SST id, not instance-local view id), so a stale watermark across a
+    /// takeover cannot drop a still-uncompacted L0. Bounded; see
+    /// [`Self::record_compacted_l0_ids`].
+    pub compacted_l0_ids: Vec<ulid::Ulid>,
 }
 
 impl LsmTreeState {
@@ -78,48 +84,43 @@ impl LsmTreeState {
                 .sum::<usize>()
     }
 
+    /// Record L0 view ids folded into a sorted run, so the writer-side merge drops exactly
+    /// these. Bounded; over-pruning only risks a benign duplicate (the L0's data is also in
+    /// the run), never a loss.
+    pub(crate) fn record_compacted_l0_ids(&mut self, ids: impl IntoIterator<Item = ulid::Ulid>) {
+        const MAX_COMPACTED_L0_IDS: usize = 4096;
+        self.compacted_l0_ids.extend(ids);
+        if self.compacted_l0_ids.len() > MAX_COMPACTED_L0_IDS {
+            let excess = self.compacted_l0_ids.len() - MAX_COMPACTED_L0_IDS;
+            self.compacted_l0_ids.drain(0..excess);
+        }
+    }
+
     /// Canonical merge of a single LSM tree, called by both
     /// [`Self::merge_from_writer`] and [`Self::merge_from_compactor`]. The
     /// writer owns L0 and the compactor owns compacted runs / markers, so the
     /// merge keeps each side's authoritative state and drops L0 entries the
     /// compactor has already absorbed.
     pub(crate) fn merge_writer_and_compactor(writer: &Self, compactor: &Self) -> Self {
-        let last_compacted_view = compactor.last_compacted_l0_sst_view_id;
-        let last_compacted_sst = compactor.last_compacted_l0_sst_id;
-        // todo: this is brittle. we are relying on the l0 list always being
-        //       updated in an expected order. We should instead encode the
-        //       ordering in the l0 SST IDs and assert that it follows the
-        //       order.
-        let l0: VecDeque<SsTableView> =
-            if last_compacted_view.is_some() || last_compacted_sst.is_some() {
-                writer
-                    .l0
-                    .iter()
-                    .cloned()
-                    .take_while(|view| {
-                        // Match by view ID first (V2 manifests), then fall back
-                        // to SST ID (V1).
-                        if let Some(id) = last_compacted_view {
-                            if view.id == id {
-                                return false;
-                            }
-                        }
-                        if let Some(id) = last_compacted_sst {
-                            if view.sst.id.unwrap_compacted_id() == id {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    .collect()
-            } else {
-                writer.l0.clone()
-            };
+        // Drop exactly the L0s the compactor recorded as compacted, matched by SST id (the
+        // stable physical identity — view ids are not shared across the writer and compactor
+        // instances). Inferring the set from the writer's deque order or the `last_compacted`
+        // watermark instead breaks across a takeover, where both go stale and still-durable,
+        // uncompacted L0s get dropped.
+        let compacted_ssts: std::collections::HashSet<ulid::Ulid> =
+            compactor.compacted_l0_ids.iter().copied().collect();
+        let l0: VecDeque<SsTableView> = writer
+            .l0
+            .iter()
+            .filter(|view| !compacted_ssts.contains(&view.sst.id.unwrap_compacted_id()))
+            .cloned()
+            .collect();
         Self {
-            last_compacted_l0_sst_view_id: last_compacted_view,
-            last_compacted_l0_sst_id: last_compacted_sst,
+            last_compacted_l0_sst_view_id: compactor.last_compacted_l0_sst_view_id,
+            last_compacted_l0_sst_id: compactor.last_compacted_l0_sst_id,
             l0,
             compacted: compactor.compacted.clone(),
+            compacted_l0_ids: compactor.compacted_l0_ids.clone(),
         }
     }
 }
@@ -2003,9 +2004,10 @@ mod tests {
 
     #[test]
     fn test_lsm_tree_merge_invariants() {
-        // Build a writer L0 with `n` views whose view IDs and SST IDs are all
-        // distinct, so we can tell V2 (view-id) and V1 (sst-id) marker
-        // matching apart.
+        // The merge drops exactly the writer L0s whose SST id the compactor recorded in
+        // `compacted_l0_ids`, keeps the rest in order, and carries the compactor's markers,
+        // sorted runs, and compacted-id set through unchanged. View id and SST id differ per
+        // entry so a regression to view-id matching would mismatch and fail.
         fn build_writer_l0(n: usize) -> VecDeque<SsTableView> {
             (0..n)
                 .map(|i| {
@@ -2023,38 +2025,19 @@ mod tests {
 
         proptest!(|(
             n in 1usize..10,
-            // 0 = no marker, 1 = V2 (view id) only, 2 = V1 (sst id) only, 3 = both
-            marker_kind in 0u8..4,
-            // Resolved against [0, n] below: index `n` means "marker doesn't
-            // match any L0 entry," exercising the no-trim path even with a
-            // marker present.
-            cutoff_idx_raw in 0usize..32,
+            // Per-position flag: did the compactor fold this L0 into a run?
+            compacted_mask in proptest::collection::vec(proptest::bool::ANY, 0..10),
         )| {
             let writer_l0 = build_writer_l0(n);
-            let cutoff_idx = cutoff_idx_raw % (n + 1);
-
-            let (last_view, last_sst) = if marker_kind == 0 {
-                (None, None)
-            } else if cutoff_idx == n {
-                // Marker that doesn't match any entry.
-                let nonmatch = Ulid::from_parts(u64::MAX, 0);
-                match marker_kind {
-                    1 => (Some(nonmatch), None),
-                    2 => (None, Some(nonmatch)),
-                    _ => (Some(nonmatch), Some(nonmatch)),
-                }
-            } else {
-                let target = &writer_l0[cutoff_idx];
-                let view_id = target.id;
-                let sst_id = target.sst.id.unwrap_compacted_id();
-                match marker_kind {
-                    1 => (Some(view_id), None),
-                    2 => (None, Some(sst_id)),
-                    _ => (Some(view_id), Some(sst_id)),
-                }
-            };
+            let compacted_l0_ids: Vec<Ulid> = writer_l0
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *compacted_mask.get(*i).unwrap_or(&false))
+                .map(|(_, v)| v.sst.id.unwrap_compacted_id())
+                .collect();
 
             let writer = LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: writer_l0.clone(),
@@ -2062,29 +2045,30 @@ mod tests {
             };
             let compactor_compacted = vec![SortedRun { id: 42, sst_views: vec![] }];
             let compactor = LsmTreeState {
-                last_compacted_l0_sst_view_id: last_view,
-                last_compacted_l0_sst_id: last_sst,
+                compacted_l0_ids: compacted_l0_ids.clone(),
+                last_compacted_l0_sst_view_id: writer_l0.back().map(|v| v.id),
+                last_compacted_l0_sst_id: writer_l0.back().map(|v| v.sst.id.unwrap_compacted_id()),
                 l0: VecDeque::new(),
                 compacted: compactor_compacted.clone(),
             };
 
             let merged = writer.merge_from_compactor(&compactor);
 
-            // Effective trim point: cutoff_idx if a matching marker is set,
-            // otherwise n (everything passes through).
-            let effective_cutoff = if marker_kind == 0 || cutoff_idx == n {
-                n
-            } else {
-                cutoff_idx
-            };
-            let expected_l0: Vec<_> = writer_l0.iter().take(effective_cutoff).cloned().collect();
+            let dropped: std::collections::HashSet<Ulid> =
+                compacted_l0_ids.iter().copied().collect();
+            let expected_l0: Vec<_> = writer_l0
+                .iter()
+                .filter(|v| !dropped.contains(&v.sst.id.unwrap_compacted_id()))
+                .cloned()
+                .collect();
             let actual_l0: Vec<_> = merged.l0.iter().cloned().collect();
             assert_eq!(actual_l0, expected_l0);
 
-            // Markers and compacted are taken from the compactor unchanged.
-            assert_eq!(merged.last_compacted_l0_sst_view_id, last_view);
-            assert_eq!(merged.last_compacted_l0_sst_id, last_sst);
+            // Markers, compacted runs, and the compacted-id set come from the compactor.
+            assert_eq!(merged.last_compacted_l0_sst_view_id, compactor.last_compacted_l0_sst_view_id);
+            assert_eq!(merged.last_compacted_l0_sst_id, compactor.last_compacted_l0_sst_id);
             assert_eq!(merged.compacted, compactor_compacted);
+            assert_eq!(merged.compacted_l0_ids, compacted_l0_ids);
 
             // The two wrappers must agree for any (writer, compactor) pair —
             // catches accidental arg-swapping in the wrappers.
@@ -2111,6 +2095,7 @@ mod tests {
                 SsTableInfo::default(),
             );
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::new(view_id, handle)]),
@@ -2119,6 +2104,7 @@ mod tests {
         }
         fn marker_tree(seed: u64) -> LsmTreeState {
             LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: Some(Ulid::from_parts(seed, 0)),
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
@@ -2400,6 +2386,7 @@ mod tests {
                         Segment {
                             prefix,
                             tree: Arc::new(LsmTreeState {
+                                compacted_l0_ids: vec![],
                                 last_compacted_l0_sst_view_id: None,
                                 last_compacted_l0_sst_id: None,
                                 l0: VecDeque::from(vec![view]),
@@ -2436,12 +2423,18 @@ mod tests {
                     if count == 0 {
                         return;
                     }
-                    let newest = tree.l0[0].id;
-                    let sr_views: Vec<_> = (0..count).map(|i| tree.l0[i].clone()).collect();
-                    for _ in 0..count {
-                        tree.l0.pop_front();
-                    }
-                    tree.last_compacted_l0_sst_view_id = Some(newest);
+                    // Compact the oldest `count` L0s (the tail; l0 is newest-first), as
+                    // production does. The watermark advances to the newest of the compacted
+                    // range, so it stays monotonic across successive compactions.
+                    let start = tree.l0.len() - count;
+                    let newest_compacted = tree.l0[start].id;
+                    let sr_views: Vec<_> =
+                        (start..tree.l0.len()).map(|i| tree.l0[i].clone()).collect();
+                    tree.l0.truncate(start);
+                    tree.last_compacted_l0_sst_view_id = Some(newest_compacted);
+                    tree.record_compacted_l0_ids(
+                        sr_views.iter().map(|v| v.sst.id.unwrap_compacted_id()),
+                    );
                     self.next_sr_id += 1;
                     tree.compacted.insert(
                         0,
@@ -2465,8 +2458,11 @@ mod tests {
                     if let Some(newest) = tree.l0.front() {
                         tree.last_compacted_l0_sst_view_id = Some(newest.id);
                     }
+                    let drained: Vec<Ulid> =
+                        tree.l0.iter().map(|v| v.sst.id.unwrap_compacted_id()).collect();
                     tree.l0.clear();
                     tree.compacted.clear();
+                    tree.record_compacted_l0_ids(drained);
                 }
             }
 
@@ -2504,7 +2500,7 @@ mod tests {
                 self.check_no_l0_resurrection();
                 self.check_l0_provenance();
                 self.check_l0_unique_across_segments();
-                self.check_watermark_trim();
+                self.check_compacted_l0s_dropped();
                 self.check_watermark_monotonic();
                 self.check_l0_not_in_l0_and_sr_simultaneously();
             }
@@ -2577,21 +2573,20 @@ mod tests {
                 }
             }
 
-            // Within a segment, no L0 in the L0 list may have an ID at
-            // or below the segment's watermark — those are supposed to
-            // be trimmed by the merge.
-            fn check_watermark_trim(&self) {
+            // No L0 whose SST id the compactor recorded as compacted may
+            // survive in a segment's L0 list — the merge drops exactly
+            // those.
+            fn check_compacted_l0s_dropped(&self) {
                 for seg in &self.store {
-                    if let Some(wm) = seg.tree.last_compacted_l0_sst_view_id {
-                        for view in &seg.tree.l0 {
-                            assert!(
-                                view.id > wm,
-                                "L0 {} survived in segment {:?} but watermark is {}",
-                                view.id,
-                                seg.prefix,
-                                wm
-                            );
-                        }
+                    let compacted: std::collections::HashSet<Ulid> =
+                        seg.tree.compacted_l0_ids.iter().copied().collect();
+                    for view in &seg.tree.l0 {
+                        assert!(
+                            !compacted.contains(&view.sst.id.unwrap_compacted_id()),
+                            "L0 {} survived in segment {:?} but its SST id is recorded compacted",
+                            view.id,
+                            seg.prefix,
+                        );
                     }
                 }
             }
@@ -3196,6 +3191,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: Bytes::from_static(b"seg/"),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![create_sst_view(segment_l0, b"seg/a")]),
@@ -3424,6 +3420,7 @@ mod tests {
         super::Segment {
             prefix: Bytes::copy_from_slice(prefix),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::new(view_id, handle)]),
@@ -3657,6 +3654,7 @@ mod tests {
         core.segments = vec![Segment {
             prefix: Bytes::copy_from_slice(prefix),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -3756,6 +3754,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -3765,6 +3764,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -3870,6 +3870,7 @@ mod tests {
         m1.core.segments.push(Segment {
             prefix: Bytes::from_static(b"hour=99/"),
             tree: Arc::new(LsmTreeState {
+                compacted_l0_ids: vec![],
                 last_compacted_l0_sst_view_id: Some(Ulid::new()),
                 last_compacted_l0_sst_id: Some(Ulid::new()),
                 l0: VecDeque::new(),
@@ -3934,6 +3935,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(prefix),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -4113,6 +4115,7 @@ mod tests {
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"foo/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -4138,6 +4141,7 @@ mod tests {
             core.segments = vec![Segment {
                 prefix: Bytes::from_static(b"foo/bar/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -4375,6 +4379,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=11/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::new_projected(
@@ -4409,6 +4414,7 @@ mod tests {
             Segment {
                 prefix: Bytes::from_static(b"hour=12/"),
                 tree: Arc::new(LsmTreeState {
+                    compacted_l0_ids: vec![],
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
@@ -4538,6 +4544,7 @@ mod tests {
                 Segment {
                     prefix: Bytes::copy_from_slice(p),
                     tree: Arc::new(LsmTreeState {
+                        compacted_l0_ids: vec![],
                         last_compacted_l0_sst_view_id: None,
                         last_compacted_l0_sst_id: None,
                         l0: VecDeque::from(vec![SsTableView::new_projected(
