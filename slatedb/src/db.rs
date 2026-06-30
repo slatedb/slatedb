@@ -179,7 +179,6 @@ impl DbInner {
             recent_flushed_wal_id,
             oracle.clone(),
             table_store.clone(),
-            mono_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
         ));
@@ -274,7 +273,7 @@ impl DbInner {
     }
 
     #[allow(unused_variables)]
-    pub(crate) fn wal_enabled_in_options(settings: &Settings) -> bool {
+    fn wal_enabled_in_options(settings: &Settings) -> bool {
         #[cfg(feature = "wal_disable")]
         return settings.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
