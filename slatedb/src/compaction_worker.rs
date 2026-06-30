@@ -672,49 +672,52 @@ impl CompactionWorkerHandler {
     /// heartbeat-only write preserves compaction status, context, and output
     /// progress, and only updates `worker.last_heartbeat_ms`.
     async fn heartbeat_owned_jobs(&mut self) -> Result<(), SlateDBError> {
-        if self.job_progress.is_empty() {
-            return Ok(());
-        }
-
-        let ids: Vec<Ulid> = self.job_progress.keys().copied().collect();
         loop {
+            let ids: Vec<Ulid> = self.job_progress.keys().copied().collect();
+            if ids.is_empty() {
+                return Ok(());
+            }
+
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let mut dirty = stored.prepare_dirty()?;
             let now_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
             let mut heartbeated = Vec::with_capacity(ids.len());
-            let mut lost = Vec::new();
 
-            for id in &ids {
-                let Some(existing) = dirty.value.get(id).cloned() else {
-                    lost.push(*id);
+            for id in ids {
+                let Some(existing) = dirty.value.get(&id).cloned() else {
+                    debug!(
+                        "heartbeat: compaction entry missing [worker_id={}, compaction_id={}]; stopping execution",
+                        self.worker_id,
+                        id
+                    );
+                    Self::stop_compaction_job(&self.executor, &mut self.job_progress, id);
                     continue;
                 };
                 if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str())
                 {
-                    lost.push(*id);
+                    debug!(
+                        "heartbeat: lost ownership [worker_id={}, compaction_id={}]; stopping execution",
+                        self.worker_id,
+                        id
+                    );
+                    Self::stop_compaction_job(&self.executor, &mut self.job_progress, id);
                     continue;
                 }
 
                 dirty
                     .value
                     .insert(existing.with_worker(Some(worker_spec.clone())));
-                heartbeated.push(*id);
+                heartbeated.push(id);
             }
 
             if heartbeated.is_empty() {
-                for id in lost {
-                    Self::stop_compaction_job(&self.executor, &mut self.job_progress, id);
-                }
                 return Ok(());
             }
 
             match stored.update(dirty).await {
                 Ok(()) => {
-                    for id in lost {
-                        Self::stop_compaction_job(&self.executor, &mut self.job_progress, id);
-                    }
                     for id in &heartbeated {
                         if let Some(state) = self.job_progress.get_mut(id) {
                             state.last_hb_ms = now_ms;
