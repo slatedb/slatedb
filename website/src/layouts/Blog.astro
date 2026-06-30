@@ -4,6 +4,7 @@ import ThemeProvider from '../components/ThemeProvider.astro';
 import barsIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/bars.svg?raw';
 import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.svg?raw';
 import { getStarsLabel } from '../lib/github-stars';
+import Analytics from '../components/Analytics.astro';
 
 interface Props {
 	title: string;
@@ -40,6 +41,7 @@ const canonical = url ?? new URL(Astro.url.pathname, Astro.site ?? Astro.url).hr
 			rel="stylesheet"
 			href="https://fonts.googleapis.com/css2?family=Marcellus&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,500;1,8..60,600;1,8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
 		/>
+		<Analytics />
 	</head>
 	<body>
 		<ThemeProvider />
