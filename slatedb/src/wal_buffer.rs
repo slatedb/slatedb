@@ -9,7 +9,6 @@ use log::{error, trace};
 use tokio::{runtime::Handle, sync::oneshot};
 use tracing::instrument;
 
-use crate::clock::MonotonicClock;
 use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::db_status::ClosedResultWriter;
@@ -52,7 +51,6 @@ pub(crate) struct WalBufferManager {
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
     status_manager: crate::db_status::DbStatusManager,
     db_stats: DbStats,
-    mono_clock: Arc<MonotonicClock>,
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
@@ -98,8 +96,6 @@ struct WalBuffer {
     entries: VecDeque<RowEntry>,
     /// watcher to await durability
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
-    /// this corresponds to the timestamp of the most recent addition to this WAL buffer
-    last_tick: i64,
     /// the sequence number of the most recent addition to this WAL buffer
     last_seq: u64,
     /// size of the entries that has been added to the WAL buffer in bytes
@@ -120,7 +116,6 @@ impl WalBufferManager {
         recent_flushed_wal_id: u64,
         oracle: Arc<DbOracle>,
         table_store: Arc<TableStore>,
-        mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
     ) -> Self {
@@ -142,7 +137,6 @@ impl WalBufferManager {
             status_manager,
             db_stats,
             table_store,
-            mono_clock,
             max_wal_bytes_size,
             max_flush_interval,
             last_flush_requested_epoch: AtomicU64::new(0),
@@ -319,11 +313,12 @@ impl WalBufferManager {
         flush_tx.send(WalFlushWork { result_tx })
     }
 
-    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
-    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
+    pub(crate) fn flush(
+        &self,
+    ) -> Result<oneshot::Receiver<Result<(), SlateDBError>>, SlateDBError> {
         let (result_tx, result_rx) = oneshot::channel();
         self.send_flush_request(Some(result_tx))?;
-        result_rx.await?
+        Ok(result_rx)
     }
 
     /// Returns the list of immutable WALs that need to be flushed.
@@ -379,7 +374,7 @@ impl WalBufferManager {
         self.db_stats.wal_buffer_flushes.increment(1);
 
         let mut sst_builder = self.table_store.wal_table_builder();
-        let (mut iter, last_tick) = (wal.iter(), wal.last_tick());
+        let mut iter = wal.iter();
         while let Some(entry) = iter.next() {
             sst_builder.add(entry).await?;
         }
@@ -390,8 +385,6 @@ impl WalBufferManager {
             .write_sst(&SsTableId::Wal(wal_id), &encoded_sst, false)
             .await?;
         self.db_stats.wal_flush_bytes.increment(written_bytes);
-
-        self.mono_clock.fetch_max_last_durable_tick(last_tick);
         Ok(())
     }
 
@@ -475,16 +468,12 @@ impl WalBuffer {
         Self {
             entries: VecDeque::new(),
             durable: WatchableOnceCell::new(),
-            last_tick: i64::MIN,
             last_seq: 0,
             entries_size: 0,
         }
     }
 
     fn append(&mut self, entry: RowEntry) {
-        if let Some(ts) = entry.create_ts {
-            self.last_tick = ts;
-        }
         self.last_seq = entry.seq;
         self.entries_size += entry.estimated_size();
         self.entries.push_back(entry);
@@ -533,11 +522,6 @@ impl WalBuffer {
         } else {
             Some(self.last_seq)
         }
-    }
-
-    /// Returns the last tick (timestamp) written to this buffer.
-    fn last_tick(&self) -> i64 {
-        self.last_tick
     }
 }
 
@@ -619,7 +603,6 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MonotonicClock;
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
@@ -657,7 +640,6 @@ mod tests {
         assert_eq!(buffer.len(), 0);
         assert_eq!(buffer.size(), 0);
         assert_eq!(buffer.last_seq(), None);
-        assert_eq!(buffer.last_tick(), i64::MIN);
     }
 
     #[test]
@@ -672,7 +654,6 @@ mod tests {
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.size(), expected_size);
         assert_eq!(buffer.last_seq(), Some(42));
-        assert_eq!(buffer.last_tick(), 1000);
     }
 
     #[test]
@@ -697,7 +678,6 @@ mod tests {
         assert_eq!(buffer.len(), 4);
         assert_eq!(buffer.size(), size1 + size2 + size3 + size4);
         assert_eq!(buffer.last_seq(), Some(40));
-        assert_eq!(buffer.last_tick(), 300);
     }
 
     #[tokio::test]
@@ -854,7 +834,6 @@ mod tests {
             TableStoreKind::Main,
         ));
         let test_clock = Arc::new(MockSystemClock::new());
-        let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
         let status_manager = DbStatusManager::new(0);
         let oracle = Arc::new(DbOracle::new(0, 0, 0, status_manager.clone()));
@@ -868,7 +847,6 @@ mod tests {
             0, // recent_flushed_wal_id
             oracle,
             table_store.clone(),
-            mono_clock,
             1000,                 // max_wal_bytes_size
             Some(flush_interval), // max_flush_interval
         ));
@@ -895,7 +873,7 @@ mod tests {
         wal_buffer.append(std::slice::from_ref(&entry2)).unwrap();
 
         // Flush the buffer
-        wal_buffer.flush().await.unwrap();
+        wal_buffer.flush().unwrap().await.unwrap().unwrap();
 
         // Verify entries were written to storage
         let sst_iter_options = SstIteratorOptions {
@@ -951,7 +929,7 @@ mod tests {
             let seq = i + 1;
             let entry = make_entry(&format!("key{}", i), &format!("value{}", i), seq, None);
             wal_buffer.append(&[entry]).unwrap();
-            wal_buffer.flush().await.unwrap();
+            wal_buffer.flush().unwrap().await.unwrap().unwrap();
         }
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
@@ -969,7 +947,7 @@ mod tests {
             let seq = i + 1;
             let entry = make_entry(&format!("key{}", i), &format!("value{}", i), seq, None);
             wal_buffer.append(&[entry]).unwrap();
-            wal_buffer.flush().await.unwrap();
+            wal_buffer.flush().unwrap().await.unwrap().unwrap();
         }
         wal_buffer.track_last_applied_seq(50);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
@@ -1004,7 +982,7 @@ mod tests {
             lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSH_REQUESTS).unwrap();
 
         // Explicitly flush to drain everything, including any partial current WAL.
-        wal_buffer.flush().await.unwrap();
+        wal_buffer.flush().unwrap().await.unwrap().unwrap();
 
         let actual_flushes = lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap();
 

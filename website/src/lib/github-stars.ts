@@ -6,12 +6,12 @@
  * during development. A short TTL keeps the value reasonably fresh.
  */
 
-const FALLBACK = '3k';
+const FALLBACK = '3.2k';
 const TTL_MS = 60 * 60 * 1000;
 
 let cached: { value: string; ts: number } | undefined;
 
-const format = (stars: number): string => `${Math.round(stars / 1000)}k`;
+const format = (stars: number): string => `${(stars / 1000).toFixed(1)}k`;
 
 export async function getStarsLabel(): Promise<string> {
     const now = Date.now();

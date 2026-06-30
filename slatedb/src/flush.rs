@@ -146,7 +146,6 @@ impl DbInner {
     pub(crate) async fn upload_sst(
         &self,
         id: &db_state::SsTableId,
-        imm_table: Arc<KVTable>,
         encoded_sst: &EncodedSsTable,
         write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
@@ -154,10 +153,6 @@ impl DbInner {
             .table_store
             .write_sst(id, encoded_sst, write_cache)
             .await?;
-
-        self.mono_clock
-            .fetch_max_last_durable_tick(imm_table.last_tick());
-
         Ok(handle)
     }
 
@@ -183,9 +178,7 @@ impl DbInner {
             let id = db_state::SsTableId::Compacted(
                 self.rand.rng().gen_ulid(self.system_clock.as_ref()),
             );
-            let handle = self
-                .upload_sst(&id, imm_table.clone(), &sst.encoded, write_cache)
-                .await?;
+            let handle = self.upload_sst(&id, &sst.encoded, write_cache).await?;
             handles.push(handle);
         }
         Ok(handles)
@@ -845,11 +838,7 @@ mod tests {
         ];
         for (sst, entries) in ssts.into_iter().zip(expected.into_iter()) {
             let id = SsTableId::Compacted(Ulid::new());
-            let handle = db
-                .inner
-                .upload_sst(&id, table.table().clone(), &sst.encoded, false)
-                .await
-                .unwrap();
+            let handle = db.inner.upload_sst(&id, &sst.encoded, false).await.unwrap();
             verify_sst(&db, &handle, &entries).await;
         }
         db.close().await.unwrap();

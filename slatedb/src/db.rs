@@ -42,7 +42,7 @@ use parking_lot::RwLock;
 use std::time::Duration;
 
 use crate::batch::WriteBatch;
-use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
+use crate::batch_write::{BatchWriterMessage, WriteBatchRequest, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -89,7 +89,7 @@ pub(crate) struct DbInner {
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flusher: Arc<MemtableFlusher>,
-    pub(crate) write_notifier: SafeSender<WriteBatchMessage>,
+    pub(crate) write_notifier: SafeSender<BatchWriterMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -129,7 +129,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
         memtable_flusher: Arc<MemtableFlusher>,
-        write_notifier: SafeSender<WriteBatchMessage>,
+        write_notifier: SafeSender<BatchWriterMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
@@ -179,7 +179,6 @@ impl DbInner {
             recent_flushed_wal_id,
             oracle.clone(),
             table_store.clone(),
-            mono_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
         ));
@@ -274,7 +273,7 @@ impl DbInner {
     }
 
     #[allow(unused_variables)]
-    pub(crate) fn wal_enabled_in_options(settings: &Settings) -> bool {
+    fn wal_enabled_in_options(settings: &Settings) -> bool {
         #[cfg(feature = "wal_disable")]
         return settings.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
@@ -295,12 +294,12 @@ impl DbInner {
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg = WriteBatchMessage {
+        let batch_msg = BatchWriterMessage::WriteBatch(WriteBatchRequest {
             batch,
             options: options.clone(),
             done: tx,
             txn,
-        };
+        });
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier.send(batch_msg)?;
@@ -421,11 +420,6 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) async fn flush_wals(&self) -> Result<u64, SlateDBError> {
-        self.wal_buffer.flush().await?;
-        Ok(self.wal_buffer.recent_flushed_wal_id())
-    }
-
     async fn flush_imm_memtables(&self, target: FlushTarget) -> Result<FlushResult, SlateDBError> {
         self.memtable_flusher().flush(target).await
     }
@@ -434,7 +428,9 @@ impl DbInner {
         &self,
         target: FlushTarget,
     ) -> Result<FlushResult, SlateDBError> {
-        self.freeze_current_memtable()?;
+        // flush the batch writer to freeze the active memtable and flush all WALs to unblock
+        // memtable flush
+        self.request_batch_writer_flush(true).await?;
         self.flush_imm_memtables(target).await
     }
 
@@ -467,18 +463,12 @@ impl DbInner {
         }
         match options.flush_type {
             FlushType::Wal => {
-                if self.wal_enabled {
-                    self.flush_wals().await.map(|_| ())
-                } else {
-                    Err(SlateDBError::WalDisabled)
+                if !self.wal_enabled {
+                    return Err(SlateDBError::WalDisabled);
                 }
+                self.request_batch_writer_flush(false).await
             }
-            FlushType::MemTable => {
-                if self.wal_enabled {
-                    self.flush_wals().await?;
-                }
-                self.flush_memtables(FlushTarget::All).await.map(|_| ())
-            }
+            FlushType::MemTable => self.flush_memtables(FlushTarget::All).await.map(|_| ()),
         }
     }
 
@@ -4878,10 +4868,7 @@ mod tests {
         // flusher is paused at the failpoint above.
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
-            tokio::spawn(async move {
-                inner.flush_wals().await?;
-                inner.flush_memtables(FlushTarget::All).await
-            })
+            tokio::spawn(async move { inner.flush_memtables(FlushTarget::All).await })
         };
 
         let mut wrote_l0_sst = false;
