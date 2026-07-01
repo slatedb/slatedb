@@ -37,7 +37,7 @@ use crate::actors::{
     CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
     WorkloadActorOptions, WorkloadMergeOperator,
 };
-use crate::utils::{build_settings, build_settings_compactor, build_toxic};
+use crate::utils::{build_settings, build_settings_compactor, build_toxic, dst_seeds};
 use crate::{DeterministicLocalFilesystem, Harness};
 
 type ScenarioError = Box<dyn std::error::Error + Send + Sync>;
@@ -45,12 +45,13 @@ type ScenarioResult<T> = Result<T, ScenarioError>;
 
 /// Configuration for a deterministic SlateDB scenario test.
 ///
-/// The scenario fans out one random seed per available CPU core, runs
-/// those seed groups on separate OS threads, and within each thread
-/// replays the seeded scenario `simulations` times in serial. Every
-/// replay must leave the harness in the same observable state (next root
-/// RNG value + current mock-clock time); a divergence indicates a
-/// non-deterministic code path in the harness or SlateDB.
+/// The scenario fans out one random seed per available CPU core (or the
+/// seeds listed in [`crate::utils::DST_SEEDS_ENV`]), runs those seed
+/// groups on separate OS threads, and within each thread replays the
+/// seeded scenario `simulations` times in serial. Every replay must
+/// leave the harness in the same observable state (next root RNG value +
+/// current mock-clock time); a divergence indicates a non-deterministic
+/// code path in the harness or SlateDB.
 pub struct DeterministicScenario {
     /// Logical name used for the harness label and tempdir path prefix.
     pub name: &'static str,
@@ -69,7 +70,8 @@ pub struct DeterministicScenario {
 impl DeterministicScenario {
     /// Runs the scenario across all available CPU cores in parallel.
     ///
-    /// Creates one random seed per available CPU core, then runs those seed
+    /// Creates one random seed per available CPU core (or takes the seeds
+    /// listed in [`crate::utils::DST_SEEDS_ENV`]), then runs those seed
     /// groups concurrently on separate OS threads. Each thread owns one seed
     /// and executes that seed repeatedly in serial, so the determinism
     /// assertion is still made by comparing multiple runs of the same seed
@@ -85,7 +87,7 @@ impl DeterministicScenario {
         let num_cores = std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(1);
-        let seeds: Vec<u64> = (0..num_cores).map(|_| rand::random::<u64>()).collect();
+        let seeds = dst_seeds(num_cores)?;
 
         let handles = seeds
             .into_iter()

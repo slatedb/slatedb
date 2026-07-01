@@ -18,7 +18,9 @@ use slatedb_dst::{
         SuppressFenced, TransferActor, TransferMode,
     },
     failing_object_store::ToxicKind,
-    utils::{build_reader_options, build_settings, build_settings_compactor, build_toxic},
+    utils::{
+        build_reader_options, build_settings, build_settings_compactor, build_toxic, dst_seeds,
+    },
     DeterministicLocalFilesystem, Harness, StartupCtx,
 };
 use tempfile::TempDir;
@@ -29,7 +31,13 @@ use tempfile::TempDir;
 fn test_dst_bank_with_toxics(
     #[case] shutdown_at_ms: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let seed = rand::random::<u64>();
+    for seed in dst_seeds(1)? {
+        run_bank(seed, shutdown_at_ms)?;
+    }
+    Ok(())
+}
+
+fn run_bank(seed: u64, shutdown_at_ms: i64) -> Result<(), Box<dyn std::error::Error>> {
     info!("dst bank seed: {seed}");
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
