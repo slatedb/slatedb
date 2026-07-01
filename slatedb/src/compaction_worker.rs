@@ -174,8 +174,6 @@ impl CompactionWorker {
 /// Per-job state used to detect when the per-range subcompaction progress has
 /// advanced and when the bytes threshold has been crossed.
 struct JobProgressState {
-    /// Total bytes processed as of the last bytes-based heartbeat write.
-    last_hb_bytes: u64,
     /// Wall-clock timestamp (ms) of this job's most recent heartbeat write
     /// (either trigger). Used to throttle the bytes trigger to at most one
     /// write per `heartbeat_min_interval`, independently of sibling jobs.
@@ -418,7 +416,6 @@ impl CompactionWorkerHandler {
                     self.job_progress.insert(
                         compaction.id(),
                         JobProgressState {
-                            last_hb_bytes: 0,
                             last_hb_ms: self.clock.now().timestamp_millis() as u64,
                             last_hb_ctx: compaction.ctx().cloned(),
                         },
@@ -531,20 +528,14 @@ impl CompactionWorkerHandler {
         // threshold (`last_hb_bytes`) and the throttle (`last_hb_ms`) are
         // per-job. The worker-level heartbeat ticker handles liveness for
         // active jobs that are temporarily not reporting byte progress.
-        let now_ms = self.clock.now().timestamp_millis() as u64;
-        let (bytes_trigger, ctx_changed, prev_sst_count) = {
+        let (ctx_changed, prev_sst_count) = {
             let Some(state) = self.job_progress.get(&id) else {
                 return Ok(());
             };
-            let bytes_trigger = bytes_processed.saturating_sub(state.last_hb_bytes)
-                >= self.options.heartbeat_bytes
-                && now_ms.saturating_sub(state.last_hb_ms)
-                    >= self.options.heartbeat_min_interval.as_millis() as u64;
             // Persist the full compaction context whenever it advances. This captures
             // both the initial plan/retention choice and later output progress.
             let ctx_changed = state.last_hb_ctx.as_ref() != Some(&ctx);
             (
-                bytes_trigger,
                 ctx_changed,
                 state
                     .last_hb_ctx
@@ -554,7 +545,7 @@ impl CompactionWorkerHandler {
             )
         };
 
-        if !bytes_trigger && !ctx_changed {
+        if !ctx_changed {
             return Ok(());
         }
 
@@ -572,7 +563,6 @@ impl CompactionWorkerHandler {
             if ctx_changed {
                 state.last_hb_ctx = Some(ctx);
             }
-            state.last_hb_bytes = bytes_processed;
             state.last_hb_ms = hb_ms;
             info!(
                 "progress heartbeat [worker_id={}, id={}, bytes={}, output_ssts={}, new_output_ssts={}]",
@@ -1335,7 +1325,6 @@ mod tests {
             (
                 id3,
                 JobProgressState {
-                    last_hb_bytes: 0,
                     last_hb_ms: 0,
                     last_hb_ctx: None,
                 },
@@ -1343,7 +1332,6 @@ mod tests {
             (
                 id1,
                 JobProgressState {
-                    last_hb_bytes: 0,
                     last_hb_ms: 0,
                     last_hb_ctx: None,
                 },
@@ -1351,7 +1339,6 @@ mod tests {
             (
                 id2,
                 JobProgressState {
-                    last_hb_bytes: 0,
                     last_hb_ms: 0,
                     last_hb_ctx: None,
                 },
@@ -1733,7 +1720,6 @@ mod tests {
         let mock_clock = Arc::new(MockSystemClock::new());
         mock_clock.set(1000);
         let options = CompactionWorkerOptions {
-            heartbeat_bytes: 1,
             heartbeat_min_interval: Duration::from_millis(1),
             ..CompactionWorkerOptions::default()
         };
@@ -1790,7 +1776,6 @@ mod tests {
         let mock_clock = Arc::new(MockSystemClock::new());
         mock_clock.set(1000);
         let options = CompactionWorkerOptions {
-            heartbeat_bytes: u64::MAX,
             ..CompactionWorkerOptions::default()
         };
         let clock: Arc<dyn SystemClock> = mock_clock.clone();

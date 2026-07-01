@@ -5,7 +5,6 @@ use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use chrono::TimeDelta;
 use futures::future::{join, join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -809,22 +808,11 @@ impl TokioCompactionExecutorInner {
             before_key.saturating_sub(before_range)
         });
 
-        // Cadence for the time-based progress send below. Caps sends at 1s (the
-        // pre-distributed-compaction default), but never coarser than the
-        // worker's `heartbeat_min_interval`, so progress heartbeats still use
-        // the worker's configured write throttle.
-        let progress_interval = TimeDelta::from_std(
-            self.options
-                .heartbeat_min_interval
-                .min(std::time::Duration::from_secs(1)),
-        )
-        .expect("clamped to <= 1s, which always fits in a TimeDelta");
         // Report the resume point up front so a resumed range surfaces the bytes
         // already processed in prior attempts immediately. A range that resumes
         // already-complete reports its full estimated size here (its resume
         // cursor sits at the range's last key) and never enters the loop below.
         progress(start_bytes_processed, &output_ssts);
-        let mut last_progress_report = self.clock.now();
 
         // At most one SST close runs in the background at a time (depth-1
         // pipeline). While a finished SST flushes to the object store we keep
@@ -844,15 +832,6 @@ impl TokioCompactionExecutorInner {
                 self.collect_close(pending, &mut output_ssts).await?;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 progress(total_bytes, &output_ssts);
-                last_progress_report = self.clock.now();
-            }
-
-            let duration_since_last_report =
-                self.clock.now().signed_duration_since(last_progress_report);
-            if duration_since_last_report > progress_interval {
-                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
-                progress(total_bytes, &output_ssts);
-                last_progress_report = self.clock.now();
             }
 
             if let Some(block_size) = current_writer.add(kv).await? {
@@ -880,7 +859,6 @@ impl TokioCompactionExecutorInner {
                 bytes_written = 0;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 progress(total_bytes, &output_ssts);
-                last_progress_report = self.clock.now();
             }
         }
 
