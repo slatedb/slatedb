@@ -55,7 +55,6 @@ impl ObjectStoreCallTag {
     }
 
     /// Reads the tag back from an extensions map, if present.
-    #[cfg(test)]
     pub(crate) fn from_extensions(extensions: &Extensions) -> Option<Self> {
         extensions.get::<Self>().copied()
     }
