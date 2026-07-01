@@ -283,6 +283,51 @@ pub fn build_toxic(rand: &DbRand, root_path: &str, index: usize) -> Toxic {
     }
 }
 
+/// Environment variable holding a comma-separated list of `u64` seeds that
+/// overrides random seed generation for DST tests.
+pub const DST_SEEDS_ENV: &str = "SLATEDB_DST_SEEDS";
+
+/// Returns the seeds a DST test should run.
+///
+/// When [`DST_SEEDS_ENV`] is set, parses it as a comma-separated list of
+/// `u64` seeds so a failed run can be reproduced with the seeds it logged.
+/// Otherwise returns `default_count` random seeds.
+pub fn dst_seeds(default_count: usize) -> std::io::Result<Vec<u64>> {
+    match std::env::var(DST_SEEDS_ENV) {
+        Ok(raw) => parse_seeds(&raw),
+        Err(std::env::VarError::NotPresent) => {
+            Ok((0..default_count).map(|_| rand::random::<u64>()).collect())
+        }
+        Err(err) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid {DST_SEEDS_ENV}: {err}"),
+        )),
+    }
+}
+
+fn parse_seeds(raw: &str) -> std::io::Result<Vec<u64>> {
+    let seeds = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse::<u64>().map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid seed {value:?} in {DST_SEEDS_ENV}: {err}"),
+                )
+            })
+        })
+        .collect::<std::io::Result<Vec<u64>>>()?;
+    if seeds.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{DST_SEEDS_ENV} must contain at least one seed"),
+        ));
+    }
+    Ok(seeds)
+}
+
 // A flag so we only initialize logging once.
 static INIT_LOGGING: Once = Once::new();
 
