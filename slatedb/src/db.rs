@@ -358,9 +358,8 @@ impl DbInner {
                 };
 
                 // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
-                // but before we get the memtable and wal table. During that time, if the memtable and/or
-                // wal table are fully flushed out, we should short circuit since the select! will always
-                // time out.
+                // but before we get the memtable. During that time, if the memtable is fully
+                // flushed out, we should short circuit to avoid blocking indefinitely.
                 if maybe_oldest_unflushed_memtable.is_none() {
                     continue;
                 }
