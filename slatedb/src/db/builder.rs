@@ -424,7 +424,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let recorder =
             MetricsRecorderHelper::new(self.metrics_recorder, self.settings.metric_level);
         let retrying_main_object_store = instrumented_retrying_object_store(
-            self.main_object_store,
+            self.main_object_store.clone(),
             &recorder,
             ObjectStoreComponent::Db,
             ObjectStoreType::Main,
@@ -622,9 +622,17 @@ impl<P: Into<Path>> DbBuilder<P> {
         )?;
         // The compactor and GC each get their own cacheless store (so background
         // reads do not pollute the foreground cache), tagged with their kind.
+        //
+        // The compactor reads/writes through whichever object store its builder
+        // holds: the DB's own store on the auto-from-settings path, or the one
+        // the caller supplied on their own `CompactorBuilder` (so a custom
+        // compaction read path — e.g. one that bypasses a prefetch wrapper used
+        // by the foreground read path — actually takes effect instead of being
+        // silently ignored). Either way it is wrapped in its own Compactor-tagged
+        // retry/instrumentation layer below.
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
-                CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                CompactorBuilder::new(path.clone(), self.main_object_store.clone())
                     .with_options(opts.clone())
             })
         });
@@ -644,9 +652,19 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
             builder = builder.with_fp_registry(self.fp_registry.clone());
 
+            // Wrap whatever object store the builder holds in the compactor's
+            // own cacheless, Compactor-tagged retry/instrumentation layer.
+            let compactor_main_object_store = instrumented_retrying_object_store(
+                builder.main_object_store.clone(),
+                &recorder,
+                ObjectStoreComponent::Compactor,
+                ObjectStoreType::Main,
+                rand.clone(),
+                system_clock.clone(),
+            );
             let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
-                    retrying_main_object_store.clone(),
+                    compactor_main_object_store,
                     retrying_wal_object_store.clone(),
                 ),
                 sst_format.clone(),
