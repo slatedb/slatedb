@@ -28,9 +28,9 @@ pub(crate) fn extract_segment_prefix(
 impl DbInner {
     pub(crate) fn replay_memtable(
         &self,
+        current_memtable_wal_id: u64,
         replayed_memtable: ReplayedMemtable,
     ) -> Result<(), SlateDBError> {
-        let current_memtable_wal_id = self.wal_buffer.recent_flushed_wal_id();
         let mut guard = self.state.write();
 
         // The active memtable was installed by the previous replay step, so its
@@ -55,7 +55,6 @@ impl DbInner {
 
         // replace the memtable
         guard.replace_memtable(replayed_memtable.table);
-        self.wal_buffer.advance_recent_flushed_wal_id(last_wal);
         let dirty_manifest = guard.state().manifest.clone();
         drop(guard);
         self.status_manager.report_manifest(dirty_manifest.into());

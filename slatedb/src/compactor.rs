@@ -5867,7 +5867,7 @@ mod tests {
                 let db_state = db.inner.state.read();
                 let cow_db_state = db_state.state();
                 (
-                    db.inner.wal_buffer.is_empty(),
+                    db.inner.wal_observer.status().buffered_wal_entries_count == 0,
                     db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty(),
                     db_state.state().core().clone(),
                 )
