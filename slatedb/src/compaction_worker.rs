@@ -24,17 +24,13 @@
 //! # Heartbeat and failure detection
 //!
 //! Workers emit heartbeats to prove liveness. A heartbeat is a CAS write that
-//! bumps `last_heartbeat_ms` in the worker's `.compactions` entry. Three paths
+//! bumps `last_heartbeat_ms` in the worker's `.compactions` entry. Two paths
 //! can refresh it:
 //!
 //! 1. **Worker ticker**: every `heartbeat_min_interval`, the worker refreshes
 //!    liveness for every active job it still owns.
-//! 2. **Bytes trigger**: when the cumulative bytes processed since the last
-//!    bytes-based heartbeat exceeds `CompactionWorkerOptions::heartbeat_bytes`
-//!    *and* at least `heartbeat_min_interval` has elapsed since the last such
-//!    write, the worker emits a cheap heartbeat that just refreshes liveness.
-//! 3. **Subcompaction trigger**: whenever the per-range subcompaction progress
-//!    (RFC-0028) advances — a range produces new output SSTs — the worker
+//! 2. **Progress trigger**: whenever the compaction context advances - the
+//!    executor plans the job or a range produces new output SSTs - the worker
 //!    writes a heartbeat carrying the latest progress report, so a reclaiming
 //!    worker can resume completed ranges.
 //!
@@ -102,12 +98,13 @@ pub(crate) enum WorkerMessage {
         /// Output SR on success, or the compaction error.
         result: Result<SortedRun, SlateDBError>,
     },
-    /// Periodic progress update from the [`CompactionExecutor`].
+    /// Progress update from the [`CompactionExecutor`].
     CompactionJobProgress {
         /// The job id associated with this progress report.
         id: Ulid,
         /// The total number of bytes processed so far (estimate).
         bytes_processed: u64,
+        /// The current compaction context, which may carry new output SSTs.
         ctx: CompactionContext,
     },
     /// Ticker-triggered message to poll `.compactions` for claimable jobs.
@@ -171,12 +168,10 @@ impl CompactionWorker {
     }
 }
 
-/// Per-job state used to detect when the per-range subcompaction progress has
-/// advanced and when the bytes threshold has been crossed.
+/// Per-job state used to detect when executor progress carries new resumable
+/// compaction context.
 struct JobProgressState {
-    /// Wall-clock timestamp (ms) of this job's most recent heartbeat write
-    /// (either trigger). Used to throttle the bytes trigger to at most one
-    /// write per `heartbeat_min_interval`, independently of sibling jobs.
+    /// Wall-clock timestamp (ms) of this job's most recent heartbeat write.
     last_hb_ms: u64,
     /// Context as of the last heartbeat write that persisted it. Snapshots
     /// change only when the executor first plans the job or when a range's
@@ -497,37 +492,28 @@ impl CompactionWorkerHandler {
         }
     }
 
-    /// Handles a progress update from the executor. Triggers:
-    /// - A **bytes heartbeat** when cumulative bytes since the last bytes-hb
-    ///   exceeds `heartbeat_bytes` and `heartbeat_min_interval` has elapsed.
-    /// - A **subcompaction write** when the per-range subcompaction progress
-    ///   (RFC-0028) changed since the one last persisted, so a reclaiming
-    ///   worker can resume completed ranges. This bypasses the bytes throttle
-    ///   because progress changes only on range output transitions, not per
-    ///   byte.
+    /// Handles a progress update from the executor. Writes a heartbeat when the
+    /// compaction context changed since the one last persisted, so a reclaiming
+    /// worker can resume completed ranges.
     ///
     /// `bytes_processed` is *cumulative* per job (the running byte total), not
     /// a delta.
     ///
-    /// Per-job progress bookkeeping (`last_hb_bytes`, `last_hb_ms`, and
-    /// `last_hb_ctx`) is only advanced after `write_heartbeat`
-    /// confirms a durable write, so a skipped write (entry gone / ownership
-    /// lost) does not mark un-persisted progress as heartbeated.
+    /// Per-job progress bookkeeping (`last_hb_ms` and `last_hb_ctx`) is only
+    /// advanced after `write_heartbeat` confirms a durable write, so a skipped
+    /// write (entry gone / ownership lost) does not mark un-persisted progress
+    /// as heartbeated.
     async fn handle_progress(
         &mut self,
         id: Ulid,
         bytes_processed: u64,
         ctx: CompactionContext,
     ) -> Result<(), SlateDBError> {
-        // Compute both triggers from a single borrow, then bail if this job is
-        // unknown (stale progress message). The borrow ends before the async
-        // `write_heartbeat`; state is advanced afterwards only on a confirmed
-        // durable write.
-        //
-        // Bytes-trigger writes are tied to *this job's own* progress: both the
-        // threshold (`last_hb_bytes`) and the throttle (`last_hb_ms`) are
-        // per-job. The worker-level heartbeat ticker handles liveness for
-        // active jobs that are temporarily not reporting byte progress.
+        // Compute the context change from a single borrow, then bail if this
+        // job is unknown (stale progress message). The borrow ends before the
+        // async `write_heartbeat`; state is advanced afterwards only on a
+        // confirmed durable write. The worker-level heartbeat ticker handles
+        // liveness even when progress reports do not change resumable state.
         let (ctx_changed, prev_sst_count) = {
             let Some(state) = self.job_progress.get(&id) else {
                 return Ok(());
@@ -549,10 +535,8 @@ impl CompactionWorkerHandler {
             return Ok(());
         }
 
-        // Carry the compaction context only when it changed; a bytes-only
-        // heartbeat just refreshes liveness (`last_heartbeat_ms`). On a
-        // confirmed write, record the timestamp that was actually persisted so
-        // in-memory throttling stays consistent with the durable entry.
+        // On a confirmed write, record the timestamp that was actually
+        // persisted so in-memory state stays consistent with the durable entry.
         let new_sst_count = total_output_ssts(ctx.subcompactions());
         let new_ctx = ctx_changed.then(|| ctx.clone());
         if let Some(hb_ms) = self.write_heartbeat(id, new_ctx).await? {
@@ -1706,16 +1690,14 @@ mod tests {
         assert!(kept.worker().unwrap().last_heartbeat_ms > 1000);
     }
 
-    /// When the bytes-processed counter crosses `heartbeat_bytes` and enough
-    /// time has elapsed since the last bytes-based heartbeat, the worker must
-    /// write a heartbeat without touching the per-range subcompaction progress.
+    /// When the executor reports the initial planned context, the worker must
+    /// persist it without requiring per-range subcompaction progress.
     #[tokio::test]
-    async fn test_worker_emits_bytes_heartbeat_on_threshold() {
+    async fn test_worker_persists_initial_compaction_context() {
         use tokio::time::pause;
         pause();
 
-        // given: a claimed compaction and a worker whose bytes threshold is tiny
-        // (so any byte progress crosses it), with the clock advanced past the
+        // given: a claimed compaction with the clock advanced past the
         // heartbeat min-interval.
         let mock_clock = Arc::new(MockSystemClock::new());
         mock_clock.set(1000);
@@ -1731,8 +1713,8 @@ mod tests {
         fx.handler.poll_and_claim().await.unwrap();
         mock_clock.advance(Duration::from_secs(2)).await;
 
-        // when: progress reports bytes over the threshold and the executor's
-        // first planned context, but no output SSTs yet.
+        // when: progress reports the executor's first planned context, but no
+        // output SSTs yet.
         let ctx =
             CompactionContext::new(vec![Subcompaction::new(BytesRange::unbounded())], Some(0));
         fx.handler
@@ -1740,8 +1722,8 @@ mod tests {
             .await
             .unwrap();
 
-        // then: a heartbeat is written (last_heartbeat_ms bumped) but no
-        // per-range output progress is persisted.
+        // then: a heartbeat is written and the initial context is persisted,
+        // but no per-range output progress exists yet.
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Running);
         let worker = c.worker().expect("worker spec missing");
@@ -1763,16 +1745,15 @@ mod tests {
 
     /// When the executor reports per-range subcompaction progress (RFC-0028),
     /// the worker must persist the progress to `.compactions` so a reclaiming
-    /// worker can resume — even when the bytes trigger did not fire. A later
-    /// report that extends a range's output SSTs must also be persisted.
+    /// worker can resume. A later report that extends a range's output SSTs
+    /// must also be persisted.
     #[tokio::test]
     async fn test_worker_persists_subcompaction_progress() {
         use tokio::time::pause;
         pause();
 
-        // given: a claimed compaction and a worker whose bytes trigger is
-        // disabled, so only a subcompaction progress report change drives a
-        // write.
+        // given: a claimed compaction where only a subcompaction progress
+        // report change drives a write.
         let mock_clock = Arc::new(MockSystemClock::new());
         mock_clock.set(1000);
         let options = CompactionWorkerOptions {
@@ -1786,7 +1767,7 @@ mod tests {
         fx.handler.poll_and_claim().await.unwrap();
         mock_clock.advance(Duration::from_secs(5)).await;
 
-        // when: progress carries a subcompaction (bytes trigger off).
+        // when: progress carries subcompaction output.
         let sst1 = fake_output_handle(Ulid::from_parts(9000, 0));
         let subcompactions =
             vec![Subcompaction::new(BytesRange::unbounded()).with_output_ssts(vec![sst1.clone()])];

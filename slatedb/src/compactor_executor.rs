@@ -521,7 +521,7 @@ impl TokioCompactionExecutorInner {
     ///   (RFC-0028)
     /// - Streams and merges input keys across all sources (per range)
     /// - Applies merge and retention policies
-    /// - Writes output SSTs up to `max_sst_size`, reporting periodic progress
+    /// - Writes output SSTs up to `max_sst_size`, reporting resumable progress
     ///
     /// ## Returns
     /// - The compaction context with all output SST handles.
