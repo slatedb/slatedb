@@ -380,12 +380,6 @@ impl WalBufferManager {
         inner
             .immutable_wals
             .push_back((next_wal_id, Arc::new(current_wal)));
-        let status = inner.status(&self.table_store);
-        let listener = inner.listener.clone();
-        drop(inner);
-        if let Some(l) = listener {
-            (*l)(WalEvent::WalFrozen(status))
-        }
         Ok(())
     }
 
@@ -652,8 +646,6 @@ pub(crate) struct WalStatus {
 /// An event emitted by [`WalBufferManager`] to subscribers.
 #[derive(Debug, Clone)]
 pub(crate) enum WalEvent {
-    /// Emitted when the current buffer is frozen
-    WalFrozen(WalStatus),
     /// Emitted when a WAL file is durably flushed to storage. On receipt of this event, SlateDB
     /// notifies write tasks blocked on [`crate::config::WriteOptions::await_durable`]
     WalFlushed(WalStatus),
