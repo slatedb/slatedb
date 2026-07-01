@@ -11,6 +11,9 @@ permissions:
 jobs:
   deterministic-simulation-test:
     runs-on: ubuntu-latest
+    # Hard backstop for the whole job. The "Run DST Tests" step below sets a
+    # shorter timeout so an overrun is reported as a step *failure* (which sends
+    # a notification) rather than a job-level cancellation (which does not).
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +25,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gdb
       - name: Run DST Tests
+        # Time out the run itself, below the job-level timeout above. A step
+        # timeout marks the step (and job) as failed, so the usual GitHub
+        # failure notification fires. A job-level timeout would instead cancel
+        # the run, and GitHub does not notify on cancellations.
+        timeout-minutes: 55
         run: cargo nextest run -p slatedb-dst --all-features --profile dst-nightly --no-capture
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
