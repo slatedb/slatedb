@@ -1192,9 +1192,6 @@ pub struct CompactionWorkerOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub compactions_poll_interval: Duration,
 
-    /// How many bytes a worker must process before emitting a heartbeat.
-    pub heartbeat_bytes: u64,
-
     /// Minimum wall-clock time between heartbeat writes.
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
@@ -1263,7 +1260,6 @@ impl Default for CompactionWorkerOptions {
         Self {
             max_concurrent_compactions: 4,
             compactions_poll_interval: Duration::from_secs(5),
-            heartbeat_bytes: 5_242_880,
             heartbeat_min_interval: Duration::from_secs(5),
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
