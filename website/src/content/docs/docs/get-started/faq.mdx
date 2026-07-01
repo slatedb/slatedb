@@ -63,7 +63,7 @@ To prevent data loss, SlateDB's `put()` API will block until the data has been f
 
 ## Does SlateDB support column families?
 
-SlateDB does not support [column families](https://github.com/facebook/rocksdb/wiki/column-families). Opening multiple SlateDB databases is cheap. This is what we recommend if you need to separate data.
+SlateDB does not support [column families](https://github.com/facebook/rocksdb/wiki/column-families), but it does offer [segments](https://github.com/slatedb/slatedb/blob/main/rfcs/0024-segment-oriented-compaction.md), which partition a single keyspace into independent, prefix-derived key ranges that each get their own compaction and retention lifecycle. If you instead need fully isolated keyspaces with independent configuration, opening multiple SlateDB databases is cheap and remains the recommended approach.
 
 ## Are there any limits to key and value sizes?
 
