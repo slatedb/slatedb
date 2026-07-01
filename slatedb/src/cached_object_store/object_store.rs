@@ -1,6 +1,6 @@
 use crate::cached_object_store::policy::{
-    CachePutConfig, DefaultPutPolicy, DefaultReadPolicy, GetAction, HeadAction, PutAction,
-    PutPolicy, ReadPolicy,
+    CachePutConfig, DefaultGetPolicy, DefaultPutPolicy, GetAction, GetPolicy, HeadAction,
+    PutAction, PutPolicy,
 };
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::storage_fs::FsCacheStorage;
@@ -33,7 +33,7 @@ pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     part_size_bytes: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
-    read_policy: Arc<dyn ReadPolicy>,
+    get_policy: Arc<dyn GetPolicy>,
     put_policy: Arc<dyn PutPolicy>,
     stats: Arc<CachedObjectStoreStats>,
     // Deduplicates concurrent HEAD requests for the same path after a cache miss.
@@ -59,7 +59,7 @@ impl CachedObjectStore {
             cache_storage,
             part_size_bytes,
             stats,
-            Arc::new(DefaultReadPolicy),
+            Arc::new(DefaultGetPolicy),
             Arc::new(DefaultPutPolicy {
                 put: CachePutConfig { cache_puts },
             }),
@@ -67,14 +67,14 @@ impl CachedObjectStore {
     }
 
     /// Like [`Self::new`], but with caller supplied read and put policies.
-    /// `new` installs [`DefaultReadPolicy`] and [`DefaultPutPolicy`].
+    /// `new` installs [`DefaultGetPolicy`] and [`DefaultPutPolicy`].
     #[allow(unused)]
     pub(crate) fn new_with_policies(
         object_store: Arc<dyn ObjectStore>,
         cache_storage: Arc<dyn LocalCacheStorage>,
         part_size_bytes: usize,
         stats: Arc<CachedObjectStoreStats>,
-        read_policy: Arc<dyn ReadPolicy>,
+        get_policy: Arc<dyn GetPolicy>,
         put_policy: Arc<dyn PutPolicy>,
     ) -> Result<Arc<Self>, SlateDBError> {
         if part_size_bytes == 0 || !part_size_bytes.is_multiple_of(1024) {
@@ -85,7 +85,7 @@ impl CachedObjectStore {
             object_store,
             part_size_bytes,
             cache_storage,
-            read_policy,
+            get_policy,
             put_policy,
             stats,
             head_flights: SingleFlight::new(),
@@ -653,7 +653,9 @@ fn build_head(cache_location: &Path, size: u64, result: &PutResult) -> ObjectMet
     ObjectMeta {
         location: cache_location.clone(),
         // `last_modified` is not used by the cache, add a stub instead of
-        // executing an actual HEAD request after write.
+        // executing an actual HEAD request after write. If this ever change,
+        // the cache should be updated to use the upstream `last_modified`
+        // instead of the stub value here.
         last_modified: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
             .expect("unix epoch is a valid timestamp"),
         size,
@@ -682,13 +684,13 @@ impl ObjectStore for CachedObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
 
         if options.head {
-            return match self.read_policy.head_action(tag.as_ref()) {
+            return match self.get_policy.head_action(tag.as_ref()) {
                 HeadAction::Bypass => self.object_store.get_opts(location, options).await,
                 HeadAction::Probe => self.cached_head(location, false).await,
                 HeadAction::ReadThrough => self.cached_head(location, true).await,
             };
         }
-        match self.read_policy.get_action(tag.as_ref()) {
+        match self.get_policy.get_action(tag.as_ref()) {
             GetAction::Bypass => self.object_store.get_opts(location, options).await,
             GetAction::Refetch => self.cached_get_opts(location, options, true).await,
             GetAction::ReadThrough => self.cached_get_opts(location, options, false).await,

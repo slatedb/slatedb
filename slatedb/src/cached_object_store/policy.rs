@@ -3,17 +3,17 @@
 use crate::db_state::SstType;
 use crate::object_store_tag::{ObjectStoreCallTag, TableStoreKind};
 
-/// Decides the read routing for a GET or HEAD from the call tag.
-pub(crate) trait ReadPolicy: Send + Sync + 'static + std::fmt::Debug {
+/// Decides how a GET or HEAD is routed, from the call tag.
+pub(crate) trait GetPolicy: Send + Sync + 'static + std::fmt::Debug {
     fn get_action(&self, tag: Option<&ObjectStoreCallTag>) -> GetAction;
     fn head_action(&self, tag: Option<&ObjectStoreCallTag>) -> HeadAction;
 }
 
-/// The built-in read policy.
+/// The built-in get policy.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct DefaultReadPolicy;
+pub(crate) struct DefaultGetPolicy;
 
-impl ReadPolicy for DefaultReadPolicy {
+impl GetPolicy for DefaultGetPolicy {
     fn get_action(&self, tag: Option<&ObjectStoreCallTag>) -> GetAction {
         // Untagged reads (manifest, WAL existence probes, other coordination I/O)
         // are never cached.
@@ -214,7 +214,7 @@ mod tests {
     // Untagged reads (coordination I/O) bypass.
     #[case(None, GetAction::Bypass)]
     fn test_get_action(#[case] tag: Option<ObjectStoreCallTag>, #[case] expected: GetAction) {
-        assert_eq!(DefaultReadPolicy.get_action(tag.as_ref()), expected);
+        assert_eq!(DefaultGetPolicy.get_action(tag.as_ref()), expected);
     }
 
     #[rstest]
@@ -271,7 +271,7 @@ mod tests {
         HeadAction::ReadThrough
     )]
     fn test_head_action(#[case] tag: Option<ObjectStoreCallTag>, #[case] expected: HeadAction) {
-        assert_eq!(DefaultReadPolicy.head_action(tag.as_ref()), expected);
+        assert_eq!(DefaultGetPolicy.head_action(tag.as_ref()), expected);
     }
 
     #[rstest]
