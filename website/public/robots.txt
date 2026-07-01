@@ -1,8 +1,13 @@
 # SlateDB website
 #
+# Resources for LLMs and AI agents:
+#   /llms.txt       - project summary, use cases, and documentation index
+#   /llms-full.txt  - the complete documentation as a single markdown bundle
+#   /agents.md      - guidance for AI coding agents (when to use, how to add it)
+#   /index.md       - markdown version of the homepage
+#
 # Every documentation page is also published as clean markdown at a sibling URL,
 # e.g. /docs/get-started/quickstart.md alongside /docs/get-started/quickstart/.
-# A complete site bundle for LLM consumption is at /llms.txt.
 
 User-agent: *
 Allow: /

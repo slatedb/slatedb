@@ -18,6 +18,89 @@ import Analytics from '../components/Analytics.astro';
 
 const starsLabel = await getStarsLabel();
 
+const site = 'https://slatedb.io';
+// Single source of truth for the homepage description. Reused verbatim across
+// <meta name="description">, og:description, twitter:description, and the
+// JSON-LD `description` so agents that cross-check these sources see one
+// consistent summary.
+const metaDescription =
+    'SlateDB is an open-source embedded key-value database, implemented as an LSM tree, that depends on object storage alone for durability.';
+const pageTitle = 'SlateDB — An embedded database built on object storage';
+const ogImage = `${site}/img/slatedb-opengraph.jpg`;
+
+// Structured data (schema.org / JSON-LD). Describes SlateDB as an open-source
+// developer library so AI agents and search engines can identify the entity,
+// link it to authoritative profiles (sameAs), and answer questions about it.
+const jsonLd = {
+    '@context': 'https://schema.org',
+    '@graph': [
+        {
+            '@type': 'Organization',
+            '@id': `${site}/#organization`,
+            name: 'SlateDB',
+            url: site,
+            logo: `${site}/img/logo-full.svg`,
+            description: metaDescription,
+            sameAs: [
+                'https://github.com/slatedb/slatedb',
+                'https://crates.io/crates/slatedb',
+                'https://docs.rs/slatedb',
+                'https://discord.gg/mHYmGy5MgA',
+            ],
+        },
+        {
+            '@type': 'WebSite',
+            '@id': `${site}/#website`,
+            url: site,
+            name: 'SlateDB',
+            description: metaDescription,
+            publisher: { '@id': `${site}/#organization` },
+            inLanguage: 'en',
+        },
+        {
+            '@type': 'WebPage',
+            '@id': `${site}/#webpage`,
+            url: `${site}/`,
+            name: pageTitle,
+            description: metaDescription,
+            isPartOf: { '@id': `${site}/#website` },
+            about: { '@id': `${site}/#software` },
+            inLanguage: 'en',
+            // Tell voice/agent readers which text best summarizes the page.
+            speakable: {
+                '@type': 'SpeakableSpecification',
+                cssSelector: ['.hero-headline', '.hero-sub'],
+            },
+        },
+        {
+            '@type': ['SoftwareApplication', 'SoftwareSourceCode'],
+            '@id': `${site}/#software`,
+            name: 'SlateDB',
+            applicationCategory: 'DeveloperApplication',
+            operatingSystem: 'Cross-platform',
+            description: metaDescription,
+            url: site,
+            codeRepository: 'https://github.com/slatedb/slatedb',
+            programmingLanguage: ['Rust', 'Go', 'Java', 'Python', 'JavaScript'],
+            license: 'https://github.com/slatedb/slatedb/blob/main/LICENSE',
+            isAccessibleForFree: true,
+            offers: {
+                '@type': 'Offer',
+                price: '0',
+                priceCurrency: 'USD',
+            },
+            keywords:
+                'embedded database, key-value store, LSM engine, object storage, S3, GCS, Azure Blob Storage, Rust, storage engine',
+            author: { '@id': `${site}/#organization` },
+            sameAs: [
+                'https://github.com/slatedb/slatedb',
+                'https://crates.io/crates/slatedb',
+                'https://docs.rs/slatedb',
+            ],
+        },
+    ],
+};
+
 // The "used by" companies — even row, all logos rendered at the same height.
 const usedBy = [
     { name: 'Dropbox',    href: 'https://www.dropbox.com/',     logo: '/img/logos/dropbox.svg',    scale: 1.2 },
@@ -186,11 +269,26 @@ const osLinks = [
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>SlateDB — An embedded database built on object storage</title>
+        <title>{pageTitle}</title>
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-        <meta name="description" content="SlateDB is an embedded storage engine built on object storage. Use it as the storage core inside the database, cache, stream processor, or workflow engine you're building." />
-        <meta property="og:image" content="/img/slatedb-opengraph.jpg" />
+        <link rel="canonical" href={`${site}/`} />
+        <meta name="description" content={metaDescription} />
+        <link rel="alternate" type="text/markdown" href="/index.md" title="Markdown source" />
+        <!-- Open Graph -->
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="SlateDB" />
+        <meta property="og:title" content={pageTitle} />
+        <meta property="og:description" content={metaDescription} />
+        <meta property="og:url" content={`${site}/`} />
+        <meta property="og:image" content={ogImage} />
         <meta property="og:image:alt" content="SlateDB | An embedded database built on object storage" />
+        <!-- Twitter -->
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content={pageTitle} />
+        <meta name="twitter:description" content={metaDescription} />
+        <meta name="twitter:image" content={ogImage} />
+        <!-- Structured data -->
+        <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
