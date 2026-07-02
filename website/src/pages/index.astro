@@ -3,15 +3,108 @@ import SocialIcons from '../components/SocialIcons.astro';
 import ThemeProvider from '../components/ThemeProvider.astro';
 import barsIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/bars.svg?raw';
 import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.svg?raw';
+import rustIcon from '../icons/rust.svg?raw';
+import goIcon from '../icons/go.svg?raw';
+import javaIcon from '../icons/openjdk.svg?raw';
+import nodeIcon from '../icons/nodedotjs.svg?raw';
+import pythonIcon from '../icons/python.svg?raw';
+import apacheIcon from '../icons/apache.svg?raw';
+import awsIcon from '../icons/amazonwebservices.svg?raw';
+import cloudflareIcon from '../icons/cloudflare.svg?raw';
+import gcpIcon from '../icons/googlecloud.svg?raw';
 import { getStarsLabel } from '../lib/github-stars';
 import { highlight } from '../lib/highlight';
+import Analytics from '../components/Analytics.astro';
 
 const starsLabel = await getStarsLabel();
+
+const site = 'https://slatedb.io';
+// Single source of truth for the homepage description. Reused verbatim across
+// <meta name="description">, og:description, twitter:description, and the
+// JSON-LD `description` so agents that cross-check these sources see one
+// consistent summary.
+const metaDescription =
+    'SlateDB is an open-source embedded key-value database, implemented as an LSM tree, that depends on object storage alone for durability.';
+const pageTitle = 'SlateDB — An embedded database built on object storage';
+const ogImage = `${site}/img/slatedb-opengraph.jpg`;
+
+// Structured data (schema.org / JSON-LD). Describes SlateDB as an open-source
+// developer library so AI agents and search engines can identify the entity,
+// link it to authoritative profiles (sameAs), and answer questions about it.
+const jsonLd = {
+    '@context': 'https://schema.org',
+    '@graph': [
+        {
+            '@type': 'Organization',
+            '@id': `${site}/#organization`,
+            name: 'SlateDB',
+            url: site,
+            logo: `${site}/img/logo-full.svg`,
+            description: metaDescription,
+            sameAs: [
+                'https://github.com/slatedb/slatedb',
+                'https://crates.io/crates/slatedb',
+                'https://docs.rs/slatedb',
+                'https://discord.gg/mHYmGy5MgA',
+            ],
+        },
+        {
+            '@type': 'WebSite',
+            '@id': `${site}/#website`,
+            url: site,
+            name: 'SlateDB',
+            description: metaDescription,
+            publisher: { '@id': `${site}/#organization` },
+            inLanguage: 'en',
+        },
+        {
+            '@type': 'WebPage',
+            '@id': `${site}/#webpage`,
+            url: `${site}/`,
+            name: pageTitle,
+            description: metaDescription,
+            isPartOf: { '@id': `${site}/#website` },
+            about: { '@id': `${site}/#software` },
+            inLanguage: 'en',
+            // Tell voice/agent readers which text best summarizes the page.
+            speakable: {
+                '@type': 'SpeakableSpecification',
+                cssSelector: ['.hero-headline', '.hero-sub'],
+            },
+        },
+        {
+            '@type': ['SoftwareApplication', 'SoftwareSourceCode'],
+            '@id': `${site}/#software`,
+            name: 'SlateDB',
+            applicationCategory: 'DeveloperApplication',
+            operatingSystem: 'Cross-platform',
+            description: metaDescription,
+            url: site,
+            codeRepository: 'https://github.com/slatedb/slatedb',
+            programmingLanguage: ['Rust', 'Go', 'Java', 'Python', 'JavaScript'],
+            license: 'https://github.com/slatedb/slatedb/blob/main/LICENSE',
+            isAccessibleForFree: true,
+            offers: {
+                '@type': 'Offer',
+                price: '0',
+                priceCurrency: 'USD',
+            },
+            keywords:
+                'embedded database, key-value store, LSM engine, object storage, S3, GCS, Azure Blob Storage, Rust, storage engine',
+            author: { '@id': `${site}/#organization` },
+            sameAs: [
+                'https://github.com/slatedb/slatedb',
+                'https://crates.io/crates/slatedb',
+                'https://docs.rs/slatedb',
+            ],
+        },
+    ],
+};
 
 // The "used by" companies — even row, all logos rendered at the same height.
 const usedBy = [
     { name: 'Dropbox',    href: 'https://www.dropbox.com/',     logo: '/img/logos/dropbox.svg',    scale: 1.2 },
-    { name: 'HelixDB',    href: 'https://www.helix-db.com/',      logo: '/img/logos/helixdb.png' },
+    { name: 'HelixDB',    href: 'https://www.helix-db.com/',      logo: '/img/logos/helixdb.png',    scale: 0.8 },
     { name: 'TensorLake', href: 'https://www.tensorlake.ai/',   logo: '/img/logos/tensorlake.svg', scale: 1.2 },
     { name: 'S2',         href: 'https://s2.dev/',                logo: '/img/logos/s2.svg' },
     { name: 'Goldsky',    href: 'https://goldsky.com/',           logo: '/img/logos/goldsky.svg' },
@@ -131,23 +224,78 @@ const features = [
         href: '/docs/design/clones/',
     },
 ];
+
+// Three linked property cells beneath the editorial lead. Each is a docs/repo
+// link fronted by a row of brand glyphs (inlined SVG, tinted via currentColor).
+const osLinks = [
+    {
+        id: 'clients',
+        kicker: 'clients',
+        href: '/docs/get-started/quickstart/',
+        desc: 'Rust core with Go, Java, Node & Python bindings.',
+        icons: [
+            { label: 'Rust', svg: rustIcon },
+            { label: 'Go', svg: goIcon },
+            { label: 'Java', svg: javaIcon },
+            { label: 'Node', svg: nodeIcon },
+            { label: 'Python', svg: pythonIcon },
+        ],
+    },
+    {
+        id: 'object-storage',
+        kicker: 'object storage',
+        href: '/docs/operations/configuration/',
+        desc: 'Runs on S3, R2, GCS & most object stores.',
+        icons: [
+            { label: 'Amazon S3', svg: awsIcon },
+            { label: 'Cloudflare R2', svg: cloudflareIcon },
+            { label: 'Google Cloud Storage', svg: gcpIcon },
+        ],
+    },
+    {
+        id: 'license',
+        kicker: 'license',
+        href: 'https://github.com/slatedb/slatedb/blob/main/LICENSE',
+        external: true,
+        desc: 'Apache 2.0 free and open source.',
+        icons: [
+            { label: 'Apache 2.0', svg: apacheIcon },
+        ],
+    },
+];
 ---
 
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>SlateDB — An embedded database built on object storage</title>
+        <title>{pageTitle}</title>
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-        <meta name="description" content="SlateDB is an embedded storage engine built on object storage. Use it as the storage core inside the database, cache, stream processor, or workflow engine you're building." />
-        <meta property="og:image" content="/img/slatedb-opengraph.jpg" />
+        <link rel="canonical" href={`${site}/`} />
+        <meta name="description" content={metaDescription} />
+        <link rel="alternate" type="text/markdown" href="/index.md" title="Markdown source" />
+        <!-- Open Graph -->
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="SlateDB" />
+        <meta property="og:title" content={pageTitle} />
+        <meta property="og:description" content={metaDescription} />
+        <meta property="og:url" content={`${site}/`} />
+        <meta property="og:image" content={ogImage} />
         <meta property="og:image:alt" content="SlateDB | An embedded database built on object storage" />
+        <!-- Twitter -->
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content={pageTitle} />
+        <meta name="twitter:description" content={metaDescription} />
+        <meta name="twitter:image" content={ogImage} />
+        <!-- Structured data -->
+        <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
             rel="stylesheet"
             href="https://fonts.googleapis.com/css2?family=Marcellus&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,500;1,8..60,600;1,8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         />
+        <Analytics />
     </head>
     <body>
         <ThemeProvider />
@@ -160,6 +308,7 @@ const features = [
                     <div class="right-group">
                         <nav class="header-links">
                             <a href="/docs/get-started/introduction/" class="header-link">docs</a>
+                            <a href="/blog/" class="header-link">blog</a>
                             <a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">discord</a>
                             <a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link" id="github-link">github <span class="star-count"><span class="star-icon">★</span>{starsLabel}</span></a>
                         </nav>
@@ -170,6 +319,7 @@ const features = [
                     </div>
                     <div class="mobile-menu" id="mobile-menu">
                         <a href="/docs/get-started/introduction/" class="mobile-menu-link">docs</a>
+                        <a href="/blog/" class="mobile-menu-link">blog</a>
                         <a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">discord</a>
                         <a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="mobile-menu-link" id="mobile-github-link">github <span class="star-count"><span class="star-icon">★</span>{starsLabel}</span></a>
                     </div>
@@ -199,29 +349,44 @@ const features = [
                     </div>
                 </section>
 
-                <!-- 2. Used by — evenly spaced, uniform-height logos -->
-                <section class="usedby" aria-label="Used by">
-                    <a
-                        class="add-logo"
-                        href="https://github.com/slatedb/slatedb/issues/new?title=add%20%3Cmy%20company%3E%27s%20logo%20to%20used%20by&body=Please%20add%20%3Cmy%20company%3E%27s%20logo%20to%20the%20slatedb%20website.%0A%0A**Logo%20SVG%3A**%0A%0A**Company%20Link%3A**%0A%0A**How%20you%20use%20slatedb%3A**%0A"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >+ add your logo</a>
-                    <div class="usedby-label">used by</div>
-                    <div class="usedby-row">
-                        {usedBy.map((c) => (
-                            <a href={c.href} target="_blank" rel="noopener noreferrer" class="usedby-logo" style={c.scale ? `--logo-scale: ${c.scale}` : undefined}>
-                                <img src={c.logo} alt={c.name} />
-                            </a>
-                        ))}
-                    </div>
-                </section>
-
-                <!-- 3. Editorial paragraph -->
+                <!-- 2 + 3. One plate: used-by logos (top row), editorial lead,
+                     and the object-storage property strip. -->
                 <section class="prose">
-                    <p>
-                    Object storage is the foundation that holds up modern cloud-native systems: strongly consistent, absurdly durable, and priced like background noise. SlateDB <em>embeds within your system</em> and provides online, transactional access to object storage. Build a&nbsp;database, a&nbsp;cache, a&nbsp;feature store, a&nbsp;ledger, a&nbsp;workflow engine or anything on top of object storage and SlateDB is the layer that makes <em>the writes correct, the reads fast, and the ops boring.</em>
-                    </p>
+                    <div class="os-panel">
+                        <div class="usedby" aria-label="Used by">
+                            <div class="usedby-row">
+                                {usedBy.map((c) => (
+                                    <a href={c.href} target="_blank" rel="noopener noreferrer" class="usedby-logo" style={c.scale ? `--logo-scale: ${c.scale}` : undefined}>
+                                        <img src={c.logo} alt={c.name} />
+                                    </a>
+                                ))}
+                            </div>
+                        </div>
+                        <p class="prose-lead">
+                        SlateDB brings the durability, consistency, and economics of object storage to your online systems without sacrificing performance or paying per-request API costs.
+                        </p>
+                        <div class="os-stats" aria-label="SlateDB at a glance">
+                            {osLinks.map((l) => (
+                                <a
+                                    class="os-stat"
+                                    href={l.href}
+                                    target={l.external ? '_blank' : undefined}
+                                    rel={l.external ? 'noopener noreferrer' : undefined}
+                                >
+                                    <span class="os-stat-kicker">
+                                        {l.kicker}
+                                        <span class="os-stat-arrow" aria-hidden="true">→</span>
+                                    </span>
+                                    <span class="os-stat-icons" data-count={l.icons.length}>
+                                        {l.icons.map((ic) => (
+                                            <span class="os-stat-icon" title={ic.label} set:html={ic.svg}></span>
+                                        ))}
+                                    </span>
+                                    <span class="os-stat-desc">{l.desc}</span>
+                                </a>
+                            ))}
+                        </div>
+                    </div>
                 </section>
 
                 <!-- 4. Feature plate -->
@@ -457,7 +622,7 @@ const features = [
         display: flex;
         align-items: center;
         justify-content: space-between;
-        max-width: 72rem;
+        max-width: 80rem;
         margin: 0 auto;
         position: relative;
     }
@@ -497,7 +662,7 @@ const features = [
         padding: 0.12rem 0.45rem;
         background-color: var(--surface-1);
         border: 1px solid var(--ink-6);
-        border-radius: 0.4rem;
+        border-radius: 0;
         color: var(--ink-2);
         font-size: 0.72rem;
         font-weight: 500;
@@ -571,7 +736,7 @@ const features = [
     /* ---------- Hero ---------- */
 
     main {
-        max-width: 72rem;
+        max-width: 80rem;
         margin: 0 auto;
         /* Inline padding scales with viewport so content keeps breathing room
            on both sides instead of going flush at widths near max-width. */
@@ -617,12 +782,11 @@ const features = [
        as art rather than a foreground subject. */
     .hero-art {
         position: absolute;
-        top: 0rem;
-        right: -3rem;
-        /* Hold a generous minimum so the figure doesn't visibly shrink with the
-           viewport until the container actually crowds it. clamp(min, preferred, max). */
-        width: clamp(40rem, 50vw, 50rem);
-        max-width: 60%;
+        top: -2rem;
+        right: -1rem;
+        /* Fixed size — the figure does not scale with the viewport; it just
+           gets hidden below 767px. */
+        width: 36rem;
         pointer-events: none;
         z-index: 0;
         opacity: 0.8;
@@ -643,7 +807,9 @@ const features = [
         font-family:
             'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
         font-weight: 400;
-        font-size: clamp(2.25rem, 5.5vw, 4rem);
+        /* Fixed size — does not scale with the viewport; wraps onto more lines
+           as the page narrows instead. */
+        font-size: 3rem;
         line-height: 1.1;
         letter-spacing: -0.005em;
         color: var(--ink-1);
@@ -671,6 +837,12 @@ const features = [
     @media (max-width: 991px) {
         .hero-sub { max-width: 20rem; }
     }
+    /* Below 767px the atlas is gone, so the hero text reclaims the full width.
+       Placed after the rules above so it wins on source order at this width. */
+    @media (max-width: 767px) {
+        .hero-text { max-width: none; }
+        .hero-sub { max-width: none; }
+    }
 
     .hero-ctas {
         display: flex;
@@ -684,7 +856,7 @@ const features = [
             'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 0.8125rem;
         padding: 0.7rem 1.1rem;
-        border-radius: 0.5rem;
+        border-radius: 0;
         text-decoration: none;
         transition: all 0.15s ease;
         display: inline-flex;
@@ -709,46 +881,16 @@ const features = [
     }
     /* ---------- Used-by — evenly spaced, uniform-height logos ---------- */
 
+    /* Top row of the panel: frosted like the lead beneath it, with a hairline
+       divider separating it from the lead. Horizontal padding matches the lead. */
     .usedby {
-        padding: 1.5rem 1.25rem 1.25rem;
-        margin: 0 -1.25rem;
-        border-top: 1px solid var(--ink-6);
-        border-bottom: 1px solid var(--ink-6);
+        padding: 1.5rem 1.75rem 1.25rem;
         position: relative;
-        background-color: rgba(246, 247, 249, 0.6);
+        border-bottom: 1px solid var(--ink-6);
+        background-color: rgba(246, 247, 249, 0.4);
         backdrop-filter: blur(14px) saturate(140%);
         -webkit-backdrop-filter: blur(14px) saturate(140%);
     }
-
-    /* "used by" sits inline with the top border (left), "+ add your logo" mirrors
-       it on the right. Both visually break the border line, like ruled labels on
-       an engineering drawing. */
-    .usedby-label,
-    .add-logo {
-        position: absolute;
-        top: -0.65rem;
-        font-family:
-            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 0.7rem;
-        background-color: var(--surface-0);
-        padding: 0 0.5rem;
-        text-decoration: none;
-        line-height: 1.2;
-    }
-
-    .usedby-label {
-        left: 0;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--ink-4);
-    }
-
-    .add-logo {
-        right: 0;
-        color: var(--ink-3);
-        transition: color 0.15s ease;
-    }
-    .add-logo:hover { color: var(--accent); }
 
     /* Even-width cells via grid; each logo fills its cell at uniform height.
        auto-fit packs as many ~100px cells as the viewport allows. */
@@ -764,7 +906,7 @@ const features = [
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        height: 1.6rem;
+        height: 1.25rem;
         width: 100%;
     }
     .usedby-logo img {
@@ -786,25 +928,8 @@ const features = [
     /* ---------- Editorial prose ---------- */
 
     .prose {
-        padding: 6rem 0;
+        padding: 2rem 0 6rem;
         position: relative;
-    }
-    /* Soft "vellum" backdrop: the Atlas figure bleeds down out of the hero, so
-       a feathered surface-0 wash + backdrop-blur sits behind the editorial line
-       to keep it legible. Radial mask = no visible rectangle, just a gentle
-       focus zone. Knobs: alpha (0.55) for wash intensity, blur(18px) for how
-       softly the figure dissolves, mask radii (75%/85%) for feather size. */
-    .prose::before {
-        content: "";
-        position: absolute;
-        inset: 0rem 2rem;
-        background-color: rgba(246, 247, 249, 0.55);
-        backdrop-filter: blur(1px) saturate(140%);
-        -webkit-backdrop-filter: blur(18px) saturate(140%);
-        -webkit-mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
-        mask-image: radial-gradient(ellipse 75% 85% at center, black 45%, transparent 100%);
-        z-index: 0;
-        pointer-events: none;
     }
     .prose p {
         position: relative;
@@ -823,6 +948,135 @@ const features = [
         font-style: italic;
         font-weight: 500;
         color: var(--accent-high);
+    }
+    /* One bordered plate: a full-width lead row spanning all columns, then a
+       three-cell property strip beneath it. Matches the feature plate — sharp
+       corners, 1px ink border, warm gridded "paper" backdrop. */
+    .os-panel {
+        position: relative;
+        z-index: 1;
+        border: 1px solid var(--ink-6);
+        /* overflow visible so the used-by label chips can break the top border. */
+    }
+    /* Lead sentence keeps the editorial serif voice but no longer carries the
+       whole message — the property strip below it does the heavy lifting. It
+       spans the full width as the plate's top row. Left transparent with a
+       frosted backdrop so the Atlas figure shows through, softly blurred. */
+    /* Selector must out-specify `.prose p` (0,1,1) — a bare `.prose-lead`
+       (0,1,0) loses to it and the overrides below silently don't apply. */
+    .prose p.prose-lead {
+        margin: 0;
+        padding: 1.75rem 3.75rem 1.75rem;
+        border-bottom: 1px solid var(--ink-6);
+        background-color: rgba(246, 247, 249, 0.4);
+        /* Very light blur so the hero grid/atlas showing through softens. */
+        backdrop-filter: blur(0.5px);
+        -webkit-backdrop-filter: blur(0.5px);
+        /* Sized and set to match the feature body copy (.plate-copy
+           .feature-body) rather than the big editorial serif from .prose p. */
+        font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+        font-weight: 400;
+        font-size: 1rem;
+        line-height: 1.62;
+        letter-spacing: normal;
+        font-variation-settings: normal;
+    }
+
+    /* Three linked property cells: mono kicker label + a row of brand glyphs +
+       a supporting line. Each cell is a docs/repo link. The warm gridded "paper"
+       backdrop lives here, beneath the cells only. */
+    .os-stats {
+        margin: 0;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        background-color: #f8f6f3;
+    }
+    .os-stat {
+        padding: 1.5rem 1.5rem 1.6rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.9rem;
+        position: relative;
+        text-decoration: none;
+        color: inherit;
+        transition: background-color 0.18s ease;
+    }
+    .os-stat:hover {
+        background-color: rgba(178, 104, 68, 0.05);
+    }
+    /* Hairline separators between cells, matching the gridded plate look. */
+    .os-stat + .os-stat {
+        border-left: 1px solid var(--ink-6);
+    }
+    .os-stat-kicker {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-family:
+            'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.68rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--ink-4);
+    }
+    .os-stat-arrow {
+        color: var(--ink-6);
+        transition: color 0.18s ease, transform 0.18s ease;
+    }
+    .os-stat:hover .os-stat-arrow {
+        color: var(--accent);
+        transform: translateX(0.2rem);
+    }
+    /* Glyph row. Icons are inlined single-path SVGs tinted via currentColor;
+       they sit muted (ink + low opacity, grayscale aesthetic) and warm to the
+       accent on hover, echoing the used-by logo treatment. */
+    .os-stat-icons {
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+        min-height: 2rem;
+        margin-top: auto;
+    }
+    .os-stat-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--ink-3);
+        opacity: 0.7;
+        transition: color 0.18s ease, opacity 0.18s ease;
+    }
+    .os-stat-icon :global(svg) {
+        display: block;
+        width: 1.6rem;
+        height: 1.6rem;
+        fill: currentColor;
+    }
+    .os-stat:hover .os-stat-icon {
+        color: var(--accent-high);
+        opacity: 1;
+    }
+    /* The license cell carries a single emblem — let it read larger. */
+    .os-stat-icons[data-count='1'] .os-stat-icon :global(svg) {
+        width: 2.1rem;
+        height: 2.1rem;
+    }
+    .os-stat-desc {
+        font-size: 0.85rem;
+        line-height: 1.45;
+        color: var(--ink-3);
+    }
+
+    @media (max-width: 640px) {
+        .os-stats {
+            grid-template-columns: 1fr;
+        }
+        .os-stat + .os-stat {
+            border-left: 0;
+            border-top: 1px solid var(--ink-6);
+        }
+        .os-stat-icons {
+            margin-top: 0;
+        }
     }
 
     /* ---------- Section eyebrows ---------- */
@@ -1683,12 +1937,11 @@ const features = [
     .quickstart-more:hover { color: var(--accent-high); }
 
     .qs-card {
+        /* Flat engineering-plate look to match the property panel: sharp corners,
+           1px ink border, no shadow. Plain surface — no gridded paper. */
         border: 1px solid var(--ink-6);
-        border-radius: 0.75rem;
         overflow: hidden;
-        background-color: var(--surface-1);
-        box-shadow: 0 1px 2px rgba(27, 36, 47, 0.04),
-                    0 6px 16px rgba(27, 36, 47, 0.04);
+        background-color: #f8f6f3;
     }
 
     .qs-tabs {
@@ -1801,7 +2054,7 @@ const features = [
         font-size: 0.825rem;
         line-height: 1.65;
         color: var(--ink-1);
-        background-color: var(--surface-1);
+        background-color: #f8f6f3;
         overflow-x: auto;
     }
     .qs-code code { background: none; padding: 0; font-family: inherit; }
@@ -1927,7 +2180,7 @@ const features = [
         flex-direction: column;
         gap: 1rem;
         align-items: center;
-        max-width: 72rem;
+        max-width: 80rem;
         margin: 0 auto;
     }
     .footer-icons {

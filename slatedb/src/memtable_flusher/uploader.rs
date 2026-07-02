@@ -197,12 +197,9 @@ impl UploadHandler {
         // uploads that already landed before the abort are left for the
         // garbage collector to reclaim, since the worker allocates ids
         // internally and they are not visible here for explicit cleanup.
-        let segments = futures::future::try_join_all(
-            built
-                .iter()
-                .map(|sst| self.upload_segment_sst(&job.imm_memtable, sst)),
-        )
-        .await?;
+        let segments =
+            futures::future::try_join_all(built.iter().map(|sst| self.upload_segment_sst(sst)))
+                .await?;
 
         Ok(UploadedMemtable {
             imm_memtable: Arc::clone(&job.imm_memtable),
@@ -217,18 +214,13 @@ impl UploadHandler {
     /// memtable.
     async fn upload_segment_sst(
         &self,
-        imm_memtable: &Arc<ImmutableMemtable>,
         sst: &EncodedSegmentSst,
     ) -> Result<SegmentedSstHandle, SlateDBError> {
         let sst_id =
             SsTableId::Compacted(self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()));
         let written_bytes = sst.encoded.remaining_len() as u64;
         loop {
-            match self
-                .db
-                .upload_sst(&sst_id, imm_memtable.table(), &sst.encoded, true)
-                .await
-            {
+            match self.db.upload_sst(&sst_id, &sst.encoded, true).await {
                 Ok(sst_handle) => {
                     self.db.db_stats.l0_flush_bytes.increment(written_bytes);
                     return Ok(SegmentedSstHandle {

@@ -383,9 +383,17 @@ impl GarbageCollector {
     #[instrument(level = "debug", skip_all, fields(resource = task.resource()))]
     async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &T) {
         if let Err(e) = self.remove_expired_checkpoints().await {
-            error!("error removing expired checkpoints [error={}]", e);
+            error!(
+                "error removing expired checkpoints [resource={}, error={:?}]",
+                task.resource(),
+                e,
+            );
         } else if let Err(e) = task.collect(self.system_clock.now()).await {
-            error!("error collecting compacted garbage [error={}]", e);
+            error!(
+                "error collecting garbage [resource={}, error={:?}]",
+                task.resource(),
+                e,
+            );
         }
     }
 

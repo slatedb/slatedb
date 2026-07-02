@@ -1,0 +1,498 @@
+---
+import { getCollection, render } from 'astro:content';
+import Blog from '../../layouts/Blog.astro';
+import PostToc from '../../components/PostToc.astro';
+
+export async function getStaticPaths() {
+	const posts = await getCollection('blog');
+	return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content, headings } = await render(post);
+const { title, author, authorGithub, pubDate, ogImage } = post.data;
+
+// Default the social card to the per-post image generated at build time
+// (src/pages/blog/og/[...slug].png.ts); frontmatter `ogImage` can override it.
+const socialImage = ogImage ?? new URL(`/blog/og/${post.id}.png`, Astro.site ?? Astro.url).href;
+
+const dateLabel = pubDate.toLocaleDateString('en-US', {
+	year: 'numeric',
+	month: 'long',
+	day: 'numeric',
+	timeZone: 'UTC',
+});
+const isoDate = pubDate.toISOString();
+---
+
+<Blog title={`${title} — SlateDB`} ogImage={socialImage}>
+	<PostToc headings={headings} />
+	<article class="post">
+		<header class="post-head">
+			<a class="post-back" href="/blog/">← all posts</a>
+			<h1 class="post-title">{title}</h1>
+			<div class="post-meta">
+				<time datetime={isoDate}>{dateLabel}</time>
+				<span class="post-meta-sep" aria-hidden="true">·</span>
+				{authorGithub ? (
+					<a href={`https://github.com/${authorGithub}`} target="_blank" rel="noopener noreferrer">{author}</a>
+				) : (
+					<span>{author}</span>
+				)}
+			</div>
+		</header>
+
+		<div class="post-body">
+			<Content />
+		</div>
+
+		<footer class="post-foot">
+			<a class="post-back" href="/blog/">← all posts</a>
+		</footer>
+	</article>
+</Blog>
+
+<script>
+	// Turn each section heading into an anchor target: append a "#" link to its
+	// own id so readers can grab a deep link. Headings already carry ids (the
+	// table of contents links to them), so this is pure enhancement.
+	for (const h of document.querySelectorAll<HTMLElement>(
+		'.post-body h2[id], .post-body h3[id], .post-body h4[id]',
+	)) {
+		const a = document.createElement('a');
+		a.className = 'heading-anchor';
+		a.href = `#${h.id}`;
+		a.setAttribute('aria-label', `Link to “${h.textContent?.trim()}”`);
+		h.appendChild(a);
+	}
+
+	// Open external links in a new tab (matching the new-tab arrow in the
+	// hover bubble). Applies on every device, independent of hover support.
+	for (const link of document.querySelectorAll<HTMLAnchorElement>(
+		'.post-body a[href^="http"]',
+	)) {
+		link.target = '_blank';
+		link.rel = 'noopener noreferrer';
+	}
+
+	// Hovering an external link reveals its full URL in a floating bubble.
+	// Skip entirely on touch / coarse-pointer devices: there's no hover there,
+	// so a tap would flash the bubble before navigating. Only wire it up where
+	// a precise pointer can actually hover.
+	const canHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+	if (canHover) {
+	// One shared element is positioned with fixed coordinates and clamped to
+	// the viewport so the URL is never clipped, and showing it never reflows
+	// the surrounding prose.
+	const tooltip = document.createElement('div');
+	tooltip.className = 'url-tooltip';
+	tooltip.setAttribute('role', 'tooltip');
+	// Globe (left) + URL text + open-in-new-tab arrow (right).
+	const globe =
+		'<svg viewBox="0 0 24 24" fill="none" stroke-width="2" aria-hidden="true">' +
+		'<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>' +
+		'<path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>';
+	const arrow =
+		'<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+		'<path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>';
+	tooltip.innerHTML = globe + '<span class="url-tooltip-text"></span>' + arrow;
+	const tooltipText = tooltip.querySelector<HTMLSpanElement>('.url-tooltip-text')!;
+	document.body.appendChild(tooltip);
+
+	const GAP = 8; // px between link and bubble
+	let activeLink: HTMLAnchorElement | null = null;
+
+	function place(link: HTMLAnchorElement) {
+		tooltipText.textContent = link.href;
+		tooltip.classList.add('is-visible');
+		// Measure after content is set.
+		const rect = link.getBoundingClientRect();
+		const tip = tooltip.getBoundingClientRect();
+		// Center the bubble over the link, then clamp into the viewport.
+		let left = rect.left + rect.width / 2 - tip.width / 2;
+		left = Math.min(left, window.innerWidth - tip.width - GAP);
+		left = Math.max(GAP, left);
+		// Prefer above the link; flip below if there isn't room.
+		let top = rect.top - tip.height - GAP;
+		if (top < GAP) top = rect.bottom + GAP;
+		tooltip.style.left = `${left}px`;
+		tooltip.style.top = `${top}px`;
+	}
+
+	function hide() {
+		activeLink = null;
+		tooltip.classList.remove('is-visible');
+	}
+
+	for (const link of document.querySelectorAll<HTMLAnchorElement>(
+		'.post-body a[href^="http"]',
+	)) {
+		link.addEventListener('mouseenter', () => {
+			activeLink = link;
+			place(link);
+		});
+		link.addEventListener('focus', () => {
+			activeLink = link;
+			place(link);
+		});
+		link.addEventListener('mouseleave', hide);
+		link.addEventListener('blur', hide);
+	}
+
+	// Keep the bubble glued to its link while scrolling.
+	window.addEventListener(
+		'scroll',
+		() => {
+			if (activeLink) place(activeLink);
+		},
+		{ passive: true },
+	);
+	}
+</script>
+
+<style>
+	.post {
+		/* White card spanning the navbar width (80rem cap, matching .header-content).
+		   Children (.post-head / .post-body) hold the centered ~40rem text measure;
+		   wide diagrams and charts opt out to their own width within the card. */
+		max-width: 80rem;
+		margin: 3rem auto;
+		padding: clamp(2.5rem, 5vw, 4rem) clamp(1.5rem, 5vw, 4rem);
+		background: var(--surface-1);
+		border: 1px solid var(--ink-6);
+		border-radius: 1.25rem;
+		box-shadow: 0 6px 16px rgba(15, 22, 32, 0.06);
+	}
+
+	/* Title + meta share the ~40rem text measure so they align with the prose. */
+	.post-head {
+		max-width: 40rem;
+		margin: 0 auto;
+	}
+
+	.post-back {
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.75rem;
+		letter-spacing: 0.04em;
+		color: var(--ink-4);
+		text-decoration: none;
+		transition: color 0.15s ease;
+	}
+	.post-back:hover { color: var(--accent); }
+
+	.post-title {
+		font-family: 'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+		font-weight: 400;
+		font-size: clamp(2rem, 4.5vw, 3rem);
+		line-height: 1.12;
+		letter-spacing: -0.005em;
+		color: var(--ink-1);
+		margin: 1.25rem 0 0;
+	}
+
+	.post-meta {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		margin-top: 1.5rem;
+		padding-bottom: 2rem;
+		border-bottom: 1px solid var(--ink-6);
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.75rem;
+		color: var(--ink-4);
+	}
+	.post-meta a { color: var(--accent); text-decoration: none; }
+	.post-meta a:hover { color: var(--accent-high); }
+	.post-meta-sep { color: var(--ink-6); }
+
+	/* Footer "back" link shares the ~40rem text measure and is set off from the
+	   prose with a top rule, mirroring the meta divider above the body. */
+	.post-foot {
+		max-width: 40rem;
+		margin: 3rem auto 0;
+		padding-top: 2rem;
+		border-top: 1px solid var(--ink-6);
+	}
+
+	/* ---------- Long-form prose (injected MDX) ---------- */
+	.post-body {
+		margin-top: 2.5rem;
+		font-family: 'Inter', system-ui, sans-serif;
+		font-size: 1.0625rem;
+		line-height: 1.7;
+		color: var(--ink-2);
+	}
+	/* Every block holds the centered ~38rem text measure by default; wide
+	   figures (diagrams, charts) opt back out to full card width further down. */
+	.post-body > :global(*) {
+		max-width: 40rem;
+		margin-inline: auto;
+	}
+	.post-body :global(p) { margin-block: 0 1.4rem; }
+	.post-body :global(a) {
+		color: var(--accent-high);
+		text-decoration: underline;
+		text-underline-offset: 0.15em;
+		text-decoration-thickness: 1px;
+		text-decoration-color: var(--ink-6);
+		transition: text-decoration-color 0.15s ease;
+	}
+	.post-body :global(a:hover) { text-decoration-color: var(--accent); }
+	/* Floating bubble showing a link's full destination. A single element is
+	   reused and positioned via JS (see script below) so it can clamp to the
+	   viewport and never clip the URL. */
+	:global(.url-tooltip) {
+		position: fixed;
+		z-index: 1000;
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		max-width: min(32rem, calc(100vw - 1rem));
+		padding: 0.3rem 0.55rem;
+		border-radius: 0.4rem;
+		background: var(--surface-0, #fff);
+		border: 1px solid var(--ink-6);
+		color: var(--accent-high);
+		font-family: 'JetBrains Mono', ui-monospace, monospace;
+		font-size: 0.7rem;
+		line-height: 1.4;
+		word-break: break-all;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+		opacity: 0;
+		transform: translateY(0.25rem);
+		transition: opacity 0.12s ease, transform 0.12s ease;
+		pointer-events: none;
+	}
+	:global(.url-tooltip svg) {
+		flex: none;
+		width: 0.85em;
+		height: 0.85em;
+		stroke: currentColor;
+	}
+	:global(.url-tooltip .url-tooltip-text) { min-width: 0; }
+	:global(.url-tooltip.is-visible) {
+		opacity: 1;
+		transform: translateY(0);
+	}
+
+	.post-body :global(h2),
+	.post-body :global(h3),
+	.post-body :global(h4) {
+		font-family: 'Marcellus', ui-serif, Georgia, 'Times New Roman', serif;
+		font-weight: 400;
+		color: var(--ink-1);
+		line-height: 1.2;
+		letter-spacing: -0.005em;
+		/* Anchor jumps land the heading below the sticky header instead of
+		   hidden underneath it. */
+		scroll-margin-top: 5rem;
+	}
+	.post-body :global(h2) {
+		font-size: 1.75rem;
+		margin-block: 3rem 1.25rem;
+		padding-bottom: 0.45rem;
+		border-bottom: 1px solid var(--ink-6);
+	}
+	.post-body :global(h3) { font-size: 1.375rem; margin-block: 2.5rem 0.85rem; }
+	.post-body :global(h4) { font-size: 1.125rem; margin-block: 2rem 0.75rem; }
+
+	/* Clickable section anchors: a faded "#" appears after a heading on hover
+	   (and on keyboard focus) and links to that heading's id. */
+	.post-body :global(.heading-anchor) {
+		margin-left: 0.4em;
+		text-decoration: none;
+		color: var(--ink-5);
+		opacity: 0;
+		transition: opacity 0.15s ease, color 0.15s ease;
+	}
+	.post-body :global(.heading-anchor)::before { content: '#'; }
+	.post-body :global(h2:hover) :global(.heading-anchor),
+	.post-body :global(h3:hover) :global(.heading-anchor),
+	.post-body :global(h4:hover) :global(.heading-anchor),
+	.post-body :global(.heading-anchor:focus) { opacity: 1; }
+	.post-body :global(.heading-anchor:hover) { color: var(--accent); }
+
+	/* Hanging indent, done with a hand-drawn marker so all three constraints
+	   hold at once: (1) the marker's left edge lines up with the paragraph text
+	   edge, (2) the item text sits at a fixed indent, and (3) the first line and
+	   every wrapped line share that indent. The native marker can't do this —
+	   `inside` makes the first line start at the marker's width (which never
+	   equals the indent, so the first line drifts), and `outside` puts the marker
+	   in a browser-dependent spot that can't be pinned to the paragraph edge. So
+	   we drop the native marker (`list-style: none`), put the whole indent on the
+	   <li> as padding (applies equally to every line), and draw the marker in an
+	   absolutely-positioned ::before at left:0 — out of flow, so its width can
+	   never push the text. */
+	.post-body :global(ul),
+	.post-body :global(ol) {
+		margin-block: 0 1.4rem;
+		padding-left: 0;
+		list-style: none;
+	}
+	.post-body :global(ol) { counter-reset: li-marker; }
+	.post-body :global(li) {
+		position: relative;
+		margin: 0.4rem 0;
+		padding-left: 1.5em;
+	}
+	.post-body :global(li)::before {
+		position: absolute;
+		left: 0;
+		color: var(--ink-3);
+	}
+	/* Ordered: per-list counter so nested lists restart at 1. */
+	.post-body :global(ol) > :global(li)::before {
+		counter-increment: li-marker;
+		content: counter(li-marker) ".";
+	}
+	.post-body :global(ul) > :global(li)::before { content: "•"; }
+	/* Nested lists indent one level from their parent item's text. */
+	.post-body :global(li) :global(ul),
+	.post-body :global(li) :global(ol) { margin-block: 0.4rem 0; }
+
+	.post-body :global(blockquote) {
+		margin-block: 1.8rem;
+		padding: 0.25rem 0 0.25rem 1.25rem;
+		border-left: 2px solid var(--accent);
+		color: var(--ink-3);
+		font-style: italic;
+	}
+
+	/* Admonitions (`:::note`) — see src/plugins/remark-admonitions.mjs. */
+	.post-body :global(.admonition) {
+		margin-block: 1.8rem;
+		padding: 1rem 1.25rem;
+		border: 1px solid var(--ink-6);
+		border-left: 3px solid var(--accent);
+		background-color: var(--surface-2);
+		color: var(--ink-2);
+	}
+	.post-body :global(.admonition) > :global(:last-child) { margin-bottom: 0; }
+	.post-body :global(.admonition-title) {
+		margin: 0 0 0.4rem;
+		font-family: 'Inter', system-ui, sans-serif;
+		font-size: 0.7rem;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--accent-high);
+	}
+
+	.post-body :global(img) {
+		max-width: 100%;
+		height: auto;
+		border-radius: 0.5rem;
+		display: block;
+		margin: 2rem auto;
+	}
+
+	.post-body :global(hr) {
+		border: 0;
+		border-top: 1px solid var(--ink-6);
+		margin-block: 3rem;
+	}
+
+	/* Inline code */
+	.post-body :global(:not(pre) > code) {
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.85em;
+		padding: 0.1em 0.35em;
+		border: 1px solid var(--ink-6);
+		border-radius: 0.25rem;
+		background-color: var(--surface-2);
+		color: var(--accent-high);
+	}
+
+	/* Shiki code blocks (github-light, set in astro.config) */
+	.post-body :global(pre) {
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-size: 0.85rem;
+		line-height: 1.6;
+		padding: 1rem 1.15rem;
+		border: 1px solid var(--ink-6);
+		border-radius: 0.75rem;
+		overflow-x: auto;
+		margin: 0 0 1.6rem;
+	}
+	.post-body :global(pre) :global(code) { font-size: inherit; }
+
+	/* Self-hosted full JetBrains Mono. Google Fonts' subset omits the
+	   box-drawing/block glyphs (U+2500–259F), so in ASCII art those characters
+	   fall back to a system monospace with a different advance width — making
+	   vertical borders drift ("squiggle"). The full font carries every glyph at
+	   one consistent cell width. */
+	@font-face {
+		font-family: 'JetBrains Mono Full';
+		src: url('/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+		font-weight: 400;
+		font-style: normal;
+		font-display: swap;
+	}
+
+	/* ASCII art (```ascii-art) is rendered by Expressive Code (one <div> per
+	   line). Override EC's own CSS variables so box-drawing characters connect
+	   vertically (line-height 1) and wide diagrams fit (smaller font), use the
+	   full-coverage font, and stop per-line wrapping so the art isn't reflowed. */
+	.post-body :global(pre[data-language='ascii-art']) {
+		--ec-codeLineHt: 1.33;
+		--ec-codeFontFml: 'JetBrains Mono Full', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		font-variant-ligatures: none;
+		/* Drive the size from the <pre>: the blog's `pre code { font-size: inherit }`
+		   rule wins over EC's `--ec-codeFontSize` var, so the code inherits this.
+		   0.7rem on desktop (the clamp cap); shrinks with the viewport on small
+		   screens so the widest diagram (~54em) fits without horizontal scroll. */
+		font-size: clamp(0.3rem, 1.5vw, 0.7rem);
+	}
+	.post-body :global(pre[data-language='ascii-art']) :global(.ec-line .code) {
+		white-space: pre;
+		overflow-wrap: normal;
+		word-break: normal;
+	}
+	/* Center the art as a block (keeping lines left-aligned to each other):
+	   shrink <code> to its widest line and auto-margin it. When the art is
+	   wider than the column it caps at 100% and scrolls instead. */
+	.post-body :global(pre[data-language='ascii-art']) > :global(code) {
+		flex: none;
+		width: max-content;
+		max-width: 100%;
+		margin-inline: auto;
+	}
+
+	/* ASCII diagrams and charts opt back out past the ~38rem text measure, but
+	   stay capped at the original full-bleed width (~53rem: the old 60rem card
+	   minus its 3.5rem side padding) so they don't stretch with the wider card.
+	   They keep margin-inline:auto from the base rule, so they stay centered.
+	   (Tables stay at the text measure so they align with the prose.) */
+	.post-body > :global(.expressive-code:has(pre[data-language='ascii-art'])),
+	.post-body > :global(iframe) {
+		max-width: 53rem;
+	}
+
+	/* Caption beneath a diagram: small, muted, centered, tucked close. */
+	.post-body :global(.fig-caption) {
+		margin: -0.6rem auto 2.2rem;
+		max-width: 36rem;
+		text-align: center;
+		font-family: 'Inter', system-ui, sans-serif;
+		font-size: 0.85rem;
+		line-height: 1.5;
+		font-style: normal;
+		color: var(--ink-4);
+	}
+
+	.post-body :global(table) {
+		width: 100%;
+		border-collapse: collapse;
+		margin-block: 0 1.6rem;
+		font-family: 'Inter', system-ui, sans-serif;
+		font-size: 0.95rem;
+	}
+	.post-body :global(th),
+	.post-body :global(td) {
+		border: 1px solid var(--ink-6);
+		padding: 0.5rem 0.75rem;
+		text-align: left;
+	}
+	.post-body :global(th) { background-color: var(--surface-2); font-weight: 600; }
+</style>

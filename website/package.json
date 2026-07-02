@@ -13,6 +13,7 @@
     "astro": "astro"
   },
   "dependencies": {
+    "@astrojs/rss": "^4.0.18",
     "@astrojs/starlight": "^0.35.2",
     "@hackernoon/pixel-icon-library": "^1.0.6",
     "@rive-app/canvas": "^2.30.4",
@@ -20,11 +21,16 @@
     "astro-google-fonts-optimizer": "^0.2.2",
     "astro-mermaid": "^1.0.4",
     "mermaid": "^11.10.1",
+    "remark-directive": "^4.0.0",
     "sharp": "^0.34.2",
     "starlight-links-validator": "^0.17.0",
-    "starlight-llms-txt": "^0.5.1"
+    "starlight-llms-txt": "^0.5.1",
+    "unist-util-visit": "^5.1.0"
   },
   "overrides": {
     "lodash-es": ">=4.17.23"
+  },
+  "devDependencies": {
+    "satori": "^0.12.2"
   }
 }
