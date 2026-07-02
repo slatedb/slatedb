@@ -967,7 +967,7 @@ impl CompactorEventHandler {
             SourceId::SstView(id) => !l0_view_ids.contains(id),
             SourceId::SortedRun(id) => !sr_ids.contains(id),
         }) {
-            warn!("compaction source missing from db state: {:?}", missing);
+            debug!("compaction source missing from db state: {:?}", missing);
             return Err(SlateDBError::InvalidCompaction);
         }
 
