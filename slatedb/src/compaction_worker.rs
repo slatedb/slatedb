@@ -168,18 +168,6 @@ impl CompactionWorker {
     }
 }
 
-/// Per-job state used to detect when executor progress carries new resumable
-/// compaction context.
-struct JobProgressState {
-    /// Wall-clock timestamp (ms) of this job's most recent heartbeat write.
-    last_hb_ms: u64,
-    /// Context as of the last heartbeat write that persisted it. Snapshots
-    /// change only when the executor first plans the job or when a range's
-    /// output SSTs change (never per byte), so comparing against this lets the
-    /// worker persist resumable state only when it actually advances.
-    last_hb_ctx: Option<CompactionContext>,
-}
-
 /// Total output SSTs recorded across a subcompaction progress (RFC-0028).
 fn total_output_ssts(subcompactions: &[Subcompaction]) -> usize {
     subcompactions.iter().map(|s| s.output_ssts().len()).sum()
@@ -202,8 +190,12 @@ pub(crate) struct CompactionWorkerHandler {
     stored: Option<StoredCompactions>,
     rand: Arc<DbRand>,
     fp_registry: Arc<FailPointRegistry>,
-    /// Per-job heartbeat bookkeeping. Entry present iff the job is active.
-    job_progress: BTreeMap<Ulid, JobProgressState>,
+    /// Per-job context as of the last heartbeat write that persisted it.
+    /// Entry present iff the job is active. Context snapshots change only when
+    /// the executor first plans the job or when a range's output SSTs change
+    /// (never per byte), so comparing against this lets the worker persist
+    /// resumable state only when it actually advances.
+    job_progress: BTreeMap<Ulid, Option<CompactionContext>>,
 }
 
 impl CompactionWorkerHandler {
@@ -408,13 +400,8 @@ impl CompactionWorkerHandler {
                         self.worker_id,
                         compaction.id()
                     );
-                    self.job_progress.insert(
-                        compaction.id(),
-                        JobProgressState {
-                            last_hb_ms: self.clock.now().timestamp_millis() as u64,
-                            last_hb_ctx: compaction.ctx().cloned(),
-                        },
-                    );
+                    self.job_progress
+                        .insert(compaction.id(), compaction.ctx().cloned());
                     Self::dispatch_to_executor(&self.executor, args);
                 }
                 Err(e) => {
@@ -435,12 +422,10 @@ impl CompactionWorkerHandler {
     /// and (when provided) the current context snapshot.
     /// Only writes if this worker still owns the entry.
     ///
-    /// Returns `Ok(Some(ms))` with the persisted heartbeat timestamp iff a
-    /// heartbeat was actually written, or `Ok(None)` if the write was skipped
-    /// (entry gone or ownership lost). Callers use the returned timestamp to
-    /// advance their in-memory progress bookkeeping consistently with what was
-    /// durably recorded, and treat `None` as "do not advance" so they never
-    /// mark progress as heartbeated that was never persisted.
+    /// Returns `Ok(true)` iff a heartbeat was actually written, or `Ok(false)`
+    /// if the write was skipped (entry gone or ownership lost). Callers treat
+    /// `false` as "do not advance" so they never mark progress as heartbeated
+    /// that was never persisted.
     ///
     /// We only ever heartbeat a compaction this worker has already claimed, and
     /// claiming requires `.compactions` to be loaded, so `self.stored` is
@@ -449,7 +434,7 @@ impl CompactionWorkerHandler {
         &mut self,
         compaction_id: Ulid,
         ctx: Option<CompactionContext>,
-    ) -> Result<Option<u64>, SlateDBError> {
+    ) -> Result<bool, SlateDBError> {
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
@@ -460,7 +445,7 @@ impl CompactionWorkerHandler {
                     self.worker_id,
                     compaction_id
                 );
-                return Ok(None);
+                return Ok(false);
             };
             if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
                 debug!(
@@ -469,7 +454,7 @@ impl CompactionWorkerHandler {
                     compaction_id
                 );
                 Self::stop_compaction_job(&self.executor, &mut self.job_progress, compaction_id);
-                return Ok(None);
+                return Ok(false);
             }
             let now_ms = self.clock.now().timestamp_millis() as u64;
             let new_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
@@ -484,7 +469,7 @@ impl CompactionWorkerHandler {
                         "wrote heartbeat [worker_id={}, id={}, now_ms={}]",
                         self.worker_id, compaction_id, now_ms
                     );
-                    return Ok(Some(now_ms));
+                    return Ok(true);
                 }
                 Err(e) if e.is_sequenced_write_conflict() => continue,
                 Err(e) => return Err(e),
@@ -499,10 +484,9 @@ impl CompactionWorkerHandler {
     /// `bytes_processed` is *cumulative* per job (the running byte total), not
     /// a delta.
     ///
-    /// Per-job progress bookkeeping (`last_hb_ms` and `last_hb_ctx`) is only
-    /// advanced after `write_heartbeat` confirms a durable write, so a skipped
-    /// write (entry gone / ownership lost) does not mark un-persisted progress
-    /// as heartbeated.
+    /// The per-job context snapshot is only advanced after `write_heartbeat`
+    /// confirms a durable write, so a skipped write (entry gone / ownership
+    /// lost) does not mark un-persisted progress as heartbeated.
     async fn handle_progress(
         &mut self,
         id: Ulid,
@@ -514,40 +498,27 @@ impl CompactionWorkerHandler {
         // async `write_heartbeat`; state is advanced afterwards only on a
         // confirmed durable write. The worker-level heartbeat ticker handles
         // liveness even when progress reports do not change resumable state.
-        let (ctx_changed, prev_sst_count) = {
-            let Some(state) = self.job_progress.get(&id) else {
+        let prev_sst_count = {
+            let Some(last_ctx) = self.job_progress.get(&id) else {
                 return Ok(());
             };
             // Persist the full compaction context whenever it advances. This captures
             // both the initial plan/retention choice and later output progress.
-            let ctx_changed = state.last_hb_ctx.as_ref() != Some(&ctx);
-            (
-                ctx_changed,
-                state
-                    .last_hb_ctx
-                    .as_ref()
-                    .map(|ctx| total_output_ssts(ctx.subcompactions()))
-                    .unwrap_or(0),
-            )
+            if last_ctx.as_ref() == Some(&ctx) {
+                return Ok(());
+            }
+            last_ctx
+                .as_ref()
+                .map(|ctx| total_output_ssts(ctx.subcompactions()))
+                .unwrap_or(0)
         };
 
-        if !ctx_changed {
-            return Ok(());
-        }
-
-        // On a confirmed write, record the timestamp that was actually
-        // persisted so in-memory state stays consistent with the durable entry.
         let new_sst_count = total_output_ssts(ctx.subcompactions());
-        let new_ctx = ctx_changed.then(|| ctx.clone());
-        if let Some(hb_ms) = self.write_heartbeat(id, new_ctx).await? {
-            let state = self
+        if self.write_heartbeat(id, Some(ctx.clone())).await? {
+            *self
                 .job_progress
                 .get_mut(&id)
-                .expect("active job must have progress bookkeeping");
-            if ctx_changed {
-                state.last_hb_ctx = Some(ctx);
-            }
-            state.last_hb_ms = hb_ms;
+                .expect("active job must have progress bookkeeping") = Some(ctx);
             info!(
                 "progress heartbeat [worker_id={}, id={}, bytes={}, output_ssts={}, new_output_ssts={}]",
                 self.worker_id,
@@ -657,7 +628,7 @@ impl CompactionWorkerHandler {
             let mut dirty = stored.prepare_dirty()?;
             let now_ms = self.clock.now().timestamp_millis() as u64;
             let worker_spec = WorkerSpec::new(self.worker_id.clone(), now_ms);
-            let mut heartbeated = Vec::with_capacity(ids.len());
+            let mut heartbeated = 0usize;
 
             for id in ids {
                 let Some(existing) = dirty.value.get(&id).cloned() else {
@@ -683,25 +654,18 @@ impl CompactionWorkerHandler {
                 dirty
                     .value
                     .insert(existing.with_worker(Some(worker_spec.clone())));
-                heartbeated.push(id);
+                heartbeated += 1;
             }
 
-            if heartbeated.is_empty() {
+            if heartbeated == 0 {
                 return Ok(());
             }
 
             match stored.update(dirty).await {
                 Ok(()) => {
-                    for id in &heartbeated {
-                        if let Some(state) = self.job_progress.get_mut(id) {
-                            state.last_hb_ms = now_ms;
-                        }
-                    }
                     debug!(
                         "worker heartbeat refreshed owned compactions [worker_id={}, count={}, now_ms={}]",
-                        self.worker_id,
-                        heartbeated.len(),
-                        now_ms
+                        self.worker_id, heartbeated, now_ms
                     );
                     return Ok(());
                 }
@@ -764,7 +728,7 @@ impl CompactionWorkerHandler {
     // To release ownership of a job, use `release_claim` instead.
     fn stop_compaction_job(
         executor: &Arc<dyn CompactionExecutor + Send + Sync>,
-        job_progress: &mut BTreeMap<Ulid, JobProgressState>,
+        job_progress: &mut BTreeMap<Ulid, Option<CompactionContext>>,
         compaction_id: Ulid,
     ) {
         executor.stop_compaction_job(compaction_id);
@@ -1305,29 +1269,8 @@ mod tests {
         let id2 = Ulid::from_parts(2, 0);
         let id3 = Ulid::from_parts(3, 0);
 
-        let job_progress = BTreeMap::from([
-            (
-                id3,
-                JobProgressState {
-                    last_hb_ms: 0,
-                    last_hb_ctx: None,
-                },
-            ),
-            (
-                id1,
-                JobProgressState {
-                    last_hb_ms: 0,
-                    last_hb_ctx: None,
-                },
-            ),
-            (
-                id2,
-                JobProgressState {
-                    last_hb_ms: 0,
-                    last_hb_ctx: None,
-                },
-            ),
-        ]);
+        let job_progress: BTreeMap<Ulid, Option<CompactionContext>> =
+            BTreeMap::from([(id3, None), (id1, None), (id2, None)]);
         let release_order = job_progress.into_keys().collect::<Vec<_>>();
 
         assert_eq!(release_order, vec![id1, id2, id3]);
@@ -1444,8 +1387,6 @@ mod tests {
         assert!(c1.output_ssts().is_empty());
         assert!(hb1 > before_id1);
         assert!(hb2 > before_id2);
-        assert_eq!(fx.handler.job_progress.get(&id1).unwrap().last_hb_ms, hb1);
-        assert_eq!(fx.handler.job_progress.get(&id2).unwrap().last_hb_ms, hb2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
