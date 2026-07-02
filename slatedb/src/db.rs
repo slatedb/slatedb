@@ -7242,6 +7242,7 @@ mod tests {
             commit_compacted_interval: Duration::from_millis(10),
             worker: Some(CompactionWorkerOptions {
                 compactions_poll_interval: Duration::from_millis(10),
+                heartbeat_min_interval: Duration::from_millis(10),
                 max_sst_size: 1,
                 ..Default::default()
             }),
@@ -7249,13 +7250,22 @@ mod tests {
         };
         let settings_without_compactor = test_db_options(0, 1024, None);
 
+        // The compactor's SST I/O runs through a gated store so the test can
+        // freeze the job after its first output SSTs upload. Manifest and
+        // `.compactions` I/O use the ungated store passed to `Db::builder`,
+        // so the worker's heartbeats keep flowing while the job is frozen.
+        let gated = Arc::new(crate::test_utils::GatedObjectStore::new(
+            object_store.clone(),
+        ));
+        let gated_store: Arc<dyn ObjectStore> = gated.clone();
+
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor.clone())
             .with_sst_block_size(SstBlockSize::Other(1))
             .with_fp_registry(fp_registry.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
-                CompactorBuilder::new(path, object_store.clone())
+                CompactorBuilder::new(path, gated_store)
                     .with_options(compactor_options.clone())
                     .with_scheduler_supplier(Arc::new(OnDemandCompactionSchedulerSupplier::new({
                         let should_compact = should_compact.clone();
@@ -7292,15 +7302,34 @@ mod tests {
             "the test requires multiple L0s so compaction has work to resume"
         );
 
+        // Fence the worker on the first heartbeat that publishes progress
+        // carrying an output SST. This leaves a partially-complete compaction
+        // (its first output SST plus the retention_min_seq captured while
+        // the snapshot was live) persisted for the resumed attempt.
         fail_parallel::cfg(
             fp_registry.clone(),
-            "compactor-progress-after-first-output-sst",
+            "compactor-heartbeat-after-output-sst",
             "return",
         )
         .unwrap();
 
         let mut status_rx = db.subscribe();
+
+        // Admit exactly one output SST upload through the closed gate, so the
+        // job reports progress with one SST and then freezes on its next
+        // upload — it cannot finish before the fencing heartbeat observes
+        // that progress.
+        let baseline_puts = gated.put_opts_gate.arrivals();
+        gated.put_opts_gate.close();
         should_compact.store(true, Ordering::SeqCst);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            gated.put_opts_gate.wait_for_arrivals(baseline_puts + 1),
+        )
+        .await
+        .expect("compaction should upload output SSTs");
+        gated.put_opts_gate.admit(1);
+
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if status_rx.borrow().close_reason.is_some() {
@@ -7313,10 +7342,11 @@ mod tests {
         .expect("compactor did not hit the failpoint");
 
         drop(snapshot);
+        gated.put_opts_gate.release();
         db.close().await.unwrap();
         fail_parallel::cfg(
             fp_registry.clone(),
-            "compactor-progress-after-first-output-sst",
+            "compactor-heartbeat-after-output-sst",
             "off",
         )
         .unwrap();

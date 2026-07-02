@@ -586,15 +586,15 @@ impl TokioCompactionExecutorInner {
     /// Executes a compaction job's subcompactions (RFC-0028), running every
     /// range concurrently.
     ///
-    /// The plan is reported (and therefore persisted by the orchestrator)
-    /// before any range output is recorded against it; per-range output SSTs
-    /// are then reported as they advance so an interrupted compaction can
-    /// resume at range granularity. Subcompactions carry no persisted status,
-    /// so every range is run: a range resumes from the output recorded against
-    /// it, and one that is already complete finds nothing left to merge and
-    /// finishes immediately. On the first range failure the remaining
-    /// subcompactions are aborted and the job fails; progress recorded by then
-    /// stays resumable.
+    /// The plan is reported (and buffered by the worker for its next
+    /// heartbeat to publish) before any range output is recorded against it;
+    /// per-range output SSTs are then reported as they advance so an
+    /// interrupted compaction can resume at range granularity. Subcompactions
+    /// carry no persisted status, so every range is run: a range resumes from
+    /// the output recorded against it, and one that is already complete finds
+    /// nothing left to merge and finishes immediately. On the first range
+    /// failure the remaining subcompactions are aborted and the job fails;
+    /// progress recorded by then stays resumable.
     async fn execute_compaction_job(
         self: &Arc<Self>,
         id: Ulid,
@@ -620,13 +620,14 @@ impl TokioCompactionExecutorInner {
         // full estimated size up front.
         let mut bytes_processed_by_sub: Vec<u64> = vec![0; subcompaction_args.len()];
 
-        // For a fresh job, report the plan immediately so it is persisted
-        // before any range records output against it; bytes are genuinely zero
-        // at this point. A resumed job's plan is already persisted (it arrived
-        // in `args.subcompactions`), so reporting it here would only republish
-        // zero bytes processed before the ranges re-report their resumed
-        // progress — a momentary drop to zero. Skip it; the per-range progress
-        // emitted as each range starts carries the resumed totals instead.
+        // For a fresh job, report the plan immediately so the worker buffers
+        // it before any range records output against it; bytes are genuinely
+        // zero at this point. A resumed job's plan is already persisted (it
+        // arrived in `args.subcompactions`), so reporting it here would only
+        // republish zero bytes processed before the ranges re-report their
+        // resumed progress — a momentary drop to zero. Skip it; the per-range
+        // progress emitted as each range starts carries the resumed totals
+        // instead.
         if ctx
             .subcompactions()
             .iter()
