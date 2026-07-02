@@ -719,12 +719,21 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         }
 
+        // Same store selection as the compactor above: a gc_builder holding
+        // the DB's own store shares the DB's wrapped store, so deleting an SST
+        // also evicts its object store cache entries; a different caller
+        // supplied store is used as given, wrapped in its own retry and
+        // instrumentation layer.
+        let gc_uses_db_store = match &self.gc_builder {
+            None => true, // auto path constructs the builder from the DB's store
+            Some(b) => Arc::ptr_eq(&b.main_object_store, &self.main_object_store),
+        };
         let gc_builder = self.gc_builder.or_else(|| {
             self.settings
                 .garbage_collector_options
                 .filter(|opts| !opts.is_empty())
                 .map(|opts| {
-                    GarbageCollectorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                    GarbageCollectorBuilder::new(path.clone(), self.main_object_store.clone())
                         .with_options(opts)
                 })
         });
@@ -734,11 +743,24 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .options
                 .metric_level
                 .or(Some(self.settings.metric_level));
-            let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
-                ObjectStores::new(
+            let (gc_main_object_store, gc_object_store) = if gc_uses_db_store {
+                (
+                    maybe_cached_main_object_store.clone(),
                     retrying_main_object_store.clone(),
-                    retrying_wal_object_store.clone(),
-                ),
+                )
+            } else {
+                let wrapped = instrumented_retrying_object_store(
+                    gc_builder.main_object_store.clone(),
+                    &recorder,
+                    ObjectStoreComponent::Gc,
+                    ObjectStoreType::Main,
+                    rand.clone(),
+                    system_clock.clone(),
+                );
+                (wrapped.clone(), wrapped)
+            };
+            let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
+                ObjectStores::new(gc_main_object_store, retrying_wal_object_store.clone()),
                 sst_format.clone(),
                 path_resolver.clone(),
                 self.fp_registry.clone(),
@@ -753,7 +775,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     gc_table_store,
                     manifest_store.clone(),
                     compactions_store.clone(),
-                    retrying_main_object_store.clone(),
+                    gc_object_store,
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = async_channel::unbounded();
