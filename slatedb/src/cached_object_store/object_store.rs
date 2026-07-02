@@ -720,18 +720,13 @@ impl ObjectStore for CachedObjectStore {
         if self.put_policy.put_action(tag.as_ref()) == PutAction::Skip {
             return Ok(inner);
         }
-        let cache_location = location.clone();
-
-        Ok(Box::new(CachingMultipartUpload {
+        Ok(Box::new(CachingMultipartUpload::new(
             inner,
-            cache_storage: Arc::clone(&self.cache_storage),
-            cache_location,
-            part_size: self.part_size_bytes,
-            buffer: BytesMut::new(),
-            next_part: 0,
-            total_len: 0,
+            Arc::clone(&self.cache_storage),
+            location.clone(),
+            self.part_size_bytes,
             attributes,
-        }))
+        )))
     }
 
     /// Deletion of the cache entries associated with the object being
@@ -835,6 +830,27 @@ struct CachingMultipartUpload {
     attributes: Attributes,
 }
 
+impl CachingMultipartUpload {
+    fn new(
+        inner: Box<dyn MultipartUpload>,
+        cache_storage: Arc<dyn LocalCacheStorage>,
+        cache_location: Path,
+        part_size: usize,
+        attributes: Attributes,
+    ) -> Self {
+        Self {
+            inner,
+            cache_storage,
+            cache_location,
+            part_size,
+            buffer: BytesMut::new(),
+            next_part: 0,
+            total_len: 0,
+            attributes,
+        }
+    }
+}
+
 impl std::fmt::Debug for CachingMultipartUpload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachingMultipartUpload")
@@ -848,9 +864,10 @@ impl MultipartUpload for CachingMultipartUpload {
     fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
         // Write the payload bytes into the cache buffer, then forward the
         // original payload upstream.
-        for bytes in data.clone() {
-            self.total_len += bytes.len() as u64;
-            self.buffer.extend_from_slice(&bytes);
+        self.total_len += data.content_length() as u64;
+        self.buffer.reserve(data.content_length());
+        for bytes in &data {
+            self.buffer.extend_from_slice(bytes);
         }
         let mut parts = Vec::new();
         while self.buffer.len() >= self.part_size {
@@ -867,12 +884,18 @@ impl MultipartUpload for CachingMultipartUpload {
         let cache_location = self.cache_location.clone();
         let part_size = self.part_size;
         Box::pin(async move {
-            let entry = cache_storage.entry(&cache_location, part_size);
-            for (part_number, chunk) in parts {
-                // Best effort: a cache write must never fail the upload.
-                entry.save_part(part_number, chunk).await.ok();
-            }
-            inner_fut.await
+            // Overlap the cache disk writes with the upstream upload.
+            let cache_fut = async {
+                let entry = cache_storage.entry(&cache_location, part_size);
+                for (part_number, chunk) in parts {
+                    // Currently, we ignore errors writing to the cache. This
+                    // is best-effort: a failed cache write never fails the
+                    // upload.
+                    entry.save_part(part_number, chunk).await.ok();
+                }
+            };
+            let (result, ()) = futures::future::join(inner_fut, cache_fut).await;
+            result
         })
     }
 
