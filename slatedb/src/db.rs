@@ -7024,7 +7024,7 @@ mod tests {
             commit_compacted_interval: Duration::from_millis(10),
             worker: Some(CompactionWorkerOptions {
                 compactions_poll_interval: Duration::from_millis(10),
-                heartbeat_min_interval: Duration::from_millis(10),
+                heartbeat_interval: Duration::from_millis(10),
                 max_sst_size: 1,
                 ..Default::default()
             }),

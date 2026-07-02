@@ -25,7 +25,7 @@
 //!
 //! Workers emit heartbeats to prove liveness. A heartbeat is a CAS write that
 //! bumps `last_heartbeat_ms` in the worker's `.compactions` entry. Every
-//! `heartbeat_min_interval`, the worker refreshes liveness for every active
+//! `heartbeat_interval`, the worker refreshes liveness for every active
 //! job it still owns and publishes the latest compaction context reported by
 //! the executor (the plan and each range's output SSTs), so a reclaiming
 //! worker can resume completed ranges. The heartbeat ticker is the only path
@@ -713,7 +713,7 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
             )
             .with_jitter(0.5, self.rand.clone()),
             MessageTickerDef::new(
-                self.options.heartbeat_min_interval,
+                self.options.heartbeat_interval,
                 Box::new(|| WorkerMessage::HeartbeatOwnedJobs),
             ),
         ]
@@ -1244,7 +1244,7 @@ mod tests {
         mock_clock.set(1000);
         let options = CompactionWorkerOptions {
             max_concurrent_compactions: 2,
-            heartbeat_min_interval: Duration::from_millis(1),
+            heartbeat_interval: Duration::from_millis(1),
             ..CompactionWorkerOptions::default()
         };
         let clock: Arc<dyn SystemClock> = mock_clock.clone();
@@ -1304,7 +1304,7 @@ mod tests {
         let options = Arc::new(CompactionWorkerOptions {
             max_concurrent_compactions: 1,
             compactions_poll_interval: Duration::from_millis(5),
-            heartbeat_min_interval: Duration::from_millis(5),
+            heartbeat_interval: Duration::from_millis(5),
             max_sst_size: planning_heartbeat_sst_size,
             ..CompactionWorkerOptions::default()
         });
@@ -1485,7 +1485,7 @@ mod tests {
         mock_clock.set(1000);
         let options = CompactionWorkerOptions {
             max_concurrent_compactions: 2,
-            heartbeat_min_interval: Duration::from_millis(1),
+            heartbeat_interval: Duration::from_millis(1),
             ..CompactionWorkerOptions::default()
         };
         let clock: Arc<dyn SystemClock> = mock_clock.clone();
@@ -1550,7 +1550,7 @@ mod tests {
         let mock_clock = Arc::new(MockSystemClock::new());
         mock_clock.set(1000);
         let options = CompactionWorkerOptions {
-            heartbeat_min_interval: Duration::from_millis(1),
+            heartbeat_interval: Duration::from_millis(1),
             ..CompactionWorkerOptions::default()
         };
         let clock: Arc<dyn SystemClock> = mock_clock.clone();
