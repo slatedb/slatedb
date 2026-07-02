@@ -1554,8 +1554,11 @@ pub struct ObjectStoreCacheOptions {
     /// its default value is 4mb.
     pub part_size_bytes: usize,
 
-    /// Whether to cache PUT operations to disk. When enabled, data written via PUT operations
-    /// will be cached locally for faster subsequent reads. Default is false.
+    /// Whether to cache PUT operations to disk.
+    ///
+    /// When enabled, compacted SSTs written by memtable flush and by
+    /// compaction are cached locally for faster subsequent reads.
+    /// Default is false.
     pub cache_puts: bool,
 
     /// Whether to preload SST files into cache during database startup. When enabled,

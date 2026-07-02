@@ -626,16 +626,27 @@ impl<P: Into<Path>> DbBuilder<P> {
             write_rx,
             &tokio_handle,
         )?;
-        // The compactor and GC each get their own cacheless store (so background
-        // reads do not pollute the foreground cache), tagged with their kind.
+
+        // The compactor reads/writes through the object store held by its
+        // builder. This can be the DB's own raw store on the auto from
+        // settings path, or the store the caller passed to their own
+        // `CompactorBuilder`.
         //
-        // The compactor reads/writes through whichever object store its builder
-        // holds: the DB's own store on the auto-from-settings path, or the one
-        // the caller supplied on their own `CompactorBuilder` (so a custom
-        // compaction read path — e.g. one that bypasses a prefetch wrapper used
-        // by the foreground read path — actually takes effect instead of being
-        // silently ignored). Either way it is wrapped in its own Compactor-tagged
-        // retry/instrumentation layer below.
+        // The store the compactor actually uses is decided below based on
+        // whether the builder holds the same store the DB was built on:
+        //
+        // 1. Same store (auto path, or a caller-supplied builder holding a
+        //    clone of the DB's store): the compactor shares the DB's wrapped
+        //    store, meaning the cached store when object store caching is
+        //    configured, otherwise the retrying instrumented main store.
+        //
+        // 2. Different caller-supplied store: used as given (so a custom
+        //    compaction reader takes effect instead of being silently
+        //    ignored), wrapped in its own retry and instrumentation layer.
+        let compactor_uses_db_store = match &self.compactor_builder {
+            None => true, // auto path constructs the builder from the DB's store
+            Some(b) => Arc::ptr_eq(&b.main_object_store, &self.main_object_store),
+        };
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
                 CompactorBuilder::new(path.clone(), self.main_object_store.clone())
@@ -658,16 +669,22 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
             builder = builder.with_fp_registry(self.fp_registry.clone());
 
-            // Wrap whatever object store the builder holds in the compactor's
-            // own cacheless, Compactor-tagged retry/instrumentation layer.
-            let compactor_main_object_store = instrumented_retrying_object_store(
-                builder.main_object_store.clone(),
-                &recorder,
-                ObjectStoreComponent::Compactor,
-                ObjectStoreType::Main,
-                rand.clone(),
-                system_clock.clone(),
-            );
+            // Case 1: the builder holds the DB's own store, so share the DB's
+            // wrapped store instead of wrapping the raw store a second time.
+            // Case 2: a different caller-supplied store is raw, so it gets its
+            // own Compactor-tagged retry/instrumentation layer.
+            let compactor_main_object_store: Arc<dyn ObjectStore> = if compactor_uses_db_store {
+                maybe_cached_main_object_store.clone()
+            } else {
+                instrumented_retrying_object_store(
+                    builder.main_object_store.clone(),
+                    &recorder,
+                    ObjectStoreComponent::Compactor,
+                    ObjectStoreType::Main,
+                    rand.clone(),
+                    system_clock.clone(),
+                )
+            };
             let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
                     compactor_main_object_store,

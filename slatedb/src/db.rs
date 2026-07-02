@@ -2062,8 +2062,6 @@ impl WriteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
-    use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;
     use crate::config::{
@@ -2108,9 +2106,7 @@ mod tests {
     use slatedb_common::clock::MockSystemClock;
     use slatedb_common::metrics::{
         lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricValue,
-        MetricsRecorderHelper,
     };
-    use slatedb_common::DbRand;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -10798,20 +10794,24 @@ mod tests {
         use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
         use object_store::ObjectStoreExt;
 
+        /// Fixture for the object store cache tests.
         struct ObjectStoreCacheTest {
             db: Db,
-            store: Arc<CachedObjectStore>,
+            upstream: Arc<dyn ObjectStore>,
+            cache_root: std::path::PathBuf,
             db_path: String,
-            part_size: usize,
+            should_compact: Option<Arc<AtomicBool>>,
         }
 
-        /// Builder for [`ObjectStoreCacheTest`]. Defaults: 1 KiB cache parts, a 1 KiB
-        /// L0 size, and cache_puts off.
+        /// Builder for [`ObjectStoreCacheTest`]. Defaults: 1 KiB cache parts, a
+        /// 1 KiB L0 size, cache_puts off, and no compactor.
         struct ObjectStoreCacheTestBuilder {
             db_path: String,
             cache_puts: bool,
             part_size: usize,
             l0_sst_size_bytes: usize,
+            on_demand_compactor: bool,
+            custom_compactor_store: bool,
         }
 
         impl ObjectStoreCacheTestBuilder {
@@ -10821,6 +10821,8 @@ mod tests {
                     cache_puts: false,
                     part_size: 1024,
                     l0_sst_size_bytes: 1024,
+                    on_demand_compactor: false,
+                    custom_compactor_store: false,
                 }
             }
 
@@ -10839,51 +10841,81 @@ mod tests {
                 self
             }
 
+            /// Adds an embedded compactor that compacts once each time
+            /// [`ObjectStoreCacheTest::compact_and_wait`] is called.
+            fn on_demand_compactor(mut self) -> Self {
+                self.on_demand_compactor = true;
+                self
+            }
+
+            /// Like `on_demand_compactor`, but the compactor holds its own
+            /// handle to upstream, so the db builder keeps it off the cached store.
+            fn on_demand_compactor_with_custom_store(mut self) -> Self {
+                self.on_demand_compactor = true;
+                self.custom_compactor_store = true;
+                self
+            }
+
             async fn build(self) -> ObjectStoreCacheTest {
                 let Self {
                     db_path,
                     cache_puts,
                     part_size,
                     l0_sst_size_bytes,
+                    on_demand_compactor,
+                    custom_compactor_store,
                 } = self;
 
                 let upstream: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-                let recorder = MetricsRecorderHelper::noop();
-                let cache_stats = Arc::new(CachedObjectStoreStats::new(&recorder));
                 let temp_dir = tempfile::Builder::new()
                     .prefix("objstore_cache_test_")
                     .tempdir()
                     .unwrap();
-                let cache_storage = Arc::new(FsCacheStorage::new(
-                    temp_dir.keep(),
-                    None,
-                    None,
-                    cache_stats.clone(),
-                    Arc::new(DefaultSystemClock::new()),
-                    Arc::new(DbRand::default()),
-                    1000,
-                ));
-                let store = CachedObjectStore::new(
-                    upstream,
-                    cache_storage,
-                    part_size,
-                    cache_puts,
-                    cache_stats,
-                )
-                .unwrap();
+                let cache_root = temp_dir.keep();
 
-                let settings = test_db_options(0, l0_sst_size_bytes, None);
-                let db = Db::builder(db_path.as_str(), store.clone())
-                    .with_settings(settings)
-                    .build()
-                    .await
-                    .unwrap();
+                let mut opts = test_db_options(0, l0_sst_size_bytes, None);
+                opts.object_store_cache_options.root_folder = Some(cache_root.clone());
+                opts.object_store_cache_options.part_size_bytes = part_size;
+                opts.object_store_cache_options.cache_puts = cache_puts;
+
+                let mut builder =
+                    Db::builder(db_path.as_str(), upstream.clone()).with_settings(opts);
+                let should_compact = if on_demand_compactor {
+                    let flag = Arc::new(AtomicBool::new(false));
+                    let flag_clone = flag.clone();
+                    let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+                        move |_state| flag_clone.swap(false, Ordering::SeqCst),
+                    )));
+                    // A different Arc over the same storage; open gates make
+                    // GatedObjectStore a pass-through.
+                    let compactor_store: Arc<dyn ObjectStore> = if custom_compactor_store {
+                        Arc::new(GatedObjectStore::new(upstream.clone()))
+                    } else {
+                        upstream.clone()
+                    };
+                    // One subcompaction writes one output SST, keeping exact
+                    // part counts deterministic.
+                    let mut compactor_options = fast_compactor_options();
+                    if let Some(worker) = compactor_options.worker.as_mut() {
+                        worker.max_subcompactions = 1;
+                    }
+                    builder = builder.with_compactor_builder(
+                        CompactorBuilder::new(db_path.as_str(), compactor_store)
+                            .with_scheduler_supplier(scheduler)
+                            .with_options(compactor_options),
+                    );
+                    Some(flag)
+                } else {
+                    None
+                };
+                let db = builder.build().await.unwrap();
 
                 ObjectStoreCacheTest {
                     db,
-                    store,
+                    upstream,
+                    cache_root,
                     db_path,
-                    part_size,
+                    should_compact,
                 }
             }
         }
@@ -10902,30 +10934,37 @@ mod tests {
                 object_store::path::Path::from(format!("{}/{}", self.db_path, suffix))
             }
 
-            async fn cached_part_count(&self, path: &object_store::path::Path) -> usize {
-                self.store
-                    .cache_storage
-                    .entry(path, self.part_size)
-                    .cached_parts()
-                    .await
-                    .unwrap()
-                    .len()
+            /// Number of cached part files for an object.
+            fn cached_part_count(&self, path: &object_store::path::Path) -> usize {
+                let dir = self.cache_root.join(path.to_string());
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return 0;
+                };
+                entries
+                    .filter(|e| {
+                        e.as_ref()
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("_part")
+                    })
+                    .count()
             }
 
-            async fn assert_cached(&self, path: &object_store::path::Path, expected_parts: usize) {
+            fn assert_cached(&self, path: &object_store::path::Path, expected_parts: usize) {
                 assert_eq!(
-                    self.cached_part_count(path).await,
+                    self.cached_part_count(path),
                     expected_parts,
                     "expected {path} to be cached as {expected_parts} part(s)"
                 );
             }
 
             /// Asserts each of `suffixes` (relative to the db root) is uncached.
-            async fn assert_uncached(&self, suffixes: &[&str]) {
+            fn assert_uncached(&self, suffixes: &[&str]) {
                 for suffix in suffixes {
                     let path = self.sub_path(suffix);
                     assert_eq!(
-                        self.cached_part_count(&path).await,
+                        self.cached_part_count(&path),
                         0,
                         "expected {suffix} to be uncached"
                     );
@@ -10935,7 +10974,7 @@ mod tests {
             /// Lists the compacted SSTs currently in the object store.
             async fn compacted_locations(&self) -> Vec<object_store::path::Path> {
                 let prefix = self.sub_path("compacted");
-                self.store
+                self.upstream
                     .list(Some(&prefix))
                     .map(|meta| meta.unwrap().location)
                     .collect()
@@ -10944,7 +10983,48 @@ mod tests {
 
             /// The size of an object as stored upstream, in bytes.
             async fn object_size(&self, path: &object_store::path::Path) -> u64 {
-                self.store.head(path).await.unwrap().size
+                self.upstream.head(path).await.unwrap().size
+            }
+
+            /// The upstream path of a compacted SST id.
+            fn compacted_sst_path(&self, id: &SsTableId) -> object_store::path::Path {
+                self.sub_path(&format!("compacted/{}.sst", id.unwrap_compacted_id()))
+            }
+
+            fn l0_ids(&self) -> Vec<SsTableId> {
+                self.db.manifest().l0().iter().map(|v| v.sst.id).collect()
+            }
+
+            /// Triggers one on-demand compaction and waits for a sorted run to
+            /// land in the manifest. Requires `on_demand_compactor`.
+            async fn compact_and_wait(&self) {
+                self.should_compact
+                    .as_ref()
+                    .expect("fixture built without on_demand_compactor")
+                    .store(true, Ordering::SeqCst);
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if !self.db.manifest().compacted().is_empty() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("compaction did not land within timeout");
+            }
+
+            /// The SSTs the compaction wrote: sorted run members that were not
+            /// among the flushed L0s.
+            fn compaction_output_ids(&self, l0_ids: &[SsTableId]) -> Vec<SsTableId> {
+                self.db
+                    .manifest()
+                    .compacted()
+                    .iter()
+                    .flat_map(|sr| sr.sst_views.iter())
+                    .map(|v| v.sst.id)
+                    .filter(|id| !l0_ids.contains(id))
+                    .collect()
             }
 
             async fn close(self) {
@@ -11100,20 +11180,18 @@ mod tests {
                 .await
                 .unwrap();
 
-            fixture
-                .assert_uncached(&[
-                    "manifest/00000000000000000001.manifest",
-                    "manifest/00000000000000000002.manifest",
-                    "wal/00000000000000000001.sst",
-                    "wal/00000000000000000002.sst",
-                ])
-                .await;
+            fixture.assert_uncached(&[
+                "manifest/00000000000000000001.manifest",
+                "manifest/00000000000000000002.manifest",
+                "wal/00000000000000000001.sst",
+                "wal/00000000000000000002.sst",
+            ]);
 
             // The single explicit memtable flush produces one L0 SST, cached as one
             // part (the key/value is well under the 1 KiB part size).
             let compacted = fixture.compacted_locations().await;
             assert_eq!(compacted.len(), 1, "expected exactly one flushed SST");
-            fixture.assert_cached(&compacted[0], 1).await;
+            fixture.assert_cached(&compacted[0], 1);
             fixture.close().await;
         }
 
@@ -11159,8 +11237,134 @@ mod tests {
                 expected_parts > 10,
                 "expected a large multipart SST, got {expected_parts} part(s)"
             );
-            fixture.assert_cached(&compacted[0], expected_parts).await;
+            fixture.assert_cached(&compacted[0], expected_parts);
             fixture.close().await;
+        }
+
+        /// The embedded compactor writes through the shared cached store, so
+        /// cache_puts admits its output.
+        #[tokio::test]
+        async fn test_object_store_cache_caches_compaction_output() {
+            let t = ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_compaction_output")
+                .cache_puts()
+                .on_demand_compactor()
+                .build()
+                .await;
+
+            for i in 0..2u32 {
+                let key = format!("key{:04}", i);
+                t.db().put(key.as_bytes(), &[b'v'; 64]).await.unwrap();
+                t.db()
+                    .flush_with_options(FlushOptions {
+                        flush_type: FlushType::MemTable,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let l0_ids = t.l0_ids();
+            assert_eq!(l0_ids.len(), 2);
+
+            t.compact_and_wait().await;
+
+            let output_ids = t.compaction_output_ids(&l0_ids);
+            assert!(!output_ids.is_empty(), "expected compaction output SSTs");
+            for id in &output_ids {
+                let path = t.compacted_sst_path(id);
+                assert!(
+                    t.cached_part_count(&path) > 0,
+                    "expected compaction output {path} to be cached"
+                );
+            }
+            t.close().await;
+        }
+
+        /// Compaction output above the multipart threshold is cached in full.
+        #[tokio::test]
+        async fn test_object_store_cache_caches_large_multipart_compaction_output() {
+            const MIB: usize = 1024 * 1024;
+
+            let t = ObjectStoreCacheTest::builder(
+                "/tmp/test_object_store_cache_large_compaction_output",
+            )
+            .cache_puts()
+            .on_demand_compactor()
+            .part_size(MIB)
+            // Large enough that each write batch flushes as a single L0 SST.
+            .l0_sst_size_bytes(64 * MIB)
+            .build()
+            .await;
+
+            // Two ~10 MiB L0s; the ~20 MiB output crosses the multipart threshold.
+            for sst in 0..2u32 {
+                for i in 0..10u32 {
+                    let key = format!("k{:04}", sst * 10 + i);
+                    t.db()
+                        .put(key.as_bytes(), &vec![i as u8; MIB])
+                        .await
+                        .unwrap();
+                }
+                t.db()
+                    .flush_with_options(FlushOptions {
+                        flush_type: FlushType::MemTable,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let l0_ids = t.l0_ids();
+            assert_eq!(l0_ids.len(), 2);
+
+            t.compact_and_wait().await;
+
+            let output_ids = t.compaction_output_ids(&l0_ids);
+            assert_eq!(output_ids.len(), 1, "expected one output SST");
+            let path = t.compacted_sst_path(&output_ids[0]);
+            let expected_parts = (t.object_size(&path).await as usize).div_ceil(MIB);
+            assert_eq!(
+                expected_parts, 21,
+                "update this count if an SST encoding change shifts the size"
+            );
+            t.assert_cached(&path, expected_parts);
+            t.close().await;
+        }
+
+        /// A compactor builder with its own object store stays cacheless:
+        /// output is not admitted even with cache_puts on.
+        #[tokio::test]
+        async fn test_object_store_cache_skips_compaction_output_from_custom_store() {
+            let t = ObjectStoreCacheTest::builder(
+                "/tmp/test_object_store_cache_custom_compactor_store",
+            )
+            .cache_puts()
+            .on_demand_compactor_with_custom_store()
+            .build()
+            .await;
+
+            for i in 0..2u32 {
+                let key = format!("key{:04}", i);
+                t.db().put(key.as_bytes(), &[b'v'; 64]).await.unwrap();
+                t.db()
+                    .flush_with_options(FlushOptions {
+                        flush_type: FlushType::MemTable,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let l0_ids = t.l0_ids();
+            assert_eq!(l0_ids.len(), 2);
+
+            t.compact_and_wait().await;
+
+            let output_ids = t.compaction_output_ids(&l0_ids);
+            assert!(!output_ids.is_empty(), "expected compaction output SSTs");
+            for id in &output_ids {
+                let path = t.compacted_sst_path(id);
+                assert_eq!(
+                    t.cached_part_count(&path),
+                    0,
+                    "expected compaction output {path} to stay uncached"
+                );
+            }
+            t.close().await;
         }
     }
 }
