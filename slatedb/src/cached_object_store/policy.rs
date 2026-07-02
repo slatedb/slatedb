@@ -76,7 +76,7 @@ impl PutPolicy for DefaultPutPolicy {
         match tag.sst_type {
             SstType::Wal => PutAction::Skip,
             // Only the stores that write compacted SSTs (the main store on flush
-            // and the compactor) are cached; other sources write through.
+            // and the compactor) are cached; other sources bypass the cache.
             SstType::Compacted => match tag.kind {
                 TableStoreKind::Main | TableStoreKind::Compactor => PutAction::Cache,
                 _ => PutAction::Skip,
