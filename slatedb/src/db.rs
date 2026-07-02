@@ -106,8 +106,8 @@ pub(crate) struct DbInner {
     pub(crate) oracle: Arc<DbOracle>,
     pub(crate) flush_merge_operator: Option<MergeOperatorType>,
     pub(crate) reader: Reader,
-    /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
-    /// of the WAL buffer to the remote storage.
+    /// [`wal_observer`] inspects the status of WAL buffer. The WAL buffer itself is owned by
+    /// the batch write task.
     pub(crate) wal_observer: DbWalObserver,
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
@@ -360,7 +360,7 @@ impl DbInner {
                 // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
                 // but before we get the memtable. During that time, if the memtable is fully
                 // flushed out, we should short circuit to avoid blocking indefinitely.
-                if maybe_oldest_unflushed_memtable.is_none() {
+                if maybe_oldest_unflushed_memtable.is_none() && wal_status.estimated_bytes == 0 {
                     continue;
                 }
 
@@ -374,7 +374,7 @@ impl DbInner {
 
                 let await_flush_wal = self
                     .wal_observer
-                    .wait_until_flushed_past_durable_seq(wal_status.last_flushed_seq);
+                    .wait_until_memory_released(wal_status.estimated_bytes);
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
                 let await_closed = async {
@@ -2065,6 +2065,7 @@ impl DbWalObserver {
             let status = match event {
                 WalEvent::WalFlushed(status) => status,
                 WalEvent::WalFrozen(status) => status,
+                WalEvent::MemoryReleased(status) => status,
             };
             if let Some(seq) = status.last_flushed_seq {
                 oracle.advance_durable_seq(seq);
@@ -2093,20 +2094,12 @@ impl DbWalObserver {
         Ok(())
     }
 
-    async fn wait_until_flushed_past_durable_seq(
+    /// Waits until the wal's estimated memory usage drops below some threshold
+    async fn wait_until_memory_released(
         &self,
-        seq: Option<u64>,
+        limit_bytes: usize,
     ) -> Result<(), SlateDBError> {
-        self.wait_on_condition(|status| {
-            let Some(seq) = seq else {
-                return status.last_flushed_seq.is_some();
-            };
-            let Some(flushed_seq) = status.last_flushed_seq else {
-                return false;
-            };
-            flushed_seq > seq
-        })
-        .await
+        self.wait_on_condition(|status| status.estimated_bytes < limit_bytes).await
     }
 }
 

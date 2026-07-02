@@ -173,7 +173,7 @@ impl WalBufferManager {
         result
     }
 
-    pub(crate) fn recent_flushed_wal_id(&self) -> u64 {
+    pub(crate) fn last_flushed_wal_id(&self) -> u64 {
         let inner = self.inner.read();
         inner.last_flushed_wal_id
     }
@@ -336,6 +336,7 @@ impl WalBufferManager {
         }
 
         self.maybe_release_immutable_wals();
+
         Ok(())
     }
 
@@ -423,6 +424,13 @@ impl WalBufferManager {
                 releaseable_count
             );
             inner.immutable_wals.drain(..releaseable_count);
+        }
+
+        let status = inner.status(&self.table_store);
+        let listener = inner.listener.clone();
+        drop(inner);
+        if let Some(l) = listener {
+            (*l)(WalEvent::MemoryReleased(status))
         }
     }
 
@@ -625,6 +633,7 @@ pub(crate) struct WalStatus {
 pub(crate) enum WalEvent {
     WalFrozen(WalStatus),
     WalFlushed(WalStatus),
+    MemoryReleased(WalStatus),
 }
 
 impl WalObserver {
@@ -977,7 +986,7 @@ mod tests {
         let mut reader = wal_buffer.maybe_trigger_flush().unwrap();
         reader.await_value().await.unwrap();
 
-        assert_eq!(wal_buffer.recent_flushed_wal_id(), 1);
+        assert_eq!(wal_buffer.last_flushed_wal_id(), 1);
     }
 
     #[tokio::test]
@@ -991,7 +1000,7 @@ mod tests {
             wal_buffer.append(&[entry]).unwrap();
             wal_buffer.flush().unwrap().await.unwrap().unwrap();
         }
-        assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
+        assert_eq!(wal_buffer.last_flushed_wal_id(), 100);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
 
         wal_buffer.track_last_applied_seq(50);
@@ -1011,7 +1020,7 @@ mod tests {
         }
         wal_buffer.track_last_applied_seq(50);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
-        assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
+        assert_eq!(wal_buffer.last_flushed_wal_id(), 100);
 
         // set flush seq to 80, and track last applied seq to 90, it should release 20 wals
         {

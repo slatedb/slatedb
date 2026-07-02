@@ -316,7 +316,7 @@ impl DbInner {
         &self,
         wal_buffer: &WalBufferManager,
     ) -> Result<(), SlateDBError> {
-        let replay_after_wal_id = wal_buffer.recent_flushed_wal_id();
+        let replay_after_wal_id = wal_buffer.last_flushed_wal_id();
         let mut guard = self.state.write();
         let meta = guard.memtable().metadata();
 
@@ -362,7 +362,7 @@ impl DbInner {
             // Note that this likely won't reflect the result of the above flush call as we don't
             // block until the flush completes. That's fine, as any earlier wal is still a safe
             // replay point.
-            let replay_after_wal_id = wal_buffer.status().last_flushed_wal_id;
+            let replay_after_wal_id = wal_buffer.last_flushed_wal_id();
             let mut guard = self.state.write();
             self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
         }
