@@ -374,7 +374,7 @@ impl DbInner {
 
                 let await_flush_wal = self
                     .wal_observer
-                    .wait_until_memory_released(wal_status.estimated_bytes);
+                    .wait_until_wal_released(wal_status.last_purged_wal_id);
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
                 let await_closed = async {
@@ -2095,11 +2095,9 @@ impl DbWalObserver {
     }
 
     /// Waits until the wal's estimated memory usage drops below some threshold
-    async fn wait_until_memory_released(
-        &self,
-        limit_bytes: usize,
-    ) -> Result<(), SlateDBError> {
-        self.wait_on_condition(|status| status.estimated_bytes < limit_bytes).await
+    async fn wait_until_wal_released(&self, last_purged_wal_id: u64) -> Result<(), SlateDBError> {
+        self.wait_on_condition(|status| status.last_purged_wal_id > last_purged_wal_id)
+            .await
     }
 }
 

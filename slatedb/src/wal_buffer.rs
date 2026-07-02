@@ -80,6 +80,8 @@ struct WalBufferManagerInner {
     last_flushed_wal_id: u64,
     /// The last seq that was flushed to the WAL. This value will be None until the first flush.
     last_flushed_seq: Option<u64>,
+    /// The last wal id that was deallocated from the buffer
+    last_purged_wal_id: u64,
     /// A listener to which the wal sends events. Currently the only event is a wal file flush.
     listener: Option<WalStatusListener>,
 }
@@ -127,6 +129,7 @@ impl WalBufferManager {
             last_applied_seq: None,
             flush_epoch: 1,
             last_flushed_wal_id,
+            last_purged_wal_id: last_flushed_wal_id,
             next_wal_id: last_flushed_wal_id + 1,
             last_flushed_seq: None,
             flush_tx: None,
@@ -336,6 +339,11 @@ impl WalBufferManager {
         }
 
         self.maybe_release_immutable_wals();
+        let status = self.status();
+        let listener = self.inner.read().listener.clone();
+        if let Some(l) = listener {
+            (*l)(WalEvent::MemoryReleased(status))
+        }
 
         Ok(())
     }
@@ -391,6 +399,7 @@ impl WalBufferManager {
             inner.last_applied_seq = Some(seq);
         }
         self.maybe_release_immutable_wals();
+        // don't notify here - notifications should only be issued from the flush task
     }
 
     /// Recycle the immutable WALs that are flushed to the remote storage.
@@ -423,14 +432,14 @@ impl WalBufferManager {
                 "draining immutable wals [releaseable_count={}]",
                 releaseable_count
             );
-            inner.immutable_wals.drain(..releaseable_count);
-        }
-
-        let status = inner.status(&self.table_store);
-        let listener = inner.listener.clone();
-        drop(inner);
-        if let Some(l) = listener {
-            (*l)(WalEvent::MemoryReleased(status))
+            let last_purged = inner
+                .immutable_wals
+                .drain(..releaseable_count)
+                .map(|(id, _wal)| id)
+                .max();
+            if let Some(last_purged) = last_purged {
+                inner.last_purged_wal_id = last_purged;
+            }
         }
     }
 
@@ -472,6 +481,7 @@ impl WalBufferManagerInner {
             next_wal_id: self.next_wal_id,
             last_flushed_wal_id: self.last_flushed_wal_id,
             last_flushed_seq: self.last_flushed_seq,
+            last_purged_wal_id: self.last_purged_wal_id,
             buffered_wal_entries_count,
         }
     }
@@ -624,8 +634,10 @@ pub(crate) struct WalObserver {
 pub(crate) struct WalStatus {
     pub(crate) estimated_bytes: usize,
     pub(crate) next_wal_id: u64,
+    #[allow(dead_code)]
     pub(crate) last_flushed_wal_id: u64,
     pub(crate) last_flushed_seq: Option<u64>,
+    pub(crate) last_purged_wal_id: u64,
     #[allow(dead_code)]
     pub(crate) buffered_wal_entries_count: usize,
 }
