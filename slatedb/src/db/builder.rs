@@ -588,14 +588,14 @@ impl<P: Into<Path>> DbBuilder<P> {
         );
 
         let recent_flushed_wal_id = replay_range.end - 1;
-        let wal_buffer = Arc::new(WalBufferManager::new(
+        let mut wal_buffer = WalBufferManager::new(
             status_manager.clone(),
             &recorder,
             recent_flushed_wal_id,
             table_store.clone(),
             self.settings.l0_sst_size_bytes,
             self.settings.flush_interval,
-        ));
+        );
 
         // Setup communication channels wired to the shared closed state.
         let reader = status_manager.result_reader();

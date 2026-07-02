@@ -2061,19 +2061,21 @@ pub(crate) struct DbWalObserver {
 impl DbWalObserver {
     fn new(wrapped: WalObserver, oracle: Arc<DbOracle>, db_state: Arc<RwLock<DbState>>) -> Self {
         let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
-        wrapped.subscribe(Arc::new(move |event| {
-            let status = match event {
-                WalEvent::WalFlushed(status) => status,
-                WalEvent::MemoryReleased(status) => status,
-            };
-            if let Some(seq) = status.last_flushed_seq {
-                oracle.advance_durable_seq(seq);
-            }
-            let mut guard = db_state.write();
-            guard.set_next_wal_id(status.last_flushed_wal_id + 1);
-            drop(guard);
-            let _ = status_tx.send(status);
-        }));
+        wrapped
+            .subscribe(Arc::new(move |event| {
+                let status = match event {
+                    WalEvent::WalFlushed(status) => status,
+                    WalEvent::MemoryReleased(status) => status,
+                };
+                if let Some(seq) = status.last_flushed_seq {
+                    oracle.advance_durable_seq(seq);
+                }
+                let mut guard = db_state.write();
+                guard.set_next_wal_id(status.last_flushed_wal_id + 1);
+                drop(guard);
+                let _ = status_tx.send(status);
+            }))
+            .expect("failed to subscribe to wal");
         Self { status_rx, wrapped }
     }
 
