@@ -1554,12 +1554,17 @@ pub struct ObjectStoreCacheOptions {
     /// its default value is 4mb.
     pub part_size_bytes: usize,
 
-    /// Whether to cache PUT operations to disk.
+    /// Whether to cache compacted SSTs produced by memtable flushes to the
+    /// local disk cache, for faster subsequent reads.
     ///
-    /// When enabled, compacted SSTs written by memtable flush and by
-    /// compaction are cached locally for faster subsequent reads.
     /// Default is false.
-    pub cache_puts: bool,
+    pub cache_on_flush: bool,
+
+    /// Whether to cache compacted SSTs produced by compaction to the local
+    /// disk cache, for faster subsequent reads.
+    ///
+    /// Default is false.
+    pub cache_on_compaction: bool,
 
     /// Whether to preload SST files into cache during database startup. When enabled,
     /// the database will load SST files into the cache up to the cache size limit
@@ -1591,7 +1596,8 @@ impl Default for ObjectStoreCacheOptions {
             #[cfg(not(target_pointer_width = "32"))]
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
-            cache_puts: false,
+            cache_on_flush: false,
+            cache_on_compaction: false,
             preload_disk_cache_on_startup: None,
             scan_interval: Some(Duration::from_secs(3600)),
             max_open_file_handles: 1000,

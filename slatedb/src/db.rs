@@ -10804,10 +10804,11 @@ mod tests {
         }
 
         /// Builder for [`ObjectStoreCacheTest`]. Defaults: 1 KiB cache parts, a
-        /// 1 KiB L0 size, cache_puts off, and no compactor.
+        /// 1 KiB L0 size, both write sources uncached, and no compactor.
         struct ObjectStoreCacheTestBuilder {
             db_path: String,
-            cache_puts: bool,
+            cache_on_flush: bool,
+            cache_on_compaction: bool,
             part_size: usize,
             l0_sst_size_bytes: usize,
             on_demand_compactor: bool,
@@ -10818,7 +10819,8 @@ mod tests {
             fn new(db_path: &str) -> Self {
                 Self {
                     db_path: db_path.to_string(),
-                    cache_puts: false,
+                    cache_on_flush: false,
+                    cache_on_compaction: false,
                     part_size: 1024,
                     l0_sst_size_bytes: 1024,
                     on_demand_compactor: false,
@@ -10826,8 +10828,13 @@ mod tests {
                 }
             }
 
-            fn cache_puts(mut self) -> Self {
-                self.cache_puts = true;
+            fn cache_on_flush(mut self) -> Self {
+                self.cache_on_flush = true;
+                self
+            }
+
+            fn cache_on_compaction(mut self) -> Self {
+                self.cache_on_compaction = true;
                 self
             }
 
@@ -10859,7 +10866,8 @@ mod tests {
             async fn build(self) -> ObjectStoreCacheTest {
                 let Self {
                     db_path,
-                    cache_puts,
+                    cache_on_flush,
+                    cache_on_compaction,
                     part_size,
                     l0_sst_size_bytes,
                     on_demand_compactor,
@@ -10876,7 +10884,8 @@ mod tests {
                 let mut opts = test_db_options(0, l0_sst_size_bytes, None);
                 opts.object_store_cache_options.root_folder = Some(cache_root.clone());
                 opts.object_store_cache_options.part_size_bytes = part_size;
-                opts.object_store_cache_options.cache_puts = cache_puts;
+                opts.object_store_cache_options.cache_on_flush = cache_on_flush;
+                opts.object_store_cache_options.cache_on_compaction = cache_on_compaction;
 
                 let mut builder =
                     Db::builder(db_path.as_str(), upstream.clone()).with_settings(opts);
@@ -11066,7 +11075,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // First (cold) get. cache_puts is off, so the SST is not cached on the
+            // First (cold) get. cache_on_flush is off, so the SST is not cached on the
             // write. The whole SST is a single cache part, read as three sub-ranges
             // (index, filter and block). The first is a cold read that fetches and
             // caches the part (a miss) and the next two are served from the cache
@@ -11159,12 +11168,12 @@ mod tests {
         }
 
         /// A flushed L0 SST is a compacted SST written by the main store, so
-        /// cache_puts admits it. The manifest (untagged) and the WAL (skipped by
-        /// policy) are never cached.
+        /// cache_on_flush admits it. The manifest (untagged) and the WAL
+        /// (skipped by policy) are never cached.
         #[tokio::test]
         async fn test_object_store_cache_caches_flushed_sst_only() {
             let fixture = ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_flush_only")
-                .cache_puts()
+                .cache_on_flush()
                 .build()
                 .await;
 
@@ -11203,7 +11212,7 @@ mod tests {
             const MIB: usize = 1024 * 1024;
 
             let fixture = ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_large_flush")
-                .cache_puts()
+                .cache_on_flush()
                 .part_size(MIB)
                 // Large enough that the whole write flushes as a single L0 SST.
                 .l0_sst_size_bytes(64 * MIB)
@@ -11241,12 +11250,12 @@ mod tests {
             fixture.close().await;
         }
 
-        /// The embedded compactor writes through the shared cached store, so
-        /// cache_puts admits its output.
+        /// cache_on_compaction admits the embedded compactor's output; with
+        /// cache_on_flush off, the flushed L0 inputs stay uncached.
         #[tokio::test]
         async fn test_object_store_cache_caches_compaction_output() {
             let t = ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_compaction_output")
-                .cache_puts()
+                .cache_on_compaction()
                 .on_demand_compactor()
                 .build()
                 .await;
@@ -11265,6 +11274,10 @@ mod tests {
             assert_eq!(l0_ids.len(), 2);
 
             t.compact_and_wait().await;
+
+            for id in &l0_ids {
+                t.assert_cached(&t.compacted_sst_path(id), 0);
+            }
 
             let output_ids = t.compaction_output_ids(&l0_ids);
             assert!(!output_ids.is_empty(), "expected compaction output SSTs");
@@ -11286,7 +11299,7 @@ mod tests {
             let t = ObjectStoreCacheTest::builder(
                 "/tmp/test_object_store_cache_large_compaction_output",
             )
-            .cache_puts()
+            .cache_on_compaction()
             .on_demand_compactor()
             .part_size(MIB)
             // Large enough that each write batch flushes as a single L0 SST.
@@ -11328,13 +11341,13 @@ mod tests {
         }
 
         /// A compactor builder with its own object store stays cacheless:
-        /// output is not admitted even with cache_puts on.
+        /// output is not admitted even with cache_on_compaction on.
         #[tokio::test]
         async fn test_object_store_cache_skips_compaction_output_from_custom_store() {
             let t = ObjectStoreCacheTest::builder(
                 "/tmp/test_object_store_cache_custom_compactor_store",
             )
-            .cache_puts()
+            .cache_on_compaction()
             .on_demand_compactor_with_custom_store()
             .build()
             .await;
