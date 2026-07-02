@@ -6,7 +6,8 @@ use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView, SstType}
 use crate::error::{RetryReason, SlateDBError};
 use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::tablestore::{ObjectStoreCallTag, TableStore, TableStoreKind};
+use crate::object_store_tag::ObjectStoreCallTag;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
