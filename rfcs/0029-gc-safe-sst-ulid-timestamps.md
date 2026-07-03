@@ -10,12 +10,12 @@ Table of Contents:
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Design](#design)
-   - [SST IDs relevant to GC](#sst-ids-relevant-to-gc)
-   - [SST ID Allocator](#sst-id-allocator)
    - [Writer L0 IDs](#writer-l0-ids)
    - [Compaction IDs](#compaction-ids)
    - [Owned Watermarks](#owned-watermarks)
    - [Invariant Checks](#invariant-checks)
+   - [Failure Handling](#failure-handling)
+   - [Clock Skew](#clock-skew)
    - [Garbage Collection](#garbage-collection)
 - [Implementation](#implementation)
 - [Impact Analysis](#impact-analysis)
@@ -37,20 +37,25 @@ Authors:
 ## Summary
 
 SlateDB compacted SST garbage collection uses the timestamp embedded in SST
-ULIDs as part of its deletion cutoff. This is unsafe when an uploaded SST has a
-ULID timestamp older than the cutoff that GC can compute before the SST becomes
-reachable from the manifest or `.compactions` state.
+ULIDs as part of its deletion cutoff. Today the writer mints L0 SST IDs inside
+the parallel upload workers, so mint order can differ from the order in which
+L0s are published to the manifest. An uploaded but unpublished SST can then
+have a ULID timestamp below the cutoff, and GC can delete it before it is
+published.
 
-This RFC proposes changes to where these SST IDs (relevant for GC) are minted. The
-writer allocates L0 SST IDs before parallel upload, in the same
-sequence order that L0s are later published. Newly flushed L0 views use the
-physical SST ID as their view ID. Compaction job IDs and compaction output IDs
-are minted through the same monotonic allocator.
+This RFC fixes the race by changing where IDs are minted, not how:
 
-The allocator only allows minting ULIDs at or above its configured floor.
-Manifest and compactions invariants then reject unsafe IDs to enforce monotonic
-structure. This keeps the GC a pure deleter and does not require any
-changes to the manifest and SST formats.
+- The writer allocates L0 physical SST IDs at dispatch, before parallel
+  upload, in the same sequence order that L0s are later published.
+- Newly flushed L0 views use the physical SST ID as their view ID.
+
+Clock skew larger than the GC `min_age` is out of scope. Users who expect more
+skew configure a larger `min_age`. Manifest and `.compactions` invariants
+reject unsafe IDs as a safety net, so skew beyond the bound fails loudly
+instead of causing silent data loss.
+
+There are no manifest or SST format changes. GC stays a pure deleter, with one
+change: the `newest_l0` cutoff term only considers L0s owned by this database.
 
 ## Background
 
@@ -71,156 +76,85 @@ in that set until a manifest commit records them.
 
 The cutoff has three parts:
 
-- `now - min_age`: do not delete objects newer than min_age.
-- `compaction_low_watermark`: do not delete possible outputs of active
-  compactions.
-- `newest_l0`: do not delete possible L0s that are uploaded but not yet
-  published.
-
-This assumes every in-flight SST has a physical SST ULID timestamp at or
-above any cutoff that GC can compute before the SST becomes reachable.
+- `now - min_age`: keep objects whose age is less than or equal to `min_age`.
+  The default `min_age` is 300 seconds.
+- `compaction_low_watermark`: the minimum job ID timestamp across active
+  compaction jobs and the most recently finished job, read from
+  `.compactions`. It protects possible outputs of active compactions.
+- `newest_l0`: the newest L0 physical SST timestamp in the latest manifest,
+  falling back to `last_compacted_l0_sst_view_id` for trees with no live L0s.
+  It protects L0s that are uploaded but not yet published.
 
 Manifest V2 also has two ULID domains:
 
 - `SsTableHandle.id`, the physical SST ID used by GC deletion.
 - `SsTableView.id`, the view ID used by `last_compacted_l0_sst_view_id`.
 
-If these IDs are minted independently, GC can compare timestamps from different
-domains.
+If these IDs are minted independently, GC can compare timestamps from
+different domains.
 
 ## Motivation
 
-The current writer mints physical L0 SST IDs inside the parallel upload worker.
-The manifest writer publishes uploaded immutable memtables later, in sequence
-number order. Mint order and publish order can therefore diverge.
+The writer mints physical L0 SST IDs inside the parallel upload workers. The
+manifest writer publishes uploaded immutable memtables in sequence number
+order. Mint order and publish order can therefore differ.
 
-The manifest writer must preserve sequence number order because `last_l0_seq`
-means that every sequence at or below that value is already in L0. If a manifest
-published a newer memtable while an older one was missing, it would still advance
-`last_l0_seq` past the missing range.
-
-Current WAL replay skips entries at or below `last_l0_seq`, so it would not
-recover the missing older range. Supporting out-of-order publish would require a
-gap-aware WAL replay protocol. With WAL disabled there is no source from which
-to rebuild the missing range.
+Publish order cannot be relaxed. `last_l0_seq` means every sequence at or
+below that value is already in L0. Publishing a newer memtable while an older
+one is missing would advance `last_l0_seq` past the missing range. WAL replay
+skips entries at or below `last_l0_seq`, so it would not recover that range,
+and with the WAL disabled there is no source to rebuild it from.
 
 The unsafe sequence is:
 
 1. Immutable memtable A has lower sequence numbers than immutable memtable B.
-2. A and B are submitted to parallel upload workers.
-3. A's worker mints and uploads a physical SST, but A is not yet in the
-   manifest.
-4. The manifest writer still must publish A before B, so B cannot be published
-   first even if B's upload finishes earlier.
-5. Meanwhile, already committed manifest state, such as another L0 or a
-   `last_compacted_l0_sst_view_id`, advances `newest_l0` past A's physical SST
-   timestamp.
-6. A's SST doesn't exist in the active manifest and checkpoint reference set, and
-   its physical SST timestamp is below the GC cutoff.
-7. GC deletes A because it is old enough and unreferenced.
-8. The writer later publishes A, creating a manifest that references a missing
-   object.
+   Both are submitted to parallel upload workers.
+2. B's worker mints its SST ID before A's worker does. B's timestamp is below
+   A's, even though B is later by sequence number.
+3. A's upload finishes and A is published. B's upload stalls, so B's SST is
+   uploaded but not yet in the manifest.
+4. `newest_l0` is now A's timestamp, which is above B's timestamp.
+5. Once the stall exceeds `min_age` and the compaction watermark is also above
+   B's timestamp, B's SST is unreferenced and below the cutoff. GC deletes it.
+6. The manifest writer later publishes B, creating a manifest that references
+   a missing object.
 
-Clock skew creates the same type of bug. A writer or compaction worker can
-restart on a host whose clock is behind timestamps already committed to durable
-state, then mint new SST IDs that are immediately eligible for GC.
+This race was reproduced by a deterministic simulation test failure in
+PR #1758. Clock skew can theoretically create the same effect, where a writer 
+or compaction worker restarts on a host whose clock is behind timestamps
+already committed to durable state, and mints new IDs that are immediately 
+below the cutoff. We have not seen the clock-skew variant in practice. 
+This RFC assumes clock skew is bounded, and the bound is `min_age` 
+(see [Clock Skew](#clock-skew)).
 
 ## Goals
 
 - Prevent GC from deleting newly flushed L0 SSTs before they are published.
-- Prevent GC from deleting compaction outputs while their job is active.
 - Preserve ULIDs as SST IDs.
-- Avoid object-store copy or rename on the normal write and compaction paths.
+- Avoid object-store copy or rename on the normal write path.
 - Preserve parallel L0 upload throughput.
 - Keep manifest and SST schemas unchanged.
-- Make unsafe minting paths fail explicitly instead of creating silent data
-  loss.
+- Make unsafe minting fail explicitly instead of causing silent data loss.
 
 ## Non-Goals
 
+- Handle clock skew larger than `min_age`. Users configure `min_age` above
+  the skew they expect.
 - Redesign compacted SST GC around sequence numbers or manifest IDs.
-- Redesign object-store consistency or conditional write behavior.
 - Add multi-writer support.
 - Fix unrelated full-ULID ordering bugs, such as choosing between two
-  same millis compaction IDs by comparing the full random suffix.
-- Remove all wall-clock use from SlateDB. This RFC only covers IDs whose
-  timestamps participate in compacted SST GC.
+  same-millisecond compaction IDs by comparing the full random suffix.
 
 ## Design
 
-### SST IDs used by GC
-
-These IDs participate in compacted SST GC safety:
-
-- L0 physical SST IDs.
-- Compaction job IDs.
-- Compaction output SST IDs.
-- View IDs that can later feed `last_compacted_l0_sst_view_id`.
-
-They are minted through one SST ID allocator. Newly flushed L0 view
-IDs are not minted separately, they are set equal to the physical SST ID.
-
-IDs that do not feed the compacted SST GC cutoff, such as worker IDs and
-multipart upload IDs, are unchanged.
-
-### SST ID Allocator
-
-Add an internal allocator for SST IDs whose timestamps are used when deleting old compacted SST files:
-
-```rust
-struct MonotonicSstIdAllocator {
-    floor_ms: i64,
-    last_issued_ms: AtomicI64,
-    system_clock: Arc<dyn SystemClock>,
-    rand: Arc<DbRand>,
-}
-
-impl MonotonicSstIdAllocator {
-    fn new(
-        system_clock: Arc<dyn SystemClock>,
-        rand: Arc<DbRand>,
-        floor_ms: i64,
-    ) -> Self;
-    async fn next_ulid(&self) -> Result<Ulid, SlateDBError>;
-}
-```
-
-The caller computes `floor_ms` from committed manifest or `.compactions` state
-before constructing the allocator. The constructor stores that floor and
-initializes `last_issued_ms` to the same value. `next_ulid` refuses to mint an
-ID with a timestamp below `max(floor_ms, last_issued_ms)`.
-If the clock is behind, it computes the required wait:
-
-```text
-wait_ms = max(floor_ms, last_issued_ms) - now_ms
-```
-
-If `wait_ms` exceeds the configured skew wait, `next_ulid` returns
-`InvalidClockTick` immediately. Otherwise it sleeps for that interval, checks the
-clock again, and returns `InvalidClockTick` if the clock is still behind.
-
-`last_issued_ms` catches backward clock steps after the allocator starts. Each
-minting role should keep its allocator for the role or job lifetime; creating a
-fresh allocator per SST would lose `last_issued_ms`. Tests must use this
-allocator for SST IDs so clock-skew bugs exercise the same path as production.
-
-Equal millisecond timestamps are safe for GC. The deletion filter only deletes
-SSTs strictly below the cutoff, so two IDs with the same millisecond timestamp
-are not ordered for GC safety by their random ULID suffix.
-
 ### Writer L0 IDs
 
-Before minting L0 SST IDs, the DB writer computes the owned L0 floor and creates
-`MonotonicSstIdAllocator` with that floor. The floor is the maximum owned L0
-physical SST timestamp across all trees, falling back to
-`last_compacted_l0_sst_view_id` for trees with no live L0s.
-
 Move L0 physical SST ID allocation from the upload worker to
-`FlushTracker::dispatch_ready_memtables`.
-
-`dispatch_ready_memtables` already dispatches immutable memtables in sequence
-number order. Allocating IDs there makes SST timestamp order match the order in
-which the manifest writer is allowed to publish L0s.
+`FlushTracker::dispatch_ready_memtables`. Dispatch already happens in sequence
+number order, so SST timestamp order matches the order in which the manifest
+writer publishes L0s. The race above cannot happen: every published L0 was
+dispatched before any still-pending L0, so `newest_l0` cannot advance past a
+pending SST's timestamp.
 
 `UploadJob` carries the pre-allocated IDs:
 
@@ -231,80 +165,55 @@ pub(crate) struct UploadJob {
 }
 ```
 
-The uploader writes each segment SST to the pre-allocated ID instead of minting a
-new ID inside the parallel upload worker. If retention removes all entries for a
-segment before upload, the unused ID is discarded.
+The uploader writes each segment SST to the pre-allocated ID instead of
+minting a new ID inside the parallel upload worker. If retention removes all
+entries for a segment before upload, the unused ID is discarded.
 
 When the manifest writer publishes a newly flushed L0, it creates an identity
 view: `SsTableView.id` is the same ULID as the physical SST ID. This keeps the
-timestamp used by `last_compacted_l0_sst_view_id` same as the
-timestamp used by GC deletion.
+timestamp used by `last_compacted_l0_sst_view_id` equal to the timestamp used
+by GC deletion.
 
-Split, union, or rescaling can create new L0 views over existing physical SSTs.
-Those views do not have to be identity views, because they are not newly
-uploaded physical objects. If a newly minted view ID from such an operation can
-later become `last_compacted_l0_sst_view_id`, it must be minted through
-`MonotonicSstIdAllocator` constructed with the owned L0 floor. For union-ed
-manifests where multiple L0s can reference the same source state, the view ID is
-a watermark, not the object GC deletes. It is safe for that view ID to be older
-than later L0s written by the target DB because later writes allocate after the
-split or union operation's floor.
+Views created by split, union, or rescaling reference existing physical SSTs,
+not newly uploaded objects. They are unchanged by this RFC.
 
 ### Compaction IDs
 
-The compactor coordinator reads the maximum existing compaction job ID
-timestamp, constructs the allocator with that floor, and then mints compaction
-job IDs through it. The coordinator owns job ID creation and may run on a
-different machine from the workers.
-
-For each claimed compaction job, the worker constructs a job-scoped output
-allocator before writing outputs. The floor is at least:
-
-- the compaction job ID timestamp, and
-- any existing output SST timestamps for that job when a job is resumed.
-
-The worker mints compaction output SST IDs and sorted-run view IDs through an
-allocator constructed with that floor. If the worker's clock is behind the
-floor, the allocator applies the bounded skew wait and returns
-`InvalidClockTick` if the clock remains behind. This ensures active compaction
-outputs are not below the `.compactions` low watermark that protects them from
-GC.
+Compaction job IDs, output SST IDs, and sorted-run view IDs are minted as
+today. Outputs of an active job are protected by `compaction_low_watermark`,
+and clock skew within `min_age` is covered by the `now - min_age` term. The
+`.compactions` invariants below reject IDs that violate the watermark rules.
 
 ### Owned Watermarks
 
-Clones and unions can make this database reference SSTs that were created by
-another database. Those SSTs may have ULID timestamps from another machine's
-clock. If a parent or source database minted an SST with a far-future timestamp,
-using that timestamp as the local writer floor could make the clone or union
-target unable to flush until its own clock catches up.
-
-Writer floors and the `l0_ulid_cutoff` invariant must therefore use only L0 SSTs
-owned by this database. They must exclude SSTs referenced through clone parents,
-union sources, or other external DB state. This is safe because this database's
-GC does not delete external SSTs as newly minted objects in this database's
-timeline.
+Clones and unions can make this database reference SSTs created by another
+database, with timestamps from another machine's clock. If such an SST has a
+far-future timestamp, it must not raise the bar for this database's own IDs or
+cutoffs.
 
 Add an owned-watermark helper, such as
-`max_owned_l0_ulid_timestamp_across_trees`. It scans the unsegmented tree and every
-segment tree, takes the maximum physical SST ULID timestamp from live L0s owned by
-this database, and falls back to the tree's local `last_compacted_l0_sst_view_id` when
-that tree has no live owned L0s. It ignores SSTs listed in `external_dbs` and any 
-inherited clone or union markers. If there is no owned L0 history, it returns no floor.
+`max_owned_l0_ulid_timestamp_across_trees`. It scans the unsegmented tree and
+every segment tree, takes the maximum physical SST ULID timestamp from live
+L0s owned by this database, and falls back to the tree's
+`last_compacted_l0_sst_view_id` when a tree has no live owned L0s. It ignores
+SSTs referenced through `external_dbs` and inherited clone or union markers.
 
 Use it in both places:
 
-- constructing the DB writer's L0 SST ID allocator, and
-- `l0_ulid_cutoff`, when checking newly added L0 SSTs.
+- the `l0_ulid_cutoff` invariant, and
+- the GC `newest_l0` cutoff term (see [Garbage Collection](#garbage-collection)).
 
 ### Invariant Checks
 
-Register invariant checks in the central stored-object construction paths, not
-at individual write call sites.
+These are `Invariant<T>` predicates from `slatedb-txn-obj` (PR #1741), not new
+fields in the manifest or `db_state.rs`. They are registered in the central
+stored object construction paths, not at individual write call sites, so new
+update paths don't miss them.
 
 For `.manifest`:
 
-- `l0_ulid_cutoff`: a newly added L0 physical SST ID must have a timestamp at or
-  above the current manifest's owned L0 watermark.
+- `l0_ulid_cutoff`: a newly added L0 physical SST ID must have a timestamp at
+  or above the current manifest's owned L0 watermark.
 
 For `.compactions`:
 
@@ -314,33 +223,60 @@ For `.compactions`:
   for a compaction must have a timestamp at or above that compaction job ID
   timestamp.
 
-The checks compare timestamp milliseconds, not full ULID ordering. A failure is
-reported as `InvalidClockTick`, and the unsafe update is not committed.
+The checks compare timestamp milliseconds, not full ULID ordering. Equal
+milliseconds are safe because GC only deletes SSTs strictly below the cutoff.
+A failure is reported as `InvalidClockTick` and the unsafe update is not
+committed. The error message includes the rejected timestamp and the required
+watermark.
+
+### Failure Handling
+
+With minting moved to dispatch, an invariant failure means clock skew or a new
+minting path that bypassed the rules, not a normal race.
+
+- If the error is returned in a user call path, the caller gets the error and
+  the `Db` stays open.
+- If the error happens in a background task, such as flush or compaction, the
+  `Db` is marked closed with a failed state.
+
+What the user should do: check the host clock and run NTP. If a previous
+writer's clock was ahead of real time, the only remedy is to wait until the
+wall clock passes the committed timestamps, then reopen. Retrying without
+fixing the clock will fail again.
+
+### Clock Skew
+
+This RFC assumes clock skew is bounded by `min_age` (default 300 seconds).
+Users who expect more skew should configure a larger `min_age`. Skew beyond
+the bound does not cause silent data loss; it causes invariant failures, which
+are handled as above.
+
+A clock set far in the future is a setup error. It commits far-future
+timestamps that block later, correctly clocked writers until real time catches
+up. The invariant error message exposes both timestamps so this is visible
+early.
 
 ### Garbage Collection
 
-This RFC proposes changes to the IDs that writers and compactors produce so the existing GC
-cutoff is safe to interpret. Garbage collector remains a pure deleter.
+GC remains a pure deleter. One change: the `newest_l0` cutoff term is computed
+from L0s owned by this database, using the same owned-watermark rule as
+`l0_ulid_cutoff`. Without this, an external L0 with a future timestamp could
+raise the cutoff above locally minted pending SSTs. External SSTs do not need
+the `newest_l0` protection; they are protected by being referenced.
 
 ## Implementation
 
-- Add `MonotonicSstIdAllocator` with a constructor that takes `floor_ms` and
-  `Arc<DbRand>`, plus `next_ulid`.
-- Add `max_owned_l0_ulid_timestamp_across_trees` for constructing the DB writer's
-  L0 SST ID allocator and for `l0_ulid_cutoff`.
-- Wire writer startup to compute the owned L0 floor and construct the allocator
-  with that floor.
-- Move L0 SST ID allocation to `FlushTracker::dispatch_ready_memtables`.
-- Add pre-allocated segment SST IDs to `UploadJob` and update the uploader to use
-  them.
+- Move L0 physical SST ID allocation to
+  `FlushTracker::dispatch_ready_memtables`.
+- Add pre-allocated segment SST IDs to `UploadJob` and update the uploader to
+  use them.
 - Update `ManifestWriter::apply_uploaded_state` to create identity L0 views.
-- Mint split, union, or rescaling view IDs through the allocator when they can
-  feed `last_compacted_l0_sst_view_id`.
-- Wire the compactor coordinator and workers to mint job IDs, output SST IDs,
-  and sorted-run view IDs through `MonotonicSstIdAllocator`.
-- Register manifest and compactions invariants in the shared construction paths
-  for loaded and newly created stored objects.
-- Return `InvalidClockTick` on invariant failure or allocator clock failure.
+- Add `max_owned_l0_ulid_timestamp_across_trees` and use it in
+  `l0_ulid_cutoff` and in the GC `newest_l0` term.
+- Register the manifest and `.compactions` invariants in the shared
+  construction paths for loaded and newly created stored objects.
+- Return `InvalidClockTick` on invariant failure, with the rejected timestamp
+  and required watermark in the error message.
 
 ## Impact Analysis
 
@@ -365,97 +301,96 @@ SlateDB features and components that this RFC interacts with:
 ### Performance & Cost
 
 - L0 upload and compaction output paths still write each SST once.
-- L0 dispatch does a small amount of extra CPU work to allocate one ID per
-  touched segment.
-- Startup or job activation can wait if the local clock is behind the required floor.
+- ID allocation moves from the upload worker to dispatch; the work is the
+  same.
 - No object-store copy, rename, or extra GC CAS path is added.
 
 ### Observability
 
-- Metrics: allocator floor, skew wait count, skew wait duration,
-  `InvalidClockTick` count, and invariant failure count.
-- Logging: include role, local timestamp, required floor, and floor source when
-  skew wait or invariant failure happens.
+- Metrics: invariant failure count.
+- Logging: on invariant failure, include the role, the rejected timestamp,
+  and the required watermark.
 
 ### Compatibility
 
 - Existing SST IDs remain valid ULIDs.
 - Existing manifests remain readable.
 - Existing projected views with distinct view IDs remain valid.
-- Strict invariants must be enabled only after all SST-minting roles use the
-  allocator.
+- Invariants must be enabled only after all writers and compactors in a
+  deployment mint L0 IDs at dispatch, otherwise the old race can trip them.
 
 ## Testing
 
-- Unit tests for `MonotonicSstIdAllocator`, owned-watermark computation,
-  identity L0 views, and manifest/compactions invariants.
-- Integration tests for parallel L0 upload where upload completion order differs
-  from manifest publish order.
-- Integration tests for compaction outputs minted at or above the job ID,
-  including resumed jobs with existing outputs.
-- Deterministic simulation test for the publish-order race that motivated this
-  RFC.
-- Fault-injection tests for writer and worker clock skew.
+- Unit tests for identity L0 views, the owned-watermark helper, and the
+  manifest and `.compactions` invariants.
+- Integration tests for parallel L0 upload where upload completion order
+  differs from manifest publish order.
+- Deterministic simulation test for the publish-order race that motivated
+  this RFC.
+- Fault-injection tests for writer and worker clock skew, checking that
+  invariants fail loudly instead of losing data.
 
 ## Rollout
 
-1. Add `MonotonicSstIdAllocator` and owned-watermark helpers.
-2. Wire writer startup to compute the owned L0 floor and construct the allocator
-   with that floor.
-3. Move L0 SST ID allocation to dispatch and pass IDs through `UploadJob`.
-4. Make newly flushed L0 views identity views.
-5. Wire compactor coordinator and worker ID minting through the allocator.
-6. Add invariants, metrics, and logs.
-7. Enable strict invariant enforcement after all roles in the deployment are
+1. Move L0 SST ID allocation to dispatch and pass IDs through `UploadJob`.
+2. Make newly flushed L0 views identity views.
+3. Compute the GC `newest_l0` term from owned L0s only.
+4. Add invariants, metrics, and logs.
+5. Enable strict invariant enforcement after all roles in the deployment are
    upgraded.
 
 ## Alternatives
 
-### Increase `min_age`
+### Increase `min_age` alone
 
 - Reduces the probability that a staged SST is old enough to delete.
-- Rejected because stalls, clock skew, and backpressure can exceed any practical
-  value.
+- Rejected as the only fix because upload stalls can exceed any practical
+  value. This RFC does rely on `min_age` as the clock-skew bound, but fixes
+  the publish-order race structurally.
 
-### Re-mint and Copy on Invariant Failure
+### Monotonic allocator with a timestamp floor
 
-- On manifest invariant failure, copy the already uploaded SST to a newly minted
-  ID and retry.
-- Rejected as the primary design because it adds object-store copy cost to the
-  contended path and treats a safety violation as a normal retry.
+- An earlier draft of this RFC added a `MonotonicSstIdAllocator`. It computed
+  a floor from committed manifest and `.compactions` state, refused to mint
+  below the floor, waited a bounded time for a lagging clock, and returned
+  `InvalidClockTick` if the clock stayed behind.
+- Dropped because the publish-order race does not need it, and skew within
+  `min_age` is already safe. It added waiting, floor plumbing across the
+  writer and compactor roles, and new failure modes for a problem the
+  invariants already catch.
 
-### Global Monotonic ULID Allocator
+### Offset-based ULID generation
 
-- Use one monotonic ULID allocator for all ULIDs in SlateDB.
-- Deferred because only IDs that feed compacted SST GC need this ordering. A
-  global allocator would add contention and couple unrelated ID domains.
+- Suggested in review: record the wall clock when the allocator starts, then
+  mint timestamps as `max(last_issued_ms, max(0, floor_ms - start_ms) + now_ms)`.
+  A lagging clock is shifted forward past the floor instead of waiting.
+- Deferred. It is a good fallback if the bounded-skew assumption proves too
+  weak. The trade-off is that every GC-relevant timestamp would have to be
+  generated this way, and shifted timestamps are written into durable state.
 
-### Persisted GC Cutoff
+### Run GC inside the `Db`
+
+- Suggested in review: require GC to run inside the `Db` so GC and the writer
+  can coordinate directly instead of relying on ID timestamps.
+- Not taken because running GC as a separate process remains a supported
+  deployment. Worth revisiting if timestamp-based safety proves fragile.
+
+### Persisted GC cutoff
 
 - Add a monotonic `gc_sst_cutoff_ms` field to manifest and compactions state.
   GC would persist the cutoff before deleting, and writers would validate new
   references against the persisted value.
-- This gives a simple CAS-based safety argument and is a good fallback if
-  allocator coverage proves fragile.
-- Not recommended here because it requires a schema change and makes GC a
-  manifest/compactions writer which feels like breaking abstraction.
+- Not taken because it requires a schema change and makes GC a
+  manifest/compactions writer.
 
-### Sequence or Manifest IDs for SSTs
+### Sequence or manifest IDs for SSTs
 
 - Replace ULID timestamp safety with sequence-number or manifest-ID safety.
-- Rejected for this RFC because SSTs are written before manifest commit, because
+- Rejected for this RFC because SSTs are written before manifest commit,
   compaction outputs do not naturally belong to the input data sequence, and
-  because clone/split/union timelines make ownership rules larger than this fix.
+  clone/split/union timelines make ownership rules larger than this fix.
 
-## Open Questions
-
-- What should the default maximum skew wait be?
-- Should `InvalidClockTick` close the DB writer or fail only the current flush?
-- Should the persisted GC cutoff alternative be promoted if reviewers prefer a
-  CAS-based design over allocator discipline?
-- Should compacted SST GC eventually use object-store `last_modified` instead of
-  the GC host's wall clock for the `now - min_age` term?
-
+  
 ## References
 
 - [RFC-0024: Segment-Oriented Compaction](0024-segment-oriented-compaction.md)
