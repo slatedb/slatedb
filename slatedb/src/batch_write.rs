@@ -269,10 +269,6 @@ impl DbInner {
         // after merge operators and overwrites are collapsed
         self.db_stats.memtable_write_bytes.increment(entries_size);
 
-        // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
-        // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        wal_buffer.track_last_applied_seq(commit_seq);
-
         // insert a fail point to make it easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.
         fail_point!(
