@@ -631,6 +631,7 @@ pub(crate) struct WalObserver {
     wal_buffer: Arc<WalBufferManager>,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct WalStatus {
     pub(crate) estimated_bytes: usize,
     pub(crate) next_wal_id: u64,
@@ -642,6 +643,7 @@ pub(crate) struct WalStatus {
     pub(crate) buffered_wal_entries_count: usize,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) enum WalEvent {
     WalFrozen(WalStatus),
     WalFlushed(WalStatus),
@@ -712,7 +714,7 @@ mod tests {
         lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use slatedb_common::MockSystemClock;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn make_entry(key: &str, value: &str, seq: u64, create_ts: Option<i64>) -> RowEntry {
@@ -903,6 +905,21 @@ mod tests {
         Arc<MockSystemClock>,
         Arc<DefaultMetricsRecorder>,
     ) {
+       setup_wal_buffer_with_args(
+           flush_interval,
+           Arc::new(|_status| {})
+       ).await
+    }
+
+    async fn setup_wal_buffer_with_args(
+        flush_interval: Duration,
+        listener: WalStatusListener,
+    ) -> (
+        Arc<WalBufferManager>,
+        Arc<TableStore>,
+        Arc<MockSystemClock>,
+        Arc<DefaultMetricsRecorder>,
+    ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store, None),
@@ -926,6 +943,7 @@ mod tests {
             Some(flush_interval), // max_flush_interval
         ));
         wal_buffer.subscribe(Arc::new(move |status| {
+            (*listener)(status.clone());
             let WalEvent::WalFlushed(status) = status else {
                 return;
             };
@@ -1081,5 +1099,77 @@ mod tests {
             size_triggered_requests,
             actual_flushes,
         );
+    }
+
+    fn recording_listener() -> (WalStatusListener, Arc<Mutex<Vec<WalEvent>>>) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = events.clone();
+        let listener = Arc::new(move |event| {
+            recorder.lock().unwrap().push(event);
+        });
+        (listener, events)
+    }
+
+    #[tokio::test]
+    async fn test_listener_notified_when_flush_task_flushes_wal() {
+        // given:
+        let (listener, events) = recording_listener();
+        let (wal_buffer, _, _, _) = setup_wal_buffer_with_args(Duration::MAX, listener).await;
+
+        // when: Append an entry and explicitly flush it, driving the background flush task.
+        wal_buffer
+            .append(&[make_entry("key1", "value1", 1, None)])
+            .unwrap();
+        wal_buffer.flush().unwrap().await.unwrap().unwrap();
+
+        // then: the listener should have been notified that wal 1 was flushed.
+        let recorded = events.lock().unwrap().clone();
+        let mut flushed: Vec<_> = recorded
+            .iter()
+            .filter_map(|e| {
+                if let WalEvent::WalFlushed(status) = e {
+                    Some(status)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(flushed.len(), 1);
+        let status = flushed.pop().unwrap();
+        assert_eq!(status.last_flushed_wal_id, 1);
+        assert_eq!(status.last_flushed_seq, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_listener_notified_when_flush_task_releases_wal() {
+        // given:
+        let (listener, events) = recording_listener();
+        let (wal_buffer, _, _, _) = setup_wal_buffer_with_args(Duration::MAX, listener).await;
+        wal_buffer.track_last_applied_seq(10);
+
+        // when:
+        wal_buffer
+            .append(&[make_entry("key1", "value1", 1, None)])
+            .unwrap();
+        wal_buffer.flush().unwrap().await.unwrap().unwrap();
+        // The flush should have released the immutable wal from memory.
+        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 0);
+
+        // The listener should have been notified that wal 1 was purged.
+        // then: the listener should have been notified that wal 1 was flushed.
+        let recorded = events.lock().unwrap().clone();
+        let mut flushed: Vec<_> = recorded
+            .iter()
+            .filter_map(|e| {
+                if let WalEvent::MemoryReleased(status) = e {
+                    Some(status)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(flushed.len(), 1);
+        let status = flushed.pop().unwrap();
+        assert_eq!(status.last_purged_wal_id, 1);
     }
 }
