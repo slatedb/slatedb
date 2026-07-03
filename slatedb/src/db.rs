@@ -10671,6 +10671,7 @@ mod tests {
     mod object_store_cache {
         use super::*;
         use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
+        use object_store::ObjectStoreExt;
 
         struct ObjectStoreCacheTest {
             db: Db,
@@ -10816,17 +10817,9 @@ mod tests {
                     .await
             }
 
-            /// The size of a compacted SST object as stored upstream, in bytes.
+            /// The size of an object as stored upstream, in bytes.
             async fn object_size(&self, path: &object_store::path::Path) -> u64 {
-                let prefix = self.sub_path("compacted");
-                let mut stream = self.store.list(Some(&prefix));
-                while let Some(meta) = stream.next().await {
-                    let meta = meta.unwrap();
-                    if &meta.location == path {
-                        return meta.size;
-                    }
-                }
-                panic!("object not found: {path}");
+                self.store.head(path).await.unwrap().size
             }
 
             async fn close(self) {
