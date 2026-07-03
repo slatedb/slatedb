@@ -1183,7 +1183,14 @@ impl Manifest {
             if let Some(intersection) =
                 current_handle.compacted_intersection(next_handle, projection_range)
             {
-                filtered_handles.push(current_handle.with_visible_range(intersection));
+                // `compacted_intersection` bounds a sorted-run SST's coverage by
+                // the next SST's start key, so `intersection` can fall into the
+                // gap beyond this SST's physical keys. `try_with_visible_range`
+                // drops the SST in that case instead of panicking on an empty
+                // physical/visible intersection.
+                if let Some(view) = current_handle.try_with_visible_range(intersection) {
+                    filtered_handles.push(view);
+                }
             }
         }
         filtered_handles
@@ -4445,6 +4452,72 @@ mod tests {
         );
         assert_eq!(projected.core.segments[0].tree.l0.len(), 1);
         assert_eq!(projected.core.segments[0].tree.compacted.len(), 1);
+    }
+
+    /// Build a single-sorted-run tree of two compacted SSTs with a key gap
+    /// between them: SST1 physically covers `[a, c]`, SST2 covers `[m, p]`,
+    /// so the keyspace `(c, m)` is owned by SST1 logically (up to SST2's start
+    /// key) but holds no physical keys in SST1.
+    fn manifest_with_two_sst_sorted_run_gap() -> Manifest {
+        let sst1 = SsTableId::Compacted(Ulid::new());
+        let sst2 = SsTableId::Compacted(Ulid::new());
+        let make = |id: SsTableId, first: &'static [u8], last: &'static [u8], vis: BytesRange| {
+            SsTableView::new_projected(
+                id.unwrap_compacted_id(),
+                SsTableHandle::new(
+                    id,
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(first)),
+                        last_entry: Some(Bytes::from_static(last)),
+                        ..SsTableInfo::default()
+                    },
+                ),
+                Some(vis),
+            )
+        };
+        let mut core = ManifestCore::new();
+        Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
+            id: 0,
+            sst_views: vec![
+                make(sst1, b"a", b"c", BytesRange::from_ref("a".."d")),
+                make(sst2, b"m", b"p", BytesRange::from_ref("m".."q")),
+            ],
+        });
+        Manifest::initial(core)
+    }
+
+    #[test]
+    fn test_projected_drops_sorted_run_sst_when_range_falls_in_key_gap() {
+        // Regression: a projection range that lands entirely in the gap between a sorted-run SST's
+        // last physical key and the next SST's start key must drop the SST, not panic.
+        // `compacted_intersection` bounds the SST by the next SST's start key (logical), so it
+        // reports overlap for `(c, m)`, but the SST has no physical keys there.
+        let manifest = manifest_with_two_sst_sorted_run_gap();
+
+        // ["e", "g") sits in the gap (c, m): both SSTs are physically disjoint
+        // from it, so the sorted run becomes empty and is dropped.
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("e".."g")),
+        )
+        .unwrap();
+        assert!(projected.core.tree.compacted.is_empty());
+    }
+
+    #[test]
+    fn test_projected_keeps_sorted_run_sst_overlapping_physical_keys() {
+        // Sanity check that the gap fix does not over-drop: a range that
+        // overlaps SST1's physical keys keeps it (with the SST projected).
+        let manifest = manifest_with_two_sst_sorted_run_gap();
+
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("b".."f")),
+        )
+        .unwrap();
+        assert_eq!(projected.core.tree.compacted.len(), 1);
+        assert_eq!(projected.core.tree.compacted[0].sst_views.len(), 1);
     }
 
     #[test]

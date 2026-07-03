@@ -155,8 +155,45 @@ impl SsTableView {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
         Self::new_projected(self.id, self.sst.clone(), Some(visible_range))
+    }
+
+    /// The SST's physical key range, derived from its first/last entry. This is
+    /// the range that [`Self::new_projected`] intersects a visible range
+    /// against.
+    fn physical_range(&self) -> BytesRange {
+        match self.sst.info.first_entry.clone() {
+            Some(physical_first_entry) => {
+                let end_bound = match self.sst.info.last_entry.clone() {
+                    Some(physical_last_entry) => Included(physical_last_entry),
+                    None => Unbounded,
+                };
+                BytesRange::new(Included(physical_first_entry), end_bound)
+            }
+            None => unreachable!("SST always has a first entry."),
+        }
+    }
+
+    /// Like [`Self::with_visible_range`], but returns `None` instead of
+    /// panicking when `visible_range` does not overlap the SST's physical key
+    /// range.
+    ///
+    /// [`Self::compacted_intersection`] bounds a sorted-run SST's logical
+    /// coverage by the *next* SST's start key, which can extend past this SST's
+    /// physical last key. When a projection range falls entirely into the gap
+    /// between this SST's last physical key and the next SST's start key, the
+    /// SST owns the range logically but holds no physical keys in it: it
+    /// contributes nothing to the projection and is dropped rather than
+    /// constructing a view whose physical/visible intersection is empty.
+    pub(crate) fn try_with_visible_range(&self, visible_range: BytesRange) -> Option<Self> {
+        self.physical_range().intersect(&visible_range)?;
+        Some(Self::new_projected(
+            self.id,
+            self.sst.clone(),
+            Some(visible_range),
+        ))
     }
 
     /// The range of keys that are visible to the user.
