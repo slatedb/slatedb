@@ -10771,7 +10771,132 @@ mod tests {
         let value_a_cached = reader_a.get(b"key1").await.unwrap();
         assert_eq!(value_a_cached, Some(Bytes::from("value_from_db_a")));
 
+        // Close reader_a; the shared cache must remain usable for reader_b.
+        reader_a.close().await.unwrap();
+
         let value_b_cached = reader_b.get(b"key1").await.unwrap();
         assert_eq!(value_b_cached, Some(Bytes::from("value_from_db_b")));
+
+        reader_b.close().await.unwrap();
+    }
+
+    #[cfg(feature = "foyer")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_does_not_kill_shared_hybrid_cache() {
+        use crate::db_cache::foyer_hybrid::FoyerHybridCache;
+        use crate::db_cache::{CachedEntry, CachedKey, DbCache};
+        use crate::db_state::SsTableId;
+        use crate::format::sst::BlockBuilder;
+        use foyer::{
+            BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder,
+            PsyncIoEngineConfig,
+        };
+
+        fn probe_entry() -> CachedEntry {
+            use rand::RngCore;
+            let mut rng = rand::rng();
+            let mut builder = BlockBuilder::new_latest(1024);
+            loop {
+                let mut k = vec![0u8; 32];
+                rng.fill_bytes(&mut k);
+                let mut v = vec![0u8; 128];
+                rng.fill_bytes(&mut v);
+                if builder.add_value(&k, &v, None, None) {
+                    break;
+                }
+            }
+            CachedEntry::with_block(Arc::new(builder.build().unwrap()))
+        }
+
+        async fn open_shared_cache(path: &std::path::Path) -> Arc<dyn DbCache> {
+            let hybrid = HybridCacheBuilder::new()
+                .with_name("shared_hybrid")
+                .memory(1024 * 1024)
+                .with_weighter(|_, v: &CachedEntry| v.size())
+                .storage()
+                .with_io_engine_config(PsyncIoEngineConfig::new())
+                .with_engine_config(
+                    BlockEngineConfig::new(
+                        FsDeviceBuilder::new(path)
+                            .with_capacity(4 * 1024 * 1024)
+                            .build()
+                            .unwrap(),
+                    )
+                    .with_block_size(64 * 1024),
+                )
+                .build()
+                .await
+                .unwrap();
+            Arc::new(FoyerHybridCache::new_with_cache(hybrid))
+        }
+
+        let cache_dir = tempfile::tempdir().unwrap();
+        let shared_cache = open_shared_cache(cache_dir.path()).await;
+
+        let object_store_a: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store_b: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        let db_a = Db::builder("/tmp/test_shared_hybrid_a", object_store_a)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+        let db_b = Db::builder("/tmp/test_shared_hybrid_b", object_store_b)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_db_cache(shared_cache.clone())
+            .build()
+            .await
+            .unwrap();
+
+        db_a.put(b"key1", b"value_from_db_a").await.unwrap();
+        db_a.flush().await.unwrap();
+        db_b.put(b"key1", b"value_from_db_b").await.unwrap();
+        db_b.flush().await.unwrap();
+
+        // Close db_a; the shared cache must remain usable for db_b.
+        db_a.close().await.unwrap();
+
+        // db_b reads still succeed (they can fall back to the object store)...
+        let value_b = db_b.get(b"key1").await.unwrap();
+        assert_eq!(value_b, Some(Bytes::from("value_from_db_b")));
+
+        // ...and entries cached on behalf of db_b after db_a closed should
+        // still persist across the caller's own graceful shutdown sequence
+        // (close all DBs, then close the cache we own) + cache reopen, exactly
+        // like `should_persist_blocks_to_disk_on_close` proves for a cache
+        // that nobody else closed. If db_a's close had closed the shared
+        // cache, these entries could never reach disk: the disk engine drops
+        // post-close writes and the final close below becomes a no-op.
+        let mut keys = Vec::new();
+        for b in 0u64..64 {
+            let k = CachedKey::from((SsTableId::Wal(u64::MAX - 2), b));
+            shared_cache.insert(k.clone(), probe_entry()).await;
+            keys.push(k);
+        }
+
+        db_b.close().await.unwrap();
+        // The caller owns the injected cache and closes it once all DBs are
+        // closed; this flushes the memory tier to disk.
+        shared_cache.close().await.unwrap();
+        drop(db_a);
+        drop(db_b);
+        drop(shared_cache);
+
+        let reopened = open_shared_cache(cache_dir.path()).await;
+        let mut found = 0;
+        for k in &keys {
+            if reopened.get_block(k).await.unwrap().is_some() {
+                found += 1;
+            }
+        }
+        assert_eq!(
+            found,
+            keys.len(),
+            "entries cached after another DB closed the shared cache were lost \
+             ({}/{} survived cache close + reopen)",
+            found,
+            keys.len()
+        );
     }
 }

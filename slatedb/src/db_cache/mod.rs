@@ -163,6 +163,14 @@ pub trait DbCache: Send + Sync {
     /// Implementations backed by hybrid (memory + disk) caches should use
     /// this to ensure cached entries survive process restarts. The default
     /// implementation is a no-op.
+    ///
+    /// SlateDB only invokes this on caches it created itself (the default
+    /// cache built when none is configured). If you pass your own cache to
+    /// [`with_db_cache`](crate::db::builder::DbBuilder::with_db_cache), you
+    /// own it: close it yourself after closing every `Db` and `DbReader`
+    /// that uses it. This allows a single cache to be safely shared across
+    /// multiple databases without the first `close()` disabling it for the
+    /// others.
     async fn close(&self) -> Result<(), crate::Error> {
         Ok(())
     }
@@ -822,6 +830,94 @@ impl DbCache for DbCacheWrapper {
         let result = self.cache.fetch_stats(scoped_key, loader).await;
         self.record_fetch_outcome("stats", loader_ran.was_called(), &result);
         result
+    }
+}
+
+/// Wraps a user-provided [`DbCache`] so that [`DbCache::close`] becomes a no-op.
+///
+/// SlateDB does not own caches passed in via `with_db_cache`: the caller may be sharing one
+/// cache across several `Db`/`DbReader` instances, so the first `Db::close()` must not shut
+/// it down for the others. The caller closes the inner cache themselves once every instance
+/// using it is closed.
+///
+/// Note: every trait method must be forwarded explicitly, including the ones with default
+/// implementations. Falling back to a default here would silently replace the inner cache's
+/// behavior (e.g. foyer's dedup-aware `fetch_*`) for user-provided caches only.
+pub(crate) struct UnownedDbCache {
+    inner: Arc<dyn DbCache>,
+}
+
+impl UnownedDbCache {
+    pub(crate) fn new(inner: Arc<dyn DbCache>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl DbCache for UnownedDbCache {
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.inner.get_block(key).await
+    }
+
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.inner.get_index(key).await
+    }
+
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.inner.get_filter(key).await
+    }
+
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.inner.get_stats(key).await
+    }
+
+    async fn insert(&self, key: CachedKey, value: CachedEntry) {
+        self.inner.insert(key, value).await
+    }
+
+    async fn remove(&self, key: &CachedKey) {
+        self.inner.remove(key).await
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.inner.entry_count()
+    }
+
+    /// The point of this type: never propagate close to a cache we don't own.
+    async fn close(&self) -> Result<(), crate::Error> {
+        Ok(())
+    }
+
+    async fn fetch_block(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.inner.fetch_block(key, loader).await
+    }
+
+    async fn fetch_index(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.inner.fetch_index(key, loader).await
+    }
+
+    async fn fetch_filter(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.inner.fetch_filter(key, loader).await
+    }
+
+    async fn fetch_stats(
+        &self,
+        key: CachedKey,
+        loader: CacheLoader,
+    ) -> Result<CachedEntry, crate::Error> {
+        self.inner.fetch_stats(key, loader).await
     }
 }
 
@@ -1487,5 +1583,115 @@ mod tests {
     #[fixture]
     async fn sst(sst_format: SsTableFormat) -> EncodedSsTable {
         build_test_sst(&sst_format, 1).await
+    }
+
+    /// Canary for `UnownedDbCache`'s delegation: every defaulted trait method must be
+    /// forwarded to the inner cache — except `close()`, which must be suppressed. If a
+    /// forwarding method is dropped (e.g. when a new defaulted method is added to
+    /// `DbCache`), the trait default runs against the wrapper instead of the inner
+    /// cache's override and this test fails.
+    #[tokio::test]
+    async fn test_unowned_cache_suppresses_close_and_forwards_overrides() {
+        use crate::db_cache::{CacheLoader, UnownedDbCache};
+        use crate::format::block::Block;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn build_block(key: &[u8]) -> Arc<Block> {
+            let mut builder = BlockBuilder::new_latest(4096);
+            assert!(builder.add(RowEntry::new_value(key, b"v", 0)).unwrap());
+            Arc::new(builder.build().unwrap())
+        }
+
+        /// A cache whose `fetch_*` overrides always return `marker` without running the
+        /// loader (like foyer's dedup-aware fetches). If the trait's default fetch runs
+        /// instead, the loader's entry comes back and the marker assertion fails.
+        struct ProbeCache {
+            close_called: AtomicBool,
+            marker: CachedEntry,
+        }
+
+        #[async_trait::async_trait]
+        impl DbCache for ProbeCache {
+            async fn get_block(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn get_index(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn get_filter(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn get_stats(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn insert(&self, _: CachedKey, _: CachedEntry) {}
+            async fn remove(&self, _: &CachedKey) {}
+            fn entry_count(&self) -> u64 {
+                0
+            }
+            async fn close(&self) -> Result<(), crate::Error> {
+                self.close_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn fetch_block(
+                &self,
+                _: CachedKey,
+                _: CacheLoader,
+            ) -> Result<CachedEntry, crate::Error> {
+                Ok(self.marker.clone())
+            }
+            async fn fetch_index(
+                &self,
+                _: CachedKey,
+                _: CacheLoader,
+            ) -> Result<CachedEntry, crate::Error> {
+                Ok(self.marker.clone())
+            }
+            async fn fetch_filter(
+                &self,
+                _: CachedKey,
+                _: CacheLoader,
+            ) -> Result<CachedEntry, crate::Error> {
+                Ok(self.marker.clone())
+            }
+            async fn fetch_stats(
+                &self,
+                _: CachedKey,
+                _: CacheLoader,
+            ) -> Result<CachedEntry, crate::Error> {
+                Ok(self.marker.clone())
+            }
+        }
+
+        let marker_block = build_block(b"marker");
+        let probe = Arc::new(ProbeCache {
+            close_called: AtomicBool::new(false),
+            marker: CachedEntry::with_block(marker_block.clone()),
+        });
+        let unowned = UnownedDbCache::new(probe.clone());
+
+        let loader = || -> CacheLoader {
+            Box::new(|| Box::pin(async { Ok(CachedEntry::with_block(build_block(b"loader"))) }))
+        };
+        let key = || CachedKey::from((SST_ID, 0u64));
+
+        let fetched = [
+            unowned.fetch_block(key(), loader()).await.unwrap(),
+            unowned.fetch_index(key(), loader()).await.unwrap(),
+            unowned.fetch_filter(key(), loader()).await.unwrap(),
+            unowned.fetch_stats(key(), loader()).await.unwrap(),
+        ];
+        for entry in fetched {
+            assert!(
+                Arc::ptr_eq(&entry.block().unwrap(), &marker_block),
+                "fetch was not forwarded to the inner cache's override"
+            );
+        }
+
+        unowned.close().await.unwrap();
+        assert!(
+            !probe.close_called.load(Ordering::SeqCst),
+            "close() must not propagate to a cache slatedb does not own"
+        );
     }
 }
