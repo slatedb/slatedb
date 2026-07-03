@@ -138,7 +138,7 @@ use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
-use crate::db_cache::{DbCache, DbCacheWrapper};
+use crate::db_cache::{DbCache, DbCacheWrapper, UnownedDbCache};
 use crate::db_reader::DbReader;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
@@ -255,8 +255,14 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
     /// [`slatedb::db_cache::SplitCache`] is used by default.
+    ///
+    /// A cache passed in here remains owned by the caller: it is safe to share it across
+    /// multiple `Db`/`DbReader` instances, and [`Db::close`](crate::Db::close) will *not*
+    /// close it. Call [`DbCache::close`] yourself after closing every database that uses it.
     pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
-        self.db_cache = Some(db_cache);
+        // Wrap so Db::close()/DbReader::close() can't close a cache the
+        // caller owns and may be sharing with other instances.
+        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache)));
         self
     }
 
@@ -1611,8 +1617,15 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     ///
     /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
     /// [`slatedb::db_cache::SplitCache`] is used by default.
+    ///
+    /// A cache passed in here remains owned by the caller: it is safe to share it across
+    /// multiple `Db`/`DbReader` instances, and [`DbReader::close`](crate::DbReader::close)
+    /// will *not* close it. Call [`DbCache::close`] yourself after closing every database
+    /// that uses it.
     pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
-        self.db_cache = Some(db_cache);
+        // Wrap so Db::close()/DbReader::close() can't close a cache the
+        // caller owns and may be sharing with other instances.
+        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache)));
         self
     }
 
