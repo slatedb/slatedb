@@ -374,3 +374,93 @@ impl TryFrom<&CheckpointOptions> for slatedb::config::CheckpointOptions {
         })
     }
 }
+
+/// Garbage collection options for a single directory (manifest, WAL, WAL fence,
+/// compacted, or compactions).
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GarbageCollectorDirectoryOptions {
+    /// Interval between recurring garbage collector runs, in milliseconds. Only
+    /// consulted by recurring garbage collection; `None` uses the default interval.
+    #[uniffi(default = None)]
+    pub interval_ms: Option<u64>,
+    /// Minimum age a file must reach before it can be garbage collected, in milliseconds.
+    pub min_age_ms: u64,
+    /// If true, log files that would be deleted without deleting them.
+    /// Defaults to `false`: enabling a directory collects for real.
+    #[uniffi(default = false)]
+    pub dry_run: bool,
+}
+
+impl From<GarbageCollectorDirectoryOptions> for slatedb::config::GarbageCollectorDirectoryOptions {
+    fn from(value: GarbageCollectorDirectoryOptions) -> Self {
+        slatedb::config::GarbageCollectorDirectoryOptions {
+            interval: value.interval_ms.map(Duration::from_millis),
+            min_age: Duration::from_millis(value.min_age_ms),
+            dry_run: value.dry_run,
+        }
+    }
+}
+
+/// Schedule options for a garbage collector task that has no file-age threshold.
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct GarbageCollectorScheduleOptions {
+    /// Interval between recurring runs, in milliseconds. Only consulted by
+    /// recurring garbage collection; `None` uses the default interval.
+    #[uniffi(default = None)]
+    pub interval_ms: Option<u64>,
+}
+
+impl From<GarbageCollectorScheduleOptions> for slatedb::config::GarbageCollectorScheduleOptions {
+    fn from(value: GarbageCollectorScheduleOptions) -> Self {
+        slatedb::config::GarbageCollectorScheduleOptions {
+            interval: value.interval_ms.map(Duration::from_millis),
+        }
+    }
+}
+
+/// Options for the garbage collector. Each directory is garbage collected
+/// independently; a `None` field disables garbage collection for that directory.
+///
+/// Note: unlike the Rust `GarbageCollectorOptions::default()` (which enables all
+/// directories, with WAL fence collection in dry-run mode), the default record is
+/// a no-op — every directory must be enabled explicitly. In particular, enabling
+/// `wal_fence_options` collects fence objects for real unless `dry_run` is set.
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct GarbageCollectorOptions {
+    /// Garbage collection options for the manifest directory.
+    #[uniffi(default = None)]
+    pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Garbage collection options for the WAL directory.
+    #[uniffi(default = None)]
+    pub wal_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Garbage collection options for zero-byte WAL fence objects.
+    ///
+    /// WARNING: deleting fence objects too aggressively can cause data loss; use a
+    /// `min_age_ms` longer than any writer is expected to run. See the Rust
+    /// `GarbageCollectorOptions::wal_fence_options` docs for details.
+    #[uniffi(default = None)]
+    pub wal_fence_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Garbage collection options for the compacted directory.
+    #[uniffi(default = None)]
+    pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Garbage collection options for the compactions directory.
+    #[uniffi(default = None)]
+    pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Schedule options for detaching a clone from its parent database(s).
+    #[uniffi(default = None)]
+    pub detach_options: Option<GarbageCollectorScheduleOptions>,
+}
+
+impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions {
+    fn from(value: GarbageCollectorOptions) -> Self {
+        slatedb::config::GarbageCollectorOptions {
+            manifest_options: value.manifest_options.map(Into::into),
+            wal_options: value.wal_options.map(Into::into),
+            wal_fence_options: value.wal_fence_options.map(Into::into),
+            compacted_options: value.compacted_options.map(Into::into),
+            compactions_options: value.compactions_options.map(Into::into),
+            detach_options: value.detach_options.map(Into::into),
+            metric_level: None,
+        }
+    }
+}

@@ -1,5 +1,5 @@
 use crate::builder::CloneBuilder;
-use crate::config::CheckpointOptions;
+use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::{Error, SlateDbError};
 use crate::types::{
     try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
@@ -152,6 +152,15 @@ impl Admin {
     pub async fn delete_checkpoint(&self, id: String) -> Result<(), crate::Error> {
         self.inner
             .delete_checkpoint(try_checkpoint_id_from_str(&id)?)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Runs a single garbage collection pass in the foreground with the provided
+    /// options. Directories whose options are `None` are skipped.
+    pub async fn run_gc_once(&self, options: GarbageCollectorOptions) -> Result<(), Error> {
+        self.inner
+            .run_gc_once(options.into())
             .await
             .map_err(Into::into)
     }

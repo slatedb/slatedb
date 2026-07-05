@@ -6,7 +6,17 @@ import time
 import pytest
 
 from conftest import new_memory_store, open_db, open_reader, unique_path, wait_until
-from slatedb.uniffi import AdminBuilder, DbBuilder, Error, FlushOptions, FlushType, CloneSourceSpec, CheckpointOptions
+from slatedb.uniffi import (
+    AdminBuilder,
+    CheckpointOptions,
+    CloneSourceSpec,
+    DbBuilder,
+    Error,
+    FlushOptions,
+    FlushType,
+    GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions,
+)
 
 MAX_I64 = 9_223_372_036_854_775_807
 MAX_U64 = 18_446_744_073_709_551_615
@@ -455,3 +465,35 @@ async def test_admin_delete_multiple_checkpoints() -> None:
             return await admin.list_checkpoints(None) == []
 
         await wait_until(checkpoints_cleared)
+
+
+@pytest.mark.asyncio
+async def test_admin_run_gc_once_prunes_old_manifests() -> None:
+    path = unique_path("admin-gc")
+    store = new_memory_store()
+    admin = AdminBuilder(path, store).build()
+
+    async with open_db(store, path=path) as db:
+        for i in range(3):
+            await db.put(f"key-{i}".encode(), b"value")
+            await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+
+    before = await admin.list_manifests(None, None)
+    assert len(before) > 1
+
+    # Every directory option defaults to None, so this pass has nothing to collect.
+    await admin.run_gc_once(GarbageCollectorOptions())
+    assert len(await admin.list_manifests(None, None)) == len(before)
+
+    # Manifest GC requires last_modified strictly older than min_age, so retry
+    # until the manifests age past min_age_ms=0.
+    async def manifests_pruned() -> bool:
+        await admin.run_gc_once(
+            GarbageCollectorOptions(manifest_options=GarbageCollectorDirectoryOptions(min_age_ms=0))
+        )
+        return len(await admin.list_manifests(None, None)) < len(before)
+
+    await wait_until(manifests_pruned)
+
+    after = await admin.list_manifests(None, None)
+    assert after[-1].id == before[-1].id
