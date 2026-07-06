@@ -1,9 +1,9 @@
 use crate::builder::CloneBuilder;
-use crate::config::CheckpointOptions;
+use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::{Error, SlateDbError};
 use crate::types::{
     try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
-    CompactorStateView, VersionedCompactions, VersionedManifest,
+    CompactionSpec, CompactorStateView, VersionedCompactions, VersionedManifest,
 };
 use chrono::{DateTime, Utc};
 use std::ops::Bound;
@@ -76,6 +76,16 @@ impl Admin {
         Ok((&view).into())
     }
 
+    /// Generate a compaction from a spec and submit it.
+    ///
+    /// ## Returns
+    /// - `Ok(Compaction)`: The submitted compaction.
+    /// - `Err`: If there was an error during submission or reading the submitted compaction.
+    pub async fn submit_compaction(&self, spec: CompactionSpec) -> Result<Compaction, Error> {
+        let compaction = self.inner.submit_compaction((&spec).try_into()?).await?;
+        Ok(Compaction::from(&compaction))
+    }
+
     /// Lists compactions files inside the half-open ID range `[from, to)`.
     pub async fn list_compactions(
         &self,
@@ -94,6 +104,17 @@ impl Admin {
     ) -> Result<Vec<Checkpoint>, Error> {
         let checkpoints = self.inner.list_checkpoints(name_filter.as_deref()).await?;
         Ok(checkpoints.iter().map(Checkpoint::from).collect())
+    }
+
+    /// Runs the garbage collector once with the provided options.
+    ///
+    /// When `options` is `None`, SlateDB's default garbage collector options are used.
+    pub async fn run_gc_once(&self, options: Option<GarbageCollectorOptions>) -> Result<(), Error> {
+        let options = options.map_or_else(
+            slatedb::config::GarbageCollectorOptions::default,
+            Into::into,
+        );
+        self.inner.run_gc_once(options).await.map_err(Into::into)
     }
 
     /// Looks up a timestamp for the provided sequence number.

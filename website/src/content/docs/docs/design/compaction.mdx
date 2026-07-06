@@ -28,3 +28,7 @@ The Executor does the actual work of compacting sorted runs by sort-merging them
 sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 is the [`TokioCompactionExecutor`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/compactor_executor.rs),
 which runs compaction on a local tokio runtime.
+
+To split data with different read/write profiles into independent LSM trees — each with its own
+compaction policy — and to retire whole key ranges cheaply, see
+[Segmented Compaction](/docs/design/segmented-compaction).
