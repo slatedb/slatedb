@@ -85,8 +85,7 @@
 //! Example with a custom SST block size:
 //!
 //! ```
-//! use slatedb::{Db, Error};
-//! use slatedb::config::SstBlockSize;
+//! use slatedb::{Db, Error, SsTableFormat};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
@@ -94,7 +93,28 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_sst_block_size(SstBlockSize::Block8Kib) // 8KiB blocks
+//!         .with_sst_format(SsTableFormat::default().with_block_size(8 * 1024))
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Example with an explicit SST format:
+//!
+//! ```
+//! use slatedb::{BloomFilterPolicy, Db, Error, SsTableFormat};
+//! use slatedb::object_store::memory::InMemory;
+//! use std::sync::Arc;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Error> {
+//!     let object_store = Arc::new(InMemory::new());
+//!     let sst_format = SsTableFormat::default()
+//!         .with_block_size(8 * 1024)
+//!         .with_filter_policies(vec![Arc::new(BloomFilterPolicy::new(10))]);
+//!     let db = Db::builder("test_db", object_store)
+//!         .with_sst_format(sst_format)
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -144,7 +164,7 @@ use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::fence::{WriterFenceResult, WriterFencer};
-use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
+use crate::filter_policy::FilterPolicy;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::garbage_collector::{GarbageCollector, GcFilter};
@@ -185,10 +205,8 @@ pub struct DbBuilder<P: Into<Path>> {
     gc_builder: Option<GarbageCollectorBuilder<Path>>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
-    sst_block_size: Option<SstBlockSize>,
+    sst_format: SsTableFormat,
     merge_operator: Option<MergeOperatorType>,
-    block_transformer: Option<Arc<dyn BlockTransformer>>,
-    filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
 }
@@ -208,10 +226,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             gc_builder: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
-            sst_block_size: None,
+            sst_format: SsTableFormat::default(),
             merge_operator: None,
-            block_transformer: None,
-            filter_policies: default_filter_policies(),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
         }
@@ -236,6 +252,14 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
         if self.gc_builder.is_some() && settings.garbage_collector_options.is_some() {
             warn!("gc_builder and settings.garbage_collector_options both set; gc_builder will take precedence");
+        }
+        self.sst_format = self
+            .sst_format
+            .with_min_filter_keys(settings.min_filter_keys)
+            .with_compression_codec(settings.compression_codec);
+        #[cfg(test)]
+        {
+            self.sst_format.block_format = settings.block_format;
         }
         self.settings = settings;
         self
@@ -345,7 +369,13 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// The builder instance for chaining.
     pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
-        self.sst_block_size = Some(block_size);
+        self.sst_format = self.sst_format.with_block_size(block_size.as_bytes());
+        self
+    }
+
+    /// Sets the SST format to use for newly written tables.
+    pub fn with_sst_format(mut self, sst_format: SsTableFormat) -> Self {
+        self.sst_format = sst_format;
         self
     }
 
@@ -380,7 +410,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// The builder instance for chaining.
     pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.block_transformer = Some(block_transformer);
+        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
         self
     }
 
@@ -399,7 +429,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// recognized, and readers will fall back to scanning SSTs whose
     /// filters they cannot decode.
     pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.filter_policies = policies;
+        self.sst_format = self.sst_format.with_filter_policies(policies);
         self
     }
 
@@ -463,25 +493,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
 
         // Setup the components
-        let block_format = {
-            #[cfg(test)]
-            {
-                self.settings.block_format
-            }
-            #[cfg(not(test))]
-            {
-                None
-            }
-        };
-        let sst_format = SsTableFormat {
-            min_filter_keys: self.settings.min_filter_keys,
-            filter_policies: self.filter_policies.clone(),
-            compression_codec: self.settings.compression_codec,
-            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
-            block_transformer: self.block_transformer.clone(),
-            block_format,
-            ..SsTableFormat::default()
-        };
+        #[cfg(not(test))]
+        let sst_format = self.sst_format;
+        #[cfg(test)]
+        let sst_format = self.sst_format;
 
         // Setup object store with optional caching
         let cached_object_store = CachedObjectStore::from_config(
@@ -1067,8 +1082,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     closed_result: Arc<dyn ClosedResultWriter>,
     merge_operator: Option<MergeOperatorType>,
     fp_registry: Arc<FailPointRegistry>,
-    block_transformer: Option<Arc<dyn BlockTransformer>>,
-    filter_policies: Vec<Arc<dyn FilterPolicy>>,
+    sst_format: SsTableFormat,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
@@ -1088,8 +1102,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             closed_result: Arc::new(WatchableOnceCell::new()),
             merge_operator: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
-            block_transformer: None,
-            filter_policies: default_filter_policies(),
+            sst_format: SsTableFormat::default(),
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
@@ -1108,8 +1121,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             closed_result: self.closed_result,
             merge_operator: self.merge_operator,
             fp_registry: self.fp_registry,
-            block_transformer: self.block_transformer,
-            filter_policies: self.filter_policies,
+            sst_format: self.sst_format,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
         }
@@ -1166,9 +1178,15 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the SST format used when the compactor rewrites SSTs.
+    pub fn with_sst_format(mut self, sst_format: SsTableFormat) -> Self {
+        self.sst_format = sst_format;
+        self
+    }
+
     /// Sets the block transformer to use for the compactor.
     pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.block_transformer = Some(block_transformer);
+        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
         self
     }
 
@@ -1181,7 +1199,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`. Pass an
     /// empty vec to disable filters entirely.
     pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.filter_policies = policies;
+        self.sst_format = self.sst_format.with_filter_policies(policies);
         self
     }
 
@@ -1234,14 +1252,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
-        let sst_format = SsTableFormat {
-            filter_policies: self.filter_policies.clone(),
-            block_transformer: self.block_transformer.clone(),
-            ..SsTableFormat::default()
-        };
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store, None),
-            sst_format,
+            self.sst_format,
             path,
             None,
             TableStoreKind::Compactor,
@@ -1343,9 +1356,7 @@ pub struct CompactionWorkerBuilder<P: Into<Path>> {
     system_clock: Arc<dyn SystemClock>,
     merge_operator: Option<MergeOperatorType>,
     fp_registry: Arc<FailPointRegistry>,
-    block_transformer: Option<Arc<dyn BlockTransformer>>,
-    filter_policies: Vec<Arc<dyn FilterPolicy>>,
-    sst_block_size: Option<SstBlockSize>,
+    sst_format: SsTableFormat,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
@@ -1362,15 +1373,19 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             system_clock: Arc::new(DefaultSystemClock::default()),
             merge_operator: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
-            block_transformer: None,
-            filter_policies: default_filter_policies(),
-            sst_block_size: None,
+            sst_format: SsTableFormat::default()
+                .with_min_filter_keys(CompactionWorkerOptions::default().min_filter_keys)
+                .with_compression_codec(CompactionWorkerOptions::default().compression_codec),
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
     }
 
     pub fn with_options(mut self, options: CompactionWorkerOptions) -> Self {
+        self.sst_format = self
+            .sst_format
+            .with_min_filter_keys(options.min_filter_keys)
+            .with_compression_codec(options.compression_codec);
         self.options = options;
         self
     }
@@ -1400,6 +1415,12 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         self
     }
 
+    /// Sets the SST format the worker uses when reading and rewriting SSTs.
+    pub fn with_sst_format(mut self, sst_format: SsTableFormat) -> Self {
+        self.sst_format = sst_format;
+        self
+    }
+
     /// Sets the block transformer the worker uses when reading and rewriting
     /// SSTs during compaction.
     ///
@@ -1408,7 +1429,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     /// configured with a transformer (e.g. encryption) cannot offload compaction
     /// to standalone workers.
     pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.block_transformer = Some(block_transformer);
+        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
         self
     }
 
@@ -1421,7 +1442,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`. Pass an
     /// empty vec to disable filters entirely.
     pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.filter_policies = policies;
+        self.sst_format = self.sst_format.with_filter_policies(policies);
         self
     }
 
@@ -1431,7 +1452,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     /// that SSTs rewritten by the worker are encoded consistently with those
     /// produced by the DB. Defaults to [`SstBlockSize::default`].
     pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
-        self.sst_block_size = Some(block_size);
+        self.sst_format = self.sst_format.with_block_size(block_size.as_bytes());
         self
     }
 
@@ -1449,16 +1470,10 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
             Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
+        let sst_format = self.sst_format;
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.main_object_store, None),
-            SsTableFormat {
-                filter_policies: self.filter_policies.clone(),
-                block_transformer: self.block_transformer.clone(),
-                block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
-                min_filter_keys: self.options.min_filter_keys,
-                compression_codec: self.options.compression_codec,
-                ..SsTableFormat::default()
-            },
+            sst_format,
             path,
             None,
             TableStoreKind::Compactor,
@@ -1561,8 +1576,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     db_cache: Option<Arc<dyn DbCache>>,
     checkpoint_id: Option<uuid::Uuid>,
     merge_operator: Option<MergeOperatorType>,
-    block_transformer: Option<Arc<dyn BlockTransformer>>,
-    filter_policies: Vec<Arc<dyn FilterPolicy>>,
+    sst_format: SsTableFormat,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
@@ -1580,8 +1594,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             db_cache: default_db_cache(),
             checkpoint_id: None,
             merge_operator: None,
-            block_transformer: None,
-            filter_policies: default_filter_policies(),
+            sst_format: SsTableFormat::default(),
             segment_extractor: None,
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -1672,6 +1685,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
+    /// Sets the SST format used to interpret SST metadata and blocks.
+    pub fn with_sst_format(mut self, sst_format: SsTableFormat) -> Self {
+        self.sst_format = sst_format;
+        self
+    }
+
     /// Sets the block transformer to use for the database. The block transformer
     /// allows custom encoding/decoding of block data before storage and after
     /// retrieval. This can be used for encryption or other transformations.
@@ -1687,7 +1706,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     ///
     /// The builder instance for chaining.
     pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.block_transformer = Some(block_transformer);
+        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
         self
     }
 
@@ -1700,7 +1719,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     ///
     /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`.
     pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.filter_policies = policies;
+        self.sst_format = self.sst_format.with_filter_policies(policies);
         self
     }
 
@@ -1789,11 +1808,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             )) as Arc<dyn DbCache>
         });
 
-        let sst_format = SsTableFormat {
-            filter_policies: self.filter_policies,
-            block_transformer: self.block_transformer,
-            ..SsTableFormat::default()
-        };
+        let sst_format = self.sst_format;
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(object_store, retrying_wal_object_store),
@@ -1824,10 +1839,6 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
         Ok(reader)
     }
-}
-
-fn default_filter_policies() -> Vec<Arc<dyn FilterPolicy>> {
-    vec![Arc::new(BloomFilterPolicy::new(10))]
 }
 
 fn default_db_cache() -> Option<Arc<dyn DbCache>> {

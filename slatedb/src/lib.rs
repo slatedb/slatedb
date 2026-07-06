@@ -58,7 +58,7 @@ pub use filter::BloomFilter;
 pub use filter_policy::{
     BloomFilterPolicy, Filter, FilterBuilder, FilterContext, FilterPolicy, FilterQuery,
 };
-pub use format::sst::BlockTransformer;
+pub use format::sst::{BlockTransformer, SsTableFormat};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::{GarbageCollectorBuilder, GcFilter};
 pub use instrumented_object_store::stats as instrumented_object_store_stats;

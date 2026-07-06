@@ -602,7 +602,7 @@ pub(crate) type LengthOffsetAndVersion = (u64, u64, u16);
 pub(crate) type TableInfoAndVersion = (SsTableInfo, u16);
 
 #[derive(Clone)]
-pub(crate) struct SsTableFormat {
+pub struct SsTableFormat {
     pub(crate) block_size: usize,
     pub(crate) min_filter_keys: u32,
     pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
@@ -627,6 +627,48 @@ impl Default for SsTableFormat {
 }
 
 impl SsTableFormat {
+    /// Sets the block size, in bytes, for SST data blocks.
+    pub fn with_block_size(mut self, block_size: usize) -> Self {
+        self.block_size = block_size;
+        self
+    }
+
+    /// Sets the minimum number of keys required before filter blocks are emitted.
+    pub fn with_min_filter_keys(mut self, min_filter_keys: u32) -> Self {
+        self.min_filter_keys = min_filter_keys;
+        self
+    }
+
+    /// Sets the filter policies used for SST filter construction and evaluation.
+    pub fn with_filter_policies(mut self, filter_policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
+        self.filter_policies = filter_policies;
+        self
+    }
+
+    /// Sets the compression codec used for SST blocks and metadata blocks.
+    pub fn with_compression_codec(mut self, compression_codec: Option<CompressionCodec>) -> Self {
+        self.compression_codec = compression_codec;
+        self
+    }
+
+    /// Sets the block transformer used for SST blocks and metadata blocks.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
+    /// Clears any configured block transformer.
+    pub fn without_block_transformer(mut self) -> Self {
+        self.block_transformer = None;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_block_format(mut self, block_format: crate::sst_builder::BlockFormat) -> Self {
+        self.block_format = Some(block_format);
+        self
+    }
+
     async fn read_length_and_metadata_offset_and_version(
         &self,
         obj: &impl ReadOnlyBlob,

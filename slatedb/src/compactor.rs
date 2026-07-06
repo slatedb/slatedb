@@ -5246,7 +5246,9 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_sst_block_size(SstBlockSize::Other(128))
+            .with_sst_format(
+                SsTableFormat::default().with_block_size(SstBlockSize::Other(128).as_bytes()),
+            )
             .with_metrics_recorder(metrics_recorder.clone())
             .build()
             .await
