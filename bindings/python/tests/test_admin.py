@@ -6,7 +6,18 @@ import time
 import pytest
 
 from conftest import new_memory_store, open_db, open_reader, unique_path, wait_until
-from slatedb.uniffi import AdminBuilder, DbBuilder, Error, FlushOptions, FlushType, CloneSourceSpec, CheckpointOptions
+from slatedb.uniffi import (
+    AdminBuilder,
+    CheckpointOptions,
+    CloneSourceSpec,
+    DbBuilder,
+    Error,
+    FlushOptions,
+    FlushType,
+    GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions,
+    GarbageCollectorScheduleOptions,
+)
 
 MAX_I64 = 9_223_372_036_854_775_807
 MAX_U64 = 18_446_744_073_709_551_615
@@ -106,6 +117,36 @@ async def test_admin_compaction_queries_handle_empty_store_and_invalid_ids() -> 
     with pytest.raises(Error.Invalid) as invalid_compaction_id:
         await admin.read_compaction("not-a-ulid", None)
     assert "invalid compaction_id ULID" in invalid_compaction_id.value.message
+
+
+@pytest.mark.asyncio
+async def test_admin_run_gc_once_accepts_default_and_custom_options() -> None:
+    path = unique_path("admin-run-gc-once")
+    store = new_memory_store()
+    admin = AdminBuilder(path, store).build()
+
+    async with open_db(store, path=path) as db:
+        await db.put(b"key", b"value")
+        await db.flush()
+
+        await admin.run_gc_once(None)
+
+        directory_options = GarbageCollectorDirectoryOptions(
+            interval_ms=None,
+            min_age_ms=0,
+            dry_run=True,
+        )
+        schedule_options = GarbageCollectorScheduleOptions(interval_ms=None)
+        options = GarbageCollectorOptions(
+            manifest_options=None,
+            wal_options=directory_options,
+            wal_fence_options=directory_options,
+            compacted_options=None,
+            compactions_options=None,
+            detach_options=schedule_options,
+        )
+
+        await admin.run_gc_once(options)
 
 
 @pytest.mark.asyncio
