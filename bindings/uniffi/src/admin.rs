@@ -3,7 +3,7 @@ use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::{Error, SlateDbError};
 use crate::types::{
     try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
-    CompactorStateView, VersionedCompactions, VersionedManifest,
+    CompactionSpec, CompactorStateView, VersionedCompactions, VersionedManifest,
 };
 use chrono::{DateTime, Utc};
 use std::ops::Bound;
@@ -74,6 +74,16 @@ impl Admin {
     pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, Error> {
         let view = self.inner.read_compactor_state_view().await?;
         Ok((&view).into())
+    }
+
+    /// Generate a compaction from a spec and submit it.
+    ///
+    /// ## Returns
+    /// - `Ok(Compaction)`: The submitted compaction.
+    /// - `Err`: If there was an error during submission or reading the submitted compaction.
+    pub async fn submit_compaction(&self, spec: CompactionSpec) -> Result<Compaction, Error> {
+        let compaction = self.inner.submit_compaction((&spec).try_into()?).await?;
+        Ok(Compaction::from(&compaction))
     }
 
     /// Lists compactions files inside the half-open ID range `[from, to)`.

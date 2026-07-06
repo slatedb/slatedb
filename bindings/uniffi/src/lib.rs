@@ -48,7 +48,7 @@ pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,
     CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat,
-    IdentifiedObjectMetadata, KeyRange, KeyValue, ObjectMetadata, RowEntry, RowEntryKind,
+    IdentifiedObjectMetadata, KeyRange, KeyValue, ObjectMetadata, RowEntry, RowEntryKind, Segment,
     SegmentPrefix, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
     SstType, VersionedCompactions, VersionedManifest, WriteHandle,
 };

@@ -518,6 +518,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_submit_compaction()
+		})
+		if checksum != 20337 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_submit_compaction: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_build()
 		})
 		if checksum != 46255 {
@@ -2186,6 +2195,12 @@ type AdminInterface interface {
 	//
 	// When `options` is `None`, SlateDB's default garbage collector options are used.
 	RunGcOnce(options *GarbageCollectorOptions) error
+	// Generate a compaction from a spec and submit it.
+	//
+	// ## Returns
+	// - `Ok(Compaction)`: The submitted compaction.
+	// - `Err`: If there was an error during submission or reading the submitted compaction.
+	SubmitCompaction(spec CompactionSpec) (Compaction, error)
 }
 
 // Administrative read/query handle for SlateDB.
@@ -2665,6 +2680,46 @@ func (_self *Admin) RunGcOnce(options *GarbageCollectorOptions) error {
 	}
 
 	return err
+}
+
+// Generate a compaction from a spec and submit it.
+//
+// ## Returns
+// - `Ok(Compaction)`: The submitted compaction.
+// - `Err`: If there was an error during submission or reading the submitted compaction.
+func (_self *Admin) SubmitCompaction(spec CompactionSpec) (Compaction, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) Compaction {
+			return FfiConverterCompactionINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_submit_compaction(
+			_pointer, FfiConverterCompactionSpecINSTANCE.Lower(spec)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 func (object *Admin) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -9087,64 +9142,6 @@ func (_ FfiDestroyerCompaction) Destroy(value Compaction) {
 	value.Destroy()
 }
 
-// Immutable compaction specification.
-type CompactionSpec struct {
-	// Ordered compaction sources.
-	Sources []SourceId
-	// Destination sorted run ID. `None` for drain-segment specs, which
-	// produce no new sorted run.
-	Destination *uint32
-	// Whether any input source is an L0 SST view.
-	HasL0Sources bool
-	// Whether any input source is a sorted run.
-	HasSrSources bool
-}
-
-func (r *CompactionSpec) Destroy() {
-	FfiDestroyerSequenceSourceId{}.Destroy(r.Sources)
-	FfiDestroyerOptionalUint32{}.Destroy(r.Destination)
-	FfiDestroyerBool{}.Destroy(r.HasL0Sources)
-	FfiDestroyerBool{}.Destroy(r.HasSrSources)
-}
-
-type FfiConverterCompactionSpec struct{}
-
-var FfiConverterCompactionSpecINSTANCE = FfiConverterCompactionSpec{}
-
-func (c FfiConverterCompactionSpec) Lift(rb RustBufferI) CompactionSpec {
-	return LiftFromRustBuffer[CompactionSpec](c, rb)
-}
-
-func (c FfiConverterCompactionSpec) Read(reader io.Reader) CompactionSpec {
-	return CompactionSpec{
-		FfiConverterSequenceSourceIdINSTANCE.Read(reader),
-		FfiConverterOptionalUint32INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterCompactionSpec) Lower(value CompactionSpec) C.RustBuffer {
-	return LowerIntoRustBuffer[CompactionSpec](c, value)
-}
-
-func (c FfiConverterCompactionSpec) LowerExternal(value CompactionSpec) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[CompactionSpec](c, value))
-}
-
-func (c FfiConverterCompactionSpec) Write(writer io.Writer, value CompactionSpec) {
-	FfiConverterSequenceSourceIdINSTANCE.Write(writer, value.Sources)
-	FfiConverterOptionalUint32INSTANCE.Write(writer, value.Destination)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasL0Sources)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasSrSources)
-}
-
-type FfiDestroyerCompactionSpec struct{}
-
-func (_ FfiDestroyerCompactionSpec) Destroy(value CompactionSpec) {
-	value.Destroy()
-}
-
 // Read-only compactor state view.
 type CompactorStateView struct {
 	// Latest compactions file, if present.
@@ -10418,6 +10415,64 @@ func (_ FfiDestroyerScanOptions) Destroy(value ScanOptions) {
 	value.Destroy()
 }
 
+// Per-segment LSM state (RFC-0024). Each named segment carries its own L0
+// SSTs and sorted runs, compacted and retired independently of the root tree.
+type Segment struct {
+	// Segment prefix.
+	Prefix []byte
+	// Last compacted L0 SST view ID for this segment, if any.
+	LastCompactedL0SstViewId *string
+	// Current L0 SST views in this segment.
+	L0 []SsTableView
+	// Current compacted sorted runs in this segment.
+	Compacted []SortedRun
+}
+
+func (r *Segment) Destroy() {
+	FfiDestroyerBytes{}.Destroy(r.Prefix)
+	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstViewId)
+	FfiDestroyerSequenceSsTableView{}.Destroy(r.L0)
+	FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted)
+}
+
+type FfiConverterSegment struct{}
+
+var FfiConverterSegmentINSTANCE = FfiConverterSegment{}
+
+func (c FfiConverterSegment) Lift(rb RustBufferI) Segment {
+	return LiftFromRustBuffer[Segment](c, rb)
+}
+
+func (c FfiConverterSegment) Read(reader io.Reader) Segment {
+	return Segment{
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
+		FfiConverterSequenceSortedRunINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSegment) Lower(value Segment) C.RustBuffer {
+	return LowerIntoRustBuffer[Segment](c, value)
+}
+
+func (c FfiConverterSegment) LowerExternal(value Segment) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[Segment](c, value))
+}
+
+func (c FfiConverterSegment) Write(writer io.Writer, value Segment) {
+	FfiConverterBytesINSTANCE.Write(writer, value.Prefix)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstViewId)
+	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0)
+	FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted)
+}
+
+type FfiDestroyerSegment struct{}
+
+func (_ FfiDestroyerSegment) Destroy(value Segment) {
+	value.Destroy()
+}
+
 // A segment (RFC-0024), identified by the key prefix it owns; the segment
 // spans the key interval `[prefix, prefix++)`.
 type SegmentPrefix struct {
@@ -10782,10 +10837,12 @@ type VersionedManifest struct {
 	LastCompactedL0SstViewId *string
 	// Last compacted L0 SST ID, if any.
 	LastCompactedL0SstId *string
-	// Current L0 SST views.
+	// Current L0 SST views (root `prefix=""` tree).
 	L0 []SsTableView
-	// Current compacted sorted runs.
+	// Current compacted sorted runs (root `prefix=""` tree).
 	Compacted []SortedRun
+	// Per-segment LSM state for named (non-empty-prefix) segments.
+	Segments []Segment
 	// Next WAL SST ID to assign.
 	NextWalSstId uint64
 	// WAL replay watermark.
@@ -10812,6 +10869,7 @@ func (r *VersionedManifest) Destroy() {
 	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstId)
 	FfiDestroyerSequenceSsTableView{}.Destroy(r.L0)
 	FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted)
+	FfiDestroyerSequenceSegment{}.Destroy(r.Segments)
 	FfiDestroyerUint64{}.Destroy(r.NextWalSstId)
 	FfiDestroyerUint64{}.Destroy(r.ReplayAfterWalId)
 	FfiDestroyerInt64{}.Destroy(r.LastL0ClockTick)
@@ -10840,6 +10898,7 @@ func (c FfiConverterVersionedManifest) Read(reader io.Reader) VersionedManifest 
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
 		FfiConverterSequenceSortedRunINSTANCE.Read(reader),
+		FfiConverterSequenceSegmentINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterInt64INSTANCE.Read(reader),
@@ -10868,6 +10927,7 @@ func (c FfiConverterVersionedManifest) Write(writer io.Writer, value VersionedMa
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstId)
 	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0)
 	FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted)
+	FfiConverterSequenceSegmentINSTANCE.Write(writer, value.Segments)
 	FfiConverterUint64INSTANCE.Write(writer, value.NextWalSstId)
 	FfiConverterUint64INSTANCE.Write(writer, value.ReplayAfterWalId)
 	FfiConverterInt64INSTANCE.Write(writer, value.LastL0ClockTick)
@@ -11105,6 +11165,95 @@ func (FfiConverterCloseReason) Write(writer io.Writer, value CloseReason) {
 type FfiDestroyerCloseReason struct{}
 
 func (_ FfiDestroyerCloseReason) Destroy(value CloseReason) {
+}
+
+// Immutable compaction specification. Mirrors the core `CompactionSpec`:
+// either a tiered merge into a destination sorted run, or a segment drain.
+type CompactionSpec interface {
+	Destroy()
+}
+
+// Tiered merge: read `sources` and write a single output sorted run with
+// id `destination`. An empty `segment` targets the root (`prefix=""`) tree.
+type CompactionSpecTiered struct {
+	Segment     []byte
+	Sources     []SourceId
+	Destination uint32
+}
+
+func (e CompactionSpecTiered) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Segment)
+	FfiDestroyerSequenceSourceId{}.Destroy(e.Sources)
+	FfiDestroyerUint32{}.Destroy(e.Destination)
+}
+
+// Segment drain (retention): retire `segment` by detaching the listed
+// `sources` (its L0 SSTs and sorted runs). Produces no new sorted run.
+type CompactionSpecDrainSegment struct {
+	Segment []byte
+	Sources []SourceId
+}
+
+func (e CompactionSpecDrainSegment) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Segment)
+	FfiDestroyerSequenceSourceId{}.Destroy(e.Sources)
+}
+
+type FfiConverterCompactionSpec struct{}
+
+var FfiConverterCompactionSpecINSTANCE = FfiConverterCompactionSpec{}
+
+func (c FfiConverterCompactionSpec) Lift(rb RustBufferI) CompactionSpec {
+	return LiftFromRustBuffer[CompactionSpec](c, rb)
+}
+
+func (c FfiConverterCompactionSpec) Lower(value CompactionSpec) C.RustBuffer {
+	return LowerIntoRustBuffer[CompactionSpec](c, value)
+}
+
+func (c FfiConverterCompactionSpec) LowerExternal(value CompactionSpec) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompactionSpec](c, value))
+}
+func (FfiConverterCompactionSpec) Read(reader io.Reader) CompactionSpec {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return CompactionSpecTiered{
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterSequenceSourceIdINSTANCE.Read(reader),
+			FfiConverterUint32INSTANCE.Read(reader),
+		}
+	case 2:
+		return CompactionSpecDrainSegment{
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterSequenceSourceIdINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterCompactionSpec.Read()", id))
+	}
+}
+
+func (FfiConverterCompactionSpec) Write(writer io.Writer, value CompactionSpec) {
+	switch variant_value := value.(type) {
+	case CompactionSpecTiered:
+		writeInt32(writer, 1)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Segment)
+		FfiConverterSequenceSourceIdINSTANCE.Write(writer, variant_value.Sources)
+		FfiConverterUint32INSTANCE.Write(writer, variant_value.Destination)
+	case CompactionSpecDrainSegment:
+		writeInt32(writer, 2)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Segment)
+		FfiConverterSequenceSourceIdINSTANCE.Write(writer, variant_value.Sources)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterCompactionSpec.Write", value))
+	}
+}
+
+type FfiDestroyerCompactionSpec struct{}
+
+func (_ FfiDestroyerCompactionSpec) Destroy(value CompactionSpec) {
+	value.Destroy()
 }
 
 // Compaction lifecycle state.
@@ -13835,6 +13984,53 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSegment struct{}
+
+var FfiConverterSequenceSegmentINSTANCE = FfiConverterSequenceSegment{}
+
+func (c FfiConverterSequenceSegment) Lift(rb RustBufferI) []Segment {
+	return LiftFromRustBuffer[[]Segment](c, rb)
+}
+
+func (c FfiConverterSequenceSegment) Read(reader io.Reader) []Segment {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]Segment, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSegmentINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSegment) Lower(value []Segment) C.RustBuffer {
+	return LowerIntoRustBuffer[[]Segment](c, value)
+}
+
+func (c FfiConverterSequenceSegment) LowerExternal(value []Segment) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]Segment](c, value))
+}
+
+func (c FfiConverterSequenceSegment) Write(writer io.Writer, value []Segment) {
+	if len(value) > math.MaxInt32 {
+		panic("[]Segment is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSegmentINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSegment struct{}
+
+func (FfiDestroyerSequenceSegment) Destroy(sequence []Segment) {
+	for _, value := range sequence {
+		FfiDestroyerSegment{}.Destroy(value)
 	}
 }
 
