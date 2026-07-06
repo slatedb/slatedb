@@ -23,8 +23,10 @@ mod write_batch;
 pub use admin::Admin;
 pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
 pub use config::{
-    DurabilityLevel, FlushOptions, FlushType, IsolationLevel, IterationOrder, MergeOptions,
-    PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
+    DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
+    MergeOptions, PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl,
+    WriteOptions,
 };
 pub use db::Db;
 pub use db_reader::DbReader;

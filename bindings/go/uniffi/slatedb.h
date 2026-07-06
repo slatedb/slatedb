@@ -689,6 +689,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_admin_read_manifest(uint64_t ptr, RustB
 uint64_t uniffi_slatedb_uniffi_fn_method_admin_refresh_checkpoint(uint64_t ptr, RustBuffer id, RustBuffer lifetime_ms
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_RUN_GC_ONCE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_RUN_GC_ONCE
+uint64_t uniffi_slatedb_uniffi_fn_method_admin_run_gc_once(uint64_t ptr, RustBuffer options
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_ADMINBUILDER
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_ADMINBUILDER
 uint64_t uniffi_slatedb_uniffi_fn_clone_adminbuilder(uint64_t handle, RustCallStatus *out_status
@@ -2085,6 +2090,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_admin_read_manifest(void
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_REFRESH_CHECKPOINT
 uint16_t uniffi_slatedb_uniffi_checksum_method_admin_refresh_checkpoint(void
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_RUN_GC_ONCE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_RUN_GC_ONCE
+uint16_t uniffi_slatedb_uniffi_checksum_method_admin_run_gc_once(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMINBUILDER_BUILD

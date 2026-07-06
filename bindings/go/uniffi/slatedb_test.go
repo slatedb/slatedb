@@ -1888,6 +1888,41 @@ func TestAdminQueries(t *testing.T) {
 	}
 }
 
+func TestAdminRunGcOnce(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key"), []byte("value")); err != nil {
+		t.Fatalf("Put(key): %v", err)
+	}
+	if err := dbHandle.db.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
+	}
+
+	if err := admin.RunGcOnce(nil); err != nil {
+		t.Fatalf("RunGcOnce(nil): %v", err)
+	}
+
+	directoryOptions := &slatedb.GarbageCollectorDirectoryOptions{
+		IntervalMs: nil,
+		MinAgeMs:   0,
+		DryRun:     true,
+	}
+	options := &slatedb.GarbageCollectorOptions{
+		ManifestOptions:    nil,
+		WalOptions:         directoryOptions,
+		WalFenceOptions:    directoryOptions,
+		CompactedOptions:   nil,
+		CompactionsOptions: nil,
+		DetachOptions:      &slatedb.GarbageCollectorScheduleOptions{IntervalMs: nil},
+	}
+
+	if err := admin.RunGcOnce(options); err != nil {
+		t.Fatalf("RunGcOnce(custom): %v", err)
+	}
+}
+
 func TestAdminClone(t *testing.T) {
 	store := newMemoryStore(t)
 
