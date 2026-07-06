@@ -99,6 +99,12 @@ path = "src/standalone_compactor.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "standalone-garbage-collector"
+path = "src/standalone_garbage_collector.rs"
+test = false
+bench = false
+
 [dependencies]
 anyhow.workspace = true
 object_store = { workspace = true, features = ["azure", "gcp"] }
