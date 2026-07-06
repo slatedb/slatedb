@@ -2095,7 +2095,7 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_admin_refresh_checkpoint(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_RUN_GC_ONCE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_RUN_GC_ONCE
 uint16_t uniffi_slatedb_uniffi_checksum_method_admin_run_gc_once(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMINBUILDER_BUILD
