@@ -225,6 +225,10 @@ export default defineConfig({
 							link: '/docs/design/compaction/',
 						},
 						{
+							label: 'Segmented Compaction',
+							link: '/docs/design/segmented-compaction/',
+						},
+						{
 							label: 'Merge Operators',
 							link: '/docs/design/merge-operators/',
 						},
