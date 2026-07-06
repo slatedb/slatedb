@@ -6,7 +6,7 @@ description: Split a dataset into independent LSM trees, each with its own compa
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 Segmented compaction splits a database into independent LSM trees keyed by a
-prefix.  Segments let each tree independenly configure compaction policy to
+prefix.  Segments let each tree independently configure compaction policy to
 match its access pattern needs, and let a whole segment be dropped cheaply
 once it ages out. All segments share a WAL and writes across segments can
 be done transactionally/atomically.
