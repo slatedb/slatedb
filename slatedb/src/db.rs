@@ -10796,6 +10796,7 @@ mod tests {
     mod object_store_cache {
         use super::*;
         use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
+        use object_store::ObjectStoreExt;
 
         struct ObjectStoreCacheTest {
             db: Db,
@@ -10939,6 +10940,11 @@ mod tests {
                     .map(|meta| meta.unwrap().location)
                     .collect()
                     .await
+            }
+
+            /// The size of an object as stored upstream, in bytes.
+            async fn object_size(&self, path: &object_store::path::Path) -> u64 {
+                self.store.head(path).await.unwrap().size
             }
 
             async fn close(self) {
@@ -11111,13 +11117,11 @@ mod tests {
             fixture.close().await;
         }
 
-        // TODO: large SSTs are written with a multipart upload, which does not yet
-        // mirror its parts into the local cache. So a flushed SST above the 10 MiB
-        // multipart threshold is not cached even with cache_puts enabled. Fix this
-        // by caching the multipart upload, after which this test should assert the
-        // SST is cached (one part per part_size chunk) rather than uncached.
+        /// A flushed SST above the 10 MiB multipart threshold is written with a
+        /// multipart upload, whose parts are now mirrored into the cache, so the
+        /// whole SST is cached (one part per part_size chunk).
         #[tokio::test]
-        async fn test_object_store_cache_does_not_cache_large_multipart_flush_yet() {
+        async fn test_object_store_cache_caches_large_multipart_flush() {
             const MIB: usize = 1024 * 1024;
 
             let fixture = ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_large_flush")
@@ -11148,8 +11152,14 @@ mod tests {
 
             let compacted = fixture.compacted_locations().await;
             assert_eq!(compacted.len(), 1, "expected exactly one flushed SST");
-            // The SST was written with a multipart upload, which is not cached yet.
-            fixture.assert_cached(&compacted[0], 0).await;
+            // The SST is written with a multipart upload (each 1 MiB part teed into
+            // the cache), so every part of the SST is cached.
+            let expected_parts = (fixture.object_size(&compacted[0]).await as usize).div_ceil(MIB);
+            assert!(
+                expected_parts > 10,
+                "expected a large multipart SST, got {expected_parts} part(s)"
+            );
+            fixture.assert_cached(&compacted[0], expected_parts).await;
             fixture.close().await;
         }
     }
