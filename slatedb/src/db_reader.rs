@@ -632,7 +632,10 @@ impl DbReaderInner {
             Err(err) if has_not_found_object_store_error(&err) => None,
             Err(err) => return Err(err),
         } {
-            assert!(replayed_table.last_wal_id > replay_after_wal_id);
+            // `last_wal_id` is a conservative watermark: a table that ends mid-file
+            // is tagged with the last fully replayed WAL ID, which may equal the
+            // watermark of the previous table.
+            assert!(replayed_table.last_wal_id >= replay_after_wal_id);
             replay_after_wal_id = replayed_table.last_wal_id;
             if !replayed_table.table.is_empty() && replayed_table.last_seq > last_committed_seq {
                 let first_seq = replayed_table
@@ -2337,9 +2340,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(last_wal_id, 0);
-        assert_eq!(last_committed_seq, 0);
-        assert!(into_tables.is_empty());
+        // WAL 2 is missing and ends the iteration, but the rows already replayed
+        // from WAL 1 must still be returned.
+        assert_eq!(last_wal_id, 1);
+        assert_eq!(last_committed_seq, 1);
+        assert_eq!(into_tables.len(), 1);
+        assert_eq!(into_tables.front().unwrap().recent_flushed_wal_id(), 1);
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ use crate::manifest::SsTableView;
 use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
+use crate::types::RowEntry;
 use crate::utils::panic_string;
 use log::error;
 use std::collections::VecDeque;
@@ -19,8 +20,8 @@ pub(crate) struct WalReplayOptions {
     pub(crate) sst_batch_size: usize,
 
     /// The target maximum number of bytes in each returned table. WAL replay only
-    /// splits between complete WAL SSTs, so a returned table may exceed this if a
-    /// single WAL SST is larger.
+    /// splits between write batches (all rows of one commit stay in one table), so
+    /// a returned table may exceed this if a single write batch is larger.
     pub(crate) max_memtable_bytes: usize,
 
     /// Options to pass through to underlying SST iterators
@@ -49,49 +50,24 @@ pub(crate) struct ReplayedMemtable {
     pub(crate) last_wal_id: u64,
 }
 
-struct WalIdAndIter {
-    wal_id: u64,
-    iter: Box<dyn RowEntryIterator + 'static>,
-}
-
-struct IteratorHolder<T> {
-    initialized: bool,
-    current_iter: Option<T>,
-}
-
-impl<T> IteratorHolder<T> {
-    fn new() -> Self {
-        Self {
-            initialized: false,
-            current_iter: None,
-        }
-    }
-
-    fn is_finished(&self) -> bool {
-        self.initialized && self.current_iter.is_none()
-    }
-
-    fn advance(&mut self, iterator: Option<T>) {
-        self.initialized = true;
-        self.current_iter = iterator;
-    }
-
-    fn reset(&mut self) {
-        self.initialized = false;
-        self.current_iter = None;
-    }
-}
-
 pub(crate) struct WalReplayIterator {
     options: WalReplayOptions,
-    wal_id_range: Range<u64>,
     table_store: Arc<TableStore>,
-    current_iter: IteratorHolder<WalIdAndIter>,
-    next_iters: VecDeque<JoinHandle<Result<Option<WalIdAndIter>, SlateDBError>>>,
+    wal_iter: WalIterator,
+    /// An error from the underlying WAL iterator, held back so that write batches
+    /// already applied to the current table are returned first. `DbReader` treats a
+    /// missing WAL file as the end of the WAL, so rows replayed before the error
+    /// must not be dropped with it. The error is surfaced on the following
+    /// [`Self::next`] call.
+    pending_error: Option<SlateDBError>,
+    /// The greatest WAL ID such that it and every WAL file before it in the replay
+    /// range are fully applied to returned tables. Tables are tagged with this
+    /// conservative watermark so that a table ending mid-file never claims a WAL
+    /// file it only partially contains.
+    last_completed_wal_id: u64,
     last_tick: i64,
     last_seq: u64,
     min_seq: u64,
-    next_wal_id: u64,
 }
 
 impl WalReplayIterator {
@@ -101,10 +77,16 @@ impl WalReplayIterator {
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
-        let sst_batch_size = options.sst_batch_size;
-        if sst_batch_size < 1 {
-            return Err(SlateDBError::InvalidSSTBatchSize(sst_batch_size));
-        }
+        // Everything before the replay range is already covered by the manifest,
+        // so the conservative WAL watermark starts just below the range.
+        let last_completed_wal_id = wal_id_range.start.saturating_sub(1);
+        let wal_iter = WalIterator::range(
+            wal_id_range,
+            options.sst_batch_size,
+            options.sst_iter_options.clone(),
+            Arc::clone(&table_store),
+        )
+        .await?;
 
         // load the last seq number from manifest, and use it as the starting seq number to avoid
         // replaying the entries that are already in the L0 SST. while replaying the WALs, we'll
@@ -113,32 +95,194 @@ impl WalReplayIterator {
         let min_seq = options.min_seq.unwrap_or(db_state.last_l0_seq);
         let last_seq = db_state.last_l0_seq;
         let last_tick = db_state.last_l0_clock_tick;
-        let next_wal_id = wal_id_range.start;
 
-        let mut replay_iter = WalReplayIterator {
+        Ok(WalReplayIterator {
             options,
-            wal_id_range,
-            table_store: Arc::clone(&table_store),
-            current_iter: IteratorHolder::new(),
-            next_iters: VecDeque::new(),
+            table_store,
+            wal_iter,
+            pending_error: None,
+            last_completed_wal_id,
             last_tick,
             last_seq,
             min_seq,
+        })
+    }
+
+    /// Get the next table replayed from the WAL. Replay accumulates write batches
+    /// until the returned table reaches [`WalReplayOptions::max_memtable_bytes`].
+    /// Tables are only split between write batches — all rows sharing a commit seq
+    /// stay in one table, and batches are applied in ascending seq order — so a
+    /// returned table may exceed the target when a single write batch is larger.
+    ///
+    /// The returned table's `last_wal_id` is a conservative watermark: the greatest
+    /// WAL ID such that it and every WAL file before it are fully contained in the
+    /// tables returned so far. A table that ends mid-file is tagged with the last
+    /// fully replayed WAL ID, so replaying from `last_wal_id + 1` and dropping rows
+    /// with seq <= the table's `last_seq` never misses or duplicates a commit.
+    ///
+    /// The final table may even be empty since writers use an empty WAL to fence
+    /// zombie writers. The empty table must still be returned so that replay logic
+    /// can account for the latest WAL ID.
+    pub(crate) async fn next(&mut self) -> Result<Option<ReplayedMemtable>, SlateDBError> {
+        if let Some(err) = self.pending_error.take() {
+            return Err(err);
+        }
+
+        let table = WritableKVTable::new();
+        let mut applied_any = false;
+
+        loop {
+            let writes = match self.wal_iter.next().await {
+                Ok(Some(writes)) => writes,
+                Ok(None) => break,
+                // Hold the error back so the write batches already applied to this
+                // table are returned first. `DbReader` treats a missing WAL file as
+                // the end of the WAL, so rows replayed before the error must not be
+                // dropped with it.
+                Err(err) if applied_any => {
+                    self.pending_error = Some(err);
+                    break;
+                }
+                Err(err) => return Err(err),
+            };
+
+            applied_any = true;
+            // A batch from WAL file `wal_id` proves every earlier file was fully
+            // applied (files are emitted in order and each yields at least one
+            // batch), so the watermark advances to `wal_id - 1` without relying on
+            // `last_in_file`. `last_in_file` merely sharpens the watermark to cover
+            // the current file at its final batch; without it the watermark lags
+            // one file behind, retaining at most one extra WAL file on recovery.
+            self.last_completed_wal_id = self
+                .last_completed_wal_id
+                .max(writes.wal_id.saturating_sub(1));
+            if writes.last_in_file {
+                assert!(writes.wal_id > self.last_completed_wal_id);
+                self.last_completed_wal_id = writes.wal_id;
+            }
+
+            for row_entry in writes.rows {
+                // skip the entries that are already in the L0 SST.
+                if row_entry.seq <= self.min_seq {
+                    continue;
+                }
+
+                if let Some(ts) = row_entry.create_ts {
+                    self.last_tick = self.last_tick.max(ts);
+                }
+                self.last_seq = self.last_seq.max(row_entry.seq);
+                table.put(row_entry);
+            }
+
+            if !table.is_empty() {
+                let meta = table.metadata();
+                let estimated_bytes = self
+                    .table_store
+                    .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
+                if estimated_bytes >= self.options.max_memtable_bytes {
+                    break;
+                }
+            }
+        }
+
+        if applied_any {
+            Ok(Some(ReplayedMemtable {
+                table,
+                last_tick: self.last_tick,
+                last_seq: self.last_seq,
+                last_wal_id: self.last_completed_wal_id,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// A set of writes along with the id of the WAL file they were read from. Two
+/// guarantees hold across the batches returned by [`WalIterator`]: all rows of a
+/// committed write batch (which share one commit seq) are contained in a single
+/// `ReplayedWrites`, and successive batches carry strictly increasing seq ranges.
+/// For now each batch simply holds all rows of one WAL file, in file order, which
+/// satisfies both (a commit never spans WAL files). `rows` is empty when the WAL
+/// file contains no rows (an empty WAL or a zero-byte fence marker); such batches
+/// are still returned so callers can account for the file's WAL ID.
+struct ReplayedWrites {
+    rows: Vec<RowEntry>,
+    wal_id: u64,
+    /// True when this batch is the last one in its WAL file. This is an
+    /// optimization: callers can already infer that a file is fully applied when
+    /// they see a batch from a later file, but this flag lets them advance their
+    /// WAL watermark over the current file without waiting for the next one.
+    last_in_file: bool,
+}
+
+/// A WAL file's id along with an iterator over its rows.
+struct WalFileIter {
+    wal_id: u64,
+    iter: Box<dyn RowEntryIterator + 'static>,
+}
+
+/// Iterates over the writes in a range of WAL files, preloading up to
+/// `sst_batch_size` WAL SSTs concurrently. Returns the rows of one WAL file per
+/// [`ReplayedWrites`], and verifies that files carry strictly increasing seq
+/// ranges — the ordering callers rely on to split and tag memtables safely.
+///
+/// Preloading only opens each WAL SST (footer, index, and any eagerly fetched
+/// blocks); a file's rows are read out only when it is returned from
+/// [`Self::next`], so at most one file's rows are materialized at a time.
+struct WalIterator {
+    /// The number of SSTs to preload while replaying
+    sst_batch_size: usize,
+    /// Options to pass through to underlying SST iterators
+    sst_iter_options: SstIteratorOptions,
+    /// Range of WAL IDs to iterate over
+    wal_id_range: Range<u64>,
+    table_store: Arc<TableStore>,
+    next_files: VecDeque<JoinHandle<Result<WalFileIter, SlateDBError>>>,
+    next_wal_id: u64,
+    /// The greatest seq returned so far, used to verify that WAL files arrive
+    /// with strictly increasing seq ranges.
+    last_seq: Option<u64>,
+    /// Set once iteration has ended, either because the range was exhausted or
+    /// because an error was returned.
+    finished: bool,
+}
+
+impl WalIterator {
+    async fn range(
+        wal_id_range: Range<u64>,
+        sst_batch_size: usize,
+        sst_iter_options: SstIteratorOptions,
+        table_store: Arc<TableStore>,
+    ) -> Result<Self, SlateDBError> {
+        if sst_batch_size < 1 {
+            return Err(SlateDBError::InvalidSSTBatchSize(sst_batch_size));
+        }
+
+        let next_wal_id = wal_id_range.start;
+        let mut wal_iter = WalIterator {
+            sst_batch_size,
+            sst_iter_options,
+            wal_id_range,
+            table_store,
+            next_files: VecDeque::new(),
             next_wal_id,
+            last_seq: None,
+            finished: false,
         };
 
         for _ in 0..sst_batch_size {
-            if !replay_iter.maybe_load_next_iter() {
+            if !wal_iter.maybe_load_next_file() {
                 break;
             }
         }
 
-        Ok(replay_iter)
+        Ok(wal_iter)
     }
 
-    fn maybe_load_next_iter(&mut self) -> bool {
+    fn maybe_load_next_file(&mut self) -> bool {
         if !self.wal_id_range.contains(&self.next_wal_id)
-            || self.next_iters.len() >= self.options.sst_batch_size
+            || self.next_files.len() >= self.sst_batch_size
         {
             return false;
         }
@@ -146,20 +290,20 @@ impl WalReplayIterator {
         let next_wal_id = self.next_wal_id;
         self.next_wal_id += 1;
 
-        async fn load_iter(
+        async fn open_file_iter(
             wal_id: u64,
             sst_iter_options: SstIteratorOptions,
             table_store: Arc<TableStore>,
-        ) -> Result<Option<WalIdAndIter>, SlateDBError> {
+        ) -> Result<WalFileIter, SlateDBError> {
             let sst = match table_store.open_sst(&SsTableId::Wal(wal_id)).await {
                 Ok(sst) => sst,
                 Err(SlateDBError::EmptySSTable) => {
                     // Zero-byte WAL files are fence markers; replay them as empty WALs
                     // so the last replayed WAL ID still advances past the marker.
-                    return Ok(Some(WalIdAndIter {
+                    return Ok(WalFileIter {
                         wal_id,
                         iter: Box::new(EmptyIterator::new()),
-                    }));
+                    });
                 }
                 Err(err) => return Err(err),
             };
@@ -170,105 +314,121 @@ impl WalReplayIterator {
                 sst_iter_options,
             )
             .await?;
-            Ok(iter.map(|iter| WalIdAndIter {
+            // An unbounded, unfiltered scan over a WAL SST always yields an
+            // iterator. `None` means the file cannot be read, and replay must
+            // fail rather than silently end early and drop the remaining WALs.
+            let Some(iter) = iter else {
+                error!(
+                    "could not construct row iterator over WAL SST. [wal_id={}]",
+                    wal_id
+                );
+                return Err(SlateDBError::InvalidDBState);
+            };
+            Ok(WalFileIter {
                 wal_id,
                 iter: Box::new(iter) as Box<dyn RowEntryIterator + 'static>,
-            }))
+            })
         }
 
-        let handle = task::spawn(load_iter(
+        let handle = task::spawn(open_file_iter(
             next_wal_id,
-            self.options.sst_iter_options.clone(),
+            self.sst_iter_options.clone(),
             Arc::clone(&self.table_store),
         ));
-        self.next_iters.push_back(handle);
+        self.next_files.push_back(handle);
         true
     }
 
-    async fn advance_current_iter(&mut self) -> Result<(), SlateDBError> {
-        let next_iter = if let Some(join_handle) = self.next_iters.pop_front() {
-            match join_handle.await {
-                Ok(Ok(sst_iter)) => sst_iter,
-                Ok(Err(slate_err)) => return Err(slate_err),
-                Err(join_err) => {
-                    let task_name = format!("wal_replay[{:?}]", self.wal_id_range);
-                    if let Ok(panic_err) = join_err.try_into_panic() {
-                        error!(
-                            "wal_replay task panicked unexpectedly. [task_name={}, panic={}]",
-                            task_name,
-                            panic_string(&panic_err),
-                        );
-                        return Err(SlateDBError::BackgroundTaskPanic(task_name));
-                    }
-                    return Err(SlateDBError::BackgroundTaskCancelled(task_name));
-                }
-            }
-        } else {
-            None
+    /// Await the next preloaded WAL file and return an iterator over its rows.
+    /// Returns `None` when there are no more files to read.
+    async fn take_next_file(&mut self) -> Result<Option<WalFileIter>, SlateDBError> {
+        let Some(join_handle) = self.next_files.pop_front() else {
+            return Ok(None);
         };
-        self.current_iter.advance(next_iter);
-        Ok(())
+        match join_handle.await {
+            Ok(result) => result.map(Some),
+            Err(join_err) => {
+                let task_name = format!("wal_replay[{:?}]", self.wal_id_range);
+                if let Ok(panic_err) = join_err.try_into_panic() {
+                    error!(
+                        "wal_replay task panicked unexpectedly. [task_name={}, panic={}]",
+                        task_name,
+                        panic_string(&panic_err),
+                    );
+                    return Err(SlateDBError::BackgroundTaskPanic(task_name));
+                }
+                Err(SlateDBError::BackgroundTaskCancelled(task_name))
+            }
+        }
     }
 
-    /// Get the next table replayed from the WAL. Replay accumulates complete WAL
-    /// SSTs until the returned table reaches [`WalReplayOptions::max_memtable_bytes`],
-    /// unless it is the final table replayed from the WAL. The final table may even
-    /// be empty since writers use an empty WAL to fence zombie writers. The empty
-    /// table must still be returned so that replay logic can account for the latest
-    /// WAL ID.
-    ///
-    /// The returned table may exceed [`WalReplayOptions::max_memtable_bytes`] when
-    /// a complete WAL SST is larger than the configured target, because replay
-    /// must not split a WAL SST across replayed memtables.
-    pub(crate) async fn next(&mut self) -> Result<Option<ReplayedMemtable>, SlateDBError> {
-        if self.current_iter.is_finished() {
+    /// Get the next set of writes from the WAL files in the range. Each returned
+    /// [`ReplayedWrites`] holds the rows of one WAL file; a WAL file with no rows
+    /// yields a batch with empty `rows`. Returns `None` once all WAL files in the
+    /// range have been read. It is an error if a WAL file in the range is not
+    /// present. Errors are returned only on calls that return no batch, so rows
+    /// read from earlier WAL files are never dropped with a later file's error.
+    async fn next(&mut self) -> Result<Option<ReplayedWrites>, SlateDBError> {
+        if self.finished {
             return Ok(None);
         }
 
-        let table = WritableKVTable::new();
-        let mut last_wal_id = 0;
+        self.maybe_load_next_file();
+        let mut file_iter = match self.take_next_file().await {
+            Ok(Some(file_iter)) => file_iter,
+            Ok(None) => {
+                self.finished = true;
+                return Ok(None);
+            }
+            Err(err) => {
+                self.finished = true;
+                return Err(err);
+            }
+        };
 
-        while !self.current_iter.is_finished() {
-            if let Some(wal_id_and_iter) = &mut self.current_iter.current_iter {
-                while let Some(row_entry) = wal_id_and_iter.iter.next().await? {
-                    // skip the entries that are already in the L0 SST.
-                    if row_entry.seq <= self.min_seq {
-                        continue;
-                    }
-
-                    if let Some(ts) = row_entry.create_ts {
-                        self.last_tick = self.last_tick.max(ts);
-                    }
-                    self.last_seq = self.last_seq.max(row_entry.seq);
-                    table.put(row_entry);
-                }
-
-                last_wal_id = wal_id_and_iter.wal_id;
-
-                let meta = table.metadata();
-                let estimated_bytes = self
-                    .table_store
-                    .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
-                if !table.is_empty() && estimated_bytes >= self.options.max_memtable_bytes {
-                    self.current_iter.reset();
-                    break;
+        // Read out the file's rows. Only the file being returned is materialized;
+        // preloaded files just hold opened iterators.
+        let mut rows = Vec::new();
+        loop {
+            match file_iter.iter.next().await {
+                Ok(Some(row)) => rows.push(row),
+                Ok(None) => break,
+                Err(err) => {
+                    self.finished = true;
+                    return Err(err);
                 }
             }
-
-            self.maybe_load_next_iter();
-            self.advance_current_iter().await?
         }
 
-        if last_wal_id > 0 {
-            Ok(Some(ReplayedMemtable {
-                table,
-                last_tick: self.last_tick,
-                last_seq: self.last_seq,
-                last_wal_id,
-            }))
-        } else {
-            Ok(None)
+        // Verify that WAL files carry strictly increasing seq ranges. Replay
+        // relies on this ordering to split and tag memtables safely: a commit seq
+        // spanning two WAL files, or files with overlapping seq ranges, would
+        // break recovery's (wal_id, seq) watermark filtering.
+        if let Some(min_seq) = rows.iter().map(|row| row.seq).min() {
+            if let Some(last_seq) = self.last_seq {
+                if min_seq <= last_seq {
+                    error!(
+                        "WAL replay saw out-of-order seqs across WAL files. \
+                         [wal_id={}, min_seq={}, last_seq={}]",
+                        file_iter.wal_id, min_seq, last_seq,
+                    );
+                    self.finished = true;
+                    return Err(SlateDBError::InvalidDBState);
+                }
+            }
+            let max_seq = rows
+                .iter()
+                .map(|row| row.seq)
+                .max()
+                .expect("non-empty rows have a max seq");
+            self.last_seq = Some(max_seq);
         }
+
+        Ok(Some(ReplayedWrites {
+            rows,
+            wal_id: file_iter.wal_id,
+            last_in_file: true,
+        }))
     }
 }
 
@@ -658,6 +818,115 @@ mod tests {
                 "WAL replay returned out-of-order memtable sequence ranges: {replayed_seq_ranges:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn should_tag_tables_with_last_fully_replayed_wal_id() {
+        let table_store = test_table_store();
+
+        // Two WAL files with two single-row write batches each. Size replayed
+        // tables so each holds one write batch, forcing splits mid-file.
+        let wal_entries = [
+            vec![
+                RowEntry::new_value(b"key_001", &[b'x'; 128], 1),
+                RowEntry::new_value(b"key_002", &[b'x'; 128], 2),
+            ],
+            vec![
+                RowEntry::new_value(b"key_003", &[b'x'; 128], 3),
+                RowEntry::new_value(b"key_004", &[b'x'; 128], 4),
+            ],
+        ];
+        let single_row_size = wal_entries[0][0].estimated_size();
+        let max_memtable_bytes = table_store.estimate_encoded_size_compacted(1, single_row_size);
+
+        for (i, entries) in wal_entries.into_iter().enumerate() {
+            let mut builder = table_store.wal_table_builder();
+            for entry in entries {
+                builder.add(entry).await.unwrap();
+            }
+            let encoded_sst = builder.build().await.unwrap();
+            table_store
+                .write_sst(&SsTableId::Wal(i as u64 + 1), &encoded_sst, false)
+                .await
+                .unwrap();
+        }
+
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
+            &ManifestCore::new(),
+            WalReplayOptions {
+                max_memtable_bytes,
+                ..WalReplayOptions::default()
+            },
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let mut replayed = Vec::new();
+        while let Some(replayed_table) = replay_iter.next().await.unwrap() {
+            let metadata = replayed_table.table.metadata();
+            replayed.push((
+                replayed_table.last_wal_id,
+                metadata.first_seq,
+                metadata.last_seq,
+            ));
+        }
+
+        // Each table must be tagged with the last fully replayed WAL ID:
+        // replaying from `last_wal_id + 1` and dropping rows with seq <= the
+        // table's max applied seq reproduces exactly the missing rows. While
+        // `WalIterator` returns one batch per WAL file, tables split at file
+        // boundaries, so each table's tag is the id of its final file.
+        assert_eq!(replayed, vec![(1, 1, 2), (2, 3, 4)]);
+    }
+
+    #[tokio::test]
+    async fn should_keep_rows_with_same_seq_in_one_table_when_file_is_not_seq_ordered() {
+        let table_store = test_table_store();
+
+        // A WAL file whose physical order is key order rather than seq order, with
+        // one commit (seq 2) split around another (seq 1). Older SlateDB versions
+        // wrote WAL SSTs in key order, so replay must regroup rows by seq.
+        let entries = vec![
+            RowEntry::new_value(b"key_001", &[b'x'; 128], 2),
+            RowEntry::new_value(b"key_002", &[b'x'; 128], 1),
+            RowEntry::new_value(b"key_003", &[b'x'; 128], 2),
+        ];
+        let max_memtable_bytes =
+            table_store.estimate_encoded_size_compacted(1, entries[0].estimated_size());
+
+        let mut builder = table_store.wal_table_builder();
+        for entry in entries {
+            builder.add(entry).await.unwrap();
+        }
+        let encoded_sst = builder.build().await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(1), &encoded_sst, false)
+            .await
+            .unwrap();
+
+        let mut replay_iter = WalReplayIterator::all_wal_ids(
+            &ManifestCore::new(),
+            WalReplayOptions {
+                max_memtable_bytes,
+                ..WalReplayOptions::default()
+            },
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let mut replayed = Vec::new();
+        while let Some(replayed_table) = replay_iter.next().await.unwrap() {
+            let metadata = replayed_table.table.metadata();
+            replayed.push((metadata.entry_num, metadata.first_seq, metadata.last_seq));
+        }
+
+        // Both seq=2 rows must land in one table even though a seq=1 row sits
+        // between them in the file. While `WalIterator` returns one batch per
+        // WAL file this holds trivially; this guards the contract if sub-file
+        // batching is reintroduced.
+        assert_eq!(replayed, vec![(3, 1, 2)]);
     }
 
     #[tokio::test]
