@@ -727,6 +727,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
+            SlateDBError::WalTruncated => Error::data(msg),
             SlateDBError::WalDataError(src) => Error::data(msg).with_source(Box::new(src)),
 
             // Internal errors
@@ -742,7 +743,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
-            SlateDBError::WalTruncated => Error::internal(msg),
             SlateDBError::WalInternalError(src) => Error::internal(msg).with_source(Box::new(src)),
         }
     }

@@ -15,7 +15,7 @@ pub(crate) mod wal_sst_builder;
 pub(crate) mod writer_init;
 
 /// A range of WAL File IDs
-pub struct WalFileRange(Bound<u64>, Bound<u64>);
+pub struct WalFileRange(pub Bound<u64>, pub Bound<u64>);
 
 impl From<Range<u64>> for WalFileRange {
     fn from(range: Range<u64>) -> Self {
@@ -113,10 +113,9 @@ impl WriterManifest {
 
 /// The result returned by [`WriterInit::fence_and_init`]
 pub struct WriterInitResult {
-    // TODO: change me to an iterator
     /// An iterator that returns writes that must be replayed before starting SlateDB to recover
     /// data from the WAL.
-    pub replay_range: WalFileRange,
+    pub replay_iterator: Box<dyn WalIterator>,
     /// The WAL writer that will be used to append new writes to the WAL
     pub wal_writer: Box<dyn WalWriter>,
 }
@@ -230,6 +229,43 @@ pub trait WalWriter: Send {
     async fn close(&mut self) -> Result<(), WalError>;
 }
 
+/// Rows returned by [`WalIterator`]
+#[derive(Clone)]
+pub struct WalRows {
+    /// The rows read from the WAL File. All the rows with a given sequence number must be present
+    /// in th same [`WalRows`].
+    pub rows: Vec<RowEntry>,
+    /// The id of the last WAL File for which all rows have been consumed by the iterator and
+    /// returned wither in this [`WalRows`] or a [`WalRows`] returned by an earlier call to
+    /// [`WalIterator::next`]
+    pub last_consumed_wal_file_id: u64,
+}
+
+/// An iterator over rows in some range of the WAL
+#[async_trait]
+pub trait WalIterator: Send + 'static {
+    /// Returns the next set of rows. Rows must be returned in sequence and WAL File order.
+    /// Returns None when iterator's range is exhausted. Iterators created using an unbounded
+    /// end range that have exhausted the current WAL block until new rows are appended and never
+    /// return `None`.
+    /// Returns [`WalError::WalTruncated`] if the iterator observes that the WAL was truncated
+    /// while iterating.
+    async fn next(&mut self) -> Result<Option<WalRows>, WalError>;
+}
+
+/// API for reading from the WAL. Used by the Reader/
+#[async_trait]
+pub trait WalReader {
+    /// Returns an iterator over the specified range of WAL File IDs. The start of the range must
+    /// not be `Unbounded`. If the end of the range is `Unbounded` then the returned iterator
+    /// continues returning writes as new writes are appended to the WAL. Otherwise, it returns
+    /// `None` upon reaching the end of the range.
+    async fn iterator(
+        &self,
+        wal_file_id_range: WalFileRange,
+    ) -> Result<Box<dyn WalIterator>, WalError>;
+}
+
 impl From<WalStatus> for WalError {
     fn from(status: WalStatus) -> Self {
         status
@@ -246,18 +282,16 @@ impl From<WalStatus> for SlateDBError {
 
 impl From<SlateDBError> for WalError {
     fn from(value: SlateDBError) -> Self {
-        {
-            let public: crate::Error = value.clone().into();
-            match public.kind() {
-                ErrorKind::Closed(CloseReason::Fenced) => WalError::Fenced,
-                ErrorKind::Closed(CloseReason::Clean) => WalError::Closed,
-                ErrorKind::Closed(_) => WalError::InternalError(Arc::new(value)),
-                ErrorKind::Unavailable => WalError::Unavailable(Arc::new(value)),
-                ErrorKind::Invalid => WalError::InternalError(Arc::new(value)),
-                ErrorKind::Data => WalError::DataError(Arc::new(value)),
-                ErrorKind::Internal => WalError::InternalError(Arc::new(value)),
-                ErrorKind::Transaction => WalError::InternalError(Arc::new(value)),
-            }
+        let public: crate::Error = value.clone().into();
+        match public.kind() {
+            ErrorKind::Closed(CloseReason::Fenced) => WalError::Fenced,
+            ErrorKind::Closed(CloseReason::Clean) => WalError::Closed,
+            ErrorKind::Closed(_) => WalError::InternalError(Arc::new(value)),
+            ErrorKind::Unavailable => WalError::Unavailable(Arc::new(value)),
+            ErrorKind::Invalid => WalError::InternalError(Arc::new(value)),
+            ErrorKind::Data => WalError::DataError(Arc::new(value)),
+            ErrorKind::Internal => WalError::InternalError(Arc::new(value)),
+            ErrorKind::Transaction => WalError::InternalError(Arc::new(value)),
         }
     }
 }
