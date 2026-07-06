@@ -339,6 +339,10 @@ export default defineConfig({
 						{
 							label: 'Standalone Compactor',
 							link: '/docs/tutorials/standalone-compactor/',
+						},
+						{
+							label: 'Standalone Garbage Collector',
+							link: '/docs/tutorials/standalone-garbage-collector/',
 						}
 					]
 				},
