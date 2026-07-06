@@ -733,6 +733,7 @@ fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
 /// | Memory | `memory` | [load_memory] |
 /// | AWS | `aws` | [load_aws] |
 /// | Azure | `azure` | [load_azure] |
+/// | GCP | `gcp` | [load_gcp] |
 pub fn load_object_store_from_env(
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, crate::Error> {
@@ -745,6 +746,8 @@ pub fn load_object_store_from_env(
         "aws" => load_aws(),
         #[cfg(feature = "azure")]
         "azure" => load_azure(),
+        #[cfg(feature = "gcp")]
+        "gcp" => load_gcp(),
         invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
             key: "CLOUD_PROVIDER".to_string(),
             value: Some(invalid_value.to_string()),
@@ -801,6 +804,21 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     Ok(Arc::new(builder.build().map_err(|error| {
         SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
             store: "MicrosoftAzure",
+            source: Box::new(error),
+        }))
+    })?) as Arc<dyn ObjectStore>)
+}
+
+/// Loads a Google Cloud Storage object store instance. The environment variables
+/// consumed are the same as those supported by [`GoogleCloudStorageBuilder::from_env`].
+/// Refer to the builder documentation for the full list and meaning of supported variables:
+/// <https://docs.rs/object_store/latest/object_store/gcp/struct.GoogleCloudStorageBuilder.html#method.with_config>
+#[cfg(feature = "gcp")]
+pub fn load_gcp() -> Result<Arc<dyn ObjectStore>, crate::Error> {
+    let builder = object_store::gcp::GoogleCloudStorageBuilder::from_env();
+    Ok(Arc::new(builder.build().map_err(|error| {
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "GoogleCloudStorage",
             source: Box::new(error),
         }))
     })?) as Arc<dyn ObjectStore>)
