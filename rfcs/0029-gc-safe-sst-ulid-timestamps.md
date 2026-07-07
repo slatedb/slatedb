@@ -49,10 +49,13 @@ This RFC fixes the race by changing where IDs are minted, not how:
   upload, in the same sequence order that L0s are later published.
 - Newly flushed L0 views use the physical SST ID as their view ID.
 
-Clock skew larger than the GC `min_age` is out of scope. Users who expect more
-skew configure a larger `min_age`. Manifest and `.compactions` invariants
-reject unsafe IDs as a safety net, so skew beyond the bound fails loudly
-instead of causing silent data loss.
+Clock skew is handled in two ways. Skew between the GC clock and the clocks
+that mint IDs is safe as long as it stays below `min_age`, and users who
+expect more skew can configure a larger `min_age`. Skew between an old writer
+and a new writer across a restart is not fixed by `min_age`. There, the
+manifest and `.compactions` invariants reject IDs minted below already
+committed timestamps, so the new writer fails with a clear error instead of
+causing silent data loss.
 
 There are no manifest or SST format changes. GC stays a pure deleter, with one
 change: the `newest_l0` cutoff term only considers L0s owned by this database.
@@ -120,12 +123,13 @@ The unsafe sequence is:
    a missing object.
 
 This race was reproduced by a deterministic simulation test failure in
-PR #1758. Clock skew can theoretically create the same effect, where a writer 
-or compaction worker restarts on a host whose clock is behind timestamps
-already committed to durable state, and mints new IDs that are immediately 
-below the cutoff. We have not seen the clock-skew variant in practice. 
-This RFC assumes clock skew is bounded, and the bound is `min_age` 
-(see [Clock Skew](#clock-skew)).
+PR #1758. Clock skew between the GC clock and the clocks that mint IDs can
+create the same effect. If GC runs inside the writer, both share one clock,
+so only an upload stall longer than `min_age` can trigger the race. If GC
+runs in its own process, a fresh SST can sit below the cutoff right away:
+either the minting clock is behind the GC clock, or the GC clock is ahead of
+the minting clock. We have not seen this in practice. This RFC assumes this
+skew is bounded by `min_age` (see [Clock Skew](#clock-skew)).
 
 ## Goals
 
@@ -138,10 +142,12 @@ This RFC assumes clock skew is bounded, and the bound is `min_age`
 
 ## Non-Goals
 
-- Handle clock skew larger than `min_age`. Users configure `min_age` above
-  the skew they expect.
+- Handle skew between the GC clock and the minting clocks that is larger
+  than `min_age`. Users configure `min_age` above the skew they expect.
+- Tolerate clock skew between an old writer and a new writer across a
+  restart. The invariants fail the new writer with a clear error, and the
+  user has to fix the clock or wait (see [Failure Handling](#failure-handling)).
 - Redesign compacted SST GC around sequence numbers or manifest IDs.
-- Add multi-writer support.
 - Fix unrelated full-ULID ordering bugs, such as choosing between two
   same-millisecond compaction IDs by comparing the full random suffix.
 
@@ -191,8 +197,13 @@ database, with timestamps from another machine's clock. If such an SST has a
 far-future timestamp, it must not raise the bar for this database's own IDs or
 cutoffs.
 
+For example, a clone starts with a copy of the parent's manifest. Its L0s and
+its `last_compacted_l0_sst_view_id` still carry ULIDs minted by the parent's
+clock. If the parent's clock was ahead, using those timestamps as this
+database's watermark would block its own flushes until its clock catches up.
+
 Add an owned-watermark helper, such as
-`max_owned_l0_ulid_timestamp_across_trees`. It scans the unsegmented tree and
+`newest_owned_l0`. It scans the unsegmented tree and
 every segment tree, takes the maximum physical SST ULID timestamp from live
 L0s owned by this database, and falls back to the tree's
 `last_compacted_l0_sst_view_id` when a tree has no live owned L0s. It ignores
@@ -200,7 +211,8 @@ SSTs referenced through `external_dbs` and inherited clone or union markers.
 
 Use it in both places:
 
-- the `l0_ulid_cutoff` invariant, and
+- the `l0_ulid_cutoff` invariant (see [Invariant Checks](#invariant-checks)),
+  and
 - the GC `newest_l0` cutoff term (see [Garbage Collection](#garbage-collection)).
 
 ### Invariant Checks
@@ -232,7 +244,10 @@ watermark.
 ### Failure Handling
 
 With minting moved to dispatch, an invariant failure means clock skew or a new
-minting path that bypassed the rules, not a normal race.
+minting path that skipped the rules, not a normal race. A minting path that
+skips the rules is a bug in SlateDB, but the check only sees timestamps and
+cannot tell the two causes apart. If the clocks are fine and the error keeps
+happening, the user should report a bug.
 
 - If the error is returned in a user call path, the caller gets the error and
   the `Db` stays open.
@@ -240,21 +255,40 @@ minting path that bypassed the rules, not a normal race.
   `Db` is marked closed with a failed state.
 
 What the user should do: check the host clock and run NTP. If a previous
-writer's clock was ahead of real time, the only remedy is to wait until the
-wall clock passes the committed timestamps, then reopen. Retrying without
-fixing the clock will fail again.
+writer's clock was ahead of real time, wait until the wall clock passes the
+committed timestamps, then reopen. Retrying without fixing the clock will
+fail again.
+
+If the committed timestamps are too far in the future to wait out, the
+database is stuck and needs manual recovery. There are two options:
+
+- Revert to a manifest version from before the bad L0s were published. This
+  loses the writes in those L0s.
+- Copy the affected SSTs to newly minted IDs and commit a manifest that
+  points at the copies. This keeps the data. The bad timestamps are part of
+  the SST object names, not just manifest fields, so this needs a copy, not a
+  manifest edit. Tooling for this is future work.
 
 ### Clock Skew
 
-This RFC assumes clock skew is bounded by `min_age` (default 300 seconds).
-Users who expect more skew should configure a larger `min_age`. Skew beyond
-the bound does not cause silent data loss; it causes invariant failures, which
-are handled as above.
+There are two kinds of skew, and they have different protections.
+
+Skew between the GC clock and the clocks that mint IDs. This is what
+`min_age` bounds (default 300 seconds). If a minting clock is behind the GC
+clock by less than `min_age`, a fresh unpublished SST still looks younger
+than `min_age` to GC, so it is safe. Users who expect more skew should
+configure a larger `min_age`.
+
+Skew between the minting clocks themselves, for example an old writer ahead
+of a new writer, or a compactor coordinator ahead of a worker. `min_age` does
+not help here. The invariants catch it: the new ID is below a committed
+timestamp, the update is rejected, and the user has to fix the clock or wait.
+This costs availability, not data.
 
 A clock set far in the future is a setup error. It commits far-future
 timestamps that block later, correctly clocked writers until real time catches
-up. The invariant error message exposes both timestamps so this is visible
-early.
+up. The invariant error message shows both timestamps so this is visible
+early. See [Failure Handling](#failure-handling) for how to recover.
 
 ### Garbage Collection
 
@@ -271,7 +305,7 @@ the `newest_l0` protection; they are protected by being referenced.
 - Add pre-allocated segment SST IDs to `UploadJob` and update the uploader to
   use them.
 - Update `ManifestWriter::apply_uploaded_state` to create identity L0 views.
-- Add `max_owned_l0_ulid_timestamp_across_trees` and use it in
+- Add `newest_owned_l0` and use it in
   `l0_ulid_cutoff` and in the GC `newest_l0` term.
 - Register the manifest and `.compactions` invariants in the shared
   construction paths for loaded and newly created stored objects.
@@ -283,17 +317,17 @@ the `newest_l0` protection; they are protected by being referenced.
 SlateDB features and components that this RFC interacts with:
 
 - [x] Error model, API errors
-- [x] Sequence numbers
-- [x] Manifest format
-- [x] Checkpoints
+- [ ] Sequence numbers
+- [ ] Manifest format
+- [ ] Checkpoints
 - [x] Clones
 - [x] Garbage collection
-- [x] Database splitting and merging
+- [ ] Database splitting and merging
 - [x] Compaction state persistence
-- [x] Compaction strategies
+- [ ] Compaction strategies
 - [x] Distributed compaction
 - [x] Compactions format
-- [x] SST format or block format
+- [ ] SST format or block format
 - [x] Observability (metrics/logging/tracing)
 
 ## Operations
@@ -303,6 +337,9 @@ SlateDB features and components that this RFC interacts with:
 - L0 upload and compaction output paths still write each SST once.
 - ID allocation moves from the upload worker to dispatch; the work is the
   same.
+- The invariant checks are in-memory timestamp comparisons over the items in
+  an update (new L0s, job IDs, outputs). They add no I/O, and their cost is
+  small next to the object-store write.
 - No object-store copy, rename, or extra GC CAS path is added.
 
 ### Observability
