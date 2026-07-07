@@ -644,15 +644,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_filter_policies()
-		})
-		if checksum != 9193 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_filter_policies: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator()
 		})
 		if checksum != 5839 {
@@ -698,15 +689,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size()
-		})
-		if checksum != 40009 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store()
 		})
 		if checksum != 4790 {
@@ -730,15 +712,6 @@ func uniffiCheckChecksums() {
 		if checksum != 41016 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies()
-		})
-		if checksum != 12871 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4211,11 +4184,6 @@ type DbBuilderInterface interface {
 	WithDbCache(dbCache *DbCache) error
 	// Disables the SST block and metadata cache.
 	WithDbCacheDisabled() error
-	// Sets the filter policies used for SST filter construction and evaluation.
-	//
-	// Pass an empty vec to disable filters entirely. When unset, the default
-	// is a single bloom filter with 10 bits per key.
-	WithFilterPolicies(policies []*FilterPolicy) error
 	// Installs an application-defined merge operator.
 	WithMergeOperator(mergeOperator MergeOperator) error
 	// Installs an application-defined metrics recorder.
@@ -4229,8 +4197,6 @@ type DbBuilderInterface interface {
 	WithSegmentExtractor(extractor PrefixExtractor) error
 	// Applies a [`crate::Settings`] object to the builder.
 	WithSettings(settings *Settings) error
-	// Sets the SSTable block size used for newly written tables.
-	WithSstBlockSize(sstBlockSize SstBlockSize) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -4307,21 +4273,6 @@ func (_self *DbBuilder) WithDbCacheDisabled() error {
 	return _uniffiErr.AsError()
 }
 
-// Sets the filter policies used for SST filter construction and evaluation.
-//
-// Pass an empty vec to disable filters entirely. When unset, the default
-// is a single bloom filter with 10 bits per key.
-func (_self *DbBuilder) WithFilterPolicies(policies []*FilterPolicy) error {
-	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_filter_policies(
-			_pointer, FfiConverterSequenceFilterPolicyINSTANCE.Lower(policies), _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
-}
-
 // Installs an application-defined merge operator.
 func (_self *DbBuilder) WithMergeOperator(mergeOperator MergeOperator) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
@@ -4380,18 +4331,6 @@ func (_self *DbBuilder) WithSettings(settings *Settings) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings(
 			_pointer, FfiConverterSettingsINSTANCE.Lower(settings), _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
-}
-
-// Sets the SSTable block size used for newly written tables.
-func (_self *DbBuilder) WithSstBlockSize(sstBlockSize SstBlockSize) error {
-	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size(
-			_pointer, FfiConverterSstBlockSizeINSTANCE.Lower(sstBlockSize), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -5202,12 +5141,6 @@ type DbReaderBuilderInterface interface {
 	Build() (*DbReader, error)
 	// Pins the reader to an existing checkpoint UUID string.
 	WithCheckpointId(checkpointId string) error
-	// Sets the filter policies used when decoding SST filter blocks.
-	//
-	// Must match (or be a superset of) the writer's policies so SST filter
-	// sub-blocks can be decoded; unrecognized policy names are silently
-	// skipped. Defaults to a single bloom filter with 10 bits per key.
-	WithFilterPolicies(policies []*FilterPolicy) error
 	// Installs an application-defined merge operator used while reading merge rows.
 	WithMergeOperator(mergeOperator MergeOperator) error
 	// Installs an application-defined metrics recorder.
@@ -5277,22 +5210,6 @@ func (_self *DbReaderBuilder) WithCheckpointId(checkpointId string) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(
 			_pointer, FfiConverterStringINSTANCE.Lower(checkpointId), _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
-}
-
-// Sets the filter policies used when decoding SST filter blocks.
-//
-// Must match (or be a superset of) the writer's policies so SST filter
-// sub-blocks can be decoded; unrecognized policy names are silently
-// skipped. Defaults to a single bloom filter with 10 bits per key.
-func (_self *DbReaderBuilder) WithFilterPolicies(policies []*FilterPolicy) error {
-	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_filter_policies(
-			_pointer, FfiConverterSequenceFilterPolicyINSTANCE.Lower(policies), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -13655,53 +13572,6 @@ type FfiDestroyerSequenceBytes struct{}
 func (FfiDestroyerSequenceBytes) Destroy(sequence [][]byte) {
 	for _, value := range sequence {
 		FfiDestroyerBytes{}.Destroy(value)
-	}
-}
-
-type FfiConverterSequenceFilterPolicy struct{}
-
-var FfiConverterSequenceFilterPolicyINSTANCE = FfiConverterSequenceFilterPolicy{}
-
-func (c FfiConverterSequenceFilterPolicy) Lift(rb RustBufferI) []*FilterPolicy {
-	return LiftFromRustBuffer[[]*FilterPolicy](c, rb)
-}
-
-func (c FfiConverterSequenceFilterPolicy) Read(reader io.Reader) []*FilterPolicy {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]*FilterPolicy, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterFilterPolicyINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceFilterPolicy) Lower(value []*FilterPolicy) C.RustBuffer {
-	return LowerIntoRustBuffer[[]*FilterPolicy](c, value)
-}
-
-func (c FfiConverterSequenceFilterPolicy) LowerExternal(value []*FilterPolicy) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]*FilterPolicy](c, value))
-}
-
-func (c FfiConverterSequenceFilterPolicy) Write(writer io.Writer, value []*FilterPolicy) {
-	if len(value) > math.MaxInt32 {
-		panic("[]*FilterPolicy is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterFilterPolicyINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceFilterPolicy struct{}
-
-func (FfiDestroyerSequenceFilterPolicy) Destroy(sequence []*FilterPolicy) {
-	for _, value := range sequence {
-		FfiDestroyerFilterPolicy{}.Destroy(value)
 	}
 }
 

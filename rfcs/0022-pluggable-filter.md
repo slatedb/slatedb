@@ -458,26 +458,14 @@ pub struct Settings {
 `DbBuilder` and `CompactorBuilder` gain a `with_filter_policies` method:
 
 ```rust
-impl<P: Into<Path>> DbBuilder<P> {
-    /// Sets the filter policies for this database. Each policy produces a
+impl SsTableFormat {
+    /// Sets the filter policies for this SST format. Each policy produces a
     /// separate filter per SST, stored in a composite filter block. On
     /// read, all filters are evaluated with AND logic — an SST is skipped
     /// if any filter returns `false`.
     ///
     /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`.
     /// Pass an empty vec to disable filters.
-    pub fn with_filter_policies(
-        mut self,
-        policies: Vec<Arc<dyn FilterPolicy>>,
-    ) -> Self {
-        self.filter_policies = policies;
-        self
-    }
-}
-
-impl<P: Into<Path>> CompactorBuilder<P> {
-    /// Sets the filter policies used when the compactor rewrites SSTs.
-    /// Must match the writer's policies to avoid silently dropping filters.
     pub fn with_filter_policies(
         mut self,
         policies: Vec<Arc<dyn FilterPolicy>>,
@@ -541,8 +529,9 @@ let db = Db::builder("path", object_store).build().await?;
 
 // Full-key + prefix bloom filter (recommended for prefix scan workloads)
 let db = Db::builder("path", object_store)
-    .with_filter_policies(vec![Arc::new(BloomFilterPolicy::new(10)
-        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new())))])
+    .with_sst_format(SsTableFormat::default().with_filter_policies(vec![Arc::new(
+        BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(MyPrefixExtractor::new())),
+    )]))
     .build()
     .await?;
 
@@ -550,19 +539,21 @@ let db = Db::builder("path", object_store)
 // extracted prefix of the queried key; scan_prefix probes with the
 // extracted prefix of the scan target. No full-key hashes are stored.
 let db = Db::builder("path", object_store)
-    .with_filter_policies(vec![Arc::new(BloomFilterPolicy::new(10)
-        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
-        .with_whole_key_filtering(false))])
+    .with_sst_format(SsTableFormat::default().with_filter_policies(vec![Arc::new(
+        BloomFilterPolicy::new(10)
+            .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
+            .with_whole_key_filtering(false),
+    )]))
     .build()
     .await?;
 
 // Multiple filters: bloom + custom min/max filter
 let db = Db::builder("path", object_store)
-    .with_filter_policies(vec![
+    .with_sst_format(SsTableFormat::default().with_filter_policies(vec![
         Arc::new(BloomFilterPolicy::new(10)
             .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))),
         Arc::new(MyMinMaxFilterPolicy::new(...)),
-    ])
+    ]))
     .build()
     .await?;
 
@@ -930,7 +921,7 @@ Example configuration:
 
 ```rust
 let db = Db::builder("path", object_store)
-    .with_filter_policies(vec![
+    .with_sst_format(SsTableFormat::default().with_filter_policies(vec![
         // Full-key bloom, only for "user::" keys
         Arc::new(BloomFilterPolicy::new(10)
             .with_key_selector(Arc::new(StartsWithSelector::new("user::")))),
@@ -939,7 +930,7 @@ let db = Db::builder("path", object_store)
             .with_key_selector(Arc::new(StartsWithSelector::new("post::")))
             .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
             .with_whole_key_filtering(false)),
-    ])
+    ]))
     .build().await?;
 ```
 
