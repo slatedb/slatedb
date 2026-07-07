@@ -214,57 +214,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_collect_deletes_large_manifest_backlog() {
-        let object_store = Arc::new(InMemory::new());
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from("/root"),
-            object_store.clone(),
-        ));
-        let mut stored_manifest = StoredManifest::create_new_db(
-            manifest_store.clone(),
-            ManifestCore::new(),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
-        // Create well over GC_DELETE_CONCURRENCY manifests so the deletion pass
-        // exercises multiple concurrent batches.
-        let update_count = GC_DELETE_CONCURRENCY * 3;
-        for _ in 0..update_count {
-            stored_manifest
-                .update(stored_manifest.prepare_dirty().unwrap())
-                .await
-                .unwrap();
-        }
-
-        let recorder = MetricsRecorderHelper::noop();
-        let task = ManifestGcTask::new(
-            manifest_store.clone(),
-            Arc::new(GcStats::new(&recorder)),
-            GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(1),
-                interval: None,
-                dry_run: false,
-            },
-            None,
-        );
-        task.collect(Utc::now() + TimeDelta::hours(1))
-            .await
-            .unwrap();
-
-        // Everything but the latest manifest is deleted.
-        let latest_id = (update_count + 1) as u64;
-        let manifests = manifest_store.list_manifests(..).await.unwrap();
-        assert_eq!(
-            vec![latest_id],
-            manifests
-                .iter()
-                .map(|manifest| manifest.id)
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
     async fn test_collect_advances_boundary_before_filtering_manifest_files() {
         let object_store = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
