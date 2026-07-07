@@ -1714,7 +1714,12 @@ mod tests {
                     .with_options(compactor_options())
                     .with_scheduler_supplier(Arc::new(SegmentTestSchedulerSupplier::new(
                         Bytes::from_static(b"aaa"),
-                        2,
+                        // Must match the number of aaa keys flushed below. The
+                        // compactor's first poll tick fires immediately and can
+                        // land mid-flush; a lower threshold lets it compact a
+                        // subset of the aaa L0s and strand the rest, since the
+                        // scheduler never proposes with fewer than this many L0s.
+                        3,
                     ))),
             )
             .build()
