@@ -1,0 +1,303 @@
+---
+title: Segmented Compaction
+description: Split a dataset into independent LSM trees, each with its own compaction and retention policy
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Segmented compaction splits a database into independent LSM trees keyed by a
+prefix.  Segments let each tree independently configure compaction policy to
+match its access pattern needs, and let a whole segment be dropped cheaply
+once it ages out. All segments share a WAL and writes across segments can
+be done transactionally/atomically.
+
+A [`PrefixExtractor`](https://docs.rs/slatedb/latest/slatedb/trait.PrefixExtractor.html)
+derives a segment prefix from each key, and each segment becomes its own
+logical LSM tree. Because segments own disjoint key ranges, they are compacted
+and retired independently, and reads/scans automatically prune to the segments
+overlapping the query.
+
+Common fits:
+
+- **Timeseries / append-ordered data**: one segment per time bucket or log
+  segment; old segments
+  freeze and age out as a unit.
+- **Metadata/data separation**: isolate a churny, frequently-read metadata
+  keyspace from bulky, write-once data so each gets its own compaction and
+  caching policy.
+- **Column-family-like isolation**: give small, frequently-overwritten
+  structures an aggressive policy while slow-moving data uses a
+  low-write-amplification one.
+
+See [RFC 0024](/rfcs/0024-segment-oriented-compaction) for the full design.
+
+## Enabling segments
+
+Configure an extractor at creation with
+[`DbBuilder::with_segment_extractor`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_segment_extractor).
+The application encodes segment boundaries in the key (e.g. an hour bucket, a log segment id);
+the extractor returns the prefix length that identifies the segment. The example below routes
+every key to the segment named by its first three bytes.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use std::sync::Arc;
+    use slatedb::{Db, PrefixExtractor, PrefixTarget};
+
+    struct FixedThreeByteExtractor;
+
+    impl PrefixExtractor for FixedThreeByteExtractor {
+        fn name(&self) -> &str { "fixed_three_byte" }
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+            let (PrefixTarget::Point(key) | PrefixTarget::Prefix(key)) = target;
+            (key.len() >= 3).then_some(3)
+        }
+    }
+
+    let db = Db::builder(path, object_store)
+        .with_segment_extractor(Arc::new(FixedThreeByteExtractor))
+        .build()
+        .await?;
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type fixedThreeByteExtractor struct{}
+
+    func (fixedThreeByteExtractor) Name() string { return "fixed_three_byte" }
+
+    func (fixedThreeByteExtractor) PrefixLen(target slatedb.PrefixTarget) *uint64 {
+        var key []byte
+        switch t := target.(type) {
+        case slatedb.PrefixTargetPoint:
+            key = t.Key
+        case slatedb.PrefixTargetPrefix:
+            key = t.Prefix
+        }
+        if len(key) < 3 {
+            return nil
+        }
+        n := uint64(3)
+        return &n
+    }
+
+    builder := slatedb.NewDbBuilder("example-db", store)
+    if err := builder.WithSegmentExtractor(fixedThreeByteExtractor{}); err != nil {
+        panic(err)
+    }
+    db, err := builder.Build()
+    ```
+  </TabItem>
+  <TabItem label="Java">
+    ```java
+    import io.slatedb.uniffi.PrefixExtractor;
+    import io.slatedb.uniffi.PrefixTarget;
+
+    class FixedThreeByteExtractor implements PrefixExtractor {
+        @Override
+        public String name() {
+            return "fixed_three_byte";
+        }
+
+        @Override
+        public Long prefixLen(PrefixTarget target) {
+            byte[] key =
+                    switch (target) {
+                        case PrefixTarget.Point point -> point.key();
+                        case PrefixTarget.Prefix prefix -> prefix.prefix();
+                    };
+            return key.length < 3 ? null : 3L;
+        }
+    }
+
+    DbBuilder builder = new DbBuilder("demo-db", store);
+    builder.withSegmentExtractor(new FixedThreeByteExtractor());
+    Db db = builder.build().get();
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { DbBuilder } from "@slatedb/uniffi";
+
+    class FixedThreeByteExtractor {
+      name() {
+        return "fixed_three_byte";
+      }
+
+      prefix_len(target) {
+        const key = target.tag === "Point" ? target.key : target.prefix;
+        return key.length < 3 ? undefined : 3;
+      }
+    }
+
+    const builder = new DbBuilder("demo-db", store);
+    builder.with_segment_extractor(new FixedThreeByteExtractor());
+    const db = await builder.build();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from slatedb.uniffi import DbBuilder, PrefixExtractor, PrefixTarget
+
+
+    class FixedThreeByteExtractor(PrefixExtractor):
+        def name(self) -> str:
+            return "fixed_three_byte"
+
+        def prefix_len(self, target: PrefixTarget) -> int | None:
+            key = target.key if target.is_point() else target.prefix
+            return None if len(key) < 3 else 3
+
+
+    builder = DbBuilder("demo-db", store)
+    builder.with_segment_extractor(FixedThreeByteExtractor())
+    db = await builder.build()
+    ```
+  </TabItem>
+</Tabs>
+
+:::caution
+The extractor is fixed for the life of the database. Its `name()` is persisted
+in the manifest; opening with a different (or newly-added/removed) extractor
+fails. 
+:::
+
+List the segments that currently exist (in the manifest or in memtables) with
+[`DbStatus::list_segments()`](https://docs.rs/slatedb/latest/slatedb/struct.DbStatus.html#method.list_segments).
+
+## How it compacts
+
+Each segment is compacted on its own schedule. The default size-tiered
+[`CompactionScheduler`](/docs/design/compaction) applies per segment, and
+compactions in different segments are parallel-safe (disjoint keys, no
+cross-segment ordering). Embed a semantic hint in the prefix (e.g. a time
+bucket) and a custom scheduler can vary policy per segment.
+
+:::note
+Writing to N segments at once produces up to N× the L0 objects (smaller each);
+the WAL is shared, so it is unaffected. Most data models keep one active
+segment, so this rarely bites in practice.
+:::
+
+## Deleting Segments Wholesale
+
+The default scheduler never drops data; segment retention is the application's
+job. To retire a whole segment, schedule a `CompactionSpec::drain_segment`
+compaction. Unlike a merge, a drain reads and rewrites nothing. Instead it
+detaches the segment's L0s and sorted runs from the manifest, leaving a drain
+marker (`l0=[]`, `compacted=[]`) that the writer prunes, after which the
+garbage collector reclaims the files.
+
+A drain is a `CompactionSpec::drain_segment` submitted through
+[`Admin.submit_compaction`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html), built
+from the segment's L0 SSTs and sorted runs read from `read_compactor_state_view`. Every binding
+mirrors this API:
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use bytes::Bytes;
+    use slatedb::admin::Admin;
+    use slatedb::compactor::{CompactionSpec, SourceId};
+
+    let admin = Admin::builder(path, object_store).build();
+    let view = admin.read_compactor_state_view().await?;
+
+    let segment = Bytes::from_static(b"hour=10/");
+    if let Some(seg) = view.manifest().segment(&segment) {
+        // Drain every L0 SST and sorted run currently visible in the segment.
+        let sources: Vec<SourceId> = seg
+            .l0()
+            .iter()
+            .map(|v| SourceId::SstView(v.id))
+            .chain(seg.compacted().iter().map(|sr| SourceId::SortedRun(sr.id)))
+            .collect();
+        admin.submit_compaction(CompactionSpec::drain_segment(segment, sources)).await?;
+    }
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    admin, err := slatedb.NewAdminBuilder("example-db", store).Build()
+    if err != nil {
+        panic(err)
+    }
+    view, err := admin.ReadCompactorStateView()
+    if err != nil {
+        panic(err)
+    }
+
+    var sources []slatedb.SourceId
+    for _, seg := range view.Manifest.Segments {
+        if !bytes.Equal(seg.Prefix, []byte("hour=10/")) {
+            continue
+        }
+        for _, v := range seg.L0 {
+            sources = append(sources, slatedb.SourceIdSstView{Field0: v.Id})
+        }
+        for _, r := range seg.Compacted {
+            sources = append(sources, slatedb.SourceIdSortedRun{Field0: r.Id})
+        }
+    }
+    _, err = admin.SubmitCompaction(slatedb.CompactionSpecDrainSegment{
+        Segment: []byte("hour=10/"),
+        Sources: sources,
+    })
+    ```
+  </TabItem>
+  <TabItem label="Java">
+    ```java
+    import io.slatedb.uniffi.*;
+    import java.util.ArrayList;
+    import java.util.Arrays;
+    import java.util.List;
+
+    Admin admin = new AdminBuilder("demo-db", store).build();
+    var view = admin.readCompactorStateView().get();
+
+    byte[] prefix = "hour=10/".getBytes();
+    List<SourceId> sources = new ArrayList<>();
+    for (Segment seg : view.manifest().segments()) {
+        if (!Arrays.equals(seg.prefix(), prefix)) continue;
+        seg.l0().forEach(v -> sources.add(new SourceId.SstView(v.id())));
+        seg.compacted().forEach(r -> sources.add(new SourceId.SortedRun(r.id())));
+    }
+    admin.submitCompaction(new CompactionSpec.DrainSegment(prefix, sources)).get();
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { AdminBuilder, CompactionSpec, SourceId } from "@slatedb/uniffi";
+
+    const admin = new AdminBuilder("demo-db", store).build();
+    const view = await admin.read_compactor_state_view();
+
+    const prefix = Buffer.from("hour=10/");
+    const seg = view.manifest.segments.find((s) => prefix.equals(Buffer.from(s.prefix)));
+    const sources = [
+      ...seg.l0.map((v) => SourceId.SstView(v.id)),
+      ...seg.compacted.map((r) => SourceId.SortedRun(r.id)),
+    ];
+    await admin.submit_compaction(CompactionSpec.DrainSegment(seg.prefix, sources));
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from slatedb.uniffi import AdminBuilder, CompactionSpec, SourceId
+
+    admin = AdminBuilder("demo-db", store).build()
+    view = await admin.read_compactor_state_view()
+
+    seg = next(s for s in view.manifest.segments if s.prefix == b"hour=10/")
+    sources = [SourceId.SST_VIEW(v.id) for v in seg.l0]
+    sources += [SourceId.SORTED_RUN(r.id) for r in seg.compacted]
+    await admin.submit_compaction(CompactionSpec.DRAIN_SEGMENT(segment=seg.prefix, sources=sources))
+    ```
+  </TabItem>
+</Tabs>
+
+To retire segments automatically (e.g. by a TTL), implement
+[`CompactionScheduler`](https://docs.rs/slatedb/latest/slatedb/compactor/trait.CompactionScheduler.html)
+and return `drain_segment` specs from `propose`, wired in with
+`CompactorBuilder::with_scheduler_supplier`.

@@ -509,6 +509,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_gc_once()
+		})
+		if checksum != 14634 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_run_gc_once: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_submit_compaction()
+		})
+		if checksum != 20337 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_submit_compaction: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_build()
 		})
 		if checksum != 46255 {
@@ -2173,6 +2191,16 @@ type AdminInterface interface {
 	ReadManifest(id *uint64) (*VersionedManifest, error)
 	// Refresh the lifetime of an existing checkpoint.
 	RefreshCheckpoint(id string, lifetimeMs *uint64) error
+	// Runs the garbage collector once with the provided options.
+	//
+	// When `options` is `None`, SlateDB's default garbage collector options are used.
+	RunGcOnce(options *GarbageCollectorOptions) error
+	// Generate a compaction from a spec and submit it.
+	//
+	// ## Returns
+	// - `Ok(Compaction)`: The submitted compaction.
+	// - `Err`: If there was an error during submission or reading the submitted compaction.
+	SubmitCompaction(spec CompactionSpec) (Compaction, error)
 }
 
 // Administrative read/query handle for SlateDB.
@@ -2618,6 +2646,80 @@ func (_self *Admin) RefreshCheckpoint(id string, lifetimeMs *uint64) error {
 	}
 
 	return err
+}
+
+// Runs the garbage collector once with the provided options.
+//
+// When `options` is `None`, SlateDB's default garbage collector options are used.
+func (_self *Admin) RunGcOnce(options *GarbageCollectorOptions) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_run_gc_once(
+			_pointer, FfiConverterOptionalGarbageCollectorOptionsINSTANCE.Lower(options)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Generate a compaction from a spec and submit it.
+//
+// ## Returns
+// - `Ok(Compaction)`: The submitted compaction.
+// - `Err`: If there was an error during submission or reading the submitted compaction.
+func (_self *Admin) SubmitCompaction(spec CompactionSpec) (Compaction, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) Compaction {
+			return FfiConverterCompactionINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_submit_compaction(
+			_pointer, FfiConverterCompactionSpecINSTANCE.Lower(spec)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 func (object *Admin) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -9040,64 +9142,6 @@ func (_ FfiDestroyerCompaction) Destroy(value Compaction) {
 	value.Destroy()
 }
 
-// Immutable compaction specification.
-type CompactionSpec struct {
-	// Ordered compaction sources.
-	Sources []SourceId
-	// Destination sorted run ID. `None` for drain-segment specs, which
-	// produce no new sorted run.
-	Destination *uint32
-	// Whether any input source is an L0 SST view.
-	HasL0Sources bool
-	// Whether any input source is a sorted run.
-	HasSrSources bool
-}
-
-func (r *CompactionSpec) Destroy() {
-	FfiDestroyerSequenceSourceId{}.Destroy(r.Sources)
-	FfiDestroyerOptionalUint32{}.Destroy(r.Destination)
-	FfiDestroyerBool{}.Destroy(r.HasL0Sources)
-	FfiDestroyerBool{}.Destroy(r.HasSrSources)
-}
-
-type FfiConverterCompactionSpec struct{}
-
-var FfiConverterCompactionSpecINSTANCE = FfiConverterCompactionSpec{}
-
-func (c FfiConverterCompactionSpec) Lift(rb RustBufferI) CompactionSpec {
-	return LiftFromRustBuffer[CompactionSpec](c, rb)
-}
-
-func (c FfiConverterCompactionSpec) Read(reader io.Reader) CompactionSpec {
-	return CompactionSpec{
-		FfiConverterSequenceSourceIdINSTANCE.Read(reader),
-		FfiConverterOptionalUint32INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterCompactionSpec) Lower(value CompactionSpec) C.RustBuffer {
-	return LowerIntoRustBuffer[CompactionSpec](c, value)
-}
-
-func (c FfiConverterCompactionSpec) LowerExternal(value CompactionSpec) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[CompactionSpec](c, value))
-}
-
-func (c FfiConverterCompactionSpec) Write(writer io.Writer, value CompactionSpec) {
-	FfiConverterSequenceSourceIdINSTANCE.Write(writer, value.Sources)
-	FfiConverterOptionalUint32INSTANCE.Write(writer, value.Destination)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasL0Sources)
-	FfiConverterBoolINSTANCE.Write(writer, value.HasSrSources)
-}
-
-type FfiDestroyerCompactionSpec struct{}
-
-func (_ FfiDestroyerCompactionSpec) Destroy(value CompactionSpec) {
-	value.Destroy()
-}
-
 // Read-only compactor state view.
 type CompactorStateView struct {
 	// Latest compactions file, if present.
@@ -9341,6 +9385,172 @@ func (c FfiConverterFoyerCacheOptions) Write(writer io.Writer, value FoyerCacheO
 type FfiDestroyerFoyerCacheOptions struct{}
 
 func (_ FfiDestroyerFoyerCacheOptions) Destroy(value FoyerCacheOptions) {
+	value.Destroy()
+}
+
+// Garbage collector options for one age-thresholded directory.
+type GarbageCollectorDirectoryOptions struct {
+	// How often recurring garbage collection runs, in milliseconds.
+	//
+	// Ignored by [`crate::Admin::run_gc_once`], but preserved so the same option
+	// shape matches SlateDB's core garbage collector configuration.
+	IntervalMs *uint64
+	// Minimum file age before it can be garbage collected, in milliseconds.
+	MinAgeMs uint64
+	// Whether to log files that would be deleted without deleting them.
+	DryRun bool
+}
+
+func (r *GarbageCollectorDirectoryOptions) Destroy() {
+	FfiDestroyerOptionalUint64{}.Destroy(r.IntervalMs)
+	FfiDestroyerUint64{}.Destroy(r.MinAgeMs)
+	FfiDestroyerBool{}.Destroy(r.DryRun)
+}
+
+type FfiConverterGarbageCollectorDirectoryOptions struct{}
+
+var FfiConverterGarbageCollectorDirectoryOptionsINSTANCE = FfiConverterGarbageCollectorDirectoryOptions{}
+
+func (c FfiConverterGarbageCollectorDirectoryOptions) Lift(rb RustBufferI) GarbageCollectorDirectoryOptions {
+	return LiftFromRustBuffer[GarbageCollectorDirectoryOptions](c, rb)
+}
+
+func (c FfiConverterGarbageCollectorDirectoryOptions) Read(reader io.Reader) GarbageCollectorDirectoryOptions {
+	return GarbageCollectorDirectoryOptions{
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterGarbageCollectorDirectoryOptions) Lower(value GarbageCollectorDirectoryOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[GarbageCollectorDirectoryOptions](c, value)
+}
+
+func (c FfiConverterGarbageCollectorDirectoryOptions) LowerExternal(value GarbageCollectorDirectoryOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[GarbageCollectorDirectoryOptions](c, value))
+}
+
+func (c FfiConverterGarbageCollectorDirectoryOptions) Write(writer io.Writer, value GarbageCollectorDirectoryOptions) {
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.IntervalMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.MinAgeMs)
+	FfiConverterBoolINSTANCE.Write(writer, value.DryRun)
+}
+
+type FfiDestroyerGarbageCollectorDirectoryOptions struct{}
+
+func (_ FfiDestroyerGarbageCollectorDirectoryOptions) Destroy(value GarbageCollectorDirectoryOptions) {
+	value.Destroy()
+}
+
+// Options controlling which garbage collector tasks run.
+type GarbageCollectorOptions struct {
+	// Options for manifest files. `None` disables manifest garbage collection.
+	ManifestOptions *GarbageCollectorDirectoryOptions
+	// Options for WAL SST files. `None` disables WAL garbage collection.
+	WalOptions *GarbageCollectorDirectoryOptions
+	// Options for zero-byte WAL fence objects. `None` disables WAL fence garbage collection.
+	WalFenceOptions *GarbageCollectorDirectoryOptions
+	// Options for compacted SST files. `None` disables compacted SST garbage collection.
+	CompactedOptions *GarbageCollectorDirectoryOptions
+	// Options for compactor job state files. `None` disables compactions garbage collection.
+	CompactionsOptions *GarbageCollectorDirectoryOptions
+	// Options for detaching clone references. `None` disables detach garbage collection.
+	DetachOptions *GarbageCollectorScheduleOptions
+}
+
+func (r *GarbageCollectorOptions) Destroy() {
+	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.ManifestOptions)
+	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.WalOptions)
+	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.WalFenceOptions)
+	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.CompactedOptions)
+	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.CompactionsOptions)
+	FfiDestroyerOptionalGarbageCollectorScheduleOptions{}.Destroy(r.DetachOptions)
+}
+
+type FfiConverterGarbageCollectorOptions struct{}
+
+var FfiConverterGarbageCollectorOptionsINSTANCE = FfiConverterGarbageCollectorOptions{}
+
+func (c FfiConverterGarbageCollectorOptions) Lift(rb RustBufferI) GarbageCollectorOptions {
+	return LiftFromRustBuffer[GarbageCollectorOptions](c, rb)
+}
+
+func (c FfiConverterGarbageCollectorOptions) Read(reader io.Reader) GarbageCollectorOptions {
+	return GarbageCollectorOptions{
+		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
+		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
+		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
+		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
+		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
+		FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterGarbageCollectorOptions) Lower(value GarbageCollectorOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[GarbageCollectorOptions](c, value)
+}
+
+func (c FfiConverterGarbageCollectorOptions) LowerExternal(value GarbageCollectorOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[GarbageCollectorOptions](c, value))
+}
+
+func (c FfiConverterGarbageCollectorOptions) Write(writer io.Writer, value GarbageCollectorOptions) {
+	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.ManifestOptions)
+	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.WalOptions)
+	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.WalFenceOptions)
+	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.CompactedOptions)
+	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.CompactionsOptions)
+	FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Write(writer, value.DetachOptions)
+}
+
+type FfiDestroyerGarbageCollectorOptions struct{}
+
+func (_ FfiDestroyerGarbageCollectorOptions) Destroy(value GarbageCollectorOptions) {
+	value.Destroy()
+}
+
+// Schedule options for a garbage collector task without a file-age threshold.
+type GarbageCollectorScheduleOptions struct {
+	// How often recurring garbage collection runs, in milliseconds.
+	//
+	// Ignored by [`crate::Admin::run_gc_once`].
+	IntervalMs *uint64
+}
+
+func (r *GarbageCollectorScheduleOptions) Destroy() {
+	FfiDestroyerOptionalUint64{}.Destroy(r.IntervalMs)
+}
+
+type FfiConverterGarbageCollectorScheduleOptions struct{}
+
+var FfiConverterGarbageCollectorScheduleOptionsINSTANCE = FfiConverterGarbageCollectorScheduleOptions{}
+
+func (c FfiConverterGarbageCollectorScheduleOptions) Lift(rb RustBufferI) GarbageCollectorScheduleOptions {
+	return LiftFromRustBuffer[GarbageCollectorScheduleOptions](c, rb)
+}
+
+func (c FfiConverterGarbageCollectorScheduleOptions) Read(reader io.Reader) GarbageCollectorScheduleOptions {
+	return GarbageCollectorScheduleOptions{
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterGarbageCollectorScheduleOptions) Lower(value GarbageCollectorScheduleOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[GarbageCollectorScheduleOptions](c, value)
+}
+
+func (c FfiConverterGarbageCollectorScheduleOptions) LowerExternal(value GarbageCollectorScheduleOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[GarbageCollectorScheduleOptions](c, value))
+}
+
+func (c FfiConverterGarbageCollectorScheduleOptions) Write(writer io.Writer, value GarbageCollectorScheduleOptions) {
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.IntervalMs)
+}
+
+type FfiDestroyerGarbageCollectorScheduleOptions struct{}
+
+func (_ FfiDestroyerGarbageCollectorScheduleOptions) Destroy(value GarbageCollectorScheduleOptions) {
 	value.Destroy()
 }
 
@@ -10205,6 +10415,64 @@ func (_ FfiDestroyerScanOptions) Destroy(value ScanOptions) {
 	value.Destroy()
 }
 
+// Per-segment LSM state (RFC-0024). Each named segment carries its own L0
+// SSTs and sorted runs, compacted and retired independently of the root tree.
+type Segment struct {
+	// Segment prefix.
+	Prefix []byte
+	// Last compacted L0 SST view ID for this segment, if any.
+	LastCompactedL0SstViewId *string
+	// Current L0 SST views in this segment.
+	L0 []SsTableView
+	// Current compacted sorted runs in this segment.
+	Compacted []SortedRun
+}
+
+func (r *Segment) Destroy() {
+	FfiDestroyerBytes{}.Destroy(r.Prefix)
+	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstViewId)
+	FfiDestroyerSequenceSsTableView{}.Destroy(r.L0)
+	FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted)
+}
+
+type FfiConverterSegment struct{}
+
+var FfiConverterSegmentINSTANCE = FfiConverterSegment{}
+
+func (c FfiConverterSegment) Lift(rb RustBufferI) Segment {
+	return LiftFromRustBuffer[Segment](c, rb)
+}
+
+func (c FfiConverterSegment) Read(reader io.Reader) Segment {
+	return Segment{
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
+		FfiConverterSequenceSortedRunINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSegment) Lower(value Segment) C.RustBuffer {
+	return LowerIntoRustBuffer[Segment](c, value)
+}
+
+func (c FfiConverterSegment) LowerExternal(value Segment) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[Segment](c, value))
+}
+
+func (c FfiConverterSegment) Write(writer io.Writer, value Segment) {
+	FfiConverterBytesINSTANCE.Write(writer, value.Prefix)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstViewId)
+	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0)
+	FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted)
+}
+
+type FfiDestroyerSegment struct{}
+
+func (_ FfiDestroyerSegment) Destroy(value Segment) {
+	value.Destroy()
+}
+
 // A segment (RFC-0024), identified by the key prefix it owns; the segment
 // spans the key interval `[prefix, prefix++)`.
 type SegmentPrefix struct {
@@ -10569,10 +10837,12 @@ type VersionedManifest struct {
 	LastCompactedL0SstViewId *string
 	// Last compacted L0 SST ID, if any.
 	LastCompactedL0SstId *string
-	// Current L0 SST views.
+	// Current L0 SST views (root `prefix=""` tree).
 	L0 []SsTableView
-	// Current compacted sorted runs.
+	// Current compacted sorted runs (root `prefix=""` tree).
 	Compacted []SortedRun
+	// Per-segment LSM state for named (non-empty-prefix) segments.
+	Segments []Segment
 	// Next WAL SST ID to assign.
 	NextWalSstId uint64
 	// WAL replay watermark.
@@ -10599,6 +10869,7 @@ func (r *VersionedManifest) Destroy() {
 	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstId)
 	FfiDestroyerSequenceSsTableView{}.Destroy(r.L0)
 	FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted)
+	FfiDestroyerSequenceSegment{}.Destroy(r.Segments)
 	FfiDestroyerUint64{}.Destroy(r.NextWalSstId)
 	FfiDestroyerUint64{}.Destroy(r.ReplayAfterWalId)
 	FfiDestroyerInt64{}.Destroy(r.LastL0ClockTick)
@@ -10627,6 +10898,7 @@ func (c FfiConverterVersionedManifest) Read(reader io.Reader) VersionedManifest 
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
 		FfiConverterSequenceSortedRunINSTANCE.Read(reader),
+		FfiConverterSequenceSegmentINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterInt64INSTANCE.Read(reader),
@@ -10655,6 +10927,7 @@ func (c FfiConverterVersionedManifest) Write(writer io.Writer, value VersionedMa
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstId)
 	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0)
 	FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted)
+	FfiConverterSequenceSegmentINSTANCE.Write(writer, value.Segments)
 	FfiConverterUint64INSTANCE.Write(writer, value.NextWalSstId)
 	FfiConverterUint64INSTANCE.Write(writer, value.ReplayAfterWalId)
 	FfiConverterInt64INSTANCE.Write(writer, value.LastL0ClockTick)
@@ -10892,6 +11165,95 @@ func (FfiConverterCloseReason) Write(writer io.Writer, value CloseReason) {
 type FfiDestroyerCloseReason struct{}
 
 func (_ FfiDestroyerCloseReason) Destroy(value CloseReason) {
+}
+
+// Immutable compaction specification. Mirrors the core `CompactionSpec`:
+// either a tiered merge into a destination sorted run, or a segment drain.
+type CompactionSpec interface {
+	Destroy()
+}
+
+// Tiered merge: read `sources` and write a single output sorted run with
+// id `destination`. An empty `segment` targets the root (`prefix=""`) tree.
+type CompactionSpecTiered struct {
+	Segment     []byte
+	Sources     []SourceId
+	Destination uint32
+}
+
+func (e CompactionSpecTiered) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Segment)
+	FfiDestroyerSequenceSourceId{}.Destroy(e.Sources)
+	FfiDestroyerUint32{}.Destroy(e.Destination)
+}
+
+// Segment drain (retention): retire `segment` by detaching the listed
+// `sources` (its L0 SSTs and sorted runs). Produces no new sorted run.
+type CompactionSpecDrainSegment struct {
+	Segment []byte
+	Sources []SourceId
+}
+
+func (e CompactionSpecDrainSegment) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Segment)
+	FfiDestroyerSequenceSourceId{}.Destroy(e.Sources)
+}
+
+type FfiConverterCompactionSpec struct{}
+
+var FfiConverterCompactionSpecINSTANCE = FfiConverterCompactionSpec{}
+
+func (c FfiConverterCompactionSpec) Lift(rb RustBufferI) CompactionSpec {
+	return LiftFromRustBuffer[CompactionSpec](c, rb)
+}
+
+func (c FfiConverterCompactionSpec) Lower(value CompactionSpec) C.RustBuffer {
+	return LowerIntoRustBuffer[CompactionSpec](c, value)
+}
+
+func (c FfiConverterCompactionSpec) LowerExternal(value CompactionSpec) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompactionSpec](c, value))
+}
+func (FfiConverterCompactionSpec) Read(reader io.Reader) CompactionSpec {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return CompactionSpecTiered{
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterSequenceSourceIdINSTANCE.Read(reader),
+			FfiConverterUint32INSTANCE.Read(reader),
+		}
+	case 2:
+		return CompactionSpecDrainSegment{
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterSequenceSourceIdINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterCompactionSpec.Read()", id))
+	}
+}
+
+func (FfiConverterCompactionSpec) Write(writer io.Writer, value CompactionSpec) {
+	switch variant_value := value.(type) {
+	case CompactionSpecTiered:
+		writeInt32(writer, 1)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Segment)
+		FfiConverterSequenceSourceIdINSTANCE.Write(writer, variant_value.Sources)
+		FfiConverterUint32INSTANCE.Write(writer, variant_value.Destination)
+	case CompactionSpecDrainSegment:
+		writeInt32(writer, 2)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Segment)
+		FfiConverterSequenceSourceIdINSTANCE.Write(writer, variant_value.Sources)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterCompactionSpec.Write", value))
+	}
+}
+
+type FfiDestroyerCompactionSpec struct{}
+
+func (_ FfiDestroyerCompactionSpec) Destroy(value CompactionSpec) {
+	value.Destroy()
 }
 
 // Compaction lifecycle state.
@@ -12581,6 +12943,129 @@ func (_ FfiDestroyerOptionalCompaction) Destroy(value *Compaction) {
 	}
 }
 
+type FfiConverterOptionalGarbageCollectorDirectoryOptions struct{}
+
+var FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE = FfiConverterOptionalGarbageCollectorDirectoryOptions{}
+
+func (c FfiConverterOptionalGarbageCollectorDirectoryOptions) Lift(rb RustBufferI) *GarbageCollectorDirectoryOptions {
+	return LiftFromRustBuffer[*GarbageCollectorDirectoryOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalGarbageCollectorDirectoryOptions) Read(reader io.Reader) *GarbageCollectorDirectoryOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterGarbageCollectorDirectoryOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalGarbageCollectorDirectoryOptions) Lower(value *GarbageCollectorDirectoryOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*GarbageCollectorDirectoryOptions](c, value)
+}
+
+func (c FfiConverterOptionalGarbageCollectorDirectoryOptions) LowerExternal(value *GarbageCollectorDirectoryOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*GarbageCollectorDirectoryOptions](c, value))
+}
+
+func (_ FfiConverterOptionalGarbageCollectorDirectoryOptions) Write(writer io.Writer, value *GarbageCollectorDirectoryOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalGarbageCollectorDirectoryOptions struct{}
+
+func (_ FfiDestroyerOptionalGarbageCollectorDirectoryOptions) Destroy(value *GarbageCollectorDirectoryOptions) {
+	if value != nil {
+		FfiDestroyerGarbageCollectorDirectoryOptions{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalGarbageCollectorOptions struct{}
+
+var FfiConverterOptionalGarbageCollectorOptionsINSTANCE = FfiConverterOptionalGarbageCollectorOptions{}
+
+func (c FfiConverterOptionalGarbageCollectorOptions) Lift(rb RustBufferI) *GarbageCollectorOptions {
+	return LiftFromRustBuffer[*GarbageCollectorOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalGarbageCollectorOptions) Read(reader io.Reader) *GarbageCollectorOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterGarbageCollectorOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalGarbageCollectorOptions) Lower(value *GarbageCollectorOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*GarbageCollectorOptions](c, value)
+}
+
+func (c FfiConverterOptionalGarbageCollectorOptions) LowerExternal(value *GarbageCollectorOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*GarbageCollectorOptions](c, value))
+}
+
+func (_ FfiConverterOptionalGarbageCollectorOptions) Write(writer io.Writer, value *GarbageCollectorOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterGarbageCollectorOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalGarbageCollectorOptions struct{}
+
+func (_ FfiDestroyerOptionalGarbageCollectorOptions) Destroy(value *GarbageCollectorOptions) {
+	if value != nil {
+		FfiDestroyerGarbageCollectorOptions{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalGarbageCollectorScheduleOptions struct{}
+
+var FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE = FfiConverterOptionalGarbageCollectorScheduleOptions{}
+
+func (c FfiConverterOptionalGarbageCollectorScheduleOptions) Lift(rb RustBufferI) *GarbageCollectorScheduleOptions {
+	return LiftFromRustBuffer[*GarbageCollectorScheduleOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalGarbageCollectorScheduleOptions) Read(reader io.Reader) *GarbageCollectorScheduleOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterGarbageCollectorScheduleOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalGarbageCollectorScheduleOptions) Lower(value *GarbageCollectorScheduleOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*GarbageCollectorScheduleOptions](c, value)
+}
+
+func (c FfiConverterOptionalGarbageCollectorScheduleOptions) LowerExternal(value *GarbageCollectorScheduleOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*GarbageCollectorScheduleOptions](c, value))
+}
+
+func (_ FfiConverterOptionalGarbageCollectorScheduleOptions) Write(writer io.Writer, value *GarbageCollectorScheduleOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterGarbageCollectorScheduleOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalGarbageCollectorScheduleOptions struct{}
+
+func (_ FfiDestroyerOptionalGarbageCollectorScheduleOptions) Destroy(value *GarbageCollectorScheduleOptions) {
+	if value != nil {
+		FfiDestroyerGarbageCollectorScheduleOptions{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalKeyRange struct{}
 
 var FfiConverterOptionalKeyRangeINSTANCE = FfiConverterOptionalKeyRange{}
@@ -13499,6 +13984,53 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceSegment struct{}
+
+var FfiConverterSequenceSegmentINSTANCE = FfiConverterSequenceSegment{}
+
+func (c FfiConverterSequenceSegment) Lift(rb RustBufferI) []Segment {
+	return LiftFromRustBuffer[[]Segment](c, rb)
+}
+
+func (c FfiConverterSequenceSegment) Read(reader io.Reader) []Segment {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]Segment, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSegmentINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSegment) Lower(value []Segment) C.RustBuffer {
+	return LowerIntoRustBuffer[[]Segment](c, value)
+}
+
+func (c FfiConverterSequenceSegment) LowerExternal(value []Segment) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]Segment](c, value))
+}
+
+func (c FfiConverterSequenceSegment) Write(writer io.Writer, value []Segment) {
+	if len(value) > math.MaxInt32 {
+		panic("[]Segment is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSegmentINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSegment struct{}
+
+func (FfiDestroyerSequenceSegment) Destroy(sequence []Segment) {
+	for _, value := range sequence {
+		FfiDestroyerSegment{}.Destroy(value)
 	}
 }
 

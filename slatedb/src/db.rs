@@ -7024,6 +7024,7 @@ mod tests {
             commit_compacted_interval: Duration::from_millis(10),
             worker: Some(CompactionWorkerOptions {
                 compactions_poll_interval: Duration::from_millis(10),
+                heartbeat_interval: Duration::from_millis(10),
                 max_sst_size: 1,
                 ..Default::default()
             }),
@@ -7031,13 +7032,22 @@ mod tests {
         };
         let settings_without_compactor = test_db_options(0, 1024, None);
 
+        // The compactor's SST I/O runs through a gated store so the test can
+        // freeze the job after its first output SSTs upload. Manifest and
+        // `.compactions` I/O use the ungated store passed to `Db::builder`,
+        // so the worker's heartbeats keep flowing while the job is frozen.
+        let gated = Arc::new(crate::test_utils::GatedObjectStore::new(
+            object_store.clone(),
+        ));
+        let gated_store: Arc<dyn ObjectStore> = gated.clone();
+
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor.clone())
             .with_sst_block_size(SstBlockSize::Other(1))
             .with_fp_registry(fp_registry.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
-                CompactorBuilder::new(path, object_store.clone())
+                CompactorBuilder::new(path, gated_store)
                     .with_options(compactor_options.clone())
                     .with_scheduler_supplier(Arc::new(OnDemandCompactionSchedulerSupplier::new({
                         let should_compact = should_compact.clone();
@@ -7074,19 +7084,42 @@ mod tests {
             "the test requires multiple L0s so compaction has work to resume"
         );
 
+        // Fence the worker on the first heartbeat that publishes progress
+        // carrying an output SST. This leaves a partially-complete compaction
+        // (its first output SST plus the retention_min_seq captured while
+        // the snapshot was live) persisted for the resumed attempt.
         fail_parallel::cfg(
             fp_registry.clone(),
-            "compactor-progress-after-first-output-sst",
+            "compactor-heartbeat-after-output-sst",
             "return",
         )
         .unwrap();
 
         let mut status_rx = db.subscribe();
+
+        // Admit exactly one output SST upload through the closed gate, so the
+        // job reports progress with one SST and then freezes on its next
+        // upload — it cannot finish before the fencing heartbeat observes
+        // that progress.
+        let baseline_puts = gated.put_opts_gate.arrivals();
+        gated.put_opts_gate.close();
         should_compact.store(true, Ordering::SeqCst);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            gated.put_opts_gate.wait_for_arrivals(baseline_puts + 1),
+        )
+        .await
+        .expect("compaction should upload output SSTs");
+        gated.put_opts_gate.admit(1);
+
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if status_rx.borrow().close_reason.is_some() {
-                    break;
+                match status_rx.borrow().close_reason {
+                    Some(CloseReason::Fenced) => break,
+                    Some(reason) => {
+                        panic!("expected compactor failpoint to fence DB, got {reason:?}")
+                    }
+                    None => {}
                 }
                 status_rx.changed().await.expect("db status channel closed");
             }
@@ -7095,10 +7128,11 @@ mod tests {
         .expect("compactor did not hit the failpoint");
 
         drop(snapshot);
+        gated.put_opts_gate.release();
         db.close().await.unwrap();
         fail_parallel::cfg(
             fp_registry.clone(),
-            "compactor-progress-after-first-output-sst",
+            "compactor-heartbeat-after-output-sst",
             "off",
         )
         .unwrap();
@@ -10796,6 +10830,7 @@ mod tests {
     mod object_store_cache {
         use super::*;
         use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
+        use object_store::ObjectStoreExt;
 
         struct ObjectStoreCacheTest {
             db: Db,
@@ -10939,6 +10974,11 @@ mod tests {
                     .map(|meta| meta.unwrap().location)
                     .collect()
                     .await
+            }
+
+            /// The size of an object as stored upstream, in bytes.
+            async fn object_size(&self, path: &object_store::path::Path) -> u64 {
+                self.store.head(path).await.unwrap().size
             }
 
             async fn close(self) {
@@ -11111,13 +11151,11 @@ mod tests {
             fixture.close().await;
         }
 
-        // TODO: large SSTs are written with a multipart upload, which does not yet
-        // mirror its parts into the local cache. So a flushed SST above the 10 MiB
-        // multipart threshold is not cached even with cache_puts enabled. Fix this
-        // by caching the multipart upload, after which this test should assert the
-        // SST is cached (one part per part_size chunk) rather than uncached.
+        /// A flushed SST above the 10 MiB multipart threshold is written with a
+        /// multipart upload, whose parts are now mirrored into the cache, so the
+        /// whole SST is cached (one part per part_size chunk).
         #[tokio::test]
-        async fn test_object_store_cache_does_not_cache_large_multipart_flush_yet() {
+        async fn test_object_store_cache_caches_large_multipart_flush() {
             const MIB: usize = 1024 * 1024;
 
             let fixture = ObjectStoreCacheTest::builder("/tmp/test_object_store_cache_large_flush")
@@ -11148,8 +11186,14 @@ mod tests {
 
             let compacted = fixture.compacted_locations().await;
             assert_eq!(compacted.len(), 1, "expected exactly one flushed SST");
-            // The SST was written with a multipart upload, which is not cached yet.
-            fixture.assert_cached(&compacted[0], 0).await;
+            // The SST is written with a multipart upload (each 1 MiB part teed into
+            // the cache), so every part of the SST is cached.
+            let expected_parts = (fixture.object_size(&compacted[0]).await as usize).div_ceil(MIB);
+            assert!(
+                expected_parts > 10,
+                "expected a large multipart SST, got {expected_parts} part(s)"
+            );
+            fixture.assert_cached(&compacted[0], expected_parts).await;
             fixture.close().await;
         }
     }

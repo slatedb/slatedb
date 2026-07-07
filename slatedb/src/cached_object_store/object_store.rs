@@ -711,8 +711,22 @@ impl ObjectStore for CachedObjectStore {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        // TODO: add proper support for multipart uploads in the cache.
-        self.object_store.put_multipart_opts(location, opts).await
+        let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
+        let attributes = opts.attributes.clone();
+
+        let inner = self.object_store.put_multipart_opts(location, opts).await?;
+
+        // Wrap the upload to mirror its parts into the cache, unless skipped.
+        if self.put_policy.put_action(tag.as_ref()) == PutAction::Skip {
+            return Ok(inner);
+        }
+        Ok(Box::new(CachingMultipartUpload::new(
+            inner,
+            Arc::clone(&self.cache_storage),
+            location.clone(),
+            self.part_size_bytes,
+            attributes,
+        )))
     }
 
     /// Deletion of the cache entries associated with the object being
@@ -785,6 +799,137 @@ impl ObjectStore for CachedObjectStore {
     }
 }
 
+/// A [`MultipartUpload`] that mirrors the uploaded bytes into the local cache as
+/// it streams them upstream. Created by [`CachedObjectStore::put_multipart_opts`]
+/// when the call policy caches a compacted SST (the path large compacted SSTs
+/// take, above BufWriter's multipart threshold).
+///
+/// The head is the commit point: it is written on `complete` after the
+/// upstream upload succeeds, which publishes the parts as a live cache entry.
+/// Until then the parts are not usable (a read with no head refetches from
+/// upstream).
+///
+/// Cache writes are best effort: a failed cache write never fails the upload.
+///
+/// TODO: fix potential part leak: a multipart upload that fails midway
+/// (dropped without complete() or abort() leaks its already written cache
+/// parts forever when the evictor is disabled. Can happen on a crash or
+/// exhuasting retries in one of the uploads.
+struct CachingMultipartUpload {
+    inner: Box<dyn MultipartUpload>,
+    cache_storage: Arc<dyn LocalCacheStorage>,
+    cache_location: Path,
+    part_size: usize,
+    /// In-order bytes observed so far that have not yet filled a cache part.
+    buffer: BytesMut,
+    /// The next cache part number to write.
+    next_part: PartID,
+    /// Total bytes teed so far; becomes the committed head's `size`.
+    total_len: u64,
+    /// Attributes from the upload options, echoed into the committed head.
+    attributes: Attributes,
+}
+
+impl CachingMultipartUpload {
+    fn new(
+        inner: Box<dyn MultipartUpload>,
+        cache_storage: Arc<dyn LocalCacheStorage>,
+        cache_location: Path,
+        part_size: usize,
+        attributes: Attributes,
+    ) -> Self {
+        Self {
+            inner,
+            cache_storage,
+            cache_location,
+            part_size,
+            buffer: BytesMut::new(),
+            next_part: 0,
+            total_len: 0,
+            attributes,
+        }
+    }
+}
+
+impl std::fmt::Debug for CachingMultipartUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachingMultipartUpload")
+            .field("cache_location", &self.cache_location)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl MultipartUpload for CachingMultipartUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        // Write the payload bytes into the cache buffer, then forward the
+        // original payload upstream.
+        self.total_len += data.content_length() as u64;
+        self.buffer.reserve(data.content_length());
+        for bytes in &data {
+            self.buffer.extend_from_slice(bytes);
+        }
+        let mut parts = Vec::new();
+        while self.buffer.len() >= self.part_size {
+            let chunk = self.buffer.split_to(self.part_size).freeze();
+            parts.push((self.next_part, chunk));
+            self.next_part += 1;
+        }
+
+        let inner_fut = self.inner.put_part(data);
+        if parts.is_empty() {
+            return inner_fut;
+        }
+        let cache_storage = Arc::clone(&self.cache_storage);
+        let cache_location = self.cache_location.clone();
+        let part_size = self.part_size;
+        Box::pin(async move {
+            // Overlap the cache disk writes with the upstream upload.
+            let cache_fut = async {
+                let entry = cache_storage.entry(&cache_location, part_size);
+                for (part_number, chunk) in parts {
+                    // Currently, we ignore errors writing to the cache. This
+                    // is best-effort: a failed cache write never fails the
+                    // upload.
+                    entry.save_part(part_number, chunk).await.ok();
+                }
+            };
+            let (result, ()) = futures::future::join(inner_fut, cache_fut).await;
+            result
+        })
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        let result = self.inner.complete().await?;
+        let entry = self
+            .cache_storage
+            .entry(&self.cache_location, self.part_size);
+        // Flush the trailing partial part once the upload is durable upstream.
+        if !self.buffer.is_empty() {
+            let chunk = std::mem::take(&mut self.buffer).freeze();
+            entry.save_part(self.next_part, chunk).await.ok();
+            self.next_part += 1;
+        }
+
+        // Commit by writing the head last (after the upstream upload succeeded):
+        // it publishes the parts as a live cache entry and lets the first read
+        // serve from the cache instead of doing an upstream HEAD and re-prefetch.
+        let meta = build_head(&self.cache_location, self.total_len, &result);
+        entry.save_head((&meta, &self.attributes)).await.ok();
+        Ok(result)
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        let result = self.inner.abort().await;
+        // The object will never exist upstream, so drop any cached parts.
+        self.cache_storage
+            .entry(&self.cache_location, self.part_size)
+            .delete()
+            .await;
+        result
+    }
+}
+
 /// Where a read (of the object head or of a single part) was served from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReadResultSource {
@@ -834,7 +979,11 @@ impl From<GetRange> for GetRangeKey {
 
 #[cfg(test)]
 mod tests {
-    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
+    use bytes::Bytes;
+    use object_store::{
+        path::Path, GetOptions, GetRange, MultipartUpload, ObjectStore, ObjectStoreExt,
+        PutMultipartOptions, PutPayload,
+    };
     use rand::Rng;
     use rstest::rstest;
     use std::sync::Arc;
@@ -2288,5 +2437,144 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, payload);
+    }
+
+    fn multipart_opts(tag: ObjectStoreCallTag) -> PutMultipartOptions {
+        PutMultipartOptions {
+            extensions: tag.into(),
+            ..Default::default()
+        }
+    }
+
+    #[rstest]
+    // Uploaded chunks larger than the cache part size: every put_part flushes
+    // a full cache part and carries a remainder into the next call.
+    #[case(1500, 2, vec![1024, 1024, 952])]
+    // Uploaded chunks equal to the cache part size.
+    #[case(1024, 2, vec![1024, 1024])]
+    // Uploaded chunks smaller than the cache part size.
+    #[case(400, 3, vec![1024, 176])]
+    // Total upload smaller than the cache part size.
+    #[case(400, 2, vec![800])]
+    #[tokio::test]
+    async fn test_multipart_compacted_upload_is_cached(
+        #[case] chunk_size: usize,
+        #[case] num_chunks: usize,
+        #[case] expected_part_sizes: Vec<usize>,
+    ) {
+        let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let store = policy_test_store(upstream.clone(), true);
+
+        // A compaction output written as a multipart upload (the path large
+        // compacted SSTs take). The tag survives multipart init, so no fallback
+        // is involved.
+        let location = Path::from("compacted/big.sst");
+        let chunks: Vec<Bytes> = (0..num_chunks)
+            .map(|_| gen_rand_bytes(chunk_size))
+            .collect();
+        let tag = ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted);
+        let mut upload = store
+            .put_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        for chunk in &chunks {
+            upload.put_part(chunk.clone().into()).await.unwrap();
+        }
+        upload.complete().await.unwrap();
+
+        let cache_location = location.clone();
+        let entry = store
+            .cache_storage
+            .entry(&cache_location, store.part_size_bytes);
+        let cached = entry.cached_parts().await.unwrap();
+        let expected_part_ids: Vec<PartID> = (0..expected_part_sizes.len()).collect();
+        assert_eq!(cached, expected_part_ids);
+
+        // The teed bytes round-trip in order through cache parts of the
+        // expected sizes.
+        let expected: Vec<u8> = chunks.iter().flat_map(|c| c.to_vec()).collect();
+        assert_eq!(expected_part_sizes.iter().sum::<usize>(), expected.len());
+        let mut offset = 0;
+        for (part_id, part_size) in expected_part_sizes.iter().enumerate() {
+            let bytes = entry
+                .read_part(part_id, 0..*part_size)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&bytes[..], &expected[offset..offset + part_size]);
+            offset += part_size;
+        }
+    }
+
+    #[rstest]
+    // A compacted multipart upload is not cached when cache_puts is off.
+    #[case(
+        ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted),
+        false
+    )]
+    // A WAL multipart upload is never cached, even with cache_puts on.
+    #[case(ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Wal), true)]
+    #[tokio::test]
+    async fn test_multipart_upload_not_cached(
+        #[case] tag: ObjectStoreCallTag,
+        #[case] cache_puts: bool,
+    ) {
+        let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let store = policy_test_store(upstream.clone(), cache_puts);
+
+        let location = Path::from("compacted/big.sst");
+        let mut upload = store
+            .put_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        upload.put_part(gen_rand_bytes(2048).into()).await.unwrap();
+        upload.complete().await.unwrap();
+
+        assert_eq!(cached_part_count(&store, &location).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_head_is_the_commit_point() {
+        let upstream: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let store = policy_test_store(upstream.clone(), true);
+
+        let location = Path::from("compacted/big.sst");
+        let cache_location = location.clone();
+        let tag = ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted);
+        let mut upload = store
+            .put_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        upload.put_part(gen_rand_bytes(2048).into()).await.unwrap();
+
+        // Before complete, parts may be on disk but the entry is not committed:
+        // no head, so a read would treat it as a miss and refetch from upstream.
+        let head_before = store
+            .cache_storage
+            .entry(&cache_location, store.part_size_bytes)
+            .read_head()
+            .await
+            .unwrap();
+        assert!(
+            head_before.is_none(),
+            "entry must not be committed before complete"
+        );
+
+        upload.complete().await.unwrap();
+
+        // complete writes the head, committing the entry.
+        let head_after = store
+            .cache_storage
+            .entry(&cache_location, store.part_size_bytes)
+            .read_head()
+            .await
+            .unwrap();
+        assert_eq!(
+            head_after
+                .expect("head should be committed on complete")
+                .0
+                .size,
+            2048
+        );
     }
 }

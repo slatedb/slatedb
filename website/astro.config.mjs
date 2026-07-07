@@ -225,6 +225,10 @@ export default defineConfig({
 							link: '/docs/design/compaction/',
 						},
 						{
+							label: 'Segmented Compaction',
+							link: '/docs/design/segmented-compaction/',
+						},
+						{
 							label: 'Merge Operators',
 							link: '/docs/design/merge-operators/',
 						},
@@ -339,6 +343,10 @@ export default defineConfig({
 						{
 							label: 'Standalone Compactor',
 							link: '/docs/tutorials/standalone-compactor/',
+						},
+						{
+							label: 'Standalone Garbage Collector',
+							link: '/docs/tutorials/standalone-garbage-collector/',
 						}
 					]
 				},
