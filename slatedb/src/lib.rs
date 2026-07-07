@@ -160,7 +160,6 @@ mod sst_builder;
 mod sst_iter;
 mod sst_reader;
 mod sst_stats;
-mod store_provider;
 mod subcompaction;
 mod tablestore;
 #[cfg(test)]
