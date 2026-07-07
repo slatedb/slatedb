@@ -7114,8 +7114,12 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if status_rx.borrow().close_reason.is_some() {
-                    break;
+                match status_rx.borrow().close_reason {
+                    Some(CloseReason::Fenced) => break,
+                    Some(reason) => {
+                        panic!("expected compactor failpoint to fence DB, got {reason:?}")
+                    }
+                    None => {}
                 }
                 status_rx.changed().await.expect("db status channel closed");
             }
