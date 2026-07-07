@@ -1,5 +1,5 @@
 use crate::blob::ReadOnlyBlob;
-use crate::config::CompressionCodec;
+use crate::config::{CompressionCodec, SstBlockSize};
 use crate::db_state::{FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
@@ -630,6 +630,12 @@ impl SsTableFormat {
     /// Sets the block size, in bytes, for SST data blocks.
     pub fn with_block_size(mut self, block_size: usize) -> Self {
         self.block_size = block_size;
+        self
+    }
+
+    /// Sets the block size for SST data blocks using the public block-size enum.
+    pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
+        self.block_size = block_size.as_bytes();
         self
     }
 

@@ -11,9 +11,7 @@ async fn test_configurable_block_size() {
 
     // Test with custom block size of 8KiB
     let db = Db::builder("/tmp/test_custom_block_size", object_store.clone())
-        .with_sst_format(
-            SsTableFormat::default().with_block_size(SstBlockSize::Block8Kib.as_bytes()),
-        )
+        .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Block8Kib))
         .build()
         .await;
 
@@ -54,9 +52,7 @@ async fn test_edge_case_block_sizes() {
 
     // Test with minimum valid block size (1KiB)
     let db = Db::builder("/tmp/test_min_block_size", object_store.clone())
-        .with_sst_format(
-            SsTableFormat::default().with_block_size(SstBlockSize::Block1Kib.as_bytes()),
-        )
+        .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Block1Kib))
         .build()
         .await;
 
@@ -64,9 +60,7 @@ async fn test_edge_case_block_sizes() {
 
     // Test with maximum valid block size (64KiB)
     let db = Db::builder("/tmp/test_max_block_size", object_store.clone())
-        .with_sst_format(
-            SsTableFormat::default().with_block_size(SstBlockSize::Block64Kib.as_bytes()),
-        )
+        .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Block64Kib))
         .build()
         .await;
 
@@ -79,9 +73,7 @@ async fn test_block_size_actually_used() {
 
     // Test with a small block size to force multiple blocks
     let db = Db::builder("/tmp/test_block_size_used", object_store.clone())
-        .with_sst_format(
-            SsTableFormat::default().with_block_size(SstBlockSize::Block1Kib.as_bytes()),
-        ) // 1KiB blocks
+        .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Block1Kib)) // 1KiB blocks
         .build()
         .await
         .expect("Failed to create DB");
@@ -134,7 +126,7 @@ async fn test_all_block_sizes(
         format!("/tmp/test_block_size_{}", expected_bytes),
         object_store.clone(),
     )
-    .with_sst_format(SsTableFormat::default().with_block_size(block_size_enum.as_bytes()))
+    .with_sst_format(SsTableFormat::default().with_sst_block_size(block_size_enum))
     .build()
     .await;
 

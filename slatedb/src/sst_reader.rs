@@ -273,9 +273,7 @@ mod tests {
         let path = "/test_sst_reader";
         let db = Db::builder(path, object_store.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
-            .with_sst_format(
-                SsTableFormat::default().with_block_size(SstBlockSize::Other(64).as_bytes()),
-            )
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(64)))
             .build()
             .await
             .unwrap();

@@ -7138,9 +7138,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor.clone())
-            .with_sst_format(
-                SsTableFormat::default().with_block_size(SstBlockSize::Other(1).as_bytes()),
-            )
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(1)))
             .with_fp_registry(fp_registry.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
@@ -7236,9 +7234,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor.clone())
-            .with_sst_format(
-                SsTableFormat::default().with_block_size(SstBlockSize::Other(1).as_bytes()),
-            )
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(1)))
             .with_fp_registry(fp_registry.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -7256,9 +7252,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor)
-            .with_sst_format(
-                SsTableFormat::default().with_block_size(SstBlockSize::Other(1).as_bytes()),
-            )
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(1)))
             .with_fp_registry(fp_registry)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
@@ -8909,9 +8903,7 @@ mod tests {
         let compactor_options = settings.compactor_options.take().unwrap();
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings)
-            .with_sst_format(
-                SsTableFormat::default().with_block_size(SstBlockSize::Other(64).as_bytes()),
-            )
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(64)))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())
@@ -9066,9 +9058,7 @@ mod tests {
         let compactor_options = settings.compactor_options.take().unwrap();
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings)
-            .with_sst_format(
-                SsTableFormat::default().with_block_size(SstBlockSize::Other(64).as_bytes()),
-            )
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(64)))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())

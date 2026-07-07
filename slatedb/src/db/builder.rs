@@ -85,7 +85,7 @@
 //! Example with a custom SST block size:
 //!
 //! ```
-//! use slatedb::{Db, Error, SsTableFormat};
+//! use slatedb::{Db, Error, SsTableFormat, SstBlockSize};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
@@ -93,7 +93,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_sst_format(SsTableFormat::default().with_block_size(8 * 1024))
+//!         .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Block8Kib))
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -111,7 +111,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let sst_format = SsTableFormat::default()
-//!         .with_block_size(8 * 1024)
+//!         .with_sst_block_size(SstBlockSize::Block8Kib)
 //!         .with_filter_policies(vec![Arc::new(BloomFilterPolicy::new(10))]);
 //!     let db = Db::builder("test_db", object_store)
 //!         .with_sst_format(sst_format)
@@ -369,7 +369,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// The builder instance for chaining.
     pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
-        self.sst_format = self.sst_format.with_block_size(block_size.as_bytes());
+        self.sst_format = self.sst_format.with_sst_block_size(block_size);
         self
     }
 
@@ -1452,7 +1452,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     /// that SSTs rewritten by the worker are encoded consistently with those
     /// produced by the DB. Defaults to [`SstBlockSize::default`].
     pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
-        self.sst_format = self.sst_format.with_block_size(block_size.as_bytes());
+        self.sst_format = self.sst_format.with_sst_block_size(block_size);
         self
     }
 
