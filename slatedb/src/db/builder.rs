@@ -103,7 +103,7 @@
 //! Example with an explicit SST format:
 //!
 //! ```
-//! use slatedb::{BloomFilterPolicy, Db, Error, SsTableFormat};
+//! use slatedb::{BloomFilterPolicy, Db, Error, SsTableFormat, SstBlockSize};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
@@ -153,8 +153,8 @@ use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
+use crate::config::Settings;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
-use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
@@ -164,8 +164,7 @@ use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::fence::{WriterFenceResult, WriterFencer};
-use crate::filter_policy::FilterPolicy;
-use crate::format::sst::{BlockTransformer, SsTableFormat};
+use crate::format::sst::SsTableFormat;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::garbage_collector::{GarbageCollector, GcFilter};
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
@@ -353,26 +352,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the block size for SSTable blocks. Blocks are the unit of reading
-    /// and caching in SlateDB. Smaller blocks can reduce read amplification but
-    /// may increase metadata overhead. Larger blocks are more efficient for
-    /// sequential scans but may waste bandwidth for point lookups.
-    ///
-    /// Note: When compression is enabled, blocks are compressed individually.
-    /// Larger blocks typically achieve better compression ratios.
-    ///
-    /// # Arguments
-    ///
-    /// * `block_size` - The block size variant to use (1KB, 2KB, 4KB, 8KB, 16KB, 32KB, or 64KB).
-    ///
-    /// # Returns
-    ///
-    /// The builder instance for chaining.
-    pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
-        self.sst_format = self.sst_format.with_sst_block_size(block_size);
-        self
-    }
-
     /// Sets the SST format to use for newly written tables.
     pub fn with_sst_format(mut self, sst_format: SsTableFormat) -> Self {
         self.sst_format = sst_format;
@@ -392,44 +371,6 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// The builder instance for chaining.
     pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
         self.merge_operator = Some(merge_operator);
-        self
-    }
-
-    /// Sets the block transformer to use for the database. The block transformer
-    /// allows custom encoding/decoding of block data before storage and after
-    /// retrieval. This can be used for encryption or other transformations.
-    ///
-    /// The transformer is applied after compression on write and before
-    /// decompression on read. The checksum is calculated on the transformed data.
-    ///
-    /// # Arguments
-    ///
-    /// * `block_transformer` - An Arc-wrapped block transformer implementation.
-    ///
-    /// # Returns
-    ///
-    /// The builder instance for chaining.
-    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
-        self
-    }
-
-    /// Sets the filter policies used for SST filter construction and evaluation.
-    ///
-    /// Each policy produces a separate filter per SST, stored in a composite
-    /// filter block. On read, all filters are evaluated with AND logic: an
-    /// SST is skipped only if every filter returns `false`.
-    ///
-    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`. Pass an
-    /// empty vec to disable filters entirely.
-    ///
-    /// A standalone compactor or a `DbReader` (distributed setup) must be
-    /// configured with the same policies, otherwise compaction will
-    /// silently drop filter sub-blocks whose policy name is not
-    /// recognized, and readers will fall back to scanning SSTs whose
-    /// filters they cannot decode.
-    pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.sst_format = self.sst_format.with_filter_policies(policies);
         self
     }
 
@@ -1184,25 +1125,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the block transformer to use for the compactor.
-    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
-        self
-    }
-
-    /// Sets the filter policies used when the compactor rewrites SSTs.
-    ///
-    /// Must match the writer's `DbBuilder::with_filter_policies` configuration,
-    /// otherwise compacted SSTs will be written with different (or no) filter
-    /// policies and existing filters may be silently dropped during compaction.
-    ///
-    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`. Pass an
-    /// empty vec to disable filters entirely.
-    pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.sst_format = self.sst_format.with_filter_policies(policies);
-        self
-    }
-
     /// Sets the compaction filter supplier for the compactor. The filter supplier
     /// creates filter instances that can inspect, drop, or modify entries during
     /// compaction.
@@ -1424,38 +1346,6 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     /// Sets the block transformer the worker uses when reading and rewriting
     /// SSTs during compaction.
     ///
-    /// Must match the writer's `DbBuilder::with_block_transformer` configuration.
-    /// Without it the worker reads and writes SST blocks untransformed, so a DB
-    /// configured with a transformer (e.g. encryption) cannot offload compaction
-    /// to standalone workers.
-    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
-        self
-    }
-
-    /// Sets the filter policies the worker uses when it rewrites SSTs.
-    ///
-    /// Must match the writer's `DbBuilder::with_filter_policies` configuration,
-    /// otherwise compacted SSTs will be written with different (or no) filter
-    /// policies and existing filters may be silently dropped during compaction.
-    ///
-    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`. Pass an
-    /// empty vec to disable filters entirely.
-    pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.sst_format = self.sst_format.with_filter_policies(policies);
-        self
-    }
-
-    /// Sets the SST block size the worker uses when it rewrites SSTs.
-    ///
-    /// Must match the writer's `DbBuilder::with_sst_block_size` configuration so
-    /// that SSTs rewritten by the worker are encoded consistently with those
-    /// produced by the DB. Defaults to [`SstBlockSize::default`].
-    pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
-        self.sst_format = self.sst_format.with_sst_block_size(block_size);
-        self
-    }
-
     #[cfg(feature = "compaction_filters")]
     pub fn with_compaction_filter_supplier(
         mut self,
@@ -1688,38 +1578,6 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Sets the SST format used to interpret SST metadata and blocks.
     pub fn with_sst_format(mut self, sst_format: SsTableFormat) -> Self {
         self.sst_format = sst_format;
-        self
-    }
-
-    /// Sets the block transformer to use for the database. The block transformer
-    /// allows custom encoding/decoding of block data before storage and after
-    /// retrieval. This can be used for encryption or other transformations.
-    ///
-    /// The transformer is applied after compression on write and before
-    /// decompression on read. The checksum is calculated on the transformed data.
-    ///
-    /// # Arguments
-    ///
-    /// * `block_transformer` - An Arc-wrapped block transformer implementation.
-    ///
-    /// # Returns
-    ///
-    /// The builder instance for chaining.
-    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.sst_format = self.sst_format.with_block_transformer(block_transformer);
-        self
-    }
-
-    /// Sets the filter policies used when decoding SST filter blocks.
-    ///
-    /// Must match (or be a superset of) the writer's policies so that any
-    /// filter sub-block in an SST can be decoded. Unrecognized policy names
-    /// are silently dropped: the SST is still readable, just without the
-    /// skipped filter.
-    ///
-    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`.
-    pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
-        self.sst_format = self.sst_format.with_filter_policies(policies);
         self
     }
 

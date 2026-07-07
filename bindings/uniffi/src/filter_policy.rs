@@ -168,12 +168,6 @@ impl FilterPolicy {
     }
 }
 
-pub(crate) fn collect_filter_policies(
-    policies: Vec<Arc<FilterPolicy>>,
-) -> Vec<Arc<dyn slatedb::FilterPolicy>> {
-    policies.into_iter().map(|p| p.inner.clone()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
