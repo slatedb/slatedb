@@ -1744,6 +1744,29 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                 .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
         }
 
+        // Extract external SSTs from manifest if available
+        let external_ssts = match &latest_manifest {
+            Some(latest_stored_manifest) => {
+                let mut external_ssts = latest_stored_manifest.manifest().external_ssts();
+                // A reader pinned to a checkpoint reads from the checkpoint's
+                // manifest, which may still reference external SSTs that have
+                // since been pruned from the latest manifest by compaction.
+                // A missing checkpoint is diagnosed in open_internal.
+                if let Some(checkpoint_id) = self.checkpoint_id {
+                    if let Some(checkpoint) = latest_stored_manifest
+                        .db_state()
+                        .find_checkpoint(checkpoint_id)
+                    {
+                        let checkpoint_manifest =
+                            manifest_store.read_manifest(checkpoint.manifest_id).await?;
+                        external_ssts.extend(checkpoint_manifest.external_ssts());
+                    }
+                }
+                external_ssts
+            }
+            None => HashMap::new(),
+        };
+
         let wrapped_cache = self.db_cache.as_ref().map(|c| {
             Arc::new(DbCacheWrapper::new(
                 c.clone(),
@@ -1757,10 +1780,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             block_transformer: self.block_transformer,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
+        let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(object_store, retrying_wal_object_store),
             sst_format,
-            path.clone(),
+            path_resolver,
+            Arc::new(FailPointRegistry::new()),
             wrapped_cache,
             TableStoreKind::Reader,
         ));
