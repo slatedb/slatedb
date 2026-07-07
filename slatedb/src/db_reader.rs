@@ -446,9 +446,24 @@ impl DbReaderInner {
             .expect("Expected checkpoint expiration time to be set")
             .sub(half_lifetime);
         if self.system_clock.now() > refresh_deadline {
-            let refreshed_checkpoint = stored_manifest
+            let refreshed_checkpoint = match stored_manifest
                 .refresh_checkpoint(checkpoint.id, self.options.checkpoint_lifetime)
-                .await?;
+                .await
+            {
+                Ok(refreshed_checkpoint) => refreshed_checkpoint,
+                Err(SlateDBError::CheckpointMissing(id)) if self.user_checkpoint_id.is_none() => {
+                    // Our self-established checkpoint lapsed (e.g. a stalled poll tick
+                    // outlived the lease during an object-store outage) and the writer's
+                    // GC reaped it. Re-establish a fresh checkpoint against the latest
+                    // manifest instead of failing the reader permanently. A user-supplied
+                    // checkpoint must still fail loud: the caller's pinned view is gone.
+                    warn!("reader checkpoint missing, re-establishing [checkpoint_id={id}]");
+                    let checkpoint = self.replace_checkpoint(stored_manifest).await?;
+                    self.reestablish_checkpoint(checkpoint).await?;
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
 
             // Update our local checkpoint copy so we know the latest expiration time
             // and can calculate future refresh deadlines correctly.
@@ -1842,6 +1857,157 @@ mod tests {
             manifests_after_first_refresh.len(),
             manifests_after_second_poll.len(),
             "checkpoint refresh should not write another manifest until half of the refreshed lifetime has elapsed"
+        );
+    }
+
+    // Regression test for https://github.com/slatedb/slatedb/issues/1888.
+    // If a poll tick stalls past the refresh deadline (e.g. during an object
+    // store brownout), the reader's checkpoint can expire and be reaped by the
+    // writer's GC. The next refresh must re-establish a fresh checkpoint
+    // instead of failing the reader permanently with CheckpointMissing.
+    #[tokio::test]
+    async fn should_reestablish_reader_checkpoint_when_missing() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_reestablish_missing_checkpoint_{}",
+            Uuid::new_v4()
+        ));
+        let clock = Arc::new(MockSystemClock::new());
+        let mut test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        test_provider.system_clock = clock.clone();
+
+        let manifest_store = test_provider.manifest_store();
+        let table_store = test_provider.table_store();
+
+        let stored_manifest = StoredManifest::create_new_db(
+            Arc::clone(&manifest_store),
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+
+        // Build DbReaderInner directly so no spawned poller can race the
+        // manual call to maybe_refresh_checkpoint below.
+        let inner = DbReaderInner::new(
+            Arc::clone(&manifest_store),
+            table_store,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(100),
+                checkpoint_lifetime: Duration::from_millis(1000),
+                ..DbReaderOptions::default()
+            },
+            None,
+            None,
+            None,
+            clock.clone(),
+            test_provider.rand.clone(),
+            recorder,
+            stored_manifest,
+        )
+        .await
+        .unwrap();
+        let reader_checkpoint_id = inner.state.read().checkpoint.id;
+
+        // Simulate the writer's GC reaping the expired checkpoint.
+        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
+            .await
+            .unwrap();
+        stored_manifest
+            .delete_checkpoint(reader_checkpoint_id)
+            .await
+            .unwrap();
+
+        // Move past the refresh deadline (checkpoint_lifetime / 2) and poll.
+        clock.advance(Duration::from_millis(501)).await;
+        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
+            .await
+            .unwrap();
+        inner
+            .maybe_refresh_checkpoint(&mut stored_manifest)
+            .await
+            .unwrap();
+
+        // The reader should have replaced the reaped checkpoint with a new one.
+        let new_checkpoint_id = inner.state.read().checkpoint.id;
+        assert_ne!(reader_checkpoint_id, new_checkpoint_id);
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        let checkpoints = &latest_manifest.manifest.core.checkpoints;
+        assert_eq!(1, checkpoints.len());
+        assert_eq!(new_checkpoint_id, checkpoints[0].id);
+    }
+
+    // A missing user-supplied checkpoint must still fail loud rather than be
+    // silently replaced (RFC-0004): the caller's pinned view is gone.
+    #[tokio::test]
+    async fn should_fail_refresh_when_user_checkpoint_missing() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_user_checkpoint_missing_{}",
+            Uuid::new_v4()
+        ));
+        let clock = Arc::new(MockSystemClock::new());
+        let mut test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        test_provider.system_clock = clock.clone();
+
+        let manifest_store = test_provider.manifest_store();
+        let table_store = test_provider.table_store();
+
+        let mut stored_manifest = StoredManifest::create_new_db(
+            Arc::clone(&manifest_store),
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let user_checkpoint_id = Uuid::new_v4();
+        stored_manifest
+            .write_checkpoint(
+                user_checkpoint_id,
+                &CheckpointOptions {
+                    lifetime: Some(Duration::from_millis(1000)),
+                    ..CheckpointOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+
+        let inner = DbReaderInner::new(
+            Arc::clone(&manifest_store),
+            table_store,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(100),
+                checkpoint_lifetime: Duration::from_millis(1000),
+                ..DbReaderOptions::default()
+            },
+            Some(user_checkpoint_id),
+            None,
+            None,
+            clock.clone(),
+            test_provider.rand.clone(),
+            recorder,
+            stored_manifest,
+        )
+        .await
+        .unwrap();
+
+        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
+            .await
+            .unwrap();
+        stored_manifest
+            .delete_checkpoint(user_checkpoint_id)
+            .await
+            .unwrap();
+
+        clock.advance(Duration::from_millis(501)).await;
+        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
+            .await
+            .unwrap();
+        let result = inner.maybe_refresh_checkpoint(&mut stored_manifest).await;
+        assert!(
+            matches!(result, Err(SlateDBError::CheckpointMissing(id)) if id == user_checkpoint_id)
         );
     }
 
