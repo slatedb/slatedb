@@ -23,11 +23,12 @@ use crate::{
     error::SlateDBError,
 };
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use log::error;
 use std::sync::Arc;
 
 use super::filter::retain_allowed_by_gc_filter;
-use super::{GcFilter, GcStats, GcTask};
+use super::{GcFilter, GcStats, GcTask, GC_DELETE_CONCURRENCY};
 
 #[derive(Clone)]
 pub(crate) struct CompactionsGcTask {
@@ -95,33 +96,37 @@ impl GcTask for CompactionsGcTask {
         }
         let compactions_to_delete =
             retain_allowed_by_gc_filter(&self.gc_filter, compactions_to_delete).await;
-        if self.compactions_options.dry_run && !compactions_to_delete.is_empty() {
-            log::info!(
-                "dry run: skipping compactions deletion [count={}]",
-                compactions_to_delete.len()
-            );
-        }
-        for compactions_metadata in compactions_to_delete {
-            if self.compactions_options.dry_run {
+        if self.compactions_options.dry_run {
+            if !compactions_to_delete.is_empty() {
+                log::info!(
+                    "dry run: skipping compactions deletion [count={}]",
+                    compactions_to_delete.len()
+                );
+            }
+            for compactions_metadata in compactions_to_delete {
                 log::debug!(
                     "dry run: would delete compactions but skipped [id={:?}]",
                     compactions_metadata.id
                 );
-                continue;
             }
-            if let Err(e) = self
-                .compactions_store
-                .delete_compactions_unchecked(compactions_metadata.id)
-                .await
-            {
-                error!(
-                    "error deleting compactions [id={:?}, error={}]",
-                    compactions_metadata.id, e
-                );
-            } else {
-                self.stats.gc_compactions_count.increment(1);
-            }
+            return Ok(());
         }
+        futures::stream::iter(compactions_to_delete)
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |compactions_metadata| async move {
+                if let Err(e) = self
+                    .compactions_store
+                    .delete_compactions_unchecked(compactions_metadata.id)
+                    .await
+                {
+                    error!(
+                        "error deleting compactions [id={:?}, error={}]",
+                        compactions_metadata.id, e
+                    );
+                } else {
+                    self.stats.gc_compactions_count.increment(1);
+                }
+            })
+            .await;
 
         Ok(())
     }
