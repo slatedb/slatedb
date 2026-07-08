@@ -160,6 +160,7 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
+use crate::wal_buffer::WalBufferManager;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -586,6 +587,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             BTreeSet::new(),
         );
 
+        let recent_flushed_wal_id = replay_range.end - 1;
+        let wal_buffer = Arc::new(WalBufferManager::new(
+            status_manager.clone(),
+            &recorder,
+            recent_flushed_wal_id,
+            table_store.clone(),
+            self.settings.l0_sst_size_bytes,
+            self.settings.flush_interval,
+        ));
+
         // Setup communication channels wired to the shared closed state.
         let reader = status_manager.result_reader();
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
@@ -601,6 +612,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 manifest_dirty,
                 Arc::clone(&memtable_flusher),
                 write_tx,
+                wal_buffer.observer(),
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
@@ -617,11 +629,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock.clone(),
         ));
         if inner.wal_enabled {
-            inner.wal_buffer.init(task_executor.clone()).await?;
+            wal_buffer.init(task_executor.clone()).await?;
         };
         task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
-            Box::new(WriteBatchEventHandler::new(inner.clone())),
+            Box::new(WriteBatchEventHandler::new(inner.clone(), wal_buffer)),
             write_rx,
             &tokio_handle,
         )?;
