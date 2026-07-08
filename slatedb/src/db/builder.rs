@@ -1744,6 +1744,27 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                 .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
         }
 
+        // Resolve external SSTs against the manifest the reader will actually
+        // read from: the pinned checkpoint's manifest when a checkpoint id is
+        // given (compaction may have pruned re-localized external SSTs from
+        // the latest manifest), and the latest manifest otherwise.
+        let external_ssts = match (&latest_manifest, self.checkpoint_id) {
+            (Some(latest_stored_manifest), Some(checkpoint_id)) => {
+                let checkpoint = latest_stored_manifest
+                    .db_state()
+                    .find_checkpoint(checkpoint_id)
+                    .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?;
+                manifest_store
+                    .read_manifest(checkpoint.manifest_id)
+                    .await?
+                    .external_ssts()
+            }
+            (Some(latest_stored_manifest), None) => {
+                latest_stored_manifest.manifest().external_ssts()
+            }
+            (None, _) => HashMap::new(),
+        };
+
         let wrapped_cache = self.db_cache.as_ref().map(|c| {
             Arc::new(DbCacheWrapper::new(
                 c.clone(),
@@ -1757,10 +1778,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             block_transformer: self.block_transformer,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
+        let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(object_store, retrying_wal_object_store),
             sst_format,
-            path.clone(),
+            path_resolver,
+            Arc::new(FailPointRegistry::new()),
             wrapped_cache,
             TableStoreKind::Reader,
         ));
