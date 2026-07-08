@@ -19,7 +19,6 @@ use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{DbStateReader, Reader, ScanContext};
 use crate::sst_iter::SstIteratorOptions;
-use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
 use crate::utils::IdGenerator;
@@ -791,7 +790,8 @@ impl DbReader {
     }
 
     pub(crate) async fn open_internal(
-        store_provider: &dyn StoreProvider,
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
         checkpoint_id: Option<Uuid>,
         merge_operator: Option<MergeOperatorType>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
@@ -801,9 +801,6 @@ impl DbReader {
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
-
-        let manifest_store = store_provider.manifest_store();
-        let table_store = store_provider.table_store();
 
         let manifest =
             StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
@@ -1313,7 +1310,6 @@ mod tests {
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
     use crate::reader::Reader;
-    use crate::store_provider::StoreProvider;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils, CloseReason, Db};
@@ -1399,7 +1395,8 @@ mod tests {
             .unwrap();
 
         let reader = DbReader::open_internal(
-            &test_provider,
+            test_provider.manifest_store(),
+            test_provider.table_store(),
             Some(checkpoint_result.id),
             None,
             None,
@@ -2581,7 +2578,8 @@ mod tests {
             merge_operator: Option<MergeOperatorType>,
         ) -> Result<DbReader, SlateDBError> {
             DbReader::open_internal(
-                self,
+                self.manifest_store(),
+                self.table_store(),
                 checkpoint,
                 merge_operator,
                 None,
@@ -3070,7 +3068,7 @@ mod tests {
         );
     }
 
-    impl StoreProvider for TestProvider {
+    impl TestProvider {
         fn table_store(&self) -> Arc<TableStore> {
             Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(Arc::clone(&self.object_store), None),

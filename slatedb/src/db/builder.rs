@@ -157,7 +157,6 @@ use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
@@ -1735,9 +1734,10 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         };
 
         // Validate WAL object store configuration.
-        let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store));
         let latest_manifest =
-            StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
+            StoredManifest::try_load(Arc::clone(&manifest_store), self.system_clock.clone())
+                .await?;
         if let Some(latest_manifest) = &latest_manifest {
             latest_manifest
                 .db_state()
@@ -1752,19 +1752,22 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             )) as Arc<dyn DbCache>
         });
 
-        let store_provider = DefaultStoreProvider {
-            path: path.clone(),
-            object_store,
-            manifest_object_store: retrying_object_store,
-            wal_object_store: retrying_wal_object_store,
-            block_cache: wrapped_cache,
-            block_transformer: self.block_transformer.clone(),
-            filter_policies: self.filter_policies.clone(),
-            kind: TableStoreKind::Reader,
+        let sst_format = SsTableFormat {
+            filter_policies: self.filter_policies,
+            block_transformer: self.block_transformer,
+            ..SsTableFormat::default()
         };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, retrying_wal_object_store),
+            sst_format,
+            path.clone(),
+            wrapped_cache,
+            TableStoreKind::Reader,
+        ));
 
         let reader = DbReader::open_internal(
-            &store_provider,
+            manifest_store,
+            table_store,
             self.checkpoint_id,
             self.merge_operator,
             self.segment_extractor,
