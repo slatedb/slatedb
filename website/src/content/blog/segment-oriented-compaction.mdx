@@ -1,0 +1,337 @@
+---
+title: "Divide and Compact: Segment-Oriented Compaction in SlateDB"
+pubDate: 2026-07-08
+author: Jason Gustafson
+authorGithub: hachikuji
+# ogImage: /img/some-custom-card.jpg   # optional per-post override
+---
+
+import ChartEmbed from '../../components/ChartEmbed.astro';
+
+LSMs typically represent all data within a single tree which is compacted over time. Controlling read/write amplification can be challenging when the data model mixes data structures with very different read/write patterns or lifetimes. Index structures, for example, tend to behave very differently from the data they point to. The single tree forces compromise to manage compaction across all structures at once.
+
+Segment-oriented compaction in SlateDB gives you a way to split the dataset into separate trees so that compaction strategies can be tailored to the structure of the data in each tree. It is the swiss army knife which lets you isolate data by read/write frequency, retention policy, caching strategy, or whatever other dimension matters to your application.
+
+This post provides an overview of segment-oriented compaction and how it can be used in your application.
+
+## How Compaction Works in SlateDB
+
+SlateDB organizes data into an LSM tree. The LSM tree is divided into two parts: L0 and the sorted runs. The L0 tables are the raw SSTs generated from memtable accumulation during ingest. Over time, the compactor takes L0 tables and rewrites them into sorted runs. We refer to the tables in these layers loosely as L0s and SRs.
+
+```ascii-art
+╭────────────────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░░░░░░░░░░ SlateDB's LSM Tree ░░░░░░░░░░░░░░░░░░░░░│
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│   writes                                                           │
+│      │                                                             │
+│      ▼                                                             │
+│   ┌──────────┐                                                     │
+│   │ memtable │   in memory                                         │
+│   └────┬─────┘                                                     │
+│        │ flush                                                     │
+│        ▼                                                           │
+│   L0 ─ raw SSTs from each flush; newest first, key ranges overlap  │
+│   ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐                                  │
+│   │ SST │ │ SST │ │ SST │ │ SST │                                  │
+│   └─────┘ └─────┘ └─────┘ └─────┘                                  │
+│        │ compaction rewrites L0 into sorted runs                   │
+│        ▼                                                           │
+│   SORTED RUNS ─ SSTs in sorted order, no overlapping key ranges    │
+│   SR0 ┌────┬────┬────┐                                             │
+│       │SST │SST │SST │                                             │
+│       └────┴────┴────┘                                             │
+│   SR1 ┌──────┬──────┬──────┬──────┐                                │
+│       │ SST  │ SST  │ SST  │ SST  │                                │
+│       └──────┴──────┴──────┴──────┘                                │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">SlateDB's LSM tree: L0 holds raw SSTs flushed from the memtable (newest first, ranges may overlap); compaction rewrites them into sorted runs of non-overlapping SSTs.</p>
+
+A compaction scheduler in SlateDB is responsible for selecting which L0s and SRs should be compacted together. Compaction strategies are typically heuristic. We don't know exactly where keys will exist within the tree, but we can build strategies which optimize for certain tree structures and read/write amplification properties.
+
+SlateDB's default scheduler is known as "size-tiered" compaction. It works by selecting similarly sized SRs for compaction. The number of size tiers is limited by the size of the dataset. If a dataset is bounded, size-tiered compaction provides an upper bound on write amplification. The final tier is the size of the dataset itself. However, if the dataset grows over time, then write amplification grows as well. Size-tiered compaction is similar to universal compaction in RocksDB.
+
+```ascii-art
+╭───────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░░░░ Size-Tiered Compaction ░░░░░░░░░░░░░░│
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│   tier 0 ─ L0 SSTs; similarly-sized runs accumulate       │
+│   ┌──┐ ┌──┐ ┌──┐ ┌──┐                                     │
+│   │██│ │██│ │██│ │██│                                     │
+│   └──┘ └──┘ └──┘ └──┘                                     │
+│        │ merge ~N similar-sized runs into one larger run  │
+│        ▼                                                  │
+│   tier 1 ─ ~N× larger                                     │
+│   ┌────────┐ ┌────────┐                                   │
+│   │████████│ │████████│                                   │
+│   └────────┘ └────────┘                                   │
+│        │ merge                                            │
+│        ▼                                                  │
+│   tier 2 ─ ~N²× larger                                    │
+│   ┌──────────────────┐                                    │
+│   │██████████████████│                                    │
+│   └──────────────────┘                                    │
+│        │ merge                                            │
+│        ▼                                                  │
+│   final tier ≈ size of the whole dataset                  │
+│   ┌────────────────────────────────────┐                  │
+│   │████████████████████████████████████│                  │
+│   └────────────────────────────────────┘                  │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">Size-tiered compaction merges similarly-sized runs into a larger run at the next tier. As the dataset grows it adds tiers, and every byte is rewritten once per tier — so write amplification grows with the number of tiers.</p>
+
+More heuristic strategies are possible with a custom compaction scheduler, but we are limited to working within the constraints of the global LSM tree. It is not always straightforward to leverage the structure of the data itself to guide our scheduling. Frequently accessed data may get mixed with infrequently accessed, long-lived data may get mixed with short-lived, often updated data may get mixed with rarely updated, etc. It is up to us to structure the keys and the compaction heuristic as well as we can in order to optimize for our data model and its access patterns.
+
+## Where Size-Tiered Compaction Breaks Down
+
+Size-tiered compaction works great for homogeneous data structures which share a common lifetime. However, complex data systems often use distinct internal structures with profoundly different access and retention characteristics. A frequently-accessed index structure might benefit from an aggressive compaction strategy, while we may be much more cautious about write amplification for its bulky data counterpart.
+
+Time is another dimension which forces distinct behavior on the compactor depending on the age of the data. Timeseries databases such as [Prometheus](https://prometheus.io/) and [Opendata-timeseries](https://github.com/opendata-oss/opendata) organize data into discrete windows of time (typically one hour). Write workloads are dominated by the arrival of new data points with less frequent backfills of older data. Size-tiered compaction fits poorly because it treats the whole key space as a single tree. Old windows that are effectively immutable are folded into ever-larger merges as new data arrives. Write amplification is bound by the total amount of data retained, and is dominated by the older immutable windows.
+
+Retention of timeseries data is also difficult with existing compaction strategies. Typically, as windows are aged out of the system, the corresponding data and index structures are removed. TTL-based expiration at the record level requires a full pass over the data that must be dropped, and all of the surviving data must be rewritten. The data has an obvious structure that the scheduler cannot easily exploit.
+
+Efficient compaction for timeseries databases was a primary motivation for segmented compaction. Alternative approaches include the time-window compaction strategy (TWCS) used in systems like [Cassandra](https://cassandra.apache.org/doc/4.1/cassandra/operating/compaction/twcs.html), but we will see how segmentation is much more general. It can be used in any data system which requires distinct strategies for its underlying structures.
+
+## Introducing Segment-Oriented Compaction
+
+Segment-oriented compaction was introduced in [RFC 24](https://github.com/slatedb/slatedb/blob/main/rfcs/0024-segment-oriented-compaction.md) and is first included in release [0.14.0](https://github.com/slatedb/slatedb/releases#release-v0.14.0). It gives you a direct way to control the compaction/retention behavior of your data by splitting the database into isolated LSM trees. Unlike [column families](#appendix-segments-vs-column-families), segmentation partitions the keyspace: each segment is defined by a key prefix which means that segments represent disjoint ranges of keys.
+
+Segments are defined using a `PrefixExtractor`. When a key is written to the database, SlateDB uses the prefix extractor to identify the segment that it belongs to. The LSM tree for each segment is created dynamically as new segment prefixes are found.
+
+```ascii-art
+╭────────────────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░░░░░░░░░░░░ Segment Routing ░░░░░░░░░░░░░░░░░░░░░░│
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│                  ┌────────────────────────────┐                    │
+│                  │   A|…   B|…   A|…   C|…    │                    │
+│                  └──────────────┬─────────────┘                    │
+│                                 ▼                                  │
+│                  ┌────────────────────────────┐                    │
+│                  │      PrefixExtractor       │                    │
+│                  └──────────────┬─────────────┘                    │
+│                                 ▼                                  │
+│                  ┌────────────────────────────┐                    │
+│                  │ single memtable  ( + WAL ) │                    │
+│                  └──────────────┬─────────────┘                    │
+│                                 │ on flush, keys split by segment  │
+│        ┌────────────────────────┼────────────────────────┐         │
+│        ▼                        ▼                        ▼         │
+│  segment A                segment B                segment C       │
+│  ┌───────────┐            ┌───────────┐            ┌───────────┐   │
+│  │ L0 · SRs  │            │ L0 · SRs  │            │ L0 · SRs  │   │
+│  └───────────┘            └───────────┘            └───────────┘   │
+│  own L0s + SRs            own L0s + SRs            own L0s + SRs   │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">Keys share one memtable and WAL regardless of segment; the <code>PrefixExtractor</code> maps each key to a segment, and on flush the data fans out into a separate LSM tree (its own L0s and sorted runs) per segment.</p>
+
+Since each segment has its own LSM tree, a compaction scheduler can target compactions to each segment using a policy which is suited to that segment. Index structures can use a separate segment so that they can be compacted more aggressively. Segmented compaction does not replace heuristic strategies, but rather complements them by allowing you to tailor the heuristic to each segment. For example, the default strategy applies size-tiered compaction within each segment.
+
+You can use semantic information embedded in the segment prefix to tell your scheduler how it should adjust its behavior. In a timeseries system, the prefix might embed a truncated timestamp corresponding to the start of the time window that it corresponds to. Other systems might embed a type discriminator to identify different structures. Custom compaction schedulers see all segments in the database and can choose any of them to act upon.
+
+The diagram above also suggests some of the tradeoffs that come from the use of segmentation.
+
+Each segment produces its own L0s and SRs. If we are writing to 10 active segments, then in principle, that is 10x the number of PUT requests writing to L0. The picture is somewhat clouded by SlateDB's use of multi-part upload requests, but in general, more segments means higher L0 write costs with smaller object sizes. (SlateDB's WAL, on the other hand, contains data across all segments, so there is no impact.)
+
+The potential for increased L0 costs depends on the steady-state write profile. Many data models tend to keep a single active segment which accumulates most of the active writes. This means only one segment is getting L0 writes at a time, so no net increase in the number of L0s being produced. Most new data points in the timeseries database discussed above would be written to the segment for the current hour. An increase in write costs into L0 or manifest bookkeeping may still be worthwhile in other use cases if it leads to better control over write amplification resulting from compaction.
+
+More L0s and SRs to write also implies a bigger index for SlateDB to track. This means larger manifest files. However, this depends on whether each segment is filling enough data to write sufficiently large SSTs. You don't want a bunch of dinky SSTs bloating the manifest. If your workload is able to sustain L0s and SRs at their respective size limits, then the increase in manifest overhead will be marginal because each segment is representing a disjoint portion of the keyspace.
+
+## Backfill
+
+Segmentation in the timeseries example also provides a natural way to handle backfill of older data. In a traditional LSM, a set of backfilled records would need to work through each level of the tree in order to find the right time bucket. The cost of this may show up in the effectiveness of the block cache, which would mix data across a wider range. Basically, the backfill does not poison the current bucket of data, which is more likely to be read.
+
+```ascii-art
+╭──────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░░░ Backfill · Unsegmented ░░░░░░░░░░░░░░│
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│   backfill (old)                 new writes (current)    │
+│         │                                 │              │
+│         ▼                                 ▼              │
+│   L0  ┌────┐ ┌────┐ ┌────┐ ┌────┐                        │
+│       │ ▒▒ │ │ ██ │ │ ██ │ │ ▒▒ │                        │
+│       └────┘ └────┘ └────┘ └────┘                        │
+│       │ compaction rewrites old + current together       │
+│       ▼                                                  │
+│   SR  ┌──────────────────────────────┐                   │
+│       │ ▒▒ ████ ▒▒ ████ ▒▒ ████ ▒▒ █ │                   │
+│       └──────────────────────────────┘                   │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+
+╭──────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░░░░ Backfill · Segmented ░░░░░░░░░░░░░░░│
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│   backfill (old)                 new writes (current)    │
+│         │                                 │              │
+│         ▼                                 ▼              │
+│   segment: OLD bucket            segment: CURRENT        │
+│   ┌────────────────┐             ┌────────────────┐      │
+│   │ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒ │             │ ██████████████ │      │
+│   └────────────────┘             └────────────────┘      │
+│   compacted in isolation         stays hot, untouched    │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">Without segments, a backfill (▒) enters L0 alongside current writes (█) and is compacted together with them, churning cache across the whole key range. With segments, the backfill routes to the old bucket's own tree; the current segment is never touched, so its hot data stays cache-resident.</p>
+
+Over time, backfills into older segments may become rarer. A system may even prohibit backfills into older segments outside of some recent window. When a segment no longer receives new data, there is no need to continue compacting it. We can schedule a final compaction and leave the segment in an immutable final state. This is a useful way to keep the compactor's working set bounded even when the total dataset itself is unbounded.
+
+In the timeseries data model, we might disallow backfills outside of the past day.
+
+```ascii-art
+╭────────────────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░░░░░░ Aging Out: Frozen Segments ░░░░░░░░░░░░░░░░░│
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  older  ◀───────────────  time  ───────────────▶  newer            │
+│                                                                    │
+│                    no backfills  ◀   ┊  ▶  recent (writable)       │
+│                                      ┊              writes         │
+│                                      ┊                  │          │
+│  seg 08h     seg 09h     seg 10h     ┊  seg 11h     seg 12h        │
+│  ┌────────┐  ┌────────┐  ┌────────┐  ┊  ┌────────┐  ┌───────▼┐     │
+│  │████████│  │████████│  │████████│  ┊  │█ ▓ ██ ▓│  │▓ ██ ▓ █│     │
+│  └────────┘  └────────┘  └────────┘  ┊  └────────┘  └────────┘     │
+│  frozen      frozen      frozen      ┊  active      active         │
+│  └───────────────┬────────────────┘     └─────────┬──────────┘     │
+│          one final run, not compacted     compactor working set    │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">Once a bucket ages past the writable window it receives no more data, so we run a final compaction and freeze it as a single immutable run. Only the recent segments stay in the compactor's working set — which keeps that set bounded even as the total dataset grows without bound.</p>
+
+In addition to reducing the active compaction workload, there is a caching benefit as well for immutable segments.
+
+One issue with SlateDB's block cache is that compaction forces cached blocks to be reloaded. This is generally a good thing because the compacted data ought to be organized more favorably for the cache to exploit data locality. However, if there are minimal changes at the block level, then the reload is pure overhead. For an immutable segment which is no longer being actively compacted, the block references in the cache remain valid indefinitely which reduces IO overhead and churn. It depends on the read workload whether this provides a true benefit. When active segments dominate the read workload, there may be no benefit.
+
+## Retention
+
+Systems like timeseries typically do not retain data indefinitely. We need an efficient way to remove data outside of the system's retention window. Segmentation gives the compactor a new strategy to drain existing segments.
+
+A segment drain simply detaches a set of L0s/SRs from the current manifest. This makes them eligible for removal by SlateDB's garbage collector.
+
+```ascii-art
+╭────────────────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░░░░░░ Retention: Draining a Segment ░░░░░░░░░░░░░░░│
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│   manifest                           object storage                │
+│   ┌──────────────────┐                                             │
+│   │ segment 10h  ✂╌ ╌ ╌ ╌ ╌ ╌ ╌ ╌ ▷  ▒ 10h  L0·SRs ▒  drained      │
+│   │                  │               ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  → GC         │
+│   │ segment 11h  ●───┼────────────▶  █ 11h  L0·SRs █  live         │
+│   │                  │               ███████████████               │
+│   │ segment 12h  ●───┼────────────▶  █ 12h  L0·SRs █  live         │
+│   └──────────────────┘               ███████████████               │
+│                                                                    │
+│   drain detaches the pointer; nothing references 10h,              │
+│   so the garbage collector reclaims its SSTs.                      │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">A segment drain removes the manifest's pointer to a segment's L0s and sorted runs. No data is read or rewritten; once nothing references those SSTs, SlateDB's garbage collector reclaims them.</p>
+
+## Query Efficiency
+
+Since segments are ordered by prefix, a query only touches one segment at a time. Point queries will route to exactly one segment; range queries will map to a contiguous range of segments. The active state is always limited by the size of each segment, not by the contributions from each segment that the query touches. In other words, segmentation does not lead to more SST merging.
+
+Query efficiency in SlateDB comes down to how well the blocks in each SST isolate the query range. If queries tend to span many segments, but within each segment, blocks provide good locality, then there is no penalty for segmentation. If, however, segments are not broad enough to give blocks sufficient data locality, then query performance may suffer. Imagine in our timeseries example if we used a window size of one minute for each bucket. A scan across one hour would need to hit 60 segments, each providing only a handful of data points. You have to find the right segment structure based on your query patterns.
+
+```ascii-art
+╭────────────────────────────────────────────────────────────────────╮
+│ ◎ ○ ○ ░░░░░░░░░░ Segment Granularity vs. Query Locality ░░░░░░░░░░░│
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│   one scan · 12:00 – 13:00                                         │
+│   ├───────────────────────────────────────────────┤                │
+│                                                                    │
+│   coarse — 1-hour buckets                                          │
+│   │█████████████████████ 12h █████████████████████│  1 segment     │
+│   one contiguous read; strong block locality                       │
+│                                                                    │
+│   fine — 1-minute buckets                                          │
+│   │█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│█│  60 segments   │
+│   a sliver from each; poor block locality                          │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">The same one-hour scan over two segment granularities. With 1-hour buckets it reads a single segment as one contiguous, cache-friendly range; with 1-minute buckets the same scan fans out across 60 segments, each returning only a sliver. Match the segment width to your query patterns. (The fine row is schematic — 60 segments won't fit at scale.)</p>
+
+## Results
+
+To make the impact of segmentation concrete, we ran a small load test modeling an append-heavy timeseries workload. Each sample uses a 20-byte `<bucket><metric><timestamp>` tuple encoded big-endian for its key. A single writer streams samples into the current bucket — rolling forward to a new one as each fills — while readers scan recently written buckets.
+
+The two arms of the experiment are identical except that the segmented arm registers a `PrefixExtractor` over the 8-byte bucket prefix, giving each time bucket its own LSM tree. We ran the workload against S3 for 30 minutes. The charts below are keyed by total bytes written, so the x-axis tracks the database growing over the run. Full details — exact parameters and hardware — live alongside the [`tsdb` bencher](https://github.com/hachikuji/slatedb/blob/rfc24-segmentation-bench/slatedb-bencher/src/tsdb.rs).
+
+### Compaction work is bounded
+
+Because a sealed segment stops being compacted, the segmented arm's cumulative write amplification climbs briefly and then plateaus at roughly **3.0x**. The unsegmented arm keeps folding cold data into ever-larger merges and drifts up to **5.5x** — and would keep climbing as the dataset grows.
+
+<ChartEmbed
+	src="/charts/seg-write-amp.html"
+	title="Cumulative write amplification vs. data written: segmented plateaus at ~3.0x, unsegmented drifts to ~5.5x"
+	minHeight={340}
+/>
+
+### Compaction throughput stays steady
+
+The same effect shows up per window in the raw compaction work. Segmentation holds compaction to a low, steady band, whereas the unsegmented arm spikes as it rewrites progressively larger sorted runs.
+
+<ChartEmbed
+	src="/charts/seg-compaction.html"
+	title="Compaction throughput per 10s window: segmented steady band vs. unsegmented spikes"
+	minHeight={340}
+/>
+
+### Write throughput improves
+
+That bounded compaction work pays off in write throughput. With less bandwidth spent on compaction, the segmented arm ingests about **13% more data** over the same 30-minute window (84 GB vs. 74.5 GB).
+
+<ChartEmbed
+	src="/charts/seg-throughput.html"
+	title="Cumulative data written over the run: segmented ingests ~13% more"
+	minHeight={340}
+/>
+
+### Reads are unaffected
+
+The write-side win comes without a read penalty. Scan p99 latency tracks closely between the two arms, since each scan on this workload touches only recent buckets that stay cache-resident regardless of segmentation. In short, segmentation buys write-side stability essentially for free on this workload.
+
+<ChartEmbed
+	src="/charts/seg-scan-p99.html"
+	title="Scan p99 latency per window: the two arms track each other"
+	minHeight={300}
+/>
+
+## Conclusion
+
+Segmentation gives you a precise way to target the compaction strategy to the data structures in your system. A segment is defined using a key prefix and isolates its own LSM tree, which can be treated with its own heuristics and retention needs. This is a powerful way to build systems on SlateDb, but it is not a free lunch. Choosing segments effectively means ensuring enough load to fill L0s and SRs, while ensuring that segment-level blocks retain enough locality to make reads efficient.
+
+We expect extensions such as segment merging in the future. As the data in a system like timeseries ages, we can consolidate into coarser windows of time (e.g. hours into days) for more efficient compression. Segmentation may also provide the common foundation that we need for column families in SlateDb. 
+
+To get started with segmented compaction today, you need SlateDb 0.14 or higher. All you need is a prefix extractor to define the segments in your system. You can then build your own compaction scheduler to tune the frequency and heurstics of each segment. A scheduler that understands the structure of your data does not need to compromise.
+
+## Appendix: Segments vs. Column Families
+
+If you've used RocksDB, segments will feel a lot like column families: both split data into independent LSM trees that can be compacted on their own schedule. Two things set them apart.
+
+**How they partition the keyspace.** A column family is effectively an extra dimension on the addressing — `(family, key)` — so families are parallel, independent keyspaces with no order between them, and you can't scan across them as one sorted stream. A segment instead partitions the single, ordered keyspace into contiguous prefix ranges: the data stays globally sorted, so a range scan can span a run of segments.
+
+**How they're managed.** Column families are a small, static set that you create and drop explicitly and write to by name. Segments are derived automatically from the key by the `PrefixExtractor`, so writes flow through one shared memtable and WAL and split into per-segment trees only at flush — never routed to a named segment. Because a segment costs nothing to declare, they can be numerous and short-lived: a new time bucket becomes a new segment with no schema change, and retention simply drains the ones that age out.
