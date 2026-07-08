@@ -631,22 +631,33 @@ pub(crate) struct WalObserver {
     wal_buffer: Arc<WalBufferManager>,
 }
 
+/// Describes the current status of the WAL
 #[derive(Debug, Clone)]
 pub(crate) struct WalStatus {
+    /// The estimated in-memory bytes used by the WAL to buffer unflushed writes.
     pub(crate) estimated_bytes: usize,
     pub(crate) next_wal_id: u64,
+    /// The id of the last WAL file that was durably flushed
     #[allow(dead_code)]
     pub(crate) last_flushed_wal_id: u64,
+    /// The last sequence number that was durably flushed
     pub(crate) last_flushed_seq: Option<u64>,
+    /// The last WAL file id whose memory was released
     pub(crate) last_purged_wal_id: u64,
+    /// The number of writes currently buffered
     #[allow(dead_code)]
     pub(crate) buffered_wal_entries_count: usize,
 }
 
+/// An event emitted by [`WalBufferManager`] to subscribers.
 #[derive(Debug, Clone)]
 pub(crate) enum WalEvent {
+    /// Emitted when the current buffer is frozen
     WalFrozen(WalStatus),
+    /// Emitted when a WAL file is durably flushed to storage. On receipt of this event, SlateDB
+    /// notifies write tasks blocked on [`crate::config::WriteOptions::await_durable`]
     WalFlushed(WalStatus),
+    /// Emitted when `WalBufferManager` releases buffer memory.
     MemoryReleased(WalStatus),
 }
 
@@ -905,10 +916,7 @@ mod tests {
         Arc<MockSystemClock>,
         Arc<DefaultMetricsRecorder>,
     ) {
-       setup_wal_buffer_with_args(
-           flush_interval,
-           Arc::new(|_status| {})
-       ).await
+        setup_wal_buffer_with_args(flush_interval, Arc::new(|_status| {})).await
     }
 
     async fn setup_wal_buffer_with_args(

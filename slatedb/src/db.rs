@@ -2094,7 +2094,7 @@ impl DbWalObserver {
         Ok(())
     }
 
-    /// Waits until the wal's estimated memory usage drops below some threshold
+    /// Waits until the wal a given wal id is released by the wal writer
     async fn wait_until_wal_released(&self, last_purged_wal_id: u64) -> Result<(), SlateDBError> {
         self.wait_on_condition(|status| status.last_purged_wal_id > last_purged_wal_id)
             .await
