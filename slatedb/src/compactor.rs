@@ -1726,11 +1726,15 @@ mod tests {
             .await
             .unwrap();
 
+        // bbb gets as many L0s as aaa, so it would qualify for compaction if
+        // segment scoping were ignored; it must still be left alone.
         for (key, value) in [
             (b"aaa-001".as_slice(), b"v1".as_slice()),
             (b"aaa-002".as_slice(), b"v2".as_slice()),
             (b"aaa-003".as_slice(), b"v3".as_slice()),
             (b"bbb-001".as_slice(), b"v4".as_slice()),
+            (b"bbb-002".as_slice(), b"v5".as_slice()),
+            (b"bbb-003".as_slice(), b"v6".as_slice()),
         ] {
             put_and_flush_memtable(&db, key, value).await;
         }
@@ -1753,7 +1757,7 @@ mod tests {
                 .expect("missing segment bbb");
             if aaa.tree.l0.is_empty()
                 && !aaa.tree.compacted.is_empty()
-                && bbb.tree.l0.len() == 1
+                && bbb.tree.l0.len() == 3
                 && bbb.tree.compacted.is_empty()
             {
                 Some(core)
@@ -1776,7 +1780,7 @@ mod tests {
             .expect("missing segment bbb");
         assert!(aaa.tree.l0.is_empty());
         assert_eq!(aaa.tree.compacted.len(), 1);
-        assert_eq!(bbb.tree.l0.len(), 1);
+        assert_eq!(bbb.tree.l0.len(), 3);
         assert!(bbb.tree.compacted.is_empty());
 
         for (key, value) in [
@@ -1784,6 +1788,8 @@ mod tests {
             (b"aaa-002".as_slice(), b"v2".as_slice()),
             (b"aaa-003".as_slice(), b"v3".as_slice()),
             (b"bbb-001".as_slice(), b"v4".as_slice()),
+            (b"bbb-002".as_slice(), b"v5".as_slice()),
+            (b"bbb-003".as_slice(), b"v6".as_slice()),
         ] {
             assert_eq!(
                 db.get(key).await.unwrap(),
