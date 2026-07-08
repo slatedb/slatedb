@@ -1750,17 +1750,14 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         // the latest manifest), and the latest manifest otherwise.
         let external_ssts = match (&latest_manifest, self.checkpoint_id) {
             (Some(latest_stored_manifest), Some(checkpoint_id)) => {
-                match latest_stored_manifest
+                let checkpoint = latest_stored_manifest
                     .db_state()
                     .find_checkpoint(checkpoint_id)
-                {
-                    Some(checkpoint) => manifest_store
-                        .read_manifest(checkpoint.manifest_id)
-                        .await?
-                        .external_ssts(),
-                    // A missing checkpoint is diagnosed in open_internal.
-                    None => HashMap::new(),
-                }
+                    .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?;
+                manifest_store
+                    .read_manifest(checkpoint.manifest_id)
+                    .await?
+                    .external_ssts()
             }
             (Some(latest_stored_manifest), None) => {
                 latest_stored_manifest.manifest().external_ssts()
