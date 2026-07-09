@@ -10807,25 +10807,40 @@ mod tests {
         /// 1 KiB L0 size, both write sources uncached, and no compactor.
         struct ObjectStoreCacheTestBuilder {
             db_path: String,
+            object_store_cache: bool,
             cache_on_flush: bool,
             cache_on_compaction: bool,
             part_size: usize,
             l0_sst_size_bytes: usize,
             on_demand_compactor: bool,
             custom_compactor_store: bool,
+            metrics_recorder: Option<Arc<DefaultMetricsRecorder>>,
         }
 
         impl ObjectStoreCacheTestBuilder {
             fn new(db_path: &str) -> Self {
                 Self {
                     db_path: db_path.to_string(),
+                    object_store_cache: true,
                     cache_on_flush: false,
                     cache_on_compaction: false,
                     part_size: 1024,
                     l0_sst_size_bytes: 1024,
                     on_demand_compactor: false,
                     custom_compactor_store: false,
+                    metrics_recorder: None,
                 }
+            }
+
+            /// Leaves the object store cache unconfigured (no root folder).
+            fn without_object_store_cache(mut self) -> Self {
+                self.object_store_cache = false;
+                self
+            }
+
+            fn metrics_recorder(mut self, recorder: Arc<DefaultMetricsRecorder>) -> Self {
+                self.metrics_recorder = Some(recorder);
+                self
             }
 
             fn cache_on_flush(mut self) -> Self {
@@ -10866,12 +10881,14 @@ mod tests {
             async fn build(self) -> ObjectStoreCacheTest {
                 let Self {
                     db_path,
+                    object_store_cache,
                     cache_on_flush,
                     cache_on_compaction,
                     part_size,
                     l0_sst_size_bytes,
                     on_demand_compactor,
                     custom_compactor_store,
+                    metrics_recorder,
                 } = self;
 
                 let upstream: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -10882,13 +10899,17 @@ mod tests {
                 let cache_root = temp_dir.keep();
 
                 let mut opts = test_db_options(0, l0_sst_size_bytes, None);
-                opts.object_store_cache_options.root_folder = Some(cache_root.clone());
+                opts.object_store_cache_options.root_folder =
+                    object_store_cache.then(|| cache_root.clone());
                 opts.object_store_cache_options.part_size_bytes = part_size;
                 opts.object_store_cache_options.cache_on_flush = cache_on_flush;
                 opts.object_store_cache_options.cache_on_compaction = cache_on_compaction;
 
                 let mut builder =
                     Db::builder(db_path.as_str(), upstream.clone()).with_settings(opts);
+                if let Some(recorder) = metrics_recorder {
+                    builder = builder.with_metrics_recorder(recorder);
+                }
                 let should_compact = if on_demand_compactor {
                     let flag = Arc::new(AtomicBool::new(false));
                     let flag_clone = flag.clone();
@@ -11378,6 +11399,45 @@ mod tests {
                 );
             }
             t.close().await;
+        }
+
+        /// An embedded compactor on the DB's own store records its object
+        /// store I/O under the compactor component, with and without the
+        /// object store cache.
+        #[tokio::test]
+        async fn test_embedded_compactor_io_recorded_under_compactor_component() {
+            for object_store_cache in [true, false] {
+                let recorder = Arc::new(DefaultMetricsRecorder::new());
+                let mut builder =
+                    ObjectStoreCacheTest::builder("/tmp/test_compactor_component_metrics")
+                        .cache_on_compaction()
+                        .on_demand_compactor()
+                        .metrics_recorder(recorder.clone());
+                if !object_store_cache {
+                    builder = builder.without_object_store_cache();
+                }
+                let t = builder.build().await;
+
+                for i in 0..2u32 {
+                    let key = format!("key{:04}", i);
+                    t.db().put(key.as_bytes(), &[b'v'; 64]).await.unwrap();
+                    t.db()
+                        .flush_with_options(FlushOptions {
+                            flush_type: FlushType::MemTable,
+                        })
+                        .await
+                        .unwrap();
+                }
+                t.compact_and_wait().await;
+
+                let gets =
+                    lookup_object_store_op_request_count(&recorder, "compactor", "main", "get");
+                let puts =
+                    lookup_object_store_op_request_count(&recorder, "compactor", "main", "put");
+                assert!(gets > 0, "no compactor gets [cache={object_store_cache}]");
+                assert!(puts > 0, "no compactor puts [cache={object_store_cache}]");
+                t.close().await;
+            }
         }
     }
 }

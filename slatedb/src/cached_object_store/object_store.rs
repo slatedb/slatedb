@@ -94,6 +94,23 @@ impl CachedObjectStore {
         }))
     }
 
+    /// Returns a new handle that reads through the new `object_store` on cache
+    /// misses while sharing everything else (all fields other than the
+    /// object_store in the cache are shared by ref-count clones).
+    ///
+    /// This lets a component with its own instrumented store (for example
+    /// the compactor) share the cache while keeping its I/O recorded under
+    /// its own metric labels.
+    pub(crate) fn clone_with_new_object_store(
+        &self,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            object_store,
+            ..self.clone()
+        })
+    }
+
     pub(crate) async fn start_evictor(&self) {
         self.cache_storage.start_evictor().await;
     }

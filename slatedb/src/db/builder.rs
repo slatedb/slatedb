@@ -632,27 +632,34 @@ impl<P: Into<Path>> DbBuilder<P> {
         // settings path, or the store the caller passed to their own
         // `CompactorBuilder`.
         //
-        // The store the compactor actually uses is decided below based on
-        // whether the builder holds the same store the DB was built on:
+        // Either way the store is wrapped in the compactor's own
+        // Compactor-tagged retry and instrumentation layer, so compaction I/O
+        // is recorded under the compactor component. What differs is cache
+        // sharing, decided below based on whether the builder holds the same
+        // store the DB was built on:
         //
         // 1. Same store (auto path, or a caller-supplied builder holding a
-        //    clone of the DB's store): the compactor shares the DB's wrapped
-        //    store, meaning the cached store when object store caching is
-        //    configured, otherwise the retrying instrumented main store.
+        //    clone of the DB's store): when object store caching is
+        //    configured, the compactor shares the DB's cache and reads
+        //    through its own instrumented layer on cache misses.
         //
         // 2. Different caller-supplied store: used as given (so a custom
         //    compaction reader takes effect instead of being silently
-        //    ignored), wrapped in its own retry and instrumentation layer.
-        let compactor_uses_db_store = match &self.compactor_builder {
-            None => true, // auto path constructs the builder from the DB's store
-            Some(b) => Arc::ptr_eq(&b.main_object_store, &self.main_object_store),
+        //    ignored), with no object store cache.
+        let (compactor_builder, compactor_uses_db_store) = match self.compactor_builder {
+            Some(b) => {
+                let uses_db_store = Arc::ptr_eq(&b.main_object_store, &self.main_object_store);
+                (Some(b), uses_db_store)
+            }
+            // The auto path constructs the builder from the DB's store.
+            None => (
+                self.settings.compactor_options.as_ref().map(|opts| {
+                    CompactorBuilder::new(path.clone(), self.main_object_store.clone())
+                        .with_options(opts.clone())
+                }),
+                true,
+            ),
         };
-        let compactor_builder = self.compactor_builder.or_else(|| {
-            self.settings.compactor_options.as_ref().map(|opts| {
-                CompactorBuilder::new(path.clone(), self.main_object_store.clone())
-                    .with_options(opts.clone())
-            })
-        });
 
         if let Some(mut compactor_builder) = compactor_builder {
             compactor_builder.options.metric_level = compactor_builder
@@ -669,21 +676,25 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
             builder = builder.with_fp_registry(self.fp_registry.clone());
 
-            // Case 1: the builder holds the DB's own store, so share the DB's
-            // wrapped store instead of wrapping the raw store a second time.
-            // Case 2: a different caller-supplied store is raw, so it gets its
-            // own Compactor-tagged retry/instrumentation layer.
-            let compactor_main_object_store: Arc<dyn ObjectStore> = if compactor_uses_db_store {
-                maybe_cached_main_object_store.clone()
-            } else {
-                instrumented_retrying_object_store(
-                    builder.main_object_store.clone(),
-                    &recorder,
-                    ObjectStoreComponent::Compactor,
-                    ObjectStoreType::Main,
-                    rand.clone(),
-                    system_clock.clone(),
-                )
+            // Case 1: the builder holds the DB's own raw store; when object
+            // store caching is configured, the DB's cache is shared through
+            // a handle that reads via the compactor's instrumented layer.
+            // Case 2: a different caller-supplied store is raw and cacheless.
+            let compactor_retrying_store = instrumented_retrying_object_store(
+                builder.main_object_store.clone(),
+                &recorder,
+                ObjectStoreComponent::Compactor,
+                ObjectStoreType::Main,
+                rand.clone(),
+                system_clock.clone(),
+            );
+            let compactor_main_object_store: Arc<dyn ObjectStore> = match &cached_object_store {
+                // Share the DB's cache through a handle that reads via the
+                // compactor's instrumented layer.
+                Some(cached) if compactor_uses_db_store => {
+                    cached.clone_with_new_object_store(compactor_retrying_store)
+                }
+                _ => compactor_retrying_store,
             };
             let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
@@ -719,46 +730,53 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         }
 
-        // Same store selection as the compactor above: a gc_builder holding
-        // the DB's own store shares the DB's wrapped store, so deleting an SST
-        // also evicts its object store cache entries; a different caller
-        // supplied store is used as given, wrapped in its own retry and
-        // instrumentation layer.
-        let gc_uses_db_store = match &self.gc_builder {
-            None => true, // auto path constructs the builder from the DB's store
-            Some(b) => Arc::ptr_eq(&b.main_object_store, &self.main_object_store),
+        // Same store selection as the compactor above. The GC always gets its
+        // own Gc-tagged retry and instrumentation layer, so its I/O is
+        // recorded under the gc component. A gc_builder holding the DB's own
+        // store additionally shares the DB's object store cache, so deleting
+        // an SST also evicts its cache entries; a different caller supplied
+        // store is used as given, with no cache.
+        let (gc_builder, gc_uses_db_store) = match self.gc_builder {
+            Some(b) => {
+                let uses_db_store = Arc::ptr_eq(&b.main_object_store, &self.main_object_store);
+                (Some(b), uses_db_store)
+            }
+            // The auto path constructs the builder from the DB's store.
+            None => (
+                self.settings
+                    .garbage_collector_options
+                    .filter(|opts| !opts.is_empty())
+                    .map(|opts| {
+                        GarbageCollectorBuilder::new(path.clone(), self.main_object_store.clone())
+                            .with_options(opts)
+                    }),
+                true,
+            ),
         };
-        let gc_builder = self.gc_builder.or_else(|| {
-            self.settings
-                .garbage_collector_options
-                .filter(|opts| !opts.is_empty())
-                .map(|opts| {
-                    GarbageCollectorBuilder::new(path.clone(), self.main_object_store.clone())
-                        .with_options(opts)
-                })
-        });
 
         if let Some(mut gc_builder) = gc_builder {
             gc_builder.options.metric_level = gc_builder
                 .options
                 .metric_level
                 .or(Some(self.settings.metric_level));
-            let (gc_main_object_store, gc_object_store) = if gc_uses_db_store {
-                (
-                    maybe_cached_main_object_store.clone(),
-                    retrying_main_object_store.clone(),
-                )
-            } else {
-                let wrapped = instrumented_retrying_object_store(
-                    gc_builder.main_object_store.clone(),
-                    &recorder,
-                    ObjectStoreComponent::Gc,
-                    ObjectStoreType::Main,
-                    rand.clone(),
-                    system_clock.clone(),
-                );
-                (wrapped.clone(), wrapped)
-            };
+            let gc_retrying_store = instrumented_retrying_object_store(
+                gc_builder.main_object_store.clone(),
+                &recorder,
+                ObjectStoreComponent::Gc,
+                ObjectStoreType::Main,
+                rand.clone(),
+                system_clock.clone(),
+            );
+            let (gc_main_object_store, gc_object_store): (Arc<dyn ObjectStore>, _) =
+                match &cached_object_store {
+                    // Share the DB's cache through a handle that reads via the
+                    // GC's instrumented layer.
+                    Some(cached) if gc_uses_db_store => (
+                        cached.clone_with_new_object_store(gc_retrying_store.clone()),
+                        gc_retrying_store,
+                    ),
+                    _ => (gc_retrying_store.clone(), gc_retrying_store),
+                };
             let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(gc_main_object_store, retrying_wal_object_store.clone()),
                 sst_format.clone(),
