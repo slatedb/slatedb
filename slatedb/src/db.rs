@@ -37,7 +37,7 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
 use crate::CloseReason;
-use log::{info, trace, warn};
+use log::{debug, info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
 
@@ -69,7 +69,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
-use crate::utils::{format_bytes_si, SafeSender};
+use crate::utils::{format_bytes_si, SafeSender, WatchableOnceCellReader};
 use crate::wal_buffer::{WalEvent, WalObserver, WalStatus, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
@@ -174,7 +174,12 @@ impl DbInner {
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
         let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone(), rand.clone()));
-        let wal_observer = DbWalObserver::new(wal_observer, oracle.clone(), state.clone());
+        let wal_observer = DbWalObserver::new(
+            wal_observer,
+            oracle.clone(),
+            state.clone(),
+            status_manager.result_reader()
+        );
 
         let db_inner = Self {
             state,
@@ -386,9 +391,11 @@ impl DbInner {
                 };
 
                 tokio::select! {
+                    biased;
+
+                    result = await_closed => result?,
                     result = await_memtable_uploaded => result?,
                     result = await_flush_wal => result?,
-                    result = await_closed => result?,
                     _ = timeout_fut => {
                         warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
@@ -2055,11 +2062,17 @@ impl WriteHandle {
 #[derive(Clone)]
 pub(crate) struct DbWalObserver {
     status_rx: tokio::sync::watch::Receiver<WalStatus>,
+    closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     wrapped: WalObserver,
 }
 
 impl DbWalObserver {
-    fn new(wrapped: WalObserver, oracle: Arc<DbOracle>, db_state: Arc<RwLock<DbState>>) -> Self {
+    fn new(
+        wrapped: WalObserver,
+        oracle: Arc<DbOracle>,
+        db_state: Arc<RwLock<DbState>>,
+        closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>
+    ) -> Self {
         let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
         wrapped
             .subscribe(Arc::new(move |event| {
@@ -2076,7 +2089,7 @@ impl DbWalObserver {
                 let _ = status_tx.send(status);
             }))
             .expect("failed to subscribe to wal");
-        Self { status_rx, wrapped }
+        Self { status_rx, closed_reader, wrapped }
     }
 
     pub(crate) fn status(&self) -> WalStatus {
@@ -2088,11 +2101,17 @@ impl DbWalObserver {
         predicate: impl FnMut(&WalStatus) -> bool,
     ) -> Result<(), SlateDBError> {
         let mut status_rx = self.status_rx.clone();
-        status_rx
+        let result = status_rx
             .wait_for(predicate)
             .await
-            .map_err(|_| SlateDBError::Closed)?;
-        Ok(())
+            .map(|_| ());
+        match result {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                debug!("wal listener tx dropped - wait on db close");
+                self.closed_reader.clone().await_value().await
+            }
+        }
     }
 
     /// Waits until the wal a given wal id is released by the wal writer
