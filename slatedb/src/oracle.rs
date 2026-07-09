@@ -61,12 +61,6 @@ impl DbOracle {
         self.last_durable_seq.fetch_max(seq, SeqCst);
         self.status_reporter.report_durable_seq(seq);
     }
-
-    #[cfg(test)]
-    pub(crate) fn set_durable_seq_unsafe(&self, value: u64) {
-        self.last_durable_seq.store(value, SeqCst);
-        self.status_reporter.report_durable_seq(value);
-    }
 }
 
 impl Oracle for DbOracle {

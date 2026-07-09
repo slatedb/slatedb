@@ -9,12 +9,13 @@ use crate::{
     tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::filter::retain_allowed_by_gc_filter;
-use super::{GcFilter, GcStats, GcTask};
+use super::{GcFilter, GcStats, GcTask, GC_DELETE_CONCURRENCY};
 
 #[derive(Clone)]
 pub(crate) struct CompactedGcTask {
@@ -115,21 +116,26 @@ impl CompactedGcTask {
     ///
     /// In case of dryrun, the actual deletion doesn't happen.
     async fn maybe_delete_compacted_ssts(&self, sst_ids: Vec<SsTableId>) {
-        if self.compacted_options.dry_run && !sst_ids.is_empty() {
-            log::info!("dry run: skipping SST deletion [count={}]", sst_ids.len());
-        }
-        for id in sst_ids {
-            if self.compacted_options.dry_run {
+        if self.compacted_options.dry_run {
+            if !sst_ids.is_empty() {
+                log::info!("dry run: skipping SST deletion [count={}]", sst_ids.len());
+            }
+            for id in sst_ids {
                 log::debug!("dry run: would delete SST but skipped [id={:?}]", id);
-                continue;
             }
-            log::info!("deleting SST [id={:?}]", id);
-            if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("error deleting SST [id={:?}, error={}]", id, e);
-            } else {
-                self.stats.gc_compacted_count.increment(1);
-            }
+            return;
         }
+
+        futures::stream::iter(sst_ids)
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
+                log::info!("deleting SST [id={:?}]", id);
+                if let Err(e) = self.table_store.delete_sst(&id).await {
+                    error!("error deleting SST [id={:?}, error={}]", id, e);
+                } else {
+                    self.stats.gc_compacted_count.increment(1);
+                }
+            })
+            .await;
     }
 }
 

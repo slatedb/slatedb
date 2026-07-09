@@ -55,6 +55,11 @@ pub use filter::GcFilter;
 pub(crate) const DEFAULT_MIN_AGE: Duration = Duration::from_secs(300);
 pub(crate) const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const GC_TASK_NAME: &str = "garbage_collector";
+/// Maximum number of concurrent object-store deletes issued by a GC task's
+/// deletion pass. Deletes are independent single-object operations, so a small
+/// bounded fan-out keeps large backlogs tractable without overwhelming the
+/// object store.
+pub(crate) const GC_DELETE_CONCURRENCY: usize = 8;
 
 trait GcTask {
     fn resource(&self) -> &str;

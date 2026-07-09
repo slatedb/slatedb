@@ -2,12 +2,13 @@ use crate::{
     config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
 };
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::filter::retain_allowed_by_gc_filter;
-use super::{GcFilter, GcStats, GcTask};
+use super::{GcFilter, GcStats, GcTask, GC_DELETE_CONCURRENCY};
 
 #[derive(Clone)]
 pub(crate) struct ManifestGcTask {
@@ -91,33 +92,37 @@ impl GcTask for ManifestGcTask {
         }
         let manifests_to_delete =
             retain_allowed_by_gc_filter(&self.gc_filter, manifests_to_delete).await;
-        if self.manifest_options.dry_run && !manifests_to_delete.is_empty() {
-            log::info!(
-                "dry run: skipping manifest deletion [count={}]",
-                manifests_to_delete.len()
-            );
-        }
-        for manifest_metadata in manifests_to_delete {
-            if self.manifest_options.dry_run {
+        if self.manifest_options.dry_run {
+            if !manifests_to_delete.is_empty() {
+                log::info!(
+                    "dry run: skipping manifest deletion [count={}]",
+                    manifests_to_delete.len()
+                );
+            }
+            for manifest_metadata in manifests_to_delete {
                 log::debug!(
                     "dry run: would delete manifest but skipped [id={:?}]",
                     manifest_metadata.id
                 );
-                continue;
             }
-            if let Err(e) = self
-                .manifest_store
-                .delete_manifest_unchecked(manifest_metadata.id)
-                .await
-            {
-                error!(
-                    "error deleting manifest [id={:?}, error={}]",
-                    manifest_metadata.id, e
-                );
-            } else {
-                self.stats.gc_manifest_count.increment(1);
-            }
+            return Ok(());
         }
+        futures::stream::iter(manifests_to_delete)
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |manifest_metadata| async move {
+                if let Err(e) = self
+                    .manifest_store
+                    .delete_manifest_unchecked(manifest_metadata.id)
+                    .await
+                {
+                    error!(
+                        "error deleting manifest [id={:?}, error={}]",
+                        manifest_metadata.id, e
+                    );
+                } else {
+                    self.stats.gc_manifest_count.increment(1);
+                }
+            })
+            .await;
 
         Ok(())
     }

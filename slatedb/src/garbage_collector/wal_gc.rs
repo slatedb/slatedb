@@ -4,12 +4,13 @@ use crate::{
     manifest::store::ManifestStore, tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use log::error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::filter::retain_allowed_by_gc_filter;
-use super::{GcFilter, GcStats, GcTask};
+use super::{GcFilter, GcStats, GcTask, GC_DELETE_CONCURRENCY};
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 
 /// Selects which class of WAL object a [`WalGcTask`] collects.
@@ -130,38 +131,42 @@ impl GcTask for WalGcTask {
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
-        if self.wal_options.dry_run && !sst_ids_to_delete.is_empty() {
-            log::info!(
-                "dry run: skipping {} deletion [count={}]",
-                self.resource(),
-                sst_ids_to_delete.len()
-            );
-            if matches!(self.mode, WalGcMode::Fence) {
+        if self.wal_options.dry_run {
+            if !sst_ids_to_delete.is_empty() {
                 log::info!(
-                    "WAL fence GC is dry-run by default. This is a conservative setting. \
-                    Set wal_fence_options.dry_run=false and use a conservative min_age to enable. \
-                    Silence this log with wal_fence_options=None. See #352 for details."
+                    "dry run: skipping {} deletion [count={}]",
+                    self.resource(),
+                    sst_ids_to_delete.len()
                 );
+                if matches!(self.mode, WalGcMode::Fence) {
+                    log::info!(
+                        "WAL fence GC is dry-run by default. This is a conservative setting. \
+                        Set wal_fence_options.dry_run=false and use a conservative min_age to enable. \
+                        Silence this log with wal_fence_options=None. See #352 for details."
+                    );
+                }
             }
-        }
-        for id in sst_ids_to_delete {
-            if self.wal_options.dry_run {
+            for id in sst_ids_to_delete {
                 log::debug!(
                     "dry run: would delete {} but skipped [id={:?}]",
                     self.resource(),
                     id
                 );
-                continue;
             }
-            if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("error deleting WAL SST [id={:?}, error={}]", id, e);
-            } else {
-                match self.mode {
-                    WalGcMode::Regular => self.stats.gc_wal_count.increment(1),
-                    WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(1),
-                }
-            }
+            return Ok(());
         }
+        futures::stream::iter(sst_ids_to_delete)
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
+                if let Err(e) = self.table_store.delete_sst(&id).await {
+                    error!("error deleting WAL SST [id={:?}, error={}]", id, e);
+                } else {
+                    match self.mode {
+                        WalGcMode::Regular => self.stats.gc_wal_count.increment(1),
+                        WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(1),
+                    }
+                }
+            })
+            .await;
 
         Ok(())
     }

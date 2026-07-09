@@ -167,7 +167,7 @@ pub struct CompactionWorkerOptions {
   pub compactions_poll_interval: Duration,
 
   // Minimum wall-clock time between heartbeat writes.
-  pub heartbeat_min_interval: Duration,
+  pub heartbeat_interval: Duration,
 
   // Max size of an output SST produced by a compaction.
   pub max_sst_size: usize,
@@ -183,7 +183,7 @@ pub struct CompactionWorkerOptions {
 
 - `compactions_poll_interval` is used for polling frequency. To prevent workers from synchronizing on `.compactions` reads, the poll ticker jitters each wait: instead of waiting exactly `compactions_poll_interval`, each tick waits a random duration picked uniformly between `compactions_poll_interval/2` and `3 * compactions_poll_interval/2` (the interval plus or minus half). Because the range is centered on `compactions_poll_interval`, each worker still polls once per `compactions_poll_interval` on average. Jitter is a feature of the shared task dispatcher (defaulting to off) that the worker enables for its poll ticker; the randomized wait happens inside the ticker rather than in the message handler, so waiting on it never blocks the worker from processing job-progress or job-finished messages. It requires no user configuration.
 
-- `heartbeat_min_interval` controls the worker ticker that refreshes liveness for active jobs and should be set well below the coordinator's `worker_heartbeat_timeout`.
+- `heartbeat_interval` controls the worker ticker that refreshes liveness for active jobs and should be set well below the coordinator's `worker_heartbeat_timeout`.
 
 New `CompactionWorkerBuilder` entrypoint for `CompactionWorker` processes:
 
@@ -191,7 +191,7 @@ New `CompactionWorkerBuilder` entrypoint for `CompactionWorker` processes:
 let options = CompactionWorkerOptions {
     max_concurrent_compactions: 2,
     compactions_poll_interval: Duration::from_secs(1),
-    heartbeat_min_interval: Duration::from_secs(10),
+    heartbeat_interval: Duration::from_secs(10),
 };
 
 let worker = CompactionWorkerBuilder::new("/path/to/db", object_store.clone())
@@ -238,7 +238,7 @@ Workers claim up to `max_concurrent_compactions` jobs at a time, limiting the nu
 
 **Heartbeat Protocol** (worker):
 
-1. Every `heartbeat_min_interval`, write updated `.compactions` with `last_heartbeat_ms = now()` for all `Running` jobs owned by this worker.
+1. Every `heartbeat_interval`, write updated `.compactions` with `last_heartbeat_ms = now()` for all `Running` jobs owned by this worker.
 2. When the compaction context changes, including the initial plan or new output SST progress, persist the updated context and piggyback `last_heartbeat_ms = now()`.
 3. On `AlreadyExists`: re-read latest. If the compaction is now `Submitted` or claimed by another `worker_id`, the worker has lost the assignment: discard local state for that compaction, abort execution, and return to the poll/claim loop. Otherwise retry the write.
 
@@ -365,7 +365,7 @@ let worker = CompactionWorkerBuilder::new("db", object_store)
       CompactionWorkerOptions {
         max_concurrent_compactions: 2,
         compactions_poll_interval: Duration::from_secs(1),
-        heartbeat_min_interval: Duration::from_secs(5),
+        heartbeat_interval: Duration::from_secs(5),
       }
     )
     .build()
@@ -417,7 +417,7 @@ let worker = CompactionWorkerBuilder::new("db", object_store)
       CompactionWorkerOptions {
         max_concurrent_compactions: 2,
         compactions_poll_interval: Duration::from_secs(1),
-        heartbeat_min_interval: Duration::from_secs(5),
+        heartbeat_interval: Duration::from_secs(5),
       }
     )
     .build()

@@ -157,10 +157,10 @@ use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
+use crate::wal_buffer::WalBufferManager;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -587,6 +587,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             BTreeSet::new(),
         );
 
+        let recent_flushed_wal_id = replay_range.end - 1;
+        let wal_buffer = Arc::new(WalBufferManager::new(
+            status_manager.clone(),
+            &recorder,
+            recent_flushed_wal_id,
+            table_store.clone(),
+            self.settings.l0_sst_size_bytes,
+            self.settings.flush_interval,
+        ));
+
         // Setup communication channels wired to the shared closed state.
         let reader = status_manager.result_reader();
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
@@ -602,6 +612,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 manifest_dirty,
                 Arc::clone(&memtable_flusher),
                 write_tx,
+                wal_buffer.observer(),
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
@@ -618,11 +629,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock.clone(),
         ));
         if inner.wal_enabled {
-            inner.wal_buffer.init(task_executor.clone()).await?;
+            wal_buffer.init(task_executor.clone()).await?;
         };
         task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
-            Box::new(WriteBatchEventHandler::new(inner.clone())),
+            Box::new(WriteBatchEventHandler::new(inner.clone(), wal_buffer)),
             write_rx,
             &tokio_handle,
         )?;
@@ -1792,14 +1803,36 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         };
 
         // Validate WAL object store configuration.
-        let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store));
         let latest_manifest =
-            StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
+            StoredManifest::try_load(Arc::clone(&manifest_store), self.system_clock.clone())
+                .await?;
         if let Some(latest_manifest) = &latest_manifest {
             latest_manifest
                 .db_state()
                 .validate_wal_object_store_uri(wal_object_store_uri.as_deref())?;
         }
+
+        // Resolve external SSTs against the manifest the reader will actually
+        // read from: the pinned checkpoint's manifest when a checkpoint id is
+        // given (compaction may have pruned re-localized external SSTs from
+        // the latest manifest), and the latest manifest otherwise.
+        let external_ssts = match (&latest_manifest, self.checkpoint_id) {
+            (Some(latest_stored_manifest), Some(checkpoint_id)) => {
+                let checkpoint = latest_stored_manifest
+                    .db_state()
+                    .find_checkpoint(checkpoint_id)
+                    .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?;
+                manifest_store
+                    .read_manifest(checkpoint.manifest_id)
+                    .await?
+                    .external_ssts()
+            }
+            (Some(latest_stored_manifest), None) => {
+                latest_stored_manifest.manifest().external_ssts()
+            }
+            (None, _) => HashMap::new(),
+        };
 
         let wrapped_cache = self.db_cache.as_ref().map(|c| {
             Arc::new(DbCacheWrapper::new(
@@ -1809,19 +1842,24 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             )) as Arc<dyn DbCache>
         });
 
-        let store_provider = DefaultStoreProvider {
-            path: path.clone(),
-            object_store,
-            manifest_object_store: retrying_object_store,
-            wal_object_store: retrying_wal_object_store,
-            block_cache: wrapped_cache,
-            block_transformer: self.block_transformer.clone(),
-            filter_policies: self.filter_policies.clone(),
-            kind: TableStoreKind::Reader,
+        let sst_format = SsTableFormat {
+            filter_policies: self.filter_policies,
+            block_transformer: self.block_transformer,
+            ..SsTableFormat::default()
         };
+        let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
+            ObjectStores::new(object_store, retrying_wal_object_store),
+            sst_format,
+            path_resolver,
+            Arc::new(FailPointRegistry::new()),
+            wrapped_cache,
+            TableStoreKind::Reader,
+        ));
 
         let reader = DbReader::open_internal(
-            &store_provider,
+            manifest_store,
+            table_store,
             self.checkpoint_id,
             self.merge_operator,
             self.segment_extractor,
