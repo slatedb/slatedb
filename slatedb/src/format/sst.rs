@@ -641,9 +641,6 @@ impl SsTableFormat {
     }
 
     /// Sets the minimum number of keys required before filter blocks are emitted.
-    ///
-    /// Defaults to 1000, matching the previous [`crate::config::Settings`]
-    /// default.
     pub fn with_min_filter_keys(mut self, min_filter_keys: u32) -> Self {
         self.min_filter_keys = min_filter_keys;
         self
