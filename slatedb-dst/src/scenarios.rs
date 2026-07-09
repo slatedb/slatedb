@@ -210,7 +210,7 @@ fn run_seed_once(
         }
 
         let db_seed = ctx.rand().rng().next_u64();
-        let mut settings = build_settings(ctx.rand()).await;
+        let (mut settings, sst_format) = build_settings(ctx.rand()).await;
 
         // Keep L0 tiny and compactor polling aggressive so a small number of
         // explicit memtable flushes will trigger real compaction during the run.
@@ -226,7 +226,8 @@ fn run_seed_once(
             .with_system_clock(ctx.system_clock())
             .with_fp_registry(ctx.fp_registry())
             .with_seed(db_seed)
-            .with_settings(settings);
+            .with_settings(settings)
+            .with_sst_format(sst_format);
         if let Some(merge_operator) = ctx.merge_operator() {
             builder = builder.with_merge_operator(merge_operator);
         }
