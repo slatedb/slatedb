@@ -105,7 +105,6 @@ fn meta_only_cache() -> Arc<SplitCache> {
 
 fn base_settings() -> Settings {
     Settings {
-        min_filter_keys: 0,
         l0_sst_size_bytes: 256 * 1024 * 1024,
         l0_max_ssts: NUM_FLUSHES + 10,
         // Sentinel keys make every SST's effective range cover every key, so
