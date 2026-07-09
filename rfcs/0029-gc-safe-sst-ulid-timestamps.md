@@ -12,10 +12,8 @@ Table of Contents:
 - [Design](#design)
    - [Writer L0 IDs](#writer-l0-ids)
    - [Compaction IDs](#compaction-ids)
-   - [Owned Watermarks](#owned-watermarks)
    - [Invariant Checks](#invariant-checks)
    - [Failure Handling](#failure-handling)
-   - [Clock Skew](#clock-skew)
    - [Garbage Collection](#garbage-collection)
 - [Implementation](#implementation)
 - [Impact Analysis](#impact-analysis)
@@ -49,16 +47,16 @@ This RFC fixes the race by changing where IDs are minted, not how:
   upload, in the same sequence order that L0s are later published.
 - Newly flushed L0 views use the physical SST ID as their view ID.
 
-Clock skew is handled in two ways. Skew between the GC clock and the clocks
-that mint IDs is safe as long as it stays below `min_age`, and users who
-expect more skew can configure a larger `min_age`. Skew between an old writer
-and a new writer across a restart is not fixed by `min_age`. There, the
-manifest and `.compactions` invariants reject IDs minted below already
-committed timestamps, so the new writer fails with a clear error instead of
-causing silent data loss.
+This makes the fix structural. An SST that is already in an active manifest is
+never deleted, because GC skips referenced SSTs. An SST that is uploaded but
+not yet published always has a timestamp at or above the newest published L0,
+so the `newest_l0` cutoff term protects it.
 
-There are no manifest or SST format changes. GC stays a pure deleter, with one
-change: the `newest_l0` cutoff term only considers L0s owned by this database.
+This RFC does not try to solve clock skew. It assumes skew is bounded, and
+users set `min_age` for the margin they want against GC-versus-writer skew.
+
+There are no manifest or SST format changes, and GC is unchanged. It stays a
+pure deleter.
 
 ## Background
 
@@ -122,14 +120,9 @@ The unsafe sequence is:
 6. The manifest writer later publishes B, creating a manifest that references
    a missing object.
 
-This race was reproduced by a deterministic simulation test failure in
-PR #1758. Clock skew between the GC clock and the clocks that mint IDs can
-create the same effect. If GC runs inside the writer, both share one clock,
-so only an upload stall longer than `min_age` can trigger the race. If GC
-runs in its own process, a fresh SST can sit below the cutoff right away:
-either the minting clock is behind the GC clock, or the GC clock is ahead of
-the minting clock. We have not seen this in practice. This RFC assumes this
-skew is bounded by `min_age` (see [Clock Skew](#clock-skew)).
+This is an ordering problem, not a clock problem. It happens on a single
+well-behaved clock, because mint order and publish order differ. It was
+reproduced by a deterministic simulation test failure in PR #1758.
 
 ## Goals
 
@@ -142,11 +135,8 @@ skew is bounded by `min_age` (see [Clock Skew](#clock-skew)).
 
 ## Non-Goals
 
-- Handle skew between the GC clock and the minting clocks that is larger
-  than `min_age`. Users configure `min_age` above the skew they expect.
-- Tolerate clock skew between an old writer and a new writer across a
-  restart. The invariants fail the new writer with a clear error, and the
-  user has to fix the clock or wait (see [Failure Handling](#failure-handling)).
+- Solve clock skew. Skew is assumed bounded, and users set `min_age` for the
+  margin they want against GC-versus-writer skew.
 - Redesign compacted SST GC around sequence numbers or manifest IDs.
 - Fix unrelated full-ULID ordering bugs, such as choosing between two
   same-millisecond compaction IDs by comparing the full random suffix.
@@ -190,30 +180,11 @@ today. Outputs of an active job are protected by `compaction_low_watermark`,
 and clock skew within `min_age` is covered by the `now - min_age` term. The
 `.compactions` invariants below reject IDs that violate the watermark rules.
 
-### Owned Watermarks
-
-Clones and unions can make this database reference SSTs created by another
-database, with timestamps from another machine's clock. If such an SST has a
-far-future timestamp, it must not raise the bar for this database's own IDs or
-cutoffs.
-
-For example, a clone starts with a copy of the parent's manifest. Its L0s and
-its `last_compacted_l0_sst_view_id` still carry ULIDs minted by the parent's
-clock. If the parent's clock was ahead, using those timestamps as this
-database's watermark would block its own flushes until its clock catches up.
-
-Add an owned-watermark helper, such as
-`newest_owned_l0`. It scans the unsegmented tree and
-every segment tree, takes the maximum physical SST ULID timestamp from live
-L0s owned by this database, and falls back to the tree's
-`last_compacted_l0_sst_view_id` when a tree has no live owned L0s. It ignores
-SSTs referenced through `external_dbs` and inherited clone or union markers.
-
-Use it in both places:
-
-- the `l0_ulid_cutoff` invariant (see [Invariant Checks](#invariant-checks)),
-  and
-- the GC `newest_l0` cutoff term (see [Garbage Collection](#garbage-collection)).
+We do not check the job ID against the manifest's L0 timestamps. The
+`.manifest` and `.compactions` files are updated independently, so such a
+check would not hold as new L0s arrive, and it would not help anyway: GC does
+not compare those timestamps, so a low job ID only lowers the cutoff and makes
+GC more cautious, never less.
 
 ### Invariant Checks
 
@@ -225,7 +196,7 @@ update paths don't miss them.
 For `.manifest`:
 
 - `l0_ulid_cutoff`: a newly added L0 physical SST ID must have a timestamp at
-  or above the current manifest's owned L0 watermark.
+  or above the newest L0 timestamp already in the manifest.
 
 For `.compactions`:
 
@@ -254,49 +225,17 @@ happening, the user should report a bug.
 - If the error happens in a background task, such as flush or compaction, the
   `Db` is marked closed with a failed state.
 
-What the user should do: check the host clock and run NTP. If a previous
-writer's clock was ahead of real time, wait until the wall clock passes the
-committed timestamps, then reopen. Retrying without fixing the clock will
-fail again.
-
-If the committed timestamps are too far in the future to wait out, the
-database is stuck and needs manual recovery. There are two options:
-
-- Revert to a manifest version from before the bad L0s were published. This
-  loses the writes in those L0s.
-- Copy the affected SSTs to newly minted IDs and commit a manifest that
-  points at the copies. This keeps the data. The bad timestamps are part of
-  the SST object names, not just manifest fields, so this needs a copy, not a
-  manifest edit. Tooling for this is future work.
-
-### Clock Skew
-
-There are two kinds of skew, and they have different protections.
-
-Skew between the GC clock and the clocks that mint IDs. This is what
-`min_age` bounds (default 300 seconds). If a minting clock is behind the GC
-clock by less than `min_age`, a fresh unpublished SST still looks younger
-than `min_age` to GC, so it is safe. Users who expect more skew should
-configure a larger `min_age`.
-
-Skew between the minting clocks themselves, for example an old writer ahead
-of a new writer, or a compactor coordinator ahead of a worker. `min_age` does
-not help here. The invariants catch it: the new ID is below a committed
-timestamp, the update is rejected, and the user has to fix the clock or wait.
-This costs availability, not data.
-
-A clock set far in the future is a setup error. It commits far-future
-timestamps that block later, correctly clocked writers until real time catches
-up. The invariant error message shows both timestamps so this is visible
-early. See [Failure Handling](#failure-handling) for how to recover.
+Skew across a writer restart can fail the invariant: if a previous writer's
+clock was ahead, a new writer's IDs fall below the committed timestamps and
+are rejected. `min_age` does not help this case. The fix is to fix the clock
+(run NTP) or wait until the wall clock passes the committed timestamps, then
+reopen. Retrying without fixing the clock will fail again.
 
 ### Garbage Collection
 
-GC remains a pure deleter. One change: the `newest_l0` cutoff term is computed
-from L0s owned by this database, using the same owned-watermark rule as
-`l0_ulid_cutoff`. Without this, an external L0 with a future timestamp could
-raise the cutoff above locally minted pending SSTs. External SSTs do not need
-the `newest_l0` protection; they are protected by being referenced.
+GC does not change. It stays a pure deleter and keeps the same cutoff. All the
+work in this RFC is on the minting side, so the IDs GC already reads are safe
+to interpret.
 
 ## Implementation
 
@@ -305,8 +244,6 @@ the `newest_l0` protection; they are protected by being referenced.
 - Add pre-allocated segment SST IDs to `UploadJob` and update the uploader to
   use them.
 - Update `ManifestWriter::apply_uploaded_state` to create identity L0 views.
-- Add `newest_owned_l0` and use it in
-  `l0_ulid_cutoff` and in the GC `newest_l0` term.
 - Register the manifest and `.compactions` invariants in the shared
   construction paths for loaded and newly created stored objects.
 - Return `InvalidClockTick` on invariant failure, with the rejected timestamp
@@ -320,7 +257,7 @@ SlateDB features and components that this RFC interacts with:
 - [ ] Sequence numbers
 - [ ] Manifest format
 - [ ] Checkpoints
-- [x] Clones
+- [ ] Clones
 - [x] Garbage collection
 - [ ] Database splitting and merging
 - [x] Compaction state persistence
@@ -358,8 +295,8 @@ SlateDB features and components that this RFC interacts with:
 
 ## Testing
 
-- Unit tests for identity L0 views, the owned-watermark helper, and the
-  manifest and `.compactions` invariants.
+- Unit tests for identity L0 views and the manifest and `.compactions`
+  invariants.
 - Integration tests for parallel L0 upload where upload completion order
   differs from manifest publish order.
 - Deterministic simulation test for the publish-order race that motivated
@@ -371,9 +308,8 @@ SlateDB features and components that this RFC interacts with:
 
 1. Move L0 SST ID allocation to dispatch and pass IDs through `UploadJob`.
 2. Make newly flushed L0 views identity views.
-3. Compute the GC `newest_l0` term from owned L0s only.
-4. Add invariants, metrics, and logs.
-5. Enable strict invariant enforcement after all roles in the deployment are
+3. Add invariants, metrics, and logs.
+4. Enable strict invariant enforcement after all roles in the deployment are
    upgraded.
 
 ## Alternatives
@@ -382,8 +318,27 @@ SlateDB features and components that this RFC interacts with:
 
 - Reduces the probability that a staged SST is old enough to delete.
 - Rejected as the only fix because upload stalls can exceed any practical
-  value. This RFC does rely on `min_age` as the clock-skew bound, but fixes
-  the publish-order race structurally.
+  value. This RFC fixes the publish-order race structurally and keeps
+  `min_age` only as a best-effort knob.
+
+### Exclude external SSTs from the cutoff
+
+- Compute `newest_l0` from L0s owned by this database only, ignoring SSTs
+  inherited from a clone or union parent. This would stop a parent's
+  far-future L0 timestamp from raising this database's cutoff.
+- Not taken. That case only happens under clock skew across databases, which
+  we assume is bounded and out of scope. Adding it would make the cutoff logic
+  more complex for a case we have not seen.
+
+### Calibrate writer clocks against the object store
+
+- Suggested in review: on each PUT, record the local time before and after,
+  and check the object's `last_modified` falls within that window plus an
+  error bound. This keeps each writer's clock close to the object store's
+  clock and bounds skew directly.
+- Deferred. It is a reasonable way to bound skew if the bounded-skew
+  assumption proves too weak, but it adds a check to every write for a problem
+  we are treating as out of scope.
 
 ### Monotonic allocator with a timestamp floor
 
@@ -427,7 +382,6 @@ SlateDB features and components that this RFC interacts with:
   compaction outputs do not naturally belong to the input data sequence, and
   clone/split/union timelines make ownership rules larger than this fix.
 
-  
 ## References
 
 - [RFC-0024: Segment-Oriented Compaction](0024-segment-oriented-compaction.md)
