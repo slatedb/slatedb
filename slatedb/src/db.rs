@@ -178,7 +178,7 @@ impl DbInner {
             wal_observer,
             oracle.clone(),
             state.clone(),
-            status_manager.result_reader()
+            status_manager.result_reader(),
         );
 
         let db_inner = Self {
@@ -2071,7 +2071,7 @@ impl DbWalObserver {
         wrapped: WalObserver,
         oracle: Arc<DbOracle>,
         db_state: Arc<RwLock<DbState>>,
-        closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>
+        closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     ) -> Self {
         let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
         wrapped
@@ -2089,7 +2089,11 @@ impl DbWalObserver {
                 let _ = status_tx.send(status);
             }))
             .expect("failed to subscribe to wal");
-        Self { status_rx, closed_reader, wrapped }
+        Self {
+            status_rx,
+            closed_reader,
+            wrapped,
+        }
     }
 
     pub(crate) fn status(&self) -> WalStatus {
@@ -2101,10 +2105,7 @@ impl DbWalObserver {
         predicate: impl FnMut(&WalStatus) -> bool,
     ) -> Result<(), SlateDBError> {
         let mut status_rx = self.status_rx.clone();
-        let result = status_rx
-            .wait_for(predicate)
-            .await
-            .map(|_| ());
+        let result = status_rx.wait_for(predicate).await.map(|_| ());
         match result {
             Ok(_) => Ok(()),
             Err(_) => {
