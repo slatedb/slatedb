@@ -139,7 +139,7 @@ use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper, UnownedDbCache};
-use crate::db_reader::DbReader;
+use crate::db_reader::{DbReader, DbReaderMode};
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
@@ -1559,7 +1559,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     db_cache: Option<Arc<dyn DbCache>>,
-    checkpoint_id: Option<uuid::Uuid>,
+    mode: DbReaderMode,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
@@ -1578,7 +1578,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             object_store,
             wal_object_store: None,
             db_cache: default_db_cache(),
-            checkpoint_id: None,
+            mode: DbReaderMode::default(),
             merge_operator: None,
             block_transformer: None,
             filter_policies: default_filter_policies(),
@@ -1590,10 +1590,9 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         }
     }
 
-    /// Sets the checkpoint ID to use for the reader.
-    /// If not set, the reader will create and manage its own checkpoint.
-    pub fn with_checkpoint_id(mut self, checkpoint_id: uuid::Uuid) -> Self {
-        self.checkpoint_id = Some(checkpoint_id);
+    /// Sets how the reader chooses and refreshes database state.
+    pub fn with_reader_mode(mut self, mode: DbReaderMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -1764,8 +1763,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         // read from: the pinned checkpoint's manifest when a checkpoint id is
         // given (compaction may have pruned re-localized external SSTs from
         // the latest manifest), and the latest manifest otherwise.
-        let external_ssts = match (&latest_manifest, self.checkpoint_id) {
-            (Some(latest_stored_manifest), Some(checkpoint_id)) => {
+        let external_ssts = match (&latest_manifest, self.mode) {
+            (Some(latest_stored_manifest), DbReaderMode::Checkpoint(checkpoint_id)) => {
                 let checkpoint = latest_stored_manifest
                     .db_state()
                     .find_checkpoint(checkpoint_id)
@@ -1775,9 +1774,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                     .await?
                     .external_ssts()
             }
-            (Some(latest_stored_manifest), None) => {
-                latest_stored_manifest.manifest().external_ssts()
-            }
+            (Some(latest_stored_manifest), _) => latest_stored_manifest.manifest().external_ssts(),
             (None, _) => HashMap::new(),
         };
 
@@ -1807,7 +1804,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let reader = DbReader::open_internal(
             manifest_store,
             table_store,
-            self.checkpoint_id,
+            self.mode,
             self.merge_operator,
             self.segment_extractor,
             self.options,

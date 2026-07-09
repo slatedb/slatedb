@@ -60,7 +60,7 @@ pub(crate) async fn exec_scan(
 
     let mut builder = DbReader::builder(path, object_store);
     if let Some(checkpoint_id) = checkpoint {
-        builder = builder.with_checkpoint_id(checkpoint_id);
+        builder = builder.with_reader_mode(slatedb::DbReaderMode::Checkpoint(checkpoint_id));
     }
     let reader = builder.build().await?;
 

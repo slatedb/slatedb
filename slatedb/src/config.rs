@@ -1003,14 +1003,14 @@ impl Default for Settings {
 pub struct DbReaderOptions {
     /// How frequently to poll for new manifest files and WAL data. Refreshing the manifest
     /// file allows readers to detect newly compacted data. The reader will also look for
-    /// new writes to the WAL at this poll interval. If the reader is using an explicit checkpoint,
-    /// then the manifest and WAL will not be polled.
+    /// new writes to the WAL at this poll interval. Readers using
+    /// [`crate::DbReaderMode::Checkpoint`] do not poll the manifest or WAL.
     pub manifest_poll_interval: Duration,
 
-    /// For readers that do not provide an explicit checkpoint, the client will
-    /// maintain its own checkpoint against the latest database state. The checkpoint's
-    /// expire time will be set to the current time plus this value. This lifetime
-    /// must always be greater than manifest_poll_interval x 2.
+    /// For readers using [`crate::DbReaderMode::ManagedCheckpoint`], the client maintains a
+    /// checkpoint against the latest database state. The checkpoint's expire time is set to the
+    /// current time plus this value. This lifetime must always be greater than
+    /// `manifest_poll_interval * 2`. This option is ignored by other reader modes.
     pub checkpoint_lifetime: Duration,
 
     /// The max size of a single in-memory table used to buffer WAL entries
@@ -1027,10 +1027,10 @@ pub struct DbReaderOptions {
     /// don't need to see the most recent uncommitted writes and want to minimize the
     /// cost of opening many readers.
     ///
-    /// WAL replay is also skipped when the reader is opened from a checkpoint.
+    /// WAL replay is also skipped in [`crate::DbReaderMode::Checkpoint`] mode.
     ///
-    /// When combined with manifest polling (no explicit checkpoint), the reader will
-    /// still see newly compacted data as manifests are updated.
+    /// When combined with a reader mode that polls manifests, the reader will still see newly
+    /// compacted data as manifests are updated.
     ///
     /// Defaults to false.
     pub skip_wal_replay: bool,

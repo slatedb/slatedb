@@ -43,6 +43,30 @@ use uuid::Uuid;
 
 pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
 
+/// Determines how a [`DbReader`] chooses and refreshes the database state it reads.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DbReaderMode {
+    /// Create and maintain checkpoints while following the latest database state.
+    ///
+    /// The reader will automatically create a checkpoint and refresh it periodically to ensure
+    /// that the reader can continue to read the latest database state without being affected by
+    /// garbage collection.
+    #[default]
+    ManagedCheckpoint,
+
+    /// Remain pinned to the database state referenced by the supplied checkpoint.
+    Checkpoint(Uuid),
+
+    /// Follow the latest manifest without creating a checkpoint.
+    ///
+    /// This mode performs no object-store writes and provides no protection from garbage
+    /// collection. Reads using an older manifest may fail if referenced objects are deleted.
+    /// This mode is useful for read-only access to a database that is not being actively written
+    /// to, for mirrored databases where manifest changes might not be allowed, or for readers
+    /// that are willing to handle missing objects gracefully.
+    FollowLatest,
+}
+
 /// Read-only interface for accessing a database from either
 /// the latest persistent state or from an arbitrary checkpoint.
 pub struct DbReader {
@@ -54,9 +78,9 @@ struct DbReaderInner {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     options: DbReaderOptions,
-    state: RwLock<Arc<CheckpointState>>,
+    mode: DbReaderMode,
+    state: RwLock<Arc<ReaderState>>,
     system_clock: Arc<dyn SystemClock>,
-    user_checkpoint_id: Option<Uuid>,
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
     status_manager: DbStatusManager,
@@ -75,8 +99,9 @@ enum DbReaderMessage {
 }
 
 #[derive(Clone)]
-struct CheckpointState {
-    checkpoint: Checkpoint,
+struct ReaderState {
+    manifest_id: u64,
+    checkpoint: Option<Checkpoint>,
     manifest: Manifest,
     imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     last_wal_id: u64,
@@ -85,7 +110,7 @@ struct CheckpointState {
 
 static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
 
-impl DbStateReader for CheckpointState {
+impl DbStateReader for ReaderState {
     fn memtable(&self) -> Arc<KVTable> {
         Arc::clone(&EMPTY_TABLE)
     }
@@ -99,9 +124,9 @@ impl DbStateReader for CheckpointState {
     }
 }
 
-impl From<&CheckpointState> for VersionedManifest {
-    fn from(state: &CheckpointState) -> Self {
-        Self::from_manifest(state.checkpoint.manifest_id, state.manifest.clone())
+impl From<&ReaderState> for VersionedManifest {
+    fn from(state: &ReaderState) -> Self {
+        Self::from_manifest(state.manifest_id, state.manifest.clone())
     }
 }
 
@@ -110,7 +135,7 @@ impl DbReaderInner {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
-        checkpoint_id: Option<Uuid>,
+        mode: DbReaderMode,
         merge_operator: Option<MergeOperatorType>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
         system_clock: Arc<dyn SystemClock>,
@@ -119,18 +144,27 @@ impl DbReaderInner {
         mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
         let checkpoint =
-            Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
-                .await?;
-
-        let replay_new_wals = checkpoint_id.is_none() && !options.skip_wal_replay;
+            Self::get_or_create_checkpoint(&mut manifest, mode, &options, rand.clone()).await?;
+        let (manifest_id, initial_manifest) = if let Some(checkpoint) = checkpoint.as_ref() {
+            (
+                checkpoint.manifest_id,
+                manifest_store.read_manifest(checkpoint.manifest_id).await?,
+            )
+        } else {
+            (manifest.id(), manifest.manifest().clone())
+        };
+        let replay_new_wals =
+            !matches!(mode, DbReaderMode::Checkpoint(_)) && !options.skip_wal_replay;
         let initial_state = Arc::new(
-            Self::build_initial_checkpoint_state(
-                Arc::clone(&manifest_store),
+            Self::build_reader_state(
+                checkpoint,
+                manifest_id,
+                initial_manifest,
+                VecDeque::new(),
+                replay_new_wals,
                 Arc::clone(&table_store),
                 &options,
                 segment_extractor.as_ref(),
-                checkpoint,
-                replay_new_wals,
             )
             .await?,
         );
@@ -170,9 +204,9 @@ impl DbReaderInner {
             manifest_store,
             table_store,
             options,
+            mode,
             state,
             system_clock,
-            user_checkpoint_id: checkpoint_id,
             oracle,
             reader,
             status_manager,
@@ -185,25 +219,32 @@ impl DbReaderInner {
 
     async fn get_or_create_checkpoint(
         manifest: &mut StoredManifest,
-        checkpoint_id: Option<Uuid>,
+        mode: DbReaderMode,
         options: &DbReaderOptions,
         rand: Arc<DbRand>,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint = if let Some(checkpoint_id) = checkpoint_id {
-            manifest
-                .db_state()
-                .find_checkpoint(checkpoint_id)
-                .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?
-                .clone()
-        } else {
-            let options = CheckpointOptions {
-                lifetime: Some(options.checkpoint_lifetime),
-                ..CheckpointOptions::default()
-            };
-            let checkpoint_id = rand.rng().gen_uuid();
-            manifest.write_checkpoint(checkpoint_id, &options).await?
-        };
-        Ok(checkpoint)
+    ) -> Result<Option<Checkpoint>, SlateDBError> {
+        match mode {
+            DbReaderMode::Checkpoint(checkpoint_id) => Ok(Some(
+                manifest
+                    .db_state()
+                    .find_checkpoint(checkpoint_id)
+                    .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?
+                    .clone(),
+            )),
+            DbReaderMode::ManagedCheckpoint => {
+                let checkpoint_options = CheckpointOptions {
+                    lifetime: Some(options.checkpoint_lifetime),
+                    ..CheckpointOptions::default()
+                };
+                let checkpoint_id = rand.rng().gen_uuid();
+                Ok(Some(
+                    manifest
+                        .write_checkpoint(checkpoint_id, &checkpoint_options)
+                        .await?,
+                ))
+            }
+            DbReaderMode::FollowLatest => Ok(None),
+        }
     }
 
     async fn get_with_options<K: AsRef<[u8]> + Send>(
@@ -268,7 +309,13 @@ impl DbReaderInner {
         &self,
         stored_manifest: &mut StoredManifest,
     ) -> Result<Checkpoint, SlateDBError> {
-        let current_checkpoint_id = self.state.read().checkpoint.id;
+        let current_checkpoint_id = self
+            .state
+            .read()
+            .checkpoint
+            .as_ref()
+            .expect("managed reader must have a checkpoint")
+            .id;
         let options = CheckpointOptions {
             lifetime: Some(self.options.checkpoint_lifetime),
             ..CheckpointOptions::default()
@@ -280,18 +327,21 @@ impl DbReaderInner {
     }
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
-        let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
-        let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
-        let versioned_manifest = VersionedManifest::from(&new_checkpoint_state);
+        let new_state = self.rebuild_checkpoint_state(checkpoint).await?;
+        self.install_state(new_state);
+        Ok(())
+    }
+
+    fn install_state(&self, new_state: ReaderState) {
+        let durable_seq = new_state.last_remote_persisted_seq;
+        let versioned_manifest = VersionedManifest::from(&new_state);
+        let touched_segments = collect_touched_segments(&new_state);
         self.oracle.advance_durable_seq(durable_seq);
         let mut write_guard = self.state.write();
-        *write_guard = Arc::new(new_checkpoint_state);
+        *write_guard = Arc::new(new_state);
         drop(write_guard);
-        self.status_manager.report_manifest_and_memtable_segments(
-            versioned_manifest,
-            collect_touched_segments(self.state.read().as_ref()),
-        );
-        Ok(())
+        self.status_manager
+            .report_manifest_and_memtable_segments(versioned_manifest, touched_segments);
     }
 
     async fn maybe_replay_new_wals(&self) -> Result<(), SlateDBError> {
@@ -304,13 +354,13 @@ impl DbReaderInner {
             .last_seen_wal_id(last_replayed_wal_id)
             .await?;
         if last_seen_wal_id > last_replayed_wal_id {
-            let current_checkpoint = Arc::clone(&self.state.read());
-            let mut imm_memtable = current_checkpoint.imm_memtable().clone();
+            let current_state = Arc::clone(&self.state.read());
+            let mut imm_memtable = current_state.imm_memtable().clone();
 
             let (last_wal_id, last_committed_seq) = Self::replay_wal_into(
                 Arc::clone(&self.table_store),
                 &self.options,
-                current_checkpoint.core(),
+                current_state.core(),
                 &mut imm_memtable,
                 true,
                 self.segment_extractor.as_ref(),
@@ -319,9 +369,10 @@ impl DbReaderInner {
 
             self.oracle.advance_durable_seq(last_committed_seq);
             let mut write_guard = self.state.write();
-            *write_guard = Arc::new(CheckpointState {
-                checkpoint: current_checkpoint.checkpoint.clone(),
-                manifest: current_checkpoint.manifest.clone(),
+            *write_guard = Arc::new(ReaderState {
+                manifest_id: current_state.manifest_id,
+                checkpoint: current_state.checkpoint.clone(),
+                manifest: current_state.manifest.clone(),
                 imm_memtable,
                 last_wal_id,
                 last_remote_persisted_seq: last_committed_seq,
@@ -333,37 +384,23 @@ impl DbReaderInner {
         Ok(())
     }
 
-    async fn build_initial_checkpoint_state(
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        options: &DbReaderOptions,
-        segment_extractor: Option<&Arc<dyn PrefixExtractor>>,
-        checkpoint: Checkpoint,
-        replay_new_wals: bool,
-    ) -> Result<CheckpointState, SlateDBError> {
-        let manifest = manifest_store.read_manifest(checkpoint.manifest_id).await?;
-        let imm_memtable = VecDeque::new();
-        Self::build_checkpoint_state(
-            checkpoint,
-            manifest,
-            imm_memtable,
-            replay_new_wals,
-            Arc::clone(&table_store),
-            options,
-            segment_extractor,
-        )
-        .await
-    }
-
     async fn rebuild_checkpoint_state(
         &self,
         new_checkpoint: Checkpoint,
-    ) -> Result<CheckpointState, SlateDBError> {
+    ) -> Result<ReaderState, SlateDBError> {
+        let manifest_id = new_checkpoint.manifest_id;
+        let manifest = self.manifest_store.read_manifest(manifest_id).await?;
+        self.rebuild_state(Some(new_checkpoint), manifest_id, manifest)
+            .await
+    }
+
+    async fn rebuild_state(
+        &self,
+        checkpoint: Option<Checkpoint>,
+        manifest_id: u64,
+        manifest: Manifest,
+    ) -> Result<ReaderState, SlateDBError> {
         let prior = self.state.read().clone();
-        let manifest = self
-            .manifest_store
-            .read_manifest(new_checkpoint.manifest_id)
-            .await?;
         let mut imm_memtable = VecDeque::new();
 
         for table in prior.imm_memtable.iter() {
@@ -390,8 +427,9 @@ impl DbReaderInner {
             }
         }
 
-        Self::build_checkpoint_state(
-            new_checkpoint,
+        Self::build_reader_state(
+            checkpoint,
+            manifest_id,
             manifest,
             imm_memtable,
             !self.options.skip_wal_replay,
@@ -402,15 +440,16 @@ impl DbReaderInner {
         .await
     }
 
-    async fn build_checkpoint_state(
-        checkpoint: Checkpoint,
+    async fn build_reader_state(
+        checkpoint: Option<Checkpoint>,
+        manifest_id: u64,
         manifest: Manifest,
         mut imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
         table_store: Arc<TableStore>,
         options: &DbReaderOptions,
         segment_extractor: Option<&Arc<dyn PrefixExtractor>>,
-    ) -> Result<CheckpointState, SlateDBError> {
+    ) -> Result<ReaderState, SlateDBError> {
         let (last_wal_id, last_committed_seq) = Self::replay_wal_into(
             Arc::clone(&table_store),
             options,
@@ -421,7 +460,8 @@ impl DbReaderInner {
         )
         .await?;
 
-        Ok(CheckpointState {
+        Ok(ReaderState {
+            manifest_id,
             checkpoint,
             manifest,
             imm_memtable,
@@ -430,11 +470,38 @@ impl DbReaderInner {
         })
     }
 
+    async fn refresh_latest_manifest(&self) -> Result<(), SlateDBError> {
+        let latest_manifest = self.manifest_store.read_latest_manifest().await?;
+        self.apply_latest_manifest(latest_manifest).await
+    }
+
+    async fn apply_latest_manifest(
+        &self,
+        latest_manifest: VersionedManifest,
+    ) -> Result<(), SlateDBError> {
+        let manifest_id = latest_manifest.id;
+        if manifest_id <= self.state.read().manifest_id {
+            return self.maybe_replay_new_wals().await;
+        }
+
+        let new_state = self
+            .rebuild_state(None, manifest_id, latest_manifest.manifest)
+            .await?;
+        self.install_state(new_state);
+        info!("refreshed reader to latest manifest [manifest_id={manifest_id}]");
+        Ok(())
+    }
+
     async fn maybe_refresh_checkpoint(
         &self,
         stored_manifest: &mut StoredManifest,
     ) -> Result<(), SlateDBError> {
-        let checkpoint = self.state.read().checkpoint.clone();
+        let checkpoint = self
+            .state
+            .read()
+            .checkpoint
+            .clone()
+            .expect("managed reader must have a checkpoint");
         let half_lifetime = self
             .options
             .checkpoint_lifetime
@@ -450,12 +517,11 @@ impl DbReaderInner {
                 .await
             {
                 Ok(refreshed_checkpoint) => refreshed_checkpoint,
-                Err(SlateDBError::CheckpointMissing(id)) if self.user_checkpoint_id.is_none() => {
+                Err(SlateDBError::CheckpointMissing(id)) => {
                     // Our self-established checkpoint lapsed (e.g. a stalled poll tick
                     // outlived the lease during an object-store outage) and the writer's
                     // GC reaped it. Re-establish a fresh checkpoint against the latest
-                    // manifest instead of failing the reader permanently. A user-supplied
-                    // checkpoint must still fail loud: the caller's pinned view is gone.
+                    // manifest instead of failing the reader permanently.
                     warn!("reader checkpoint missing, re-establishing [checkpoint_id={id}]");
                     let checkpoint = self.replace_checkpoint(stored_manifest).await?;
                     self.reestablish_checkpoint(checkpoint).await?;
@@ -470,11 +536,16 @@ impl DbReaderInner {
                 let mut write_guard = self.state.write();
                 let current_state = write_guard.as_ref();
                 // Defensively, only update checkpoint if the id and expiry still match.
-                if current_state.checkpoint.id == checkpoint.id
-                    && current_state.checkpoint.expire_time == checkpoint.expire_time
+                if current_state
+                    .checkpoint
+                    .as_ref()
+                    .is_some_and(|current_checkpoint| {
+                        current_checkpoint.id == checkpoint.id
+                            && current_checkpoint.expire_time == checkpoint.expire_time
+                    })
                 {
                     let mut updated_state = current_state.clone();
-                    updated_state.checkpoint = refreshed_checkpoint.clone();
+                    updated_state.checkpoint = Some(refreshed_checkpoint.clone());
                     *write_guard = Arc::new(updated_state);
                 }
             }
@@ -649,24 +720,37 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
         assert!(matches!(message, DbReaderMessage::PollManifest));
-        let mut manifest = StoredManifest::load(
-            Arc::clone(&self.inner.manifest_store),
-            self.inner.system_clock.clone(),
-        )
-        .await?;
+        match self.inner.mode {
+            DbReaderMode::ManagedCheckpoint => {
+                let mut manifest = StoredManifest::load(
+                    Arc::clone(&self.inner.manifest_store),
+                    self.inner.system_clock.clone(),
+                )
+                .await?;
 
-        let latest_manifest = manifest.manifest();
-        if self
-            .inner
-            .should_reestablish_checkpoint(&latest_manifest.core)
-        {
-            let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-            self.inner.reestablish_checkpoint(checkpoint).await?;
-        } else {
-            self.inner.maybe_replay_new_wals().await?;
+                let latest_manifest = manifest.manifest();
+                if self
+                    .inner
+                    .should_reestablish_checkpoint(&latest_manifest.core)
+                {
+                    let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
+                    self.inner.reestablish_checkpoint(checkpoint).await?;
+                } else {
+                    self.inner.maybe_replay_new_wals().await?;
+                }
+
+                self.inner.maybe_refresh_checkpoint(&mut manifest).await
+            }
+            DbReaderMode::FollowLatest => {
+                let result = self.inner.refresh_latest_manifest().await;
+                if let Err(error) = result {
+                    warn!("failed to refresh reader to latest manifest [error={error:?}]");
+                }
+                Ok(())
+            }
+            // No polling is needed for a pinned checkpoint, so we just return Ok(()).
+            DbReaderMode::Checkpoint(_) => Ok(()),
         }
-
-        self.inner.maybe_refresh_checkpoint(&mut manifest).await
     }
 
     async fn cleanup(
@@ -674,25 +758,36 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
         _messages: BoxStream<'async_trait, DbReaderMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
+        if self.inner.mode != DbReaderMode::ManagedCheckpoint {
+            return Ok(());
+        }
         let mut manifest = StoredManifest::load(
             Arc::clone(&self.inner.manifest_store),
             self.inner.system_clock.clone(),
         )
         .await?;
-        let checkpoint_id = self.inner.state.read().checkpoint.id;
-        if Some(checkpoint_id) != self.inner.user_checkpoint_id {
-            info!(
-                "deleting reader established checkpoint for shutdown [checkpoint_id={}]",
-                checkpoint_id
-            );
-            manifest.delete_checkpoint(checkpoint_id).await?;
-        }
+        let checkpoint_id = self
+            .inner
+            .state
+            .read()
+            .checkpoint
+            .as_ref()
+            .expect("managed reader must have a checkpoint")
+            .id;
+        info!(
+            "deleting reader established checkpoint for shutdown [checkpoint_id={}]",
+            checkpoint_id
+        );
+        manifest.delete_checkpoint(checkpoint_id).await?;
         Ok(())
     }
 }
 
 impl DbReader {
-    fn validate_options(options: &DbReaderOptions) -> Result<(), SlateDBError> {
+    fn validate_options(mode: DbReaderMode, options: &DbReaderOptions) -> Result<(), SlateDBError> {
+        if mode != DbReaderMode::ManagedCheckpoint {
+            return Ok(());
+        }
         if options.checkpoint_lifetime.as_millis() < 1000 {
             return Err(SlateDBError::InvalidCheckpointLifetime(
                 options.checkpoint_lifetime,
@@ -732,23 +827,21 @@ impl DbReader {
     }
 
     /// Creates a database reader that can read the contents of a database (but cannot write any
-    /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
-    /// reader will read using the specified checkpoint and will not periodically refresh the
-    /// checkpoint. Otherwise, the reader creates a new checkpoint pointing to the current manifest
-    /// and refreshes it periodically as specified in the options. It also removes the previous
-    /// checkpoint once any ongoing reads have completed.
+    /// data). [`DbReaderMode`] controls whether the reader manages a checkpoint, remains pinned to
+    /// a supplied checkpoint, or follows the latest manifest without garbage-collection
+    /// protection.
     pub async fn open<P: Into<Path>>(
         path: P,
         object_store: Arc<dyn ObjectStore>,
-        checkpoint_id: Option<Uuid>,
+        mode: DbReaderMode,
         options: DbReaderOptions,
     ) -> Result<Self, crate::Error> {
         // Use the builder API internally
-        let mut builder = Self::builder(path, object_store).with_options(options);
-        if let Some(id) = checkpoint_id {
-            builder = builder.with_checkpoint_id(id);
-        }
-        builder.build().await
+        Self::builder(path, object_store)
+            .with_options(options)
+            .with_reader_mode(mode)
+            .build()
+            .await
     }
 
     /// Creates a new builder for a database reader at the given path.
@@ -792,7 +885,7 @@ impl DbReader {
     pub(crate) async fn open_internal(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
-        checkpoint_id: Option<Uuid>,
+        mode: DbReaderMode,
         merge_operator: Option<MergeOperatorType>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
         options: DbReaderOptions,
@@ -800,7 +893,7 @@ impl DbReader {
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
-        Self::validate_options(&options)?;
+        Self::validate_options(mode, &options)?;
 
         let manifest =
             StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
@@ -817,7 +910,7 @@ impl DbReader {
                 manifest_store,
                 table_store,
                 options,
-                checkpoint_id,
+                mode,
                 merge_operator,
                 segment_extractor,
                 system_clock.clone(),
@@ -832,10 +925,9 @@ impl DbReader {
             system_clock.clone(),
         );
 
-        // If no checkpoint was provided, then we have established a new checkpoint
-        // from the latest state, and we need to refresh it according to the params
-        // of `DbReaderOptions`.
-        if checkpoint_id.is_none() {
+        // Pinned checkpoints never advance. Managed checkpoints and unprotected readers both
+        // poll for newer database state according to `DbReaderOptions`.
+        if !matches!(mode, DbReaderMode::Checkpoint(_)) {
             inner.spawn_manifest_poller(&task_executor)?;
         }
 
@@ -866,7 +958,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, Error};
+    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -880,7 +972,7 @@ impl DbReader {
     ///     let reader = DbReader::open(
     ///       "test_db",
     ///       Arc::clone(&object_store),
-    ///       None,
+    ///       DbReaderMode::ManagedCheckpoint,
     ///       DbReaderOptions::default(),
     ///     ).await?;
     ///     assert_eq!(reader.get(b"key").await?, Some("value".into()));
@@ -914,7 +1006,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ReadOptions, Error};
+    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, config::ReadOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -928,7 +1020,7 @@ impl DbReader {
     ///     let reader = DbReader::open(
     ///       "test_db",
     ///       Arc::clone(&object_store),
-    ///       None,
+    ///       DbReaderMode::ManagedCheckpoint,
     ///       DbReaderOptions::default(),
     ///     ).await?;
     ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
@@ -985,7 +1077,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, Error};
+    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1000,7 +1092,7 @@ impl DbReader {
     ///     let reader = DbReader::open(
     ///       "test_db",
     ///       Arc::clone(&object_store),
-    ///       None,
+    ///       DbReaderMode::ManagedCheckpoint,
     ///       DbReaderOptions::default(),
     ///     ).await?;
     ///     let mut iter = reader.scan("a".."b").await?;
@@ -1036,7 +1128,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ScanOptions, config::DurabilityLevel, Error};
+    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, config::ScanOptions, config::DurabilityLevel, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1051,7 +1143,7 @@ impl DbReader {
     ///     let reader = DbReader::open(
     ///       "test_db",
     ///       Arc::clone(&object_store),
-    ///       None,
+    ///       DbReaderMode::ManagedCheckpoint,
     ///       DbReaderOptions::default(),
     ///     ).await?;
     ///     let mut iter = reader.scan_with_options("a".."b", &ScanOptions {
@@ -1146,7 +1238,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, Error};
+    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1155,7 +1247,12 @@ impl DbReader {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store.clone()).await?;
     ///     let options = DbReaderOptions::default();
-    ///     let reader = DbReader::open("test_db", object_store.clone(), None, options).await?;
+    ///     let reader = DbReader::open(
+    ///         "test_db",
+    ///         object_store.clone(),
+    ///         DbReaderMode::ManagedCheckpoint,
+    ///         options,
+    ///     ).await?;
     ///     reader.close().await?;
     ///     Ok(())
     /// }
@@ -1288,16 +1385,17 @@ fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::CheckpointState;
+    use super::{DbReaderMessage, ManifestPoller, ReaderState};
     use crate::clock::MonotonicClock;
     use crate::config::{
         CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, PutOptions,
         Settings, WriteOptions,
     };
-    use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
+    use crate::db_reader::{DbReader, DbReaderInner, DbReaderMode, DbReaderOptions};
     use crate::db_state::SsTableId;
     use crate::db_stats::DbStats;
     use crate::db_status::DbStatusManager;
+    use crate::dispatcher::MessageHandler;
     use crate::format::sst::SsTableFormat;
     use crate::iter::IterationOrder;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -1317,7 +1415,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use rstest::rstest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::DbRand;
@@ -1326,6 +1424,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[test]
+    fn default_reader_mode_should_manage_checkpoints() {
+        assert_eq!(DbReaderMode::default(), DbReaderMode::ManagedCheckpoint);
+    }
 
     #[tokio::test]
     async fn should_get_value_from_db() {
@@ -1343,7 +1446,7 @@ mod tests {
         let reader = DbReader::open(
             path.clone(),
             Arc::clone(&object_store),
-            None,
+            DbReaderMode::ManagedCheckpoint,
             DbReaderOptions::default(),
         )
         .await
@@ -1365,9 +1468,14 @@ mod tests {
         db.put(b"test_key", b"test_value").await.unwrap();
         db.flush().await.unwrap();
 
-        let reader = DbReader::open(path, object_store, None, DbReaderOptions::default())
-            .await
-            .unwrap();
+        let reader = DbReader::open(
+            path,
+            object_store,
+            DbReaderMode::ManagedCheckpoint,
+            DbReaderOptions::default(),
+        )
+        .await
+        .unwrap();
 
         let manifest = reader.manifest();
         let expected: VersionedManifest =
@@ -1397,7 +1505,7 @@ mod tests {
         let reader = DbReader::open_internal(
             test_provider.manifest_store(),
             test_provider.table_store(),
-            Some(checkpoint_result.id),
+            DbReaderMode::Checkpoint(checkpoint_result.id),
             None,
             None,
             DbReaderOptions::default(),
@@ -1435,7 +1543,7 @@ mod tests {
         let reader = DbReader::open(
             path.clone(),
             Arc::clone(&object_store),
-            Some(checkpoint_result.id),
+            DbReaderMode::Checkpoint(checkpoint_result.id),
             DbReaderOptions::default(),
         )
         .await
@@ -1581,7 +1689,7 @@ mod tests {
         // when
         let reader = DbReader::builder(path, object_store)
             .with_segment_extractor(Arc::new(test_utils::FixedThreeBytePrefixExtractor))
-            .with_checkpoint_id(checkpoint.id)
+            .with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id))
             .build()
             .await
             .unwrap();
@@ -1659,6 +1767,165 @@ mod tests {
 
         test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
             .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follow_latest_should_refresh_without_object_store_writes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_follow_latest_reader");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        let key = b"key";
+        db.put(key, b"initial").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let recording_store = Arc::new(test_utils::RecordingObjectStore::new(Arc::clone(
+            &object_store,
+        )));
+        let reader_store: Arc<dyn ObjectStore> = recording_store.clone();
+        let reader = DbReader::open(
+            path,
+            reader_store,
+            DbReaderMode::FollowLatest,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(100),
+                // FollowLatest does not create a checkpoint, so checkpoint validation is
+                // intentionally inapplicable to this mode.
+                checkpoint_lifetime: Duration::ZERO,
+                ..DbReaderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(b"initial"))
+        );
+        let initial_manifest = reader.manifest();
+        let initial_manifest_id = initial_manifest.id();
+
+        db.put(key, b"updated").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let latest_manifest = test_provider
+            .manifest_store()
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert!(latest_manifest.id > initial_manifest_id);
+        assert!(latest_manifest.manifest.core.checkpoints.is_empty());
+
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+        poller.handle(DbReaderMessage::PollManifest).await.unwrap();
+
+        assert!(reader.manifest().id() >= latest_manifest.id);
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+
+        let refreshed_manifest_id = reader.manifest().id();
+        reader
+            .inner
+            .apply_latest_manifest(initial_manifest)
+            .await
+            .unwrap();
+        assert_eq!(reader.manifest().id(), refreshed_manifest_id);
+        assert!(recording_store.write_kinds().is_empty());
+
+        reader.close().await.unwrap();
+        assert!(recording_store.write_kinds().is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_latest_refresh_failure_should_keep_last_good_state() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_follow_latest_refresh_failure");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        db.put(b"key", b"value").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let reader = DbReader::open_internal(
+            test_provider.manifest_store(),
+            test_provider.table_store(),
+            DbReaderMode::FollowLatest,
+            None,
+            None,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_secs(60 * 60),
+                ..DbReaderOptions::default()
+            },
+            test_provider.system_clock.clone(),
+            test_provider.rand.clone(),
+            slatedb_common::metrics::MetricsRecorderHelper::noop(),
+        )
+        .await
+        .unwrap();
+        let manifest_id = reader.manifest().id();
+
+        let manifest_store = test_provider.manifest_store();
+        let mut saved_manifests = Vec::new();
+        for manifest in manifest_store.list_manifests(..).await.unwrap() {
+            let location = manifest.metadata.location;
+            let bytes = object_store
+                .get(&location)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            object_store.delete(&location).await.unwrap();
+            saved_manifests.push((location, bytes));
+        }
+
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+        poller.handle(DbReaderMessage::PollManifest).await.unwrap();
+
+        assert_eq!(reader.manifest().id(), manifest_id);
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+
+        for (location, bytes) in saved_manifests {
+            object_store.put(&location, bytes.into()).await.unwrap();
+        }
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        db.put(b"key", b"updated").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        poller.handle(DbReaderMessage::PollManifest).await.unwrap();
+        assert!(reader.manifest().id() > manifest_id);
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+        reader.close().await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -1800,7 +2067,7 @@ mod tests {
                 checkpoint_lifetime: Duration::from_millis(1000),
                 ..DbReaderOptions::default()
             },
-            None,
+            DbReaderMode::ManagedCheckpoint,
             None,
             None,
             clock.clone(),
@@ -1895,7 +2162,7 @@ mod tests {
                 checkpoint_lifetime: Duration::from_millis(1000),
                 ..DbReaderOptions::default()
             },
-            None,
+            DbReaderMode::ManagedCheckpoint,
             None,
             None,
             clock.clone(),
@@ -1905,7 +2172,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let reader_checkpoint_id = inner.state.read().checkpoint.id;
+        let reader_checkpoint_id = inner.state.read().checkpoint.as_ref().unwrap().id;
 
         // Simulate the writer's GC reaping the expired checkpoint.
         let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
@@ -1927,85 +2194,12 @@ mod tests {
             .unwrap();
 
         // The reader should have replaced the reaped checkpoint with a new one.
-        let new_checkpoint_id = inner.state.read().checkpoint.id;
+        let new_checkpoint_id = inner.state.read().checkpoint.as_ref().unwrap().id;
         assert_ne!(reader_checkpoint_id, new_checkpoint_id);
         let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoints = &latest_manifest.manifest.core.checkpoints;
         assert_eq!(1, checkpoints.len());
         assert_eq!(new_checkpoint_id, checkpoints[0].id);
-    }
-
-    // A missing user-supplied checkpoint must still fail loud rather than be
-    // silently replaced (RFC-0004): the caller's pinned view is gone.
-    #[tokio::test]
-    async fn should_fail_refresh_when_user_checkpoint_missing() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from(format!(
-            "/tmp/test_db_reader_user_checkpoint_missing_{}",
-            Uuid::new_v4()
-        ));
-        let clock = Arc::new(MockSystemClock::new());
-        let mut test_provider = TestProvider::new(path, Arc::clone(&object_store));
-        test_provider.system_clock = clock.clone();
-
-        let manifest_store = test_provider.manifest_store();
-        let table_store = test_provider.table_store();
-
-        let mut stored_manifest = StoredManifest::create_new_db(
-            Arc::clone(&manifest_store),
-            ManifestCore::new(),
-            clock.clone(),
-        )
-        .await
-        .unwrap();
-        let user_checkpoint_id = Uuid::new_v4();
-        stored_manifest
-            .write_checkpoint(
-                user_checkpoint_id,
-                &CheckpointOptions {
-                    lifetime: Some(Duration::from_millis(1000)),
-                    ..CheckpointOptions::default()
-                },
-            )
-            .await
-            .unwrap();
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
-
-        let inner = DbReaderInner::new(
-            Arc::clone(&manifest_store),
-            table_store,
-            DbReaderOptions {
-                manifest_poll_interval: Duration::from_millis(100),
-                checkpoint_lifetime: Duration::from_millis(1000),
-                ..DbReaderOptions::default()
-            },
-            Some(user_checkpoint_id),
-            None,
-            None,
-            clock.clone(),
-            test_provider.rand.clone(),
-            recorder,
-            stored_manifest,
-        )
-        .await
-        .unwrap();
-
-        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
-            .await
-            .unwrap();
-        stored_manifest
-            .delete_checkpoint(user_checkpoint_id)
-            .await
-            .unwrap();
-
-        clock.advance(Duration::from_millis(501)).await;
-        let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store), clock.clone())
-            .await
-            .unwrap();
-        let result = inner.maybe_refresh_checkpoint(&mut stored_manifest).await;
-        assert!(
-            matches!(result, Err(SlateDBError::CheckpointMissing(id)) if id == user_checkpoint_id)
-        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2577,10 +2771,11 @@ mod tests {
             checkpoint: Option<Uuid>,
             merge_operator: Option<MergeOperatorType>,
         ) -> Result<DbReader, SlateDBError> {
+            let mode = checkpoint.map_or(DbReaderMode::ManagedCheckpoint, DbReaderMode::Checkpoint);
             DbReader::open_internal(
                 self.manifest_store(),
                 self.table_store(),
-                checkpoint,
+                mode,
                 merge_operator,
                 None,
                 options,
@@ -2724,8 +2919,12 @@ mod tests {
 
         // Seed the prior checkpoint state with IMMs.
         let input_tables: Vec<_> = case.tables.iter().map(InputMemtable::build).collect();
-        let prior_state = CheckpointState {
-            checkpoint: test_checkpoint(stored_manifest.id(), test_provider.system_clock.clone()),
+        let prior_state = ReaderState {
+            manifest_id: stored_manifest.id(),
+            checkpoint: Some(test_checkpoint(
+                stored_manifest.id(),
+                test_provider.system_clock.clone(),
+            )),
             manifest: stored_manifest.manifest().clone(),
             imm_memtable: input_tables.iter().cloned().collect(),
             last_wal_id: 0,
@@ -2769,9 +2968,9 @@ mod tests {
                 skip_wal_replay: true,
                 ..DbReaderOptions::default()
             },
+            mode: DbReaderMode::ManagedCheckpoint,
             state: parking_lot::RwLock::new(Arc::new(prior_state)),
             system_clock: test_provider.system_clock.clone(),
-            user_checkpoint_id: None,
             oracle,
             reader,
             status_manager: DbStatusManager::new(0),
@@ -2824,8 +3023,9 @@ mod tests {
         let manifest_store = test_provider.manifest_store();
         let table_store = test_provider.table_store();
 
-        let prior_state = CheckpointState {
-            checkpoint: test_checkpoint(1, test_provider.system_clock.clone()),
+        let prior_state = ReaderState {
+            manifest_id: 1,
+            checkpoint: Some(test_checkpoint(1, test_provider.system_clock.clone())),
             manifest: Manifest::initial(current_core.clone()),
             imm_memtable: VecDeque::from([immutable_memtable(
                 1,
@@ -2851,9 +3051,9 @@ mod tests {
             manifest_store,
             table_store,
             options: DbReaderOptions::default(),
+            mode: DbReaderMode::ManagedCheckpoint,
             state: parking_lot::RwLock::new(Arc::new(prior_state)),
             system_clock: test_provider.system_clock.clone(),
-            user_checkpoint_id: None,
             oracle,
             reader,
             status_manager: DbStatusManager::new(0),
@@ -3014,9 +3214,14 @@ mod tests {
         reader_opts.object_store_cache_options.root_folder = Some(cache_path.clone());
         reader_opts.object_store_cache_options.part_size_bytes = 1024;
 
-        let reader = DbReader::open(path.clone(), Arc::clone(&object_store), None, reader_opts)
-            .await
-            .unwrap();
+        let reader = DbReader::open(
+            path.clone(),
+            Arc::clone(&object_store),
+            DbReaderMode::ManagedCheckpoint,
+            reader_opts,
+        )
+        .await
+        .unwrap();
 
         // Read data to populate the cache
         let val = reader.get(b"key1").await.unwrap();
