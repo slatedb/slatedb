@@ -44,7 +44,7 @@ preserves current behavior; users implement the trait for different behavior.
 There are multiple usecases that can benefit from controlling the block cache
 behavior in internal operations, some examples are:
 - If L0 blocks are in the block cache, the embedded compactor can be much more
-effecient in L0 reads if it attempts reading from the block cache.
+efficient in L0 reads if it attempts reading from the block cache.
 - Some usecases might need to keep the indices and filters always in memory to
 avoid multiple read requests per point get to read the index and filter for the
 new compacted SST.
