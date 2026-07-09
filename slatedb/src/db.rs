@@ -11098,6 +11098,7 @@ mod tests {
                 object_store.clone(),
             )
             .with_settings(opts)
+            .with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
             .with_db_cache_disabled()
             .with_metrics_recorder(metrics_recorder.clone())
             .build()

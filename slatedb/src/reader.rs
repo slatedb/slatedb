@@ -515,10 +515,14 @@ mod tests {
 
     impl TestDbState {
         async fn new() -> Self {
+            Self::new_with_sst_format(SsTableFormat::default()).await
+        }
+
+        async fn new_with_sst_format(sst_format: SsTableFormat) -> Self {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let table_store = Arc::new(TableStore::new(
                 ObjectStores::new(object_store, None),
-                SsTableFormat::default(),
+                sst_format,
                 Path::from("/test"),
                 None,
                 TableStoreKind::Main,
@@ -1692,7 +1696,9 @@ mod tests {
     ) -> Result<(), SlateDBError> {
         // Create test database state and populate it
 
-        let mut test_db_state = TestDbState::new().await;
+        let mut test_db_state =
+            TestDbState::new_with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
+                .await;
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
@@ -1913,7 +1919,9 @@ mod tests {
             TestEntry::value(b"key3", b"value3", 40).with_location(LayerLocation::SortedRun(0)),
         ];
 
-        let mut test_db_state = TestDbState::new().await;
+        let mut test_db_state =
+            TestDbState::new_with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
+                .await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
         let recorder = Arc::new(DefaultMetricsRecorder::new());
