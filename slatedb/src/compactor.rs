@@ -5235,18 +5235,20 @@ mod tests {
         .into();
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
-        options.compression_codec = Some(CompressionCodec::Zstd);
         options
             .compactor_options
             .as_mut()
             .expect("compactor options missing")
             .scheduler_options = scheduler_options;
+        let sst_format = SsTableFormat::default()
+            .with_compression_codec(Some(CompressionCodec::Zstd))
+            .with_sst_block_size(SstBlockSize::Other(128));
 
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(128)))
+            .with_sst_format(sst_format)
             .with_metrics_recorder(metrics_recorder.clone())
             .build()
             .await

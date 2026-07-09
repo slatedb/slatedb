@@ -616,7 +616,7 @@ impl Default for SsTableFormat {
     fn default() -> Self {
         Self {
             block_size: 4096,
-            min_filter_keys: 0,
+            min_filter_keys: 1000,
             sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
             filter_policies: vec![Arc::new(BloomFilterPolicy::new(10))],
             compression_codec: None,
@@ -628,6 +628,7 @@ impl Default for SsTableFormat {
 
 impl SsTableFormat {
     /// Sets the block size, in bytes, for SST data blocks.
+    #[cfg(test)]
     pub fn with_block_size(mut self, block_size: usize) -> Self {
         self.block_size = block_size;
         self
@@ -640,6 +641,9 @@ impl SsTableFormat {
     }
 
     /// Sets the minimum number of keys required before filter blocks are emitted.
+    ///
+    /// Defaults to 1000, matching the previous [`crate::config::Settings`]
+    /// default.
     pub fn with_min_filter_keys(mut self, min_filter_keys: u32) -> Self {
         self.min_filter_keys = min_filter_keys;
         self

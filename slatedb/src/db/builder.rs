@@ -33,10 +33,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_settings(Settings {
-//!             min_filter_keys: 2000,
-//!             ..Default::default()
-//!         })
+//!         .with_settings(Settings::default())
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -251,14 +248,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
         if self.gc_builder.is_some() && settings.garbage_collector_options.is_some() {
             warn!("gc_builder and settings.garbage_collector_options both set; gc_builder will take precedence");
-        }
-        self.sst_format = self
-            .sst_format
-            .with_min_filter_keys(settings.min_filter_keys)
-            .with_compression_codec(settings.compression_codec);
-        #[cfg(test)]
-        {
-            self.sst_format.block_format = settings.block_format;
         }
         self.settings = settings;
         self
@@ -1295,19 +1284,13 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             system_clock: Arc::new(DefaultSystemClock::default()),
             merge_operator: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
-            sst_format: SsTableFormat::default()
-                .with_min_filter_keys(CompactionWorkerOptions::default().min_filter_keys)
-                .with_compression_codec(CompactionWorkerOptions::default().compression_codec),
+            sst_format: SsTableFormat::default(),
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
     }
 
     pub fn with_options(mut self, options: CompactionWorkerOptions) -> Self {
-        self.sst_format = self
-            .sst_format
-            .with_min_filter_keys(options.min_filter_keys)
-            .with_compression_codec(options.compression_codec);
         self.options = options;
         self
     }

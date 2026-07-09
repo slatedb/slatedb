@@ -76,7 +76,7 @@ Readers binary-search the index to find the first block that may contain a targe
 
 ## Filter Blocks
 
-Compacted SSTs can include a Bloom filter. SlateDB writes one when the file has at least [`Settings::min_filter_keys`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.min_filter_keys) rows and sizes it with [`Settings::filter_bits_per_key`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.filter_bits_per_key). Point lookups can skip the whole SST on a negative result. WAL SSTs do not include a filter because SlateDB reads them sequentially during replay.
+Compacted SSTs can include a Bloom filter. SlateDB writes one when the file has at least the number of rows configured by [`SsTableFormat::with_min_filter_keys`](https://docs.rs/slatedb/latest/slatedb/struct.SsTableFormat.html#method.with_min_filter_keys) and sizes it with the configured filter policies, which default to a bloom filter with 10 bits per key. Point lookups can skip the whole SST on a negative result. WAL SSTs do not include a filter because SlateDB reads them sequentially during replay.
 
 ## Stats Block
 

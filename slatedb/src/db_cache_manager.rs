@@ -227,7 +227,7 @@ mod tests {
     use crate::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
     use crate::db::Db;
     use crate::db_cache::{CachedKey, DbCache};
-    use crate::DbCacheManagerOps;
+    use crate::{DbCacheManagerOps, SsTableFormat};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
 
@@ -684,9 +684,9 @@ mod tests {
         let db = Db::builder(PATH, os)
             .with_settings(Settings {
                 flush_interval: None,
-                min_filter_keys: 1,
                 ..Default::default()
             })
+            .with_sst_format(SsTableFormat::default().with_min_filter_keys(1))
             .build()
             .await
             .expect("failed to open db");

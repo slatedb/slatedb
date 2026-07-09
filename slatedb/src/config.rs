@@ -47,7 +47,6 @@
 //! wal_enabled = false
 //! manifest_poll_interval = "1s"
 //! manifest_update_timeout = "300s"
-//! min_filter_keys = 1000
 //! l0_sst_size_bytes = 67108864
 //! max_wal_flushes_before_l0_flush = 4096
 //! l0_max_ssts = 8
@@ -99,7 +98,6 @@
 //!  "wal_enabled": false,
 //!  "manifest_poll_interval": "1s",
 //!  "manifest_update_timeout": "300s",
-//!  "min_filter_keys": 1000,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "max_wal_flushes_before_l0_flush": 4096,
 //!  "l0_max_ssts": 8,
@@ -119,7 +117,6 @@
 //!      "include_size_threshold": "4.0"
 //!    }
 //!  },
-//!  "compression_codec": null,
 //!  "object_store_cache_options": {
 //!    "root_folder": "/tmp/slatedb-cache",
 //!    "max_cache_size_bytes": 17179869184,
@@ -154,7 +151,6 @@
 //! wal_enabled: false
 //! manifest_poll_interval: '1s'
 //! manifest_update_timeout: '300s'
-//! min_filter_keys: 1000
 //! l0_sst_size_bytes: 67108864
 //! max_wal_flushes_before_l0_flush: 4096
 //! l0_max_ssts: 8
@@ -171,7 +167,6 @@
 //!     min_compaction_sources: "4"
 //!     max_compaction_sources: "8"
 //!     include_size_threshold: "4.0"
-//! compression_codec: null
 //! object_store_cache_options:
 //!   root_folder: /tmp/slatedb-cache
 //!   max_cache_size_bytes: 17179869184
@@ -651,11 +646,6 @@ pub struct Settings {
     #[serde(serialize_with = "serialize_duration")]
     pub manifest_update_timeout: Duration,
 
-    /// Write SSTables with a bloom filter if the number of keys in the SSTable
-    /// is greater than or equal to this value. Reads on small SSTables might be
-    /// faster without a bloom filter.
-    pub min_filter_keys: u32,
-
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
     /// (based on flush_interval) regardless of this value. Memtable sizes are checked
@@ -735,9 +725,6 @@ pub struct Settings {
     /// is configured via [`CompactorOptions::worker`].
     pub compactor_options: Option<CompactorOptions>,
 
-    /// The compression algorithm to use for SSTables.
-    pub compression_codec: Option<CompressionCodec>,
-
     /// The object store cache options.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
@@ -756,12 +743,6 @@ pub struct Settings {
     ///
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
-
-    /// The block format for SST files. This is only available in tests
-    /// to verify backward compatibility between V1 and V2 formats.
-    #[cfg(test)]
-    #[serde(skip)]
-    pub block_format: Option<crate::sst_builder::BlockFormat>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -777,7 +758,6 @@ impl std::fmt::Debug for Settings {
         }
         data.field("manifest_poll_interval", &self.manifest_poll_interval)
             .field("manifest_update_timeout", &self.manifest_update_timeout)
-            .field("min_filter_keys", &self.min_filter_keys)
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
             .field(
@@ -788,7 +768,6 @@ impl std::fmt::Debug for Settings {
             .field("l0_max_ssts_per_key", &self.l0_max_ssts_per_key)
             .field("l0_flush_parallelism", &self.l0_flush_parallelism)
             .field("compactor_options", &self.compactor_options)
-            .field("compression_codec", &self.compression_codec)
             .field(
                 "object_store_cache_options",
                 &self.object_store_cache_options,
@@ -980,7 +959,6 @@ impl Default for Settings {
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
             manifest_update_timeout: Duration::from_secs(300),
-            min_filter_keys: 1000,
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
             max_wal_flushes_before_l0_flush: 4096,
@@ -988,13 +966,10 @@ impl Default for Settings {
             l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
-            compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             metric_level: MetricLevel::default(),
             default_ttl: None,
-            #[cfg(test)]
-            block_format: None,
         }
     }
 }
@@ -1233,22 +1208,6 @@ pub struct CompactionWorkerOptions {
     /// it.
     pub max_subcompactions: usize,
 
-    /// Write SSTables with a bloom filter if the number of keys in the SSTable
-    /// is greater than or equal to this value. Reads on small SSTables might be
-    /// faster without a bloom filter.
-    ///
-    /// Must match the writer's [`Settings::min_filter_keys`] configuration so
-    /// that SSTs rewritten by the worker carry filters consistent with those
-    /// produced by the DB.
-    pub min_filter_keys: u32,
-
-    /// The compression algorithm to use for SSTables the worker writes.
-    ///
-    /// Must match the writer's [`Settings::compression_codec`] configuration so
-    /// that SSTs rewritten by the worker are encoded consistently with those
-    /// produced by the DB.
-    pub compression_codec: Option<CompressionCodec>,
-
     /// Optional metrics reporting level for standalone compaction workers.
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
@@ -1266,8 +1225,6 @@ impl Default for CompactionWorkerOptions {
             max_fetch_tasks: 4,
             bytes_to_fetch: 2 * 1024 * 1024,
             max_subcompactions: 4,
-            min_filter_keys: 1000,
-            compression_codec: None,
             metric_level: None,
         }
     }

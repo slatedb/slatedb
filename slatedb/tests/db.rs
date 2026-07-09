@@ -13,7 +13,7 @@ use slatedb::fail_parallel::{self, FailPointRegistry};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-use slatedb::{CompactorBuilder, Db};
+use slatedb::{CompactorBuilder, Db, SsTableFormat};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -188,7 +188,6 @@ async fn test_concurrent_writers_and_readers() {
             manifest_update_timeout: Duration::from_secs(300),
             // Allow 16KB of unflushed data
             max_unflushed_bytes: 16 * 1024,
-            min_filter_keys: 0,
             // Allow up to four 4096-byte blocks per-SST
             l0_sst_size_bytes: 4 * 4096,
             compactor_options: None,
@@ -214,9 +213,11 @@ async fn test_concurrent_writers_and_readers() {
             let db_path = format!("/tmp/test_concurrent_writers_readers_{}", ts);
             Db::builder(db_path.clone(), object_store.clone())
                 .with_settings(config.clone())
+                .with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
                 .with_compactor_builder(
                     CompactorBuilder::new(db_path, object_store.clone())
                         .with_options(compactor_options.clone())
+                        .with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
                         .with_scheduler_supplier(supplier.clone()),
                 )
                 .build()

@@ -2076,7 +2076,7 @@ mod tests {
     }
 
     fn test_db_options(
-        min_filter_keys: u32,
+        _min_filter_keys: u32,
         l0_sst_size_bytes: usize,
         compactor_options: Option<crate::config::CompactorOptions>,
     ) -> crate::config::Settings {
@@ -2090,16 +2090,13 @@ mod tests {
             l0_max_ssts: 8,
             l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 1,
-            min_filter_keys,
             l0_sst_size_bytes,
             max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
-            compression_codec: None,
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
             default_ttl: None,
-            block_format: None,
         }
     }
 

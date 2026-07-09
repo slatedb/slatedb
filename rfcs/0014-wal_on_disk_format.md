@@ -44,7 +44,7 @@ existing SST format since also the new WAL format would need versioning and meta
 one in the existing SST format.
 The only component of the existing SST format that is not needed for the WAL format is the filter.
 Not encoding the filter is allowed in the existing SST format when there are fewer keys in the SST
-than set in config `min_filter_keys`.
+than set by `SsTableFormat::with_min_filter_keys`.
 Thus, not encoding filters for the WAL would also not justify a new format.
 Additionally, it is not impossible that filters for WAL files might be interesting for future use cases.
 Given all of these arguments, we decided to reject this RFC about a new persistence format for the WAL

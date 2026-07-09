@@ -102,7 +102,6 @@ mod composite_filters {
 
     fn base_settings() -> Settings {
         Settings {
-            min_filter_keys: 0,
             compactor_options: None,
             ..Settings::default()
         }
@@ -199,7 +198,11 @@ mod composite_filters {
     ) -> Db {
         Db::builder(path, store)
             .with_settings(base_settings())
-            .with_sst_format(SsTableFormat::default().with_filter_policies(policies))
+            .with_sst_format(
+                SsTableFormat::default()
+                    .with_min_filter_keys(0)
+                    .with_filter_policies(policies),
+            )
             .build()
             .await
             .expect("failed to build db")
@@ -285,13 +288,17 @@ mod subrange {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder("/test/subrange", Arc::new(InMemory::new()))
             .with_settings(Settings {
-                min_filter_keys: 0,
                 compactor_options: None,
                 ..Settings::default()
             })
-            .with_sst_format(SsTableFormat::default().with_filter_policies(vec![Arc::new(
-                BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(FixedPrefixExtractor)),
-            )]))
+            .with_sst_format(
+                SsTableFormat::default()
+                    .with_min_filter_keys(0)
+                    .with_filter_policies(vec![Arc::new(
+                        BloomFilterPolicy::new(10)
+                            .with_prefix_extractor(Arc::new(FixedPrefixExtractor)),
+                    )]),
+            )
             .with_metrics_recorder(recorder.clone())
             .build()
             .await
@@ -431,7 +438,6 @@ mod prop_test {
 
     fn settings() -> Settings {
         Settings {
-            min_filter_keys: 0,
             compactor_options: None,
             ..Settings::default()
         }
@@ -440,7 +446,11 @@ mod prop_test {
     async fn build_db(path: &str, filter_policies: Vec<Arc<dyn FilterPolicy>>) -> Db {
         Db::builder(path, Arc::new(InMemory::new()))
             .with_settings(settings())
-            .with_sst_format(SsTableFormat::default().with_filter_policies(filter_policies))
+            .with_sst_format(
+                SsTableFormat::default()
+                    .with_min_filter_keys(0)
+                    .with_filter_policies(filter_policies),
+            )
             .build()
             .await
             .expect("failed to build db")
