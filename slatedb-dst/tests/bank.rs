@@ -184,7 +184,7 @@ fn run_bank(seed: u64, shutdown_at_ms: i64) -> Result<(), Box<dyn std::error::Er
 
 async fn open_bank_db(ctx: StartupCtx) -> Result<Arc<Db>, Error> {
     let db_seed = ctx.rand().rng().next_u64();
-    let mut settings = build_settings(ctx.rand()).await;
+    let (mut settings, sst_format) = build_settings(ctx.rand()).await;
 
     // Clock ticks in the harness and `Toxic` clock advances go _very_ fast.
     // This can cause the auditor's scan to appear to take longer than 15
@@ -212,7 +212,8 @@ async fn open_bank_db(ctx: StartupCtx) -> Result<Arc<Db>, Error> {
         .with_system_clock(ctx.system_clock())
         .with_fp_registry(ctx.fp_registry())
         .with_seed(db_seed)
-        .with_settings(settings);
+        .with_settings(settings)
+        .with_sst_format(sst_format);
 
     if let Some(merge_operator) = ctx.merge_operator() {
         builder = builder.with_merge_operator(merge_operator);

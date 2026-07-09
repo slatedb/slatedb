@@ -2108,7 +2108,7 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;
     use crate::config::{
-        CheckpointOptions, CompactionWorkerOptions, CompactorOptions, CompressionCodec,
+        CheckpointOptions, CompactionWorkerOptions, CompactorOptions,
         GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
         PutOptions, ScanOptions, Settings, SstBlockSize, Ttl, WriteOptions,
     };
