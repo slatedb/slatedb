@@ -16,7 +16,6 @@ Table of Contents:
 - [Impact Analysis](#impact-analysis)
 - [Operations](#operations)
 - [Testing](#testing)
-- [Rollout](#rollout)
 - [Alternatives](#alternatives)
 - [Open Questions](#open-questions)
 - [References](#references)
@@ -31,9 +30,9 @@ Authors:
 
 ## Summary
 
-Apart from `cache_blocks` in read APIs and the caching warming APIs in `CacheManager`,
+Apart from `cache_blocks` in read APIs and the cache warming APIs in `CacheManager`,
 SlateDB has a fixed block cache usage today for internal operations (memtable
-flush or or SST compaction) where it inserts every block of a flushed SST into
+flush or SST compaction) where it inserts every block of a flushed SST into
 the block cache, and compaction doesn't read or write from the cache. This RFC
 adds a `BlockCachePolicy` trait, set on `DbBuilder`, that controls block cache
 behavior in flush, compaction reads and writes. The default implementation
@@ -41,18 +40,18 @@ preserves current behavior; users implement the trait for different behavior.
 
 ## Motivation
 
-There are multiple usecases that can benefit from controlling the block cache
+There are multiple use cases that can benefit from controlling the block cache
 behavior in internal operations, some examples are:
 - If L0 blocks are in the block cache, the embedded compactor can be much more
 efficient in L0 reads if it attempts reading from the block cache.
-- Some usecases might need to keep the indices and filters always in memory to
+- Some use cases might need to keep the indices and filters always in memory to
 avoid multiple read requests per point get to read the index and filter for the
 new compacted SST.
-- For usecases that use the hybrid block cache, they might wish to cache the
+- For use cases that use the hybrid block cache, they might wish to cache the
 compaction output to disk to avoid reading from ObjectStore.
 
-These different needs show that a flexible policy where user can clearily set
-their block cache policy can help these scenarios.
+These different needs show that a flexible policy where users can clearly set
+their block cache behavior can help these scenarios.
 
 ## Goals
 
@@ -69,8 +68,8 @@ request in `ReadOptions::cache_blocks` and `ScanOptions::cache_blocks`.
 
 ### Public API
 
-The policy is a trait. It is consulted per SST component, once for writes and
-once for reads:
+The policy is a trait. It is consulted per SST component, through one method
+for writes and one for reads:
 
 ```rust
 /// A component of an SST that can be inserted into the block cache.
@@ -124,7 +123,7 @@ pub enum CacheReadMode {
 }
 
 pub trait BlockCachePolicy: Send + Sync + 'static {
-    /// Whether `component` of an SST written by `source` is inserted into the
+    /// How `component` of an SST written by `source` interacts with the
     /// block cache.
     fn write_mode(&self, source: WriteSource, component: CacheComponent) -> CacheWriteMode;
 
@@ -201,8 +200,8 @@ A custom policy receives every source, including `Foreground` with the
 per-request option, and may resolve them differently from the table above. The
 engine executes whatever mode the policy returns.
 
-This design means the cache read action is resolved in one place at the read
-and write locations instead of passing booleans around.
+This design means the cache interaction is resolved in one place for both
+reads and writes instead of passing booleans around.
 
 ## Impact Analysis
 
@@ -257,22 +256,22 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 - [ ] CLI tools
 - [ ] Language bindings (Go/Python/etc)
-- [ ] Observability (metrics/logging/tracing)
+- [x] Observability (metrics/logging/tracing)
 
 ## Operations
 
 ### Performance & Cost
 
 - The default policy changes nothing on the read or write path.
-- The custom policy set by the user will impact the performance of reads and
-potentially writes if the cache the data in SST files.
+- A custom policy impacts read performance, and write performance when it
+caches SST components on write.
 
 ### Configuration
 
 - New configuration: `BlockCachePolicy` on `DbBuilder`.
 
 ### Metrics
-- Hit and Miss metrics for the block cache gains a label that is `TableStoreKind`
+- Hit and miss metrics for the block cache gain a label that is `TableStoreKind`
 to distinguish between main and compactor table store reads.
 
 ### Compatibility
@@ -282,12 +281,12 @@ to distinguish between main and compactor table store reads.
 ## Testing
 
 - Unit tests.
-- Performance tests for difference usecases.
+- Performance tests for different use cases.
 
 ## Alternatives
 
 **Status quo.**
-Rejected because of the usecases mentioned in Motivation
+Rejected because of the use cases mentioned in Motivation.
 
 **A declarative policy struct.**
 `BlockCachePolicy` can be a plain struct, with the resolution tables fixed in
@@ -316,9 +315,9 @@ pub struct BlockCachePolicy {
 ```
 
 This keeps a smaller public surface (no trait, and `ReadSource`,
-`WriteSource`, and `CacheReadMode` stay internal) and cannot express invalid
+`WriteSource`, `CacheReadMode`, and `CacheWriteMode` stay internal) and cannot express invalid
 states, but every new caching behavior needs a new field. The proposed design
-is more flexible and lets the user to handle all cases for reads and writes.
+is more flexible and lets the user handle all cases for reads and writes.
 
 **Coarse knobs.**
 Five booleans (`cache_blocks_on_flush`, `cache_metadata_on_flush`, and so on)
@@ -329,7 +328,7 @@ Rejected because it's a lot of knobs and new scenarios will just add more knobs.
 - The `CacheComponent` in the design is different from `CacheTarget` in
 `CacheManager` because `CacheManager` allows for loading a certain data range
 in the cache. The current design doesn't support data range in the cache policy,
-but it can be added later if needed, is there any issue here ?
+but it can be added later if needed, is there any issue here?
 
 ## References
 
