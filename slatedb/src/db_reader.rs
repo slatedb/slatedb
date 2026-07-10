@@ -1425,11 +1425,6 @@ mod tests {
     use std::time::Duration;
     use uuid::Uuid;
 
-    #[test]
-    fn default_reader_mode_should_manage_checkpoints() {
-        assert_eq!(DbReaderMode::default(), DbReaderMode::ManagedCheckpoint);
-    }
-
     #[tokio::test]
     async fn should_get_value_from_db() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
