@@ -2108,7 +2108,7 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;
     use crate::config::{
-        CheckpointOptions, CompactionWorkerOptions, CompactorOptions, CompressionCodec,
+        CheckpointOptions, CompactionWorkerOptions, CompactorOptions,
         GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
         PutOptions, ScanOptions, Settings, SstBlockSize, Ttl, WriteOptions,
     };
@@ -6888,6 +6888,7 @@ mod tests {
         // where re-opening a DB using zstd compression causes "attempt to subtract with overflow"
         // error in Block::decode
 
+        use crate::config::CompressionCodec;
         use std::str::FromStr;
 
         // Create and load initial database
