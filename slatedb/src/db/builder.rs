@@ -168,6 +168,7 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
 use slatedb_common::DbRand;
 use uuid::Uuid;
+use crate::wal::wal_disabled::DisabledWalWriter;
 
 /// A builder for creating a new Db instance.
 ///
@@ -568,30 +569,43 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         };
 
-        let fencer = WriterFencer::new(table_store.clone(), &self.settings, system_clock.clone());
+        let manifest_dirty = stored_manifest.prepare_dirty()?;
+        let status_manager = Arc::new(DbStatusManager::new_with_initial_values(
+            manifest_dirty.value.core.last_l0_seq,
+            manifest_dirty.into(),
+            BTreeSet::new(),
+        ));
+
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            status_manager.clone(),
+            system_clock.clone(),
+        ));
+
+        let fencer = WriterFencer::new(
+            status_manager.result_reader(),
+            recorder.clone(),
+            table_store.clone(),
+            &self.settings,
+            system_clock.clone(),
+            task_executor.clone()
+        );
         let WriterFenceResult {
             manifest,
             replay_range,
+            wal_writer: mut wal_writer,
         } = fencer.fence(stored_manifest).await?;
+        let wal_writer = if DbInner::wal_enabled_in_options(&self.settings) {
+            wal_writer
+        } else {
+            let status = wal_writer.status();
+            wal_writer.close().await.map_err(|e| SlateDBError::from(e))?;
+            Box::new(DisabledWalWriter::new(status))
+        };
 
         let manifest_dirty = manifest.prepare_dirty()?;
-
-        // Shared lifecycle state — created before DbInner so it can be shared
-        // with the executor and future channel construction.
-        let status_manager = DbStatusManager::new_with_initial_values(
+        status_manager.report_fence_manifest(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.clone().into(),
-            BTreeSet::new(),
-        );
-
-        let recent_flushed_wal_id = replay_range.end - 1;
-        let mut wal_buffer = WalBufferManager::new(
-            status_manager.clone(),
-            &recorder,
-            recent_flushed_wal_id,
-            table_store.clone(),
-            self.settings.l0_sst_size_bytes,
-            self.settings.flush_interval,
         );
 
         // Setup communication channels wired to the shared closed state.
@@ -599,7 +613,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
-        let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
+        let memtable_flusher = Arc::new(MemtableFlusher::new(status_manager.as_ref()));
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
@@ -609,11 +623,11 @@ impl<P: Into<Path>> DbBuilder<P> {
                 manifest_dirty,
                 Arc::clone(&memtable_flusher),
                 write_tx,
-                wal_buffer.observer(),
+                wal_writer.observer(),
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
-                status_manager.clone(),
+                status_manager,
                 self.segment_extractor.clone(),
             )
             .await?,
@@ -621,16 +635,9 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup background tasks
         let tokio_handle = Handle::current();
-        let task_executor = Arc::new(MessageHandlerExecutor::new(
-            Arc::new(status_manager),
-            system_clock.clone(),
-        ));
-        if inner.wal_enabled {
-            wal_buffer.init(task_executor.clone()).await?;
-        };
         task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
-            Box::new(WriteBatchEventHandler::new(inner.clone(), wal_buffer)),
+            Box::new(WriteBatchEventHandler::new(inner.clone(), wal_writer)),
             write_rx,
             &tokio_handle,
         )?;
@@ -784,7 +791,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             &tokio_handle,
             &task_executor,
-            &inner.status_manager,
+            inner.status_manager.as_ref(),
         )?;
 
         // Monitor background tasks

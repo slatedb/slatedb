@@ -71,7 +71,6 @@ use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender, WatchableOnceCellReader};
-use crate::wal_buffer::{WalEvent, WalObserver, WalStatus, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
@@ -82,6 +81,7 @@ use slatedb_txn_obj::DirtyObject;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
+use crate::wal::{WalEvent, WalObserver, WalStatus};
 
 pub(crate) mod builder;
 
@@ -114,7 +114,7 @@ pub(crate) struct DbInner {
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
     pub(crate) snapshot_manager: Arc<SnapshotManager>,
-    pub(crate) status_manager: DbStatusManager,
+    pub(crate) status_manager: Arc<DbStatusManager>,
     /// Segment extractor (RFC-0024). When `Some`, the writer routes every
     /// key through this extractor and groups flush output into per-segment
     /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
@@ -131,11 +131,11 @@ impl DbInner {
         manifest: DirtyObject<Manifest>,
         memtable_flusher: Arc<MemtableFlusher>,
         write_notifier: SafeSender<BatchWriterMessage>,
-        wal_observer: WalObserver,
+        wal_observer: Box<dyn WalObserver>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
-        status_manager: DbStatusManager,
+        status_manager: Arc<DbStatusManager>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
@@ -269,7 +269,7 @@ impl DbInner {
     }
 
     #[allow(unused_variables)]
-    fn wal_enabled_in_options(settings: &Settings) -> bool {
+    pub(crate) fn wal_enabled_in_options(settings: &Settings) -> bool {
         #[cfg(feature = "wal_disable")]
         return settings.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
@@ -302,10 +302,21 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let (write_handle, mut durable_watcher) = rx.await??;
+        let write_handle = rx.await??;
 
         if options.await_durable {
-            durable_watcher.await_value().await?;
+            let seq = write_handle.seq;
+            let mut status_subscription = self.status_manager.subscribe();
+            let durable = status_subscription.wait_for(|s| s.durable_seq >= seq);
+            let mut error = self.status_manager.result_reader();
+            tokio::select! {
+                result = durable => {
+                    result.map_err(|e| SlateDBError::Closed)?;
+                },
+                result = error.await_value() => {
+                    result?;
+                },
+            };
         }
 
         Ok(write_handle)
@@ -756,10 +767,6 @@ impl Db {
             .await
         {
             warn!("failed to shutdown writer task [error={:?}]", e);
-        }
-
-        if let Err(e) = self.task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await {
-            warn!("failed to shutdown wal writer task [error={:?}]", e);
         }
 
         if let Err(e) = self.inner.table_store.close_cache().await {
@@ -2064,12 +2071,12 @@ impl WriteHandle {
 pub(crate) struct DbWalObserver {
     status_rx: tokio::sync::watch::Receiver<WalStatus>,
     closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
-    wrapped: WalObserver,
+    wrapped: Arc<dyn WalObserver>,
 }
 
 impl DbWalObserver {
     fn new(
-        wrapped: WalObserver,
+        wrapped: Box<dyn WalObserver>,
         oracle: Arc<DbOracle>,
         db_state: Arc<RwLock<DbState>>,
         closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
@@ -2090,7 +2097,7 @@ impl DbWalObserver {
         Self {
             status_rx,
             closed_reader,
-            wrapped,
+            wrapped: wrapped.into(),
         }
     }
 

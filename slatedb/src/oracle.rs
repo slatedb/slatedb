@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 
@@ -23,7 +24,7 @@ pub(crate) struct DbOracle {
     last_seq: AtomicU64,
     last_committed_seq: AtomicU64,
     last_durable_seq: AtomicU64,
-    status_reporter: DbStatusManager,
+    status_reporter: Arc<DbStatusManager>,
 }
 
 impl DbOracle {
@@ -31,7 +32,7 @@ impl DbOracle {
         last_seq: u64,
         last_committed_seq: u64,
         last_durable_seq: u64,
-        status_reporter: DbStatusManager,
+        status_reporter: Arc<DbStatusManager>,
     ) -> Self {
         Self {
             last_seq: AtomicU64::new(last_seq),
