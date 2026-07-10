@@ -411,7 +411,7 @@ mod tests {
     fn create_transaction_manager() -> TransactionManager {
         let db_rand = Arc::new(DbRand::new(0));
         let status_reporter = DbStatusManager::new(0);
-        let oracle = Arc::new(DbOracle::new(0, 0, 0, status_reporter));
+        let oracle = Arc::new(DbOracle::new(0, 0, 0, Arc::new(status_reporter)));
         TransactionManager::new(oracle, db_rand)
     }
 
@@ -419,7 +419,7 @@ mod tests {
     fn test_new_transaction_uses_oracle_seq() {
         let db_rand = Arc::new(DbRand::new(0));
         let status_reporter = DbStatusManager::new(123);
-        let oracle = Arc::new(DbOracle::new(123, 123, 123, status_reporter));
+        let oracle = Arc::new(DbOracle::new(123, 123, 123, Arc::new(status_reporter)));
         let txn_manager = TransactionManager::new(oracle, db_rand);
 
         let (txn_id, seq) = txn_manager.new_transaction();

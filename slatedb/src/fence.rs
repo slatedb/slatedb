@@ -1,17 +1,27 @@
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
+use crate::utils::WatchableOnceCellReader;
+use crate::wal::writer_init::WalWriterInit;
+use crate::wal::{WalWriter, WriterInit};
 use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
+use log::error;
+use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::SystemClock;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct WriterFencer {
+    closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    recorder: MetricsRecorderHelper,
+    settings: Settings,
     table_store: Arc<TableStore>,
     manifest_update_timeout: Duration,
     system_clock: Arc<dyn SystemClock>,
+    task_executor: Arc<MessageHandlerExecutor>,
     #[cfg_attr(not(test), allow(dead_code))]
     fp_tx: FailPointTx,
 }
@@ -19,27 +29,46 @@ pub(crate) struct WriterFencer {
 pub(crate) struct WriterFenceResult {
     pub(crate) manifest: FenceableManifest,
     pub(crate) replay_range: Range<u64>,
+    pub(crate) wal_writer: Box<dyn WalWriter>,
 }
 
 impl WriterFencer {
     pub(crate) fn new(
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
+        task_executor: Arc<MessageHandlerExecutor>,
     ) -> Self {
-        Self::new_with_fp_handle(table_store, settings, system_clock, FailPointTx::dummy())
+        Self::new_with_fp_handle(
+            closed_result_reader,
+            recorder,
+            table_store,
+            settings,
+            system_clock,
+            task_executor,
+            FailPointTx::dummy(),
+        )
     }
 
     fn new_with_fp_handle(
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
+        task_executor: Arc<MessageHandlerExecutor>,
         fp_tx: FailPointTx,
     ) -> Self {
         Self {
+            closed_result_reader,
+            recorder,
             table_store,
+            settings: settings.clone(),
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
+            task_executor,
             fp_tx,
         }
     }
@@ -57,13 +86,18 @@ impl WriterFencer {
         self,
         stored_manifest: StoredManifest,
     ) -> Result<WriterFenceResult, SlateDBError> {
-        let mut empty_wal_id = self
-            .table_store
-            .next_wal_sst_id(stored_manifest.manifest().core.replay_after_wal_id)
-            .await?;
-        self.fail_point_send("LoadEmptyWalId");
+        let wal_writer_init = WalWriterInit::load(
+            self.closed_result_reader.clone(),
+            self.recorder.clone(),
+            self.table_store.clone(),
+            &self.settings,
+            stored_manifest.manifest(),
+            self.task_executor.clone(),
+            self.fp_tx.clone(),
+        )
+        .await?;
 
-        let mut manifest = FenceableManifest::init_writer(
+        let manifest = FenceableManifest::init_writer(
             stored_manifest,
             self.manifest_update_timeout,
             self.system_clock.clone(),
@@ -71,56 +105,26 @@ impl WriterFencer {
         .await?;
         self.fail_point_send("FenceManifest");
 
-        let mut manifest_dirty = manifest.prepare_dirty()?;
-        // verify that the empty_wal_id we computed is still valid. Its possible that between
-        // computing empty_wal_id and fencing the manifest, the fenced writer advanced the gc
-        // boundary (replay_after_wal_id)
-        if empty_wal_id <= manifest_dirty.value.core.replay_after_wal_id {
-            // the wal gc boundary advanced because the old writer finished a flush - recompute
-            // the next wal id
-            empty_wal_id = self
-                .table_store
-                .next_wal_sst_id(manifest_dirty.value.core.replay_after_wal_id)
-                .await?;
-            manifest.refresh().await?;
-            manifest_dirty = manifest.prepare_dirty()?;
-            self.fail_point_send("ReloadEmptyWalId");
-            // at this point we still hold the epoch, so it should not be possible for the barrier
-            // to have advanced past the computed empty_wal_id
-            assert!(empty_wal_id > manifest_dirty.value.core.replay_after_wal_id);
-        }
+        let mut manifest = manifest.into();
+        let result = wal_writer_init.fence_and_init(&mut manifest).await?;
+        let mut manifest: FenceableManifest = manifest.into();
 
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            let wrote_fence = match self.table_store.write_wal_fence(empty_wal_id).await {
-                Ok(()) => true,
-                Err(SlateDBError::Fenced) => false,
-                Err(err) => return Err(err),
-            };
-            self.fail_point_send(format!("{}:{}", "WriteWalFence", attempt));
+        // Refresh validates that we own the latest epoch still.
+        manifest.refresh().await?;
+        fail_point_send!(self.fp_tx, "FinalRefreshManifest");
 
-            // Refresh validates that we own the latest epoch still.
-            manifest.refresh().await?;
-            let dirty_manifest = manifest.prepare_dirty()?;
-            let replay_after_wal_id = dirty_manifest.value.core.replay_after_wal_id;
-            self.fail_point_send(format!("{}:{}", "RefreshManifest", attempt));
-
-            if wrote_fence {
-                // this writer is the only writer that could have written replay_after_wal_id,
-                // so it should not be possible for it to have advanced past the fencing wal.
-                // older writers would have failed with a stale epoch
-                assert!(empty_wal_id > replay_after_wal_id);
-                return Ok(WriterFenceResult {
-                    manifest,
-                    replay_range: replay_after_wal_id + 1..empty_wal_id + 1,
-                });
-            } else {
-                // The old writer managed to write a WAL before we could write the fencing wal.
-                // Try the next wal ID
-                empty_wal_id += 1;
+        let replay_range = match result.replay_range.try_into() {
+            Ok(replay_range) => replay_range,
+            Err(_) => {
+                error!("replay range must use inclusive lower bound and exclusive upper bound");
+                return Err(SlateDBError::InvalidDBState);
             }
-        }
+        };
+        Ok(WriterFenceResult {
+            manifest,
+            wal_writer: result.wal_writer,
+            replay_range,
+        })
     }
 }
 
@@ -130,6 +134,7 @@ mod tests {
     use crate::config::{
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     };
+    use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
     use crate::fence::WriterFencer;
     use crate::format::sst::SsTableFormat;
@@ -139,6 +144,7 @@ mod tests {
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
     use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::utils::WatchableOnceCell;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::fail_point_channel;
@@ -147,7 +153,9 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use rstest::rstest;
-    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder, MetricsRecorderHelper};
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+    };
     use slatedb_common::{DefaultSystemClock, SystemClock};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -188,10 +196,22 @@ mod tests {
             .unwrap();
             let fp_registry = Arc::new(FailPointRegistry::new());
             let (fp_tx, event_rx) = fail_point_channel(fp_registry.clone());
+            let cell = Arc::new(WatchableOnceCell::new());
+            let recorder = MetricsRecorderHelper::new(
+                Arc::new(DefaultMetricsRecorder::new()),
+                MetricLevel::Info,
+            );
+            let task_executor = Arc::new(MessageHandlerExecutor::new(
+                cell.clone(),
+                system_clock.clone(),
+            ));
             let fencer = WriterFencer::new_with_fp_handle(
+                cell.reader(),
+                recorder,
                 table_store.clone(),
                 &settings,
                 system_clock.clone(),
+                task_executor.clone(),
                 fp_tx,
             );
             Self {
