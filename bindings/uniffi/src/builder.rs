@@ -12,6 +12,7 @@ use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
 use crate::runtime;
 use crate::settings::Settings;
+use crate::sst_format::SsTableFormat;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
@@ -56,6 +57,13 @@ impl DbBuilder {
     pub fn with_settings(&self, settings: Arc<Settings>) -> Result<(), Error> {
         let settings = settings.inner();
         self.update_builder(|builder| builder.with_settings(settings))
+            .map_err(Into::into)
+    }
+
+    /// Sets the SST format used for newly written tables.
+    pub fn with_sst_format(&self, sst_format: Arc<SsTableFormat>) -> Result<(), Error> {
+        let sst_format = sst_format.inner();
+        self.update_builder(|builder| builder.with_sst_format(sst_format))
             .map_err(Into::into)
     }
 
@@ -167,6 +175,13 @@ impl DbReaderBuilder {
         let checkpoint_id = Uuid::parse_str(&checkpoint_id)
             .map_err(|source| SlateDbError::InvalidCheckpointId { source })?;
         self.update_builder(|builder| builder.with_checkpoint_id(checkpoint_id))
+            .map_err(Into::into)
+    }
+
+    /// Sets the SST format used to interpret SST metadata and blocks.
+    pub fn with_sst_format(&self, sst_format: Arc<SsTableFormat>) -> Result<(), Error> {
+        let sst_format = sst_format.inner();
+        self.update_builder(|builder| builder.with_sst_format(sst_format))
             .map_err(Into::into)
     }
 

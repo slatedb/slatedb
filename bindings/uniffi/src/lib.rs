@@ -15,6 +15,7 @@ mod metrics;
 mod object_store;
 mod runtime;
 mod settings;
+mod sst_format;
 mod types;
 mod validation;
 mod wal_reader;
@@ -45,6 +46,7 @@ pub use metrics::{
 };
 pub use object_store::ObjectStore;
 pub use settings::Settings;
+pub use sst_format::SsTableFormat;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,
     CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat,

@@ -75,4 +75,5 @@ rm -f \
 cp "${GENERATED_GO_FILE}" "${GO_PKG_DIR}/$(basename "${GENERATED_GO_FILE}")"
 cp "${GENERATED_H_FILE}" "${GO_PKG_DIR}/$(basename "${GENERATED_H_FILE}")"
 apply_async_error_workaround "${GO_PKG_DIR}/$(basename "${GENERATED_GO_FILE}")"
+perl -pi -e 's/[ \t]+$//' "${GO_PKG_DIR}/$(basename "${GENERATED_H_FILE}")"
 go -C "${GO_PKG_DIR}" fmt ./...

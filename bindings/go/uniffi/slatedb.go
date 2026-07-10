@@ -689,6 +689,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_format()
+		})
+		if checksum != 1746 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_format: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store()
 		})
 		if checksum != 4790 {
@@ -748,6 +757,15 @@ func uniffiCheckChecksums() {
 		if checksum != 2822 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_segment_extractor: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_sst_format()
+		})
+		if checksum != 9495 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_sst_format: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1553,6 +1571,42 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_sstableformat_with_compression_codec()
+		})
+		if checksum != 5127 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_sstableformat_with_compression_codec: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_sstableformat_with_filter_policies()
+		})
+		if checksum != 60424 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_sstableformat_with_filter_policies: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_sstableformat_with_min_filter_keys()
+		})
+		if checksum != 15905 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_sstableformat_with_min_filter_keys: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_sstableformat_with_sst_block_size()
+		})
+		if checksum != 6273 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_sstableformat_with_sst_block_size: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_walfile_id()
 		})
 		if checksum != 62512 {
@@ -1819,6 +1873,15 @@ func uniffiCheckChecksums() {
 		if checksum != 7949 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_load: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_sstableformat_default()
+		})
+		if checksum != 5188 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_sstableformat_default: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4197,6 +4260,8 @@ type DbBuilderInterface interface {
 	WithSegmentExtractor(extractor PrefixExtractor) error
 	// Applies a [`crate::Settings`] object to the builder.
 	WithSettings(settings *Settings) error
+	// Sets the SST format used for newly written tables.
+	WithSstFormat(sstFormat *SsTableFormat) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -4331,6 +4396,18 @@ func (_self *DbBuilder) WithSettings(settings *Settings) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings(
 			_pointer, FfiConverterSettingsINSTANCE.Lower(settings), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the SST format used for newly written tables.
+func (_self *DbBuilder) WithSstFormat(sstFormat *SsTableFormat) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_format(
+			_pointer, FfiConverterSsTableFormatINSTANCE.Lower(sstFormat), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -5151,6 +5228,8 @@ type DbReaderBuilderInterface interface {
 	// database must configure an extractor matching the one the database
 	// was created with.
 	WithSegmentExtractor(extractor PrefixExtractor) error
+	// Sets the SST format used to interpret SST metadata and blocks.
+	WithSstFormat(sstFormat *SsTableFormat) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -5260,6 +5339,18 @@ func (_self *DbReaderBuilder) WithSegmentExtractor(extractor PrefixExtractor) er
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_segment_extractor(
 			_pointer, FfiConverterPrefixExtractorINSTANCE.Lower(extractor), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the SST format used to interpret SST metadata and blocks.
+func (_self *DbReaderBuilder) WithSstFormat(sstFormat *SsTableFormat) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_sst_format(
+			_pointer, FfiConverterSsTableFormatINSTANCE.Lower(sstFormat), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -8037,6 +8128,135 @@ func LowerToExternalSettings(value *Settings) uint64 {
 type FfiDestroyerSettings struct{}
 
 func (_ FfiDestroyerSettings) Destroy(value *Settings) {
+	value.Destroy()
+}
+
+// SST configuration shared by database writers and readers.
+//
+// Configure a format once, then pass it to [`crate::DbBuilder`] and, when
+// applicable, [`crate::DbReaderBuilder`].
+type SsTableFormatInterface interface {
+	// Sets the compression codec used for SST blocks and metadata blocks.
+	WithCompressionCodec(compressionCodec *CompressionCodec)
+	// Sets the filter policies used for SST filter construction and evaluation.
+	WithFilterPolicies(policies []*FilterPolicy)
+	// Sets the minimum number of keys required before filter blocks are emitted.
+	WithMinFilterKeys(minFilterKeys uint32)
+	// Sets the block size used for newly written SST data blocks.
+	WithSstBlockSize(blockSize SstBlockSize)
+}
+
+// SST configuration shared by database writers and readers.
+//
+// Configure a format once, then pass it to [`crate::DbBuilder`] and, when
+// applicable, [`crate::DbReaderBuilder`].
+type SsTableFormat struct {
+	ffiObject FfiObject
+}
+
+// Creates an SST format populated with SlateDB defaults.
+func SsTableFormatDefault() *SsTableFormat {
+	return FfiConverterSsTableFormatINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_sstableformat_default(_uniffiStatus)
+	}))
+}
+
+// Sets the compression codec used for SST blocks and metadata blocks.
+func (_self *SsTableFormat) WithCompressionCodec(compressionCodec *CompressionCodec) {
+	_pointer := _self.ffiObject.incrementPointer("*SsTableFormat")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_sstableformat_with_compression_codec(
+			_pointer, FfiConverterOptionalCompressionCodecINSTANCE.Lower(compressionCodec), _uniffiStatus)
+		return false
+	})
+}
+
+// Sets the filter policies used for SST filter construction and evaluation.
+func (_self *SsTableFormat) WithFilterPolicies(policies []*FilterPolicy) {
+	_pointer := _self.ffiObject.incrementPointer("*SsTableFormat")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_sstableformat_with_filter_policies(
+			_pointer, FfiConverterSequenceFilterPolicyINSTANCE.Lower(policies), _uniffiStatus)
+		return false
+	})
+}
+
+// Sets the minimum number of keys required before filter blocks are emitted.
+func (_self *SsTableFormat) WithMinFilterKeys(minFilterKeys uint32) {
+	_pointer := _self.ffiObject.incrementPointer("*SsTableFormat")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_sstableformat_with_min_filter_keys(
+			_pointer, FfiConverterUint32INSTANCE.Lower(minFilterKeys), _uniffiStatus)
+		return false
+	})
+}
+
+// Sets the block size used for newly written SST data blocks.
+func (_self *SsTableFormat) WithSstBlockSize(blockSize SstBlockSize) {
+	_pointer := _self.ffiObject.incrementPointer("*SsTableFormat")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_sstableformat_with_sst_block_size(
+			_pointer, FfiConverterSstBlockSizeINSTANCE.Lower(blockSize), _uniffiStatus)
+		return false
+	})
+}
+func (object *SsTableFormat) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterSsTableFormat struct{}
+
+var FfiConverterSsTableFormatINSTANCE = FfiConverterSsTableFormat{}
+
+func (c FfiConverterSsTableFormat) Lift(handle C.uint64_t) *SsTableFormat {
+	result := &SsTableFormat{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_sstableformat(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_sstableformat(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*SsTableFormat).Destroy)
+	return result
+}
+
+func (c FfiConverterSsTableFormat) Read(reader io.Reader) *SsTableFormat {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterSsTableFormat) Lower(value *SsTableFormat) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*SsTableFormat")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterSsTableFormat) Write(writer io.Writer, value *SsTableFormat) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalSsTableFormat(handle uint64) *SsTableFormat {
+	return FfiConverterSsTableFormatINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalSsTableFormat(value *SsTableFormat) uint64 {
+	return uint64(FfiConverterSsTableFormatINSTANCE.Lower(value))
+}
+
+type FfiDestroyerSsTableFormat struct{}
+
+func (_ FfiDestroyerSsTableFormat) Destroy(value *SsTableFormat) {
 	value.Destroy()
 }
 
@@ -13572,6 +13792,53 @@ type FfiDestroyerSequenceBytes struct{}
 func (FfiDestroyerSequenceBytes) Destroy(sequence [][]byte) {
 	for _, value := range sequence {
 		FfiDestroyerBytes{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceFilterPolicy struct{}
+
+var FfiConverterSequenceFilterPolicyINSTANCE = FfiConverterSequenceFilterPolicy{}
+
+func (c FfiConverterSequenceFilterPolicy) Lift(rb RustBufferI) []*FilterPolicy {
+	return LiftFromRustBuffer[[]*FilterPolicy](c, rb)
+}
+
+func (c FfiConverterSequenceFilterPolicy) Read(reader io.Reader) []*FilterPolicy {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]*FilterPolicy, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterFilterPolicyINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceFilterPolicy) Lower(value []*FilterPolicy) C.RustBuffer {
+	return LowerIntoRustBuffer[[]*FilterPolicy](c, value)
+}
+
+func (c FfiConverterSequenceFilterPolicy) LowerExternal(value []*FilterPolicy) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]*FilterPolicy](c, value))
+}
+
+func (c FfiConverterSequenceFilterPolicy) Write(writer io.Writer, value []*FilterPolicy) {
+	if len(value) > math.MaxInt32 {
+		panic("[]*FilterPolicy is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterFilterPolicyINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceFilterPolicy struct{}
+
+func (FfiDestroyerSequenceFilterPolicy) Destroy(sequence []*FilterPolicy) {
+	for _, value := range sequence {
+		FfiDestroyerFilterPolicy{}.Destroy(value)
 	}
 }
 
