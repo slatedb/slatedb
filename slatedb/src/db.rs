@@ -7794,6 +7794,7 @@ mod tests {
             }),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
         };
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())

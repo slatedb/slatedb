@@ -309,6 +309,7 @@ mod tests {
                 compactions_options: None,
                 detach_options: None,
                 metric_level: None,
+                boundary_files_enabled: true,
             };
             let gc = GarbageCollector::new(
                 self.manifest_store.clone(),
