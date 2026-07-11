@@ -22,4 +22,5 @@ thiserror = { workspace = true }
 test-util = []
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
