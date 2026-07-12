@@ -1149,6 +1149,7 @@ async fn delete_cache_entry(
 
                 deleted_entries
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
             Err(e) => {
                 error!("FS cache failed to read_dir {path:?}: {e:?}");
                 vec![]

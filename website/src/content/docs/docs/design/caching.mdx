@@ -33,7 +33,7 @@ The defaults reflect the usual access patterns. Point reads default to `cache_bl
 
 The disk cache stays disabled unless `object_store_cache_options.root_folder` is set. If you want it warm before serving traffic, you can preload it on startup with [`PreloadLevel::L0Sst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.L0Sst) or [`PreloadLevel::AllSst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.AllSst). SlateDB loads recent SSTs, or all SSTs, into the local cache until the cache size limit is reached.
 
-By default, writes go straight to the upstream object store and do not populate the object-store cache. Setting [`cache_puts`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_puts) to `true` also stores `PUT` payloads locally, which can help if readers are likely to touch freshly written SSTs soon afterward.
+By default, writes go straight to the upstream object store and do not populate the object-store cache. Each SST write source has its own admission flag: [`cache_on_flush`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_flush) stores SSTs written by memtable flushes locally, and [`cache_on_compaction`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_compaction) does the same for compaction output. Enabling them can help if readers are likely to touch freshly written SSTs soon afterward. WAL and manifest writes are never cached.
 
 ## Sharing Between Instances
 

@@ -637,16 +637,43 @@ impl<P: Into<Path>> DbBuilder<P> {
             write_rx,
             &tokio_handle,
         )?;
-        // The compactor and GC each get their own cacheless store (so background
-        // reads do not pollute the foreground cache), tagged with their kind.
+
+        // Wraps a background component's (compactor, GC) raw main store in
+        // the component's own retry and instrumentation layer, so its I/O is
+        // recorded under its own metric labels. Returns (main, uncached).
         //
-        // The compactor reads/writes through whichever object store its builder
-        // holds: the DB's own store on the auto-from-settings path, or the one
-        // the caller supplied on their own `CompactorBuilder` (so a custom
-        // compaction read path — e.g. one that bypasses a prefetch wrapper used
-        // by the foreground read path — actually takes effect instead of being
-        // silently ignored). Either way it is wrapped in its own Compactor-tagged
-        // retry/instrumentation layer below.
+        // main: when the component runs against the DB's own store (the auto
+        // from settings path, or a caller-supplied builder holding a clone of
+        // the DB's store) and object store caching is configured, the DB's
+        // cache is shared on top of that layer, so cache fills and evictions
+        // stay coherent with the DB's. A different caller-supplied store is
+        // used as given (so a custom compaction reader takes effect instead
+        // of being silently ignored) and stays cacheless.
+        //
+        // uncached: the same wrapped store without the cache, for I/O that
+        // must bypass it.
+        let background_component_stores =
+            |raw_store: Arc<dyn ObjectStore>, component: ObjectStoreComponent| {
+                let retrying = instrumented_retrying_object_store(
+                    raw_store.clone(),
+                    &recorder,
+                    component,
+                    ObjectStoreType::Main,
+                    rand.clone(),
+                    system_clock.clone(),
+                );
+                let main: Arc<dyn ObjectStore> = match &cached_object_store {
+                    Some(cached) if Arc::ptr_eq(&raw_store, &self.main_object_store) => {
+                        cached.clone_with_new_object_store(retrying.clone())
+                    }
+                    _ => retrying.clone(),
+                };
+                (main, retrying)
+            };
+
+        // The compactor reads/writes through the object store held by its
+        // builder: the DB's own store on the auto from settings path, or the
+        // store the caller passed to their own `CompactorBuilder`.
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
                 CompactorBuilder::new(path.clone(), self.main_object_store.clone())
@@ -669,15 +696,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
             builder = builder.with_fp_registry(self.fp_registry.clone());
 
-            // Wrap whatever object store the builder holds in the compactor's
-            // own cacheless, Compactor-tagged retry/instrumentation layer.
-            let compactor_main_object_store = instrumented_retrying_object_store(
+            let (compactor_main_object_store, _) = background_component_stores(
                 builder.main_object_store.clone(),
-                &recorder,
                 ObjectStoreComponent::Compactor,
-                ObjectStoreType::Main,
-                rand.clone(),
-                system_clock.clone(),
             );
             let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
@@ -713,12 +734,14 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         }
 
+        // Same store selection as the compactor above. Sharing the DB's cache
+        // also means an SST deleted by the GC has its cache entries evicted.
         let gc_builder = self.gc_builder.or_else(|| {
             self.settings
                 .garbage_collector_options
                 .filter(|opts| !opts.is_empty())
                 .map(|opts| {
-                    GarbageCollectorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                    GarbageCollectorBuilder::new(path.clone(), self.main_object_store.clone())
                         .with_options(opts)
                 })
         });
@@ -728,11 +751,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .options
                 .metric_level
                 .or(Some(self.settings.metric_level));
+            let (gc_main_object_store, gc_object_store) = background_component_stores(
+                gc_builder.main_object_store.clone(),
+                ObjectStoreComponent::Gc,
+            );
             let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
-                ObjectStores::new(
-                    retrying_main_object_store.clone(),
-                    retrying_wal_object_store.clone(),
-                ),
+                ObjectStores::new(gc_main_object_store, retrying_wal_object_store.clone()),
                 sst_format.clone(),
                 path_resolver.clone(),
                 self.fp_registry.clone(),
@@ -747,7 +771,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     gc_table_store,
                     manifest_store.clone(),
                     compactions_store.clone(),
-                    retrying_main_object_store.clone(),
+                    gc_object_store,
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = async_channel::unbounded();
