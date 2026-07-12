@@ -882,7 +882,11 @@ impl<P: Into<Path>> AdminBuilder<P> {
 
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
-        // No retrying object stores here, since we don't want to retry admin operations
+        // Store the raw object stores here. Admin wraps them in a
+        // `RetryingObjectStore` per-operation (see `Admin::retrying_store`)
+        // rather than at build time, because several admin operations delegate
+        // to sub-builders (compactor/GC) that add their own retry layer, and
+        // wrapping here would double-wrap them.
         Admin {
             path: self.path.into(),
             object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),

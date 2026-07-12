@@ -2064,14 +2064,13 @@ impl DbWalObserver {
         wrapped.subscribe(Arc::new(move |event| {
             let status = match event {
                 WalEvent::WalFlushed(status) => status,
-                WalEvent::WalFrozen(status) => status,
                 WalEvent::MemoryReleased(status) => status,
             };
             if let Some(seq) = status.last_flushed_seq {
                 oracle.advance_durable_seq(seq);
             }
             let mut guard = db_state.write();
-            guard.set_next_wal_id(status.next_wal_id);
+            guard.set_next_wal_id(status.last_flushed_wal_id + 1);
             drop(guard);
             let _ = status_tx.send(status);
         }));
@@ -5901,7 +5900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wal_id_last_seen_should_exist_even_if_wal_write_fails() {
+    async fn test_wal_id_last_seen_should_only_reflect_flushed_wals() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
@@ -5913,6 +5912,8 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        // Trigger a WAL write and block until durable so WAL is written
+        db.put(b"foo", b"bar").await.unwrap();
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
 
@@ -5943,10 +5944,8 @@ mod tests {
         // Get the latest manifest
         let manifest = manifest_store.read_latest_manifest().await.unwrap();
 
-        // It's possible that there exists buffered multiple wals in memory, so the next_wal_sst_id
-        // in manifest is greater than the next_wal_sst_id based on what's currently in the object
-        // store unless ALL the wals are flushed.
-        assert!(manifest.manifest.core.next_wal_sst_id > next_wal_sst_id);
+        // Assert that the manifest reflects only the flushed WAL
+        assert_eq!(manifest.manifest.core.next_wal_sst_id, next_wal_sst_id);
     }
 
     #[tokio::test]

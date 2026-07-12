@@ -41,7 +41,7 @@ jobs:
         # failure notification fires. A job-level timeout would instead cancel
         # the run, and GitHub does not notify on cancellations.
         timeout-minutes: 60
-        run: cargo nextest run -p slatedb-dst --all-features --profile dst-nightly --no-capture ${{ matrix.test-filter }}
+        run: cargo nextest run -p slatedb-dst --all-features --cargo-profile dst --profile dst-nightly --no-capture ${{ matrix.test-filter }}
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
           RUST_LOG: "info"
