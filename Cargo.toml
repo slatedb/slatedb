@@ -22,6 +22,12 @@ readme = "README.md"
 [profile.bench]
 lto = true
 
+[profile.dst]
+inherits = "test"
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
 [workspace.dependencies]
 
 # dependencies
