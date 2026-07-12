@@ -842,7 +842,8 @@ impl MessageHandlerExecutor {
         Ok(())
     }
 
-    /// Cancels a task and waits for it to complete.
+    /// Removes a task that has not started yet, or cancels a running task and waits for it to
+    /// complete.
     ///
     /// ## Arguments
     ///
@@ -852,6 +853,16 @@ impl MessageHandlerExecutor {
     ///
     /// The result of the task.
     pub(crate) async fn shutdown_task(&self, name: &str) -> Result<(), SlateDBError> {
+        {
+            let mut guard = self.futures.lock();
+            if let Some(task_definitions) = guard.as_mut() {
+                if task_definitions.iter().any(|task| task.name == name) {
+                    task_definitions.retain(|task| task.name != name);
+                    return Ok(());
+                }
+            }
+        }
+
         self.cancel_task(name);
         self.join_task(name).await
     }
@@ -1181,6 +1192,76 @@ mod test {
                 (Phase::Cleanup, TestMessage::Channel(77)),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_task_removes_handler_before_monitor_starts() {
+        let clock = Arc::new(DefaultSystemClock::new());
+        let closed_result = Arc::new(WatchableOnceCell::new());
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
+        let removed_cleanup = WatchableOnceCell::new();
+        let retained_cleanup = WatchableOnceCell::new();
+        let (removed_tx, removed_rx) = async_channel::unbounded();
+        let (_retained_tx, retained_rx) = async_channel::unbounded();
+
+        task_executor
+            .add_handler(
+                "removed".to_string(),
+                Box::new(TestHandler::new(
+                    Arc::new(Mutex::new(Vec::new())),
+                    removed_cleanup.clone(),
+                    clock.clone(),
+                )),
+                removed_rx,
+                &Handle::current(),
+            )
+            .unwrap();
+        task_executor
+            .add_handler(
+                "retained".to_string(),
+                Box::new(TestHandler::new(
+                    Arc::new(Mutex::new(Vec::new())),
+                    retained_cleanup.clone(),
+                    clock,
+                )),
+                retained_rx,
+                &Handle::current(),
+            )
+            .unwrap();
+
+        task_executor.shutdown_task("removed").await.unwrap();
+        assert!(removed_tx.is_closed());
+        assert!(removed_cleanup.result_reader().read().is_none());
+
+        let monitor = task_executor.monitor_on(&Handle::current()).unwrap();
+        assert!(!task_executor.tokens.contains_key("removed"));
+        assert!(task_executor.tokens.contains_key("retained"));
+
+        task_executor.shutdown_task("retained").await.unwrap();
+        monitor.await.unwrap();
+        assert!(retained_cleanup.result_reader().read().is_some());
+        assert!(closed_result.result_reader().read().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_task_cancels_when_pending_task_not_found() {
+        let task_executor = MessageHandlerExecutor::new(
+            Arc::new(WatchableOnceCell::new()),
+            Arc::new(DefaultSystemClock::new()),
+        );
+        let running_token = CancellationToken::new();
+        let running_result = WatchableOnceCell::new();
+        running_result.write(Ok(()));
+        task_executor
+            .tokens
+            .insert("running".to_string(), running_token.clone());
+        task_executor
+            .results
+            .insert("running".to_string(), running_result);
+
+        task_executor.shutdown_task("running").await.unwrap();
+
+        assert!(running_token.is_cancelled());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

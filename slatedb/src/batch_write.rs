@@ -28,7 +28,7 @@
 use async_trait::async_trait;
 use fail_parallel::fail_point;
 use futures::stream::BoxStream;
-use futures::{StreamExt, FutureExt};
+use futures::{FutureExt, StreamExt};
 use log::warn;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,13 +43,13 @@ use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
+use crate::wal::{FlushResultFuture, WalWriter};
 use crate::wal_buffer::WalBufferManager;
 use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
 use bytes::Bytes;
 use parking_lot::RwLockWriteGuard;
 use slatedb_common::clock::SystemClock;
 use tokio::sync::oneshot;
-use crate::wal::{FlushResultFuture, WalWriter};
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
@@ -129,11 +129,25 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
             }) => {
                 let result = self
                     .db_inner
-                    .write_batch(batch, &options, txn.as_ref(), self.wal_writer.as_mut(), self.is_first_write)
+                    .write_batch(
+                        batch,
+                        &options,
+                        txn.as_ref(),
+                        self.wal_writer.as_mut(),
+                        self.is_first_write,
+                    )
                     .await;
                 self.is_first_write = false;
-                _ = done.send(result);
-                Ok(())
+                match result {
+                    Ok(write_result) => {
+                        let _ = done.send(write_result);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = done.send(Err(error.clone()));
+                        Err(error)
+                    }
+                }
             }
             BatchWriterMessage::Flush(flush_msg) => {
                 let BatchWriterFlush {
@@ -144,8 +158,16 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                     .db_inner
                     .flush_batch_writer(freeze_memtable, self.wal_writer.as_mut())
                     .await;
-                let _ = done.send(result);
-                Ok(())
+                match result {
+                    Ok(flush_result) => {
+                        let _ = done.send(Ok(flush_result));
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = done.send(Err(error.clone()));
+                        Err(error)
+                    }
+                }
             }
         }
     }
@@ -185,7 +207,7 @@ impl DbInner {
         txn: Option<&DbTransaction>,
         wal_writer: &mut dyn WalWriter,
         is_first_write: bool,
-    ) -> WriteBatchResult {
+    ) -> Result<WriteBatchResult, SlateDBError> {
         let _options = options;
         #[cfg(not(dst))]
         let now = self.mono_clock.now().await?;
@@ -198,10 +220,10 @@ impl DbInner {
         let commit_seq = if options.seqnum > 0 {
             let current = self.oracle.last_seq();
             if options.seqnum <= current {
-                return Err(SlateDBError::InvalidSequenceNumber {
+                return Ok(Err(SlateDBError::InvalidSequenceNumber {
                     provided: options.seqnum,
                     current,
-                });
+                }));
             }
             self.oracle.advance_last_seq(options.seqnum);
             options.seqnum
@@ -213,13 +235,13 @@ impl DbInner {
         // if this batch is part of a transaction.
         if let Some(txn) = txn {
             if self.txn_manager.check_has_conflict(&txn.id()) {
-                return Err(SlateDBError::TransactionConflict);
+                return Ok(Err(SlateDBError::TransactionConflict));
             }
         }
 
         // Count batch-local merge folding on the flush path so DB-side merge
         // resolution uses one metric for both write batches and memtable flushes.
-        let (entries, touched_segments, entries_size) = batch
+        let (entries, touched_segments, entries_size) = match batch
             .extract_entries(
                 commit_seq,
                 now,
@@ -227,14 +249,20 @@ impl DbInner {
                 self.flush_merge_operator.clone(),
                 self.segment_extractor.as_deref(),
             )
-            .await?;
+            .await
+        {
+            Ok(extracted) => extracted,
+            Err(error) => return Ok(Err(error)),
+        };
 
         // RFC-0024 route-consistency: when a segment extractor is
         // configured, every write must extract a prefix that does
         // not nest with the current segment set. Runs before the
         // WAL append so a rejected batch produces no durable side
         // effects.
-        self.validate_segment_antichain(&touched_segments)?;
+        if let Err(error) = self.validate_segment_antichain(&touched_segments) {
+            return Ok(Err(error));
+        }
 
         if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
@@ -299,7 +327,7 @@ impl DbInner {
 
         let write_handle = WriteHandle::new(commit_seq, now);
 
-        Ok(write_handle)
+        Ok(Ok(write_handle))
     }
 
     fn maybe_freeze_current_memtable(
@@ -337,7 +365,7 @@ impl DbInner {
     async fn flush_batch_writer(
         &self,
         freeze_memtable: bool,
-        wal_buffer: &mut dyn WalWriter
+        wal_buffer: &mut dyn WalWriter,
     ) -> Result<FlushResultFuture, SlateDBError> {
         let flush_rx = if self.wal_enabled {
             wal_buffer.flush().await?
@@ -512,9 +540,57 @@ async fn monitor_first_write(
 mod tests {
     use super::*;
     use crate::object_store::memory::InMemory;
-    use crate::Db;
-    use crate::db_status::ClosedResultWriter;
     use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::{WalError, WalObserver, WalStatus};
+    use crate::Db;
+
+    enum FailingWalOperation {
+        Append,
+        Flush,
+    }
+
+    struct FailingWalWriter {
+        inner: FakeWalWriter,
+        operation: FailingWalOperation,
+    }
+
+    impl FailingWalWriter {
+        fn new(operation: FailingWalOperation) -> Self {
+            Self {
+                inner: FakeWalWriter::new(0),
+                operation,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WalWriter for FailingWalWriter {
+        async fn append(&mut self, write_batch: &[RowEntry]) -> Result<(), WalError> {
+            if matches!(self.operation, FailingWalOperation::Append) {
+                return Err(WalError::Fenced);
+            }
+            self.inner.append(write_batch).await
+        }
+
+        async fn flush(&mut self) -> Result<FlushResultFuture, WalError> {
+            if matches!(self.operation, FailingWalOperation::Flush) {
+                return Err(WalError::Fenced);
+            }
+            self.inner.flush().await
+        }
+
+        fn observer(&self) -> Box<dyn WalObserver> {
+            self.inner.observer()
+        }
+
+        fn status(&self) -> WalStatus {
+            self.inner.status()
+        }
+
+        async fn close(&mut self) -> Result<(), WalError> {
+            self.inner.close().await
+        }
+    }
 
     /// Build a transaction-less `WriteBatchMessage` and its result receiver,
     /// keeping the `txn: None` and channel boilerplate out of individual tests.
@@ -560,6 +636,62 @@ mod tests {
         let result = done_rx.await.unwrap();
         assert!(result.is_ok());
         assert!(!handler.is_first_write);
+    }
+
+    #[tokio::test]
+    async fn test_append_error_notifies_caller_and_fails_handler() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open(
+            "/tmp/test_append_error_notifies_caller_and_fails_handler",
+            object_store,
+        )
+        .await
+        .unwrap();
+        let wal_writer = Box::new(FailingWalWriter::new(FailingWalOperation::Append));
+        let mut handler = WriteBatchEventHandler::new(db.inner.clone(), wal_writer);
+
+        let mut batch = WriteBatch::new();
+        batch.put(b"key", b"value");
+        let (msg, done_rx) = test_message(batch, WriteOptions::default());
+
+        let handler_error = handler.handle(msg).await.unwrap_err();
+        assert!(matches!(handler_error, SlateDBError::Fenced));
+        let caller_error = match done_rx.await.unwrap() {
+            Ok(_) => panic!("append unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(matches!(caller_error, SlateDBError::Fenced));
+        assert_eq!(db.get(b"key").await.unwrap(), None);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_flush_error_notifies_caller_and_fails_handler() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open(
+            "/tmp/test_flush_error_notifies_caller_and_fails_handler",
+            object_store,
+        )
+        .await
+        .unwrap();
+        let wal_writer = Box::new(FailingWalWriter::new(FailingWalOperation::Flush));
+        let mut handler = WriteBatchEventHandler::new(db.inner.clone(), wal_writer);
+        let (done, done_rx) = tokio::sync::oneshot::channel();
+        let msg = BatchWriterMessage::Flush(BatchWriterFlush {
+            freeze_memtable: false,
+            done,
+        });
+
+        let handler_error = handler.handle(msg).await.unwrap_err();
+        assert!(matches!(handler_error, SlateDBError::Fenced));
+        let caller_error = match done_rx.await.unwrap() {
+            Ok(_) => panic!("flush unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(matches!(caller_error, SlateDBError::Fenced));
+
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -3488,6 +3488,14 @@ mod tests {
             .build()
             .await
             .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            db.task_executor
+                .join_task(crate::wal_buffer::WAL_BUFFER_TASK_NAME),
+        )
+        .await
+        .expect("native WAL task should not run when the WAL is disabled")
+        .unwrap();
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
             await_durable: false,
