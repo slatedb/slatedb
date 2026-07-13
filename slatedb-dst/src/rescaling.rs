@@ -51,7 +51,8 @@ use tokio::runtime::RngSeed;
 use tracing::instrument;
 
 use crate::actors::{
-    FlusherActor, ShutdownActor, WorkloadActor, WorkloadActorOptions, WorkloadMergeOperator,
+    decode_workload_value, FlusherActor, ShutdownActor, WorkloadActor, WorkloadActorOptions,
+    WorkloadMergeOperator,
 };
 use crate::utils::{build_settings, build_toxic, dst_seeds};
 use crate::{DeterministicLocalFilesystem, Harness};
@@ -142,9 +143,11 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
         next_seed(),
         0,
         shutdown_at_ms,
+        1,
         ROOT_ACTORS,
     )?;
     let root_rows = snapshot_rows(root_path.clone(), object_store.clone(), next_seed())?;
+    let child_next_value_version = next_workload_value_version(&root_rows);
 
     let split_key = Bytes::from_static(SPLIT_KEY);
     let left_range = (Bound::Unbounded, Bound::Excluded(split_key.clone()));
@@ -192,6 +195,7 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
                     phase_seed,
                     root_end_ms,
                     shutdown_at_ms,
+                    child_next_value_version,
                     actors,
                 )
             }),
@@ -231,6 +235,7 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
 
     let merged_rows = snapshot_rows(merged_path.clone(), object_store.clone(), next_seed())?;
     let expected_merged = left_rows.into_iter().chain(right_rows).collect::<Rows>();
+    let merged_next_value_version = next_workload_value_version(&expected_merged);
     assert_eq!(
         merged_rows, expected_merged,
         "union mismatch [scenario={name}, seed={seed}, phase=merge]"
@@ -243,6 +248,7 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
         next_seed(),
         children_end_ms,
         shutdown_at_ms,
+        merged_next_value_version,
         ROOT_ACTORS,
     )?;
 
@@ -256,6 +262,7 @@ fn run_harness_phase(
     seed: u64,
     start_at_ms: i64,
     shutdown_at_ms: i64,
+    next_value_version: u64,
     actor_names: &'static [&'static str],
 ) -> ScenarioResult<i64> {
     let system_clock = Arc::new(MockSystemClock::with_time(start_at_ms));
@@ -306,7 +313,9 @@ fn run_harness_phase(
     .with_merge_operator(Arc::new(WorkloadMergeOperator));
 
     for actor_name in actor_names {
-        harness = harness.actor(*actor_name, WorkloadActor::new(workload_options.clone())?);
+        let actor = WorkloadActor::new(workload_options.clone())?
+            .with_next_value_version(next_value_version);
+        harness = harness.actor(*actor_name, actor);
     }
     harness = harness
         .actor("flusher", FlusherActor::new(1_u64..=5_u64)?)
@@ -315,6 +324,15 @@ fn run_harness_phase(
     info!("starting rescaling harness phase [name={harness_name}]");
     harness.run()?;
     Ok(system_clock.now().timestamp_millis())
+}
+
+fn next_workload_value_version(rows: &Rows) -> u64 {
+    rows.iter()
+        .map(|(_, value)| decode_workload_value(value.as_ref()))
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .expect("workload value version must not overflow")
 }
 
 fn block_on_seeded<F>(seed: u64, future: F) -> F::Output
