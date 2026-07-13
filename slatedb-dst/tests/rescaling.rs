@@ -1,25 +1,33 @@
-//! Verifies that RFC-0004 projection and union preserve database contents.
+//! Verifies that RFC-0004 projection and union preserve database contents under
+//! DST workloads.
 //!
 //! Each simulation run:
-//! - runs four prefix-scoped workload actors against one root database
-//! - quiesces the root and records its complete key/value state
-//! - projects the root at `workload-3/` into two adjacent child databases
-//! - checks that each child contains exactly its half of the root state
-//! - runs the two children concurrently in independent
-//!   [`slatedb_dst::Harness`] instances, with workload actors 1-2 assigned to
-//!   the left child and 3-4 to the right
-//! - quiesces both children and unions them into one database
-//! - checks that the union contains exactly the post-workload state of both
-//!   children, then runs all four workload actors against the merged database
+//! - opens a root database on a deterministic filesystem-backed object store
+//! - runs four prefix-scoped workload actors with randomized SlateDB settings,
+//!   object-store faults, flushing, compaction, and garbage collection
+//! - quiesces the root and records its complete ordered key/value state
+//! - projects the root at `workload-3/` into adjacent left and right databases
+//! - checks that each projection exactly matches its range in the root snapshot
+//! - runs the children concurrently in separate [`slatedb_dst::Harness`]
+//!   instances, assigning actors 1-2 to the left child and 3-4 to the right
+//! - quiesces both children and records their post-workload state
+//! - unions the children and checks that the merged database exactly matches
+//!   the two child snapshots
+//! - runs all four workload actors against the merged database to confirm that
+//!   it remains readable and writable after the union
 //!
-//! Actor prefixes keep every point operation, write batch, and prefix scan
-//! inside one child. The child harnesses use separate seeded runtimes, random
-//! number generators, clocks, and fault controllers while sharing the same
-//! underlying deterministic object stores. Garbage collection remains active,
-//! except for detach GC, so neither child mutates their shared parent's
-//! checkpoint state. WALs are disabled because manifest union does not merge
-//! WAL state.
+//! Workload actor names are also key prefixes. The split boundary therefore
+//! keeps every point operation, write batch, and prefix scan inside one child.
+//! The child harnesses share the underlying object store but have independent
+//! seeded runtimes, clocks, and fault controllers.
 //!
+//! Garbage collection remains enabled during harness runs. Detach GC is
+//! disabled because both children retain checkpoints in the root manifest.
+//! WALs are disabled because manifest union rejects sources with live WAL data.
+//! Projection and union happen only after their source harnesses have stopped.
+//!
+//! A snapshot mismatch means projection dropped or misplaced a root row, or
+//! union failed to preserve the complete logical state of both children.
 #![cfg(dst)]
 
 use rstest::rstest;

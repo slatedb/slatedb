@@ -19,11 +19,9 @@
 //!
 //! Every workload operation remains inside one actor prefix, so point
 //! operations, write batches, and scans stay within one child. The child
-//! harnesses have independent seeded Tokio runtimes, [`DbRand`] instances,
-//! [`MockSystemClock`] instances, and fault controllers. They share the same
-//! underlying [`DeterministicLocalFilesystem`] object stores, which exercises
-//! concurrent object-store access without making either runtime's scheduling
-//! order part of the other runtime's state.
+//! harnesses run on separate threads and share one underlying
+//! [`DeterministicLocalFilesystem`], exercising concurrent access to the same
+//! object store.
 //!
 //! Garbage collection remains enabled, but detach GC is disabled because both
 //! projected children reference the root checkpoint. WALs are disabled because
@@ -60,7 +58,6 @@ use crate::{DeterministicLocalFilesystem, Harness};
 
 type ScenarioError = Box<dyn std::error::Error + Send + Sync>;
 type ScenarioResult<T> = Result<T, ScenarioError>;
-type ProjectionRange = (Bound<Bytes>, Bound<Bytes>);
 type Rows = Vec<(Bytes, Bytes)>;
 
 const ROOT_ACTORS: &[&str] = &["workload-1", "workload-2", "workload-3", "workload-4"];
@@ -125,26 +122,14 @@ impl RescalingScenario {
     }
 }
 
-#[derive(Clone)]
-struct ScenarioStores {
-    main: Arc<dyn ObjectStore>,
-    wal: Arc<dyn ObjectStore>,
-}
-
 #[instrument(level = "debug", skip_all, fields(scenario = name, seed = seed))]
 fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResult<()> {
     let tempdir = TempDir::new()?;
-    let main_dir = tempdir.path().join("main");
-    let wal_dir = tempdir.path().join("wal");
-    std::fs::create_dir_all(&main_dir)?;
-    std::fs::create_dir_all(&wal_dir)?;
-
-    let stores = ScenarioStores {
-        main: Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
-        wal: Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
-    };
-    let plan_rand = DbRand::new(seed);
-    let next_seed = || plan_rand.rng().next_u64();
+    let object_store: Arc<dyn ObjectStore> = Arc::new(
+        DeterministicLocalFilesystem::new_with_prefix(tempdir.path())?,
+    );
+    let seed_rng = DbRand::new(seed);
+    let next_seed = || seed_rng.rng().next_u64();
     let root_path = Path::from(format!("{name}/root"));
     let left_path = Path::from(format!("{name}/split/left"));
     let right_path = Path::from(format!("{name}/split/right"));
@@ -153,12 +138,12 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
     run_harness_phase(
         format!("{name}-root"),
         root_path.clone(),
-        stores.clone(),
+        object_store.clone(),
         next_seed(),
         shutdown_at_ms,
         ROOT_ACTORS,
     )?;
-    let root_rows = snapshot_rows(root_path.clone(), stores.clone(), next_seed())?;
+    let root_rows = snapshot_rows(root_path.clone(), object_store.clone(), next_seed())?;
 
     let split_key = Bytes::from_static(SPLIT_KEY);
     let left_range = (Bound::Unbounded, Bound::Excluded(split_key.clone()));
@@ -166,63 +151,70 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
     create_clone(
         left_path.clone(),
         vec![CloneSourceSpec::new(root_path.clone()).with_projection_range(left_range.clone())],
-        stores.clone(),
+        object_store.clone(),
         next_seed(),
     )?;
     create_clone(
         right_path.clone(),
         vec![CloneSourceSpec::new(root_path).with_projection_range(right_range.clone())],
-        stores.clone(),
+        object_store.clone(),
         next_seed(),
     )?;
 
-    let left_after_split = snapshot_rows(left_path.clone(), stores.clone(), next_seed())?;
-    let right_after_split = snapshot_rows(right_path.clone(), stores.clone(), next_seed())?;
+    let left_after_split = snapshot_rows(left_path.clone(), object_store.clone(), next_seed())?;
+    let right_after_split = snapshot_rows(right_path.clone(), object_store.clone(), next_seed())?;
     let (expected_left, expected_right): (Rows, Rows) = root_rows
         .into_iter()
         .partition(|(key, _)| key.as_ref() < SPLIT_KEY);
-    assert_eq!(left_after_split, expected_left);
-    assert_eq!(right_after_split, expected_right);
+    assert_eq!(
+        left_after_split, expected_left,
+        "projection mismatch [scenario={name}, seed={seed}, phase=split, partition=left]"
+    );
+    assert_eq!(
+        right_after_split, expected_right,
+        "projection mismatch [scenario={name}, seed={seed}, phase=split, partition=right]"
+    );
 
-    // Allocate both seeds before either thread starts so scheduling cannot
-    // change which random stream is assigned to a child.
-    let left_harness_seed = next_seed();
-    let right_harness_seed = next_seed();
-    let left_handle = {
-        let stores = stores.clone();
-        let path = left_path.clone();
-        std::thread::spawn(move || {
-            run_harness_phase(
-                format!("{name}-left"),
-                path,
-                stores,
-                left_harness_seed,
-                shutdown_at_ms,
-                LEFT_ACTORS,
-            )
-        })
-    };
-    let right_handle = {
-        let stores = stores.clone();
-        let path = right_path.clone();
-        std::thread::spawn(move || {
-            run_harness_phase(
-                format!("{name}-right"),
-                path,
-                stores,
-                right_harness_seed,
-                shutdown_at_ms,
-                RIGHT_ACTORS,
-            )
-        })
-    };
-    join_phase(name, "left", left_handle)?;
-    join_phase(name, "right", right_handle)?;
+    let child_handles = [
+        ("left", left_path.clone(), next_seed(), LEFT_ACTORS),
+        ("right", right_path.clone(), next_seed(), RIGHT_ACTORS),
+    ]
+    .map(|(phase, path, phase_seed, actors)| {
+        let object_store = object_store.clone();
+        (
+            phase,
+            std::thread::spawn(move || {
+                run_harness_phase(
+                    format!("{name}-{phase}"),
+                    path,
+                    object_store,
+                    phase_seed,
+                    shutdown_at_ms,
+                    actors,
+                )
+            }),
+        )
+    });
+    for (phase, handle) in child_handles {
+        match handle.join() {
+            Ok(result) => result?,
+            Err(payload) => {
+                error!("dst {name} child phase panicked [phase={phase}, seed={seed}]");
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 
-    let left_rows = snapshot_rows(left_path.clone(), stores.clone(), next_seed())?;
-    let right_rows = snapshot_rows(right_path.clone(), stores.clone(), next_seed())?;
-    assert!(left_rows.iter().all(|(key, _)| key.as_ref() < SPLIT_KEY));
-    assert!(right_rows.iter().all(|(key, _)| key.as_ref() >= SPLIT_KEY));
+    let left_rows = snapshot_rows(left_path.clone(), object_store.clone(), next_seed())?;
+    let right_rows = snapshot_rows(right_path.clone(), object_store.clone(), next_seed())?;
+    assert!(
+        left_rows.iter().all(|(key, _)| key.as_ref() < SPLIT_KEY),
+        "child contains key outside its range [scenario={name}, seed={seed}, phase=children, partition=left]"
+    );
+    assert!(
+        right_rows.iter().all(|(key, _)| key.as_ref() >= SPLIT_KEY),
+        "child contains key outside its range [scenario={name}, seed={seed}, phase=children, partition=right]"
+    );
 
     create_clone(
         merged_path.clone(),
@@ -230,18 +222,21 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
             CloneSourceSpec::new(left_path).with_projection_range(left_range),
             CloneSourceSpec::new(right_path).with_projection_range(right_range),
         ],
-        stores.clone(),
+        object_store.clone(),
         next_seed(),
     )?;
 
-    let merged_rows = snapshot_rows(merged_path.clone(), stores.clone(), next_seed())?;
+    let merged_rows = snapshot_rows(merged_path.clone(), object_store.clone(), next_seed())?;
     let expected_merged = left_rows.into_iter().chain(right_rows).collect::<Rows>();
-    assert_eq!(merged_rows, expected_merged);
+    assert_eq!(
+        merged_rows, expected_merged,
+        "union mismatch [scenario={name}, seed={seed}, phase=merge]"
+    );
 
     run_harness_phase(
         format!("{name}-merged"),
         merged_path,
-        stores,
+        object_store,
         next_seed(),
         shutdown_at_ms,
         ROOT_ACTORS,
@@ -253,13 +248,11 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
 fn run_harness_phase(
     name: String,
     path: Path,
-    stores: ScenarioStores,
+    object_store: Arc<dyn ObjectStore>,
     seed: u64,
     shutdown_at_ms: i64,
     actor_names: &'static [&'static str],
 ) -> ScenarioResult<()> {
-    let rand = Arc::new(DbRand::new(seed));
-    let system_clock = Arc::new(MockSystemClock::new());
     let workload_options = WorkloadActorOptions {
         read_durability: DurabilityLevel::Remote,
         ..WorkloadActorOptions::default()
@@ -277,33 +270,29 @@ fn run_harness_phase(
         settings.l0_max_ssts = 4;
         settings.max_unflushed_bytes = 64 * 1024;
         settings.manifest_poll_interval = Duration::from_millis(10);
-        if let Some(gc_options) = settings.garbage_collector_options.as_mut() {
-            // Parallel projected children share a parent. Keep the shard-local
-            // GC tasks active, but prevent both children from concurrently
-            // releasing checkpoints in the parent's manifest.
-            gc_options.detach_options = None;
-        }
-        // RFC-0004 union cannot merge WAL state. Keep this scenario focused on
-        // projection/union and exercise WAL draining in a separate protocol test.
+        settings
+            .garbage_collector_options
+            .as_mut()
+            .expect("rescaling scenario requires garbage collection")
+            .detach_options = None;
+        // Manifest union rejects sources with live WAL data.
         settings.wal_enabled = false;
 
-        let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
-            .with_wal_object_store(ctx.wal_object_store().expect("configured"))
+        let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
             .with_system_clock(ctx.system_clock())
             .with_fp_registry(ctx.fp_registry())
             .with_seed(db_seed)
-            .with_settings(settings);
-        if let Some(merge_operator) = ctx.merge_operator() {
-            builder = builder.with_merge_operator(merge_operator);
-        }
-        let db = builder.build().await?;
+            .with_settings(settings)
+            .with_merge_operator(
+                ctx.merge_operator()
+                    .expect("rescaling workload requires a merge operator"),
+            )
+            .build()
+            .await?;
         Ok(Arc::new(db))
     })
-    .with_rand(rand)
-    .with_system_clock(system_clock)
     .with_path(path)
-    .with_main_object_store(stores.main)
-    .with_wal_object_store(stores.wal)
+    .with_main_object_store(object_store)
     .with_merge_operator(Arc::new(WorkloadMergeOperator));
 
     for actor_name in actor_names {
@@ -316,20 +305,6 @@ fn run_harness_phase(
     info!("starting rescaling harness phase [name={harness_name}]");
     harness.run()?;
     Ok(())
-}
-
-fn join_phase(
-    scenario: &str,
-    phase: &str,
-    handle: std::thread::JoinHandle<ScenarioResult<()>>,
-) -> ScenarioResult<()> {
-    match handle.join() {
-        Ok(result) => result,
-        Err(payload) => {
-            error!("dst {scenario} child phase panicked [phase={phase}]");
-            std::panic::resume_unwind(payload);
-        }
-    }
 }
 
 fn block_on_seeded<F>(seed: u64, future: F) -> F::Output
@@ -345,14 +320,13 @@ where
 
 fn create_clone(
     clone_path: Path,
-    sources: Vec<CloneSourceSpec<ProjectionRange>>,
-    stores: ScenarioStores,
+    sources: Vec<CloneSourceSpec<(Bound<Bytes>, Bound<Bytes>)>>,
+    object_store: Arc<dyn ObjectStore>,
     seed: u64,
 ) -> Result<(), slatedb::Error> {
     block_on_seeded(seed, async move {
         let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
-        let admin = AdminBuilder::new(clone_path, stores.main.clone())
-            .with_wal_object_store(stores.wal.clone())
+        let admin = AdminBuilder::new(clone_path, object_store)
             .with_system_clock(system_clock.clone())
             .with_seed(seed)
             .build();
@@ -371,11 +345,14 @@ fn create_clone(
     })
 }
 
-fn snapshot_rows(path: Path, stores: ScenarioStores, seed: u64) -> ScenarioResult<Rows> {
+fn snapshot_rows(
+    path: Path,
+    object_store: Arc<dyn ObjectStore>,
+    seed: u64,
+) -> ScenarioResult<Rows> {
     block_on_seeded(seed, async move {
         let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
-        let reader = DbReader::builder(path, stores.main)
-            .with_wal_object_store(stores.wal)
+        let reader = DbReader::builder(path, object_store)
             .with_system_clock(system_clock)
             .with_seed(seed)
             .with_merge_operator(Arc::new(WorkloadMergeOperator))
