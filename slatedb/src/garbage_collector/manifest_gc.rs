@@ -44,6 +44,34 @@ impl ManifestGcTask {
     fn manifest_min_age(&self) -> chrono::Duration {
         chrono::Duration::from_std(self.manifest_options.min_age).expect("invalid duration")
     }
+
+    /// Deletes the given manifests from the manifest store.
+    ///
+    /// In case of dryrun, the actual deletion doesn't happen.
+    async fn maybe_delete_manifests(&self, manifest_ids: Vec<u64>) {
+        if self.manifest_options.dry_run {
+            if !manifest_ids.is_empty() {
+                log::info!(
+                    "dry run: skipping manifest deletion [count={}]",
+                    manifest_ids.len()
+                );
+            }
+            for id in manifest_ids {
+                log::debug!("dry run: would delete manifest but skipped [id={:?}]", id);
+            }
+            return;
+        }
+
+        futures::stream::iter(manifest_ids)
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
+                if let Err(e) = self.manifest_store.delete_manifest_unchecked(id).await {
+                    error!("error deleting manifest [id={:?}, error={}]", id, e);
+                } else {
+                    self.stats.gc_manifest_count.increment(1);
+                }
+            })
+            .await;
+    }
 }
 
 impl GcTask for ManifestGcTask {
@@ -92,37 +120,12 @@ impl GcTask for ManifestGcTask {
         }
         let manifests_to_delete =
             retain_allowed_by_gc_filter(&self.gc_filter, manifests_to_delete).await;
-        if self.manifest_options.dry_run {
-            if !manifests_to_delete.is_empty() {
-                log::info!(
-                    "dry run: skipping manifest deletion [count={}]",
-                    manifests_to_delete.len()
-                );
-            }
-            for manifest_metadata in manifests_to_delete {
-                log::debug!(
-                    "dry run: would delete manifest but skipped [id={:?}]",
-                    manifest_metadata.id
-                );
-            }
-            return Ok(());
-        }
-        futures::stream::iter(manifests_to_delete)
-            .for_each_concurrent(GC_DELETE_CONCURRENCY, |manifest_metadata| async move {
-                if let Err(e) = self
-                    .manifest_store
-                    .delete_manifest_unchecked(manifest_metadata.id)
-                    .await
-                {
-                    error!(
-                        "error deleting manifest [id={:?}, error={}]",
-                        manifest_metadata.id, e
-                    );
-                } else {
-                    self.stats.gc_manifest_count.increment(1);
-                }
-            })
-            .await;
+        let manifest_ids_to_delete = manifests_to_delete
+            .into_iter()
+            .map(|manifest_metadata| manifest_metadata.id)
+            .collect::<Vec<_>>();
+
+        self.maybe_delete_manifests(manifest_ids_to_delete).await;
 
         Ok(())
     }

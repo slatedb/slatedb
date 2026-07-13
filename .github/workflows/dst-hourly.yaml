@@ -20,6 +20,8 @@ jobs:
             test-filter: test_dst_bank_with_toxics
           - name: determinism
             test-filter: test_dst_is_deterministic
+          - name: rescaling
+            test-filter: test_dst_rescaling_preserves_data
           - name: segments
             test-filter: test_dst_segments_is_deterministic
     # Hard backstop for the whole job. The "Run DST Tests" step below sets a
@@ -41,7 +43,7 @@ jobs:
         # failure notification fires. A job-level timeout would instead cancel
         # the run, and GitHub does not notify on cancellations.
         timeout-minutes: 60
-        run: cargo nextest run -p slatedb-dst --all-features --profile dst-nightly --no-capture ${{ matrix.test-filter }}
+        run: cargo nextest run -p slatedb-dst --all-features --cargo-profile dst --profile dst-nightly --no-capture ${{ matrix.test-filter }}
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
           RUST_LOG: "info"

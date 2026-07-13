@@ -113,6 +113,12 @@ impl WorkloadActor {
             key_prefix: None,
         })
     }
+
+    /// Overrides the version assigned to the next generated workload value.
+    pub fn with_next_value_version(mut self, next_value_version: u64) -> Self {
+        self.next_value_version = AtomicU64::new(next_value_version);
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -434,7 +440,7 @@ fn observe_absent(key: &Bytes, observed: &mut BTreeMap<Bytes, Observation>) {
     }
 }
 
-fn decode_workload_value(value: &[u8]) -> u64 {
+pub(crate) fn decode_workload_value(value: &[u8]) -> u64 {
     let version_bytes: [u8; WORKLOAD_VALUE_VERSION_SIZE] = value[..WORKLOAD_VALUE_VERSION_SIZE]
         .try_into()
         .expect("workload value version slice has fixed size");

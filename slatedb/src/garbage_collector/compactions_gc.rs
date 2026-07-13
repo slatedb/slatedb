@@ -64,6 +64,41 @@ impl CompactionsGcTask {
     fn compactions_min_age(&self) -> chrono::Duration {
         chrono::Duration::from_std(self.compactions_options.min_age).expect("invalid duration")
     }
+
+    /// Deletes the given compactions files from the compactions store.
+    ///
+    /// In case of dryrun, the actual deletion doesn't happen.
+    async fn maybe_delete_compactions(&self, compactions_ids: Vec<u64>) {
+        if self.compactions_options.dry_run {
+            if !compactions_ids.is_empty() {
+                log::info!(
+                    "dry run: skipping compactions deletion [count={}]",
+                    compactions_ids.len()
+                );
+            }
+            for id in compactions_ids {
+                log::debug!(
+                    "dry run: would delete compactions but skipped [id={:?}]",
+                    id
+                );
+            }
+            return;
+        }
+
+        futures::stream::iter(compactions_ids)
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
+                if let Err(e) = self
+                    .compactions_store
+                    .delete_compactions_unchecked(id)
+                    .await
+                {
+                    error!("error deleting compactions [id={:?}, error={}]", id, e);
+                } else {
+                    self.stats.gc_compactions_count.increment(1);
+                }
+            })
+            .await;
+    }
 }
 
 impl GcTask for CompactionsGcTask {
@@ -96,36 +131,12 @@ impl GcTask for CompactionsGcTask {
         }
         let compactions_to_delete =
             retain_allowed_by_gc_filter(&self.gc_filter, compactions_to_delete).await;
-        if self.compactions_options.dry_run {
-            if !compactions_to_delete.is_empty() {
-                log::info!(
-                    "dry run: skipping compactions deletion [count={}]",
-                    compactions_to_delete.len()
-                );
-            }
-            for compactions_metadata in compactions_to_delete {
-                log::debug!(
-                    "dry run: would delete compactions but skipped [id={:?}]",
-                    compactions_metadata.id
-                );
-            }
-            return Ok(());
-        }
-        futures::stream::iter(compactions_to_delete)
-            .for_each_concurrent(GC_DELETE_CONCURRENCY, |compactions_metadata| async move {
-                if let Err(e) = self
-                    .compactions_store
-                    .delete_compactions_unchecked(compactions_metadata.id)
-                    .await
-                {
-                    error!(
-                        "error deleting compactions [id={:?}, error={}]",
-                        compactions_metadata.id, e
-                    );
-                } else {
-                    self.stats.gc_compactions_count.increment(1);
-                }
-            })
+        let compactions_ids_to_delete = compactions_to_delete
+            .into_iter()
+            .map(|compactions_metadata| compactions_metadata.id)
+            .collect::<Vec<_>>();
+
+        self.maybe_delete_compactions(compactions_ids_to_delete)
             .await;
 
         Ok(())

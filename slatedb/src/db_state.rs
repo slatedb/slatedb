@@ -100,16 +100,10 @@ impl SsTableView {
 
     /// Create a new view with no visible_range projection.
     pub(crate) fn new(id: Ulid, sst: SsTableHandle) -> Self {
-        let effective_range = match sst.info.first_entry.clone() {
-            Some(physical_first_entry) => {
-                let end_bound = match sst.info.last_entry.clone() {
-                    Some(physical_last_entry) => Included(physical_last_entry),
-                    None => Unbounded,
-                };
-                BytesRange::new(Included(physical_first_entry), end_bound)
-            }
-            None => BytesRange::new_empty(),
-        };
+        let effective_range = sst
+            .info
+            .physical_range()
+            .unwrap_or_else(BytesRange::new_empty);
 
         SsTableView {
             id,
@@ -125,18 +119,10 @@ impl SsTableView {
         sst: SsTableHandle,
         visible_range: Option<BytesRange>,
     ) -> Self {
-        let mut effective_range = match sst.info.first_entry.clone() {
-            Some(physical_first_entry) => {
-                let end_bound = match sst.info.last_entry.clone() {
-                    Some(physical_last_entry) => Included(physical_last_entry),
-                    None => Unbounded,
-                };
-                BytesRange::new(Included(physical_first_entry), end_bound)
-            }
-            None => {
-                unreachable!("SST always has a first entry.")
-            }
-        };
+        let mut effective_range = sst
+            .info
+            .physical_range()
+            .expect("SST always has a first entry.");
         if let Some(visible_range) = &visible_range {
             assert!(
                 visible_range.is_start_bound_included_or_unbounded(),
@@ -163,16 +149,10 @@ impl SsTableView {
     /// the range that [`Self::new_projected`] intersects a visible range
     /// against.
     fn physical_range(&self) -> BytesRange {
-        match self.sst.info.first_entry.clone() {
-            Some(physical_first_entry) => {
-                let end_bound = match self.sst.info.last_entry.clone() {
-                    Some(physical_last_entry) => Included(physical_last_entry),
-                    None => Unbounded,
-                };
-                BytesRange::new(Included(physical_first_entry), end_bound)
-            }
-            None => unreachable!("SST always has a first entry."),
-        }
+        self.sst
+            .info
+            .physical_range()
+            .expect("SST always has a first entry.")
     }
 
     /// Like [`Self::with_visible_range`], but returns `None` instead of
@@ -475,6 +455,18 @@ pub struct SsTableInfo {
     pub stats_len: u64,
     /// Filter block format.
     pub filter_format: FilterFormat,
+}
+
+impl SsTableInfo {
+    pub(crate) fn physical_range(&self) -> Option<BytesRange> {
+        self.first_entry.clone().map(|first_entry| {
+            let end_bound = match self.last_entry.clone() {
+                Some(last_entry) => Included(last_entry),
+                None => Unbounded,
+            };
+            BytesRange::new(Included(first_entry), end_bound)
+        })
+    }
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
