@@ -40,7 +40,9 @@ type TestResult<T> = Result<T, TestError>;
 
 #[rstest]
 #[cfg_attr(not(slow), case::regular(200))]
-#[cfg_attr(slow, case::slow(2_400_000))]
+// Four physical harness clocks (root, left, right, and merged) make this a
+// 4.8M ms aggregate mock-clock budget per seed.
+#[cfg_attr(slow, case::slow(1_200_000))]
 fn test_dst_rescaling_preserves_data(#[case] shutdown_at_ms: i64) -> TestResult<()> {
     RescalingScenario {
         name: "rescaling",
