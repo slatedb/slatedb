@@ -74,7 +74,7 @@ const SPLIT_KEY: &[u8] = b"workload-3/";
 pub struct RescalingScenario {
     /// Logical name used for harness labels and database paths.
     pub name: &'static str,
-    /// Per-harness mock-clock deadline, in milliseconds since the Unix epoch.
+    /// Per-harness mock-clock duration, in milliseconds.
     pub shutdown_at_ms: i64,
 }
 
@@ -135,11 +135,12 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
     let right_path = Path::from(format!("{name}/split/right"));
     let merged_path = Path::from(format!("{name}/merged"));
 
-    run_harness_phase(
+    let root_end_ms = run_harness_phase(
         format!("{name}-root"),
         root_path.clone(),
         object_store.clone(),
         next_seed(),
+        0,
         shutdown_at_ms,
         ROOT_ACTORS,
     )?;
@@ -189,15 +190,17 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
                     path,
                     object_store,
                     phase_seed,
+                    root_end_ms,
                     shutdown_at_ms,
                     actors,
                 )
             }),
         )
     });
+    let mut children_end_ms = root_end_ms;
     for (phase, handle) in child_handles {
         match handle.join() {
-            Ok(result) => result?,
+            Ok(result) => children_end_ms = children_end_ms.max(result?),
             Err(payload) => {
                 error!("dst {name} child phase panicked [phase={phase}, seed={seed}]");
                 std::panic::resume_unwind(payload);
@@ -238,6 +241,7 @@ fn run_seed(name: &'static str, seed: u64, shutdown_at_ms: i64) -> ScenarioResul
         merged_path,
         object_store,
         next_seed(),
+        children_end_ms,
         shutdown_at_ms,
         ROOT_ACTORS,
     )?;
@@ -250,9 +254,14 @@ fn run_harness_phase(
     path: Path,
     object_store: Arc<dyn ObjectStore>,
     seed: u64,
+    start_at_ms: i64,
     shutdown_at_ms: i64,
     actor_names: &'static [&'static str],
-) -> ScenarioResult<()> {
+) -> ScenarioResult<i64> {
+    let system_clock = Arc::new(MockSystemClock::with_time(start_at_ms));
+    let shutdown_at_ms = start_at_ms
+        .checked_add(shutdown_at_ms)
+        .expect("rescaling phase shutdown timestamp must not overflow");
     let workload_options = WorkloadActorOptions {
         read_durability: DurabilityLevel::Remote,
         ..WorkloadActorOptions::default()
@@ -293,6 +302,7 @@ fn run_harness_phase(
     })
     .with_path(path)
     .with_main_object_store(object_store)
+    .with_system_clock(system_clock.clone())
     .with_merge_operator(Arc::new(WorkloadMergeOperator));
 
     for actor_name in actor_names {
@@ -304,7 +314,7 @@ fn run_harness_phase(
 
     info!("starting rescaling harness phase [name={harness_name}]");
     harness.run()?;
-    Ok(())
+    Ok(system_clock.now().timestamp_millis())
 }
 
 fn block_on_seeded<F>(seed: u64, future: F) -> F::Output
