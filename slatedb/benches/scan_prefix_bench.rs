@@ -203,7 +203,11 @@ async fn build_db(path: &str, filter_policies: Vec<Arc<dyn FilterPolicy>>) -> Be
     let db = Db::builder(path, store.clone())
         .with_settings(base_settings())
         .with_db_cache(meta_only_cache())
-        .with_sst_format(SsTableFormat::default().with_filter_policies(filter_policies))
+        .with_sst_format(
+            SsTableFormat::default()
+                .with_min_filter_keys(0)
+                .with_filter_policies(filter_policies),
+        )
         .build()
         .await
         .expect("failed to build db");
