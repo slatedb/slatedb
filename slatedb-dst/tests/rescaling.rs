@@ -9,7 +9,8 @@
 //! - projects the root at `workload-3/` into adjacent left and right databases
 //! - checks that each projection exactly matches its range in the root snapshot
 //! - runs the children concurrently in separate [`slatedb_dst::Harness`]
-//!   instances, assigning actors 1-2 to the left child and 3-4 to the right
+//!   instances on one seeded runtime, assigning actors 1-2 to the left child
+//!   and actors 3-4 to the right
 //! - quiesces both children and records their post-workload state
 //! - unions the children and checks that the merged database exactly matches
 //!   the two child snapshots
@@ -18,8 +19,9 @@
 //!
 //! Workload actor names are also key prefixes. The split boundary therefore
 //! keeps every point operation, write batch, and prefix scan inside one child.
-//! The child harnesses share the underlying object store but have independent
-//! seeded runtimes, clocks, and fault controllers.
+//! The child harnesses share the underlying object store and seeded runtime but
+//! have independent clocks and fault controllers. The single-threaded runtime
+//! makes their interleaved object-store operations reproducible from the seed.
 //!
 //! Garbage collection remains enabled during harness runs. Detach GC is
 //! disabled because both children retain checkpoints in the root manifest.
