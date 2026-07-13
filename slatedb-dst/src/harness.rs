@@ -598,7 +598,22 @@ impl Harness {
             .rng_seed(RngSeed::from_bytes(&runtime_seed.to_le_bytes()))
             .build_local(Default::default())
             .expect("failed to build dst harness runtime");
-        runtime.block_on(async move { self.run_inner().await })
+        runtime.block_on(self.run_async())
+    }
+
+    /// Runs the harness to completion on the current Tokio runtime.
+    ///
+    /// This is useful when multiple harnesses must share one deterministic
+    /// scheduler. The caller is responsible for providing and seeding the
+    /// runtime.
+    ///
+    /// ## Returns
+    /// - `Ok(())`: All actors completed successfully, or an actor requested
+    ///   shutdown and all remaining actor exits were neutral.
+    /// - `Err(Error)`: Database startup failed, no actors were configured, or
+    ///   an actor returned or joined with an error.
+    pub async fn run_async(self) -> Result<(), Error> {
+        self.run_inner().await
     }
 
     async fn run_inner(self) -> Result<(), Error> {
