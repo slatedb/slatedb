@@ -22,8 +22,6 @@ internal path dependency rather than from crates.io.
 
 - `Harness`: builder and executor for deterministic simulations
 - `Actor`: async actor trait run by the harness
-- `RescalingScenario`: RFC-0004 split/merge orchestration that runs projected
-  child databases concurrently in independent harnesses before unioning them
 - `actors`: reusable scenario actors, including workload, flusher, standalone
   compactor, shutdown, and bank-transfer/auditor actors
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable

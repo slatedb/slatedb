@@ -605,7 +605,7 @@ impl Harness {
     ///
     /// This is useful when multiple harnesses must share one deterministic
     /// scheduler. The caller is responsible for providing and seeding the
-    /// runtime; [`Harness::run`] remains the convenient synchronous entry point.
+    /// runtime.
     ///
     /// ## Returns
     /// - `Ok(())`: All actors completed successfully, or an actor requested
