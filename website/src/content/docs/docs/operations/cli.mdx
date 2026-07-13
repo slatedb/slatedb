@@ -76,6 +76,11 @@ slatedb --env-file .env --path <db-path> schedule-garbage-collection \
 
 The scheduled process runs until interrupted (Ctrl-C), then shuts down gracefully.
 
+Pass `--disable-boundary-files` to `run-garbage-collection` or
+`schedule-garbage-collection` to delete eligible manifest and compactions metadata without
+advancing boundary files. Use the same setting for every garbage collector operating on the
+database.
+
 :::note
 
 The garbage collector expects the database to already exist (a manifest must be present). If you're creating a new database, open it once before starting the garbage collector.

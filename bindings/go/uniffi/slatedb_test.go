@@ -1925,12 +1925,13 @@ func TestAdminRunGcOnce(t *testing.T) {
 		DryRun:     true,
 	}
 	options := &slatedb.GarbageCollectorOptions{
-		ManifestOptions:    nil,
-		WalOptions:         directoryOptions,
-		WalFenceOptions:    directoryOptions,
-		CompactedOptions:   nil,
-		CompactionsOptions: nil,
-		DetachOptions:      &slatedb.GarbageCollectorScheduleOptions{IntervalMs: nil},
+		ManifestOptions:      nil,
+		WalOptions:           directoryOptions,
+		WalFenceOptions:      directoryOptions,
+		CompactedOptions:     nil,
+		CompactionsOptions:   nil,
+		DetachOptions:        &slatedb.GarbageCollectorScheduleOptions{IntervalMs: nil},
+		DisableBoundaryFiles: true,
 	}
 
 	if err := admin.RunGcOnce(options); err != nil {

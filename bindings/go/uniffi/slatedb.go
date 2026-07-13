@@ -9457,6 +9457,9 @@ type GarbageCollectorOptions struct {
 	CompactionsOptions *GarbageCollectorDirectoryOptions
 	// Options for detaching clone references. `None` disables detach garbage collection.
 	DetachOptions *GarbageCollectorScheduleOptions
+	// Whether GC should delete eligible manifest/compactions metadata without advancing boundary
+	// files.
+	DisableBoundaryFiles bool
 }
 
 func (r *GarbageCollectorOptions) Destroy() {
@@ -9466,6 +9469,7 @@ func (r *GarbageCollectorOptions) Destroy() {
 	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.CompactedOptions)
 	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.CompactionsOptions)
 	FfiDestroyerOptionalGarbageCollectorScheduleOptions{}.Destroy(r.DetachOptions)
+	FfiDestroyerBool{}.Destroy(r.DisableBoundaryFiles)
 }
 
 type FfiConverterGarbageCollectorOptions struct{}
@@ -9484,6 +9488,7 @@ func (c FfiConverterGarbageCollectorOptions) Read(reader io.Reader) GarbageColle
 		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
 		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
 		FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -9502,6 +9507,7 @@ func (c FfiConverterGarbageCollectorOptions) Write(writer io.Writer, value Garba
 	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.CompactedOptions)
 	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.CompactionsOptions)
 	FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Write(writer, value.DetachOptions)
+	FfiConverterBoolINSTANCE.Write(writer, value.DisableBoundaryFiles)
 }
 
 type FfiDestroyerGarbageCollectorOptions struct{}
