@@ -20,6 +20,8 @@ jobs:
             test-filter: test_dst_bank_with_toxics
           - name: determinism
             test-filter: test_dst_is_deterministic
+          - name: rescaling
+            test-filter: test_dst_rescaling_preserves_data
           - name: segments
             test-filter: test_dst_segments_is_deterministic
     # Hard backstop for the whole job. The "Run DST Tests" step below sets a
