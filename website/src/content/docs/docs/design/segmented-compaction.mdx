@@ -158,13 +158,46 @@ every key to the segment named by its first three bytes.
 </Tabs>
 
 :::caution
-The extractor is fixed for the life of the database. Its `name()` is persisted
-in the manifest; opening with a different (or newly-added/removed) extractor
-fails. 
+Whether segmentation is enabled is fixed for the life of the database. The
+extractor's `name()` is persisted in the manifest; opening with a different
+name, or adding or removing an extractor, fails. This is primarily as a soft
+check against accidental misuse.
 :::
 
 List the segments that currently exist (in the manifest or in memtables) with
 [`DbStatus::list_segments()`](https://docs.rs/slatedb/latest/slatedb/struct.DbStatus.html#method.list_segments).
+
+## Evolving the key schema
+
+An extractor's name is fixed, but its implementation may evolve
+when the change is backward-compatible. For example, a schema byte can
+reserve disjoint key ranges for successive segmentation policies:
+
+```text
+# all records below use a schema marker as the first part of the key prefix
+
+# initially use weekly partitions
+[01][week]... -> [01][week]  # v1: weekly segments
+# later migrate to daily partitions
+[02][day]...  -> [02][day]   # v2: daily segments
+```
+
+The new implementation must keep extracting the original weekly prefixes for
+all v1 keys while adding daily prefixes only for v2 keys. In general:
+
+- Keep the same stable name and preserve the behavior of previous PrefixExtractor
+  implementations.
+- Ensure segment prefixes from all versions form an antichain: no
+  prefix may be a prefix of another (a schema discriminator at the
+  start of the key is a simple way to reserve disjoint ranges).
+
+SlateDB checks the name and, on open, asks the configured extractor to
+recognize every persisted segment prefix. It also rejects new writes that
+would introduce a nested prefix. These are guardrails rather than complete
+compatibility verification: SlateDB does not persist the implementation's
+version or revalidate every existing key. Maintaining backward-compatible
+routing under a stable name is therefore the application's responsibility.
+
 
 ## How it compacts
 

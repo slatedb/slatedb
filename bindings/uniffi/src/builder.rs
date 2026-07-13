@@ -124,7 +124,10 @@ impl DbBuilder {
     /// Sets the segment extractor (RFC-0024). When configured, every write is
     /// routed through the extractor and the database tracks per-segment LSM
     /// state. The extractor must be configured at database creation time and
-    /// cannot be changed thereafter.
+    /// remain configured thereafter. Its name must remain stable; its
+    /// implementation may evolve only if it preserves routing for all existing
+    /// key schemas and keeps segment prefixes across schema versions an
+    /// antichain (no prefix may be a proper prefix of another).
     pub fn with_segment_extractor(&self, extractor: Arc<dyn PrefixExtractor>) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_segment_extractor(adapt_prefix_extractor(extractor))
