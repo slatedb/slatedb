@@ -155,7 +155,13 @@ async fn run_seed_async(name: &'static str, seed: u64, shutdown_at_ms: i64) -> S
         ROOT_ACTORS,
     )
     .await?;
-    let root_rows = snapshot_rows(root_path.clone(), object_store.clone(), next_seed()).await?;
+    let root_rows = snapshot_rows(
+        root_path.clone(),
+        object_store.clone(),
+        next_seed(),
+        root_end_ms,
+    )
+    .await?;
     let child_next_value_version = next_workload_value_version(&root_rows);
 
     let split_key = Bytes::from_static(SPLIT_KEY);
@@ -166,6 +172,7 @@ async fn run_seed_async(name: &'static str, seed: u64, shutdown_at_ms: i64) -> S
         vec![CloneSourceSpec::new(root_path.clone()).with_projection_range(left_range.clone())],
         object_store.clone(),
         next_seed(),
+        root_end_ms,
     )
     .await?;
     create_clone(
@@ -173,13 +180,24 @@ async fn run_seed_async(name: &'static str, seed: u64, shutdown_at_ms: i64) -> S
         vec![CloneSourceSpec::new(root_path).with_projection_range(right_range.clone())],
         object_store.clone(),
         next_seed(),
+        root_end_ms,
     )
     .await?;
 
-    let left_after_split =
-        snapshot_rows(left_path.clone(), object_store.clone(), next_seed()).await?;
-    let right_after_split =
-        snapshot_rows(right_path.clone(), object_store.clone(), next_seed()).await?;
+    let left_after_split = snapshot_rows(
+        left_path.clone(),
+        object_store.clone(),
+        next_seed(),
+        root_end_ms,
+    )
+    .await?;
+    let right_after_split = snapshot_rows(
+        right_path.clone(),
+        object_store.clone(),
+        next_seed(),
+        root_end_ms,
+    )
+    .await?;
     let (expected_left, expected_right): (Rows, Rows) = root_rows
         .into_iter()
         .partition(|(key, _)| key.as_ref() < SPLIT_KEY);
@@ -216,8 +234,20 @@ async fn run_seed_async(name: &'static str, seed: u64, shutdown_at_ms: i64) -> S
     )?;
     let children_end_ms = left_end_ms.max(right_end_ms);
 
-    let left_rows = snapshot_rows(left_path.clone(), object_store.clone(), next_seed()).await?;
-    let right_rows = snapshot_rows(right_path.clone(), object_store.clone(), next_seed()).await?;
+    let left_rows = snapshot_rows(
+        left_path.clone(),
+        object_store.clone(),
+        next_seed(),
+        children_end_ms,
+    )
+    .await?;
+    let right_rows = snapshot_rows(
+        right_path.clone(),
+        object_store.clone(),
+        next_seed(),
+        children_end_ms,
+    )
+    .await?;
     assert!(
         left_rows.iter().all(|(key, _)| key.as_ref() < SPLIT_KEY),
         "child contains key outside its range [scenario={name}, seed={seed}, phase=children, partition=left]"
@@ -235,10 +265,17 @@ async fn run_seed_async(name: &'static str, seed: u64, shutdown_at_ms: i64) -> S
         ],
         object_store.clone(),
         next_seed(),
+        children_end_ms,
     )
     .await?;
 
-    let merged_rows = snapshot_rows(merged_path.clone(), object_store.clone(), next_seed()).await?;
+    let merged_rows = snapshot_rows(
+        merged_path.clone(),
+        object_store.clone(),
+        next_seed(),
+        children_end_ms,
+    )
+    .await?;
     let expected_merged = left_rows.into_iter().chain(right_rows).collect::<Rows>();
     let merged_next_value_version = next_workload_value_version(&expected_merged);
     assert_eq!(
@@ -346,8 +383,9 @@ async fn create_clone(
     sources: Vec<CloneSourceSpec<(Bound<Bytes>, Bound<Bytes>)>>,
     object_store: Arc<dyn ObjectStore>,
     seed: u64,
+    start_at_ms: i64,
 ) -> Result<(), slatedb::Error> {
-    let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
+    let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::with_time(start_at_ms));
     let admin = AdminBuilder::new(clone_path, object_store)
         .with_system_clock(system_clock.clone())
         .with_seed(seed)
@@ -370,8 +408,9 @@ async fn snapshot_rows(
     path: Path,
     object_store: Arc<dyn ObjectStore>,
     seed: u64,
+    start_at_ms: i64,
 ) -> ScenarioResult<Rows> {
-    let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
+    let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::with_time(start_at_ms));
     let reader = DbReader::builder(path, object_store)
         .with_system_clock(system_clock)
         .with_seed(seed)
