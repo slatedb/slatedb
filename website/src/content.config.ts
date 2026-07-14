@@ -17,6 +17,9 @@ export const collections = {
 			authorGithub: z.string().optional(),
 			// Optional per-post social image; falls back to the site default.
 			ogImage: z.string().optional(),
+			// Optional canonical URL for cross-posted/syndicated content; points
+			// search engines at the original. Falls back to this page's own URL.
+			canonicalUrl: z.string().url().optional(),
 		}),
 	}),
 };
