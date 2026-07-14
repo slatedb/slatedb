@@ -160,7 +160,8 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
-use crate::wal_buffer::WalBufferManager;
+use crate::wal::wal_disabled::DisabledWalObserver;
+use crate::wal::WalObserver;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -168,7 +169,6 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
 use slatedb_common::DbRand;
 use uuid::Uuid;
-use crate::wal::wal_disabled::DisabledWalWriter;
 
 /// A builder for creating a new Db instance.
 ///
@@ -587,19 +587,33 @@ impl<P: Into<Path>> DbBuilder<P> {
             table_store.clone(),
             &self.settings,
             system_clock.clone(),
-            task_executor.clone()
+            task_executor.clone(),
         );
         let WriterFenceResult {
             manifest,
             replay_range,
-            wal_writer: mut wal_writer,
+            mut wal_writer,
         } = fencer.fence(stored_manifest).await?;
-        let wal_writer = if DbInner::wal_enabled_in_options(&self.settings) {
-            wal_writer
+        let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
+            let wal_observer = wal_writer.observer();
+            (Some(wal_writer), wal_observer)
         } else {
-            let status = wal_writer.status();
-            wal_writer.close().await.map_err(|e| SlateDBError::from(e))?;
-            Box::new(DisabledWalWriter::new(status))
+            wal_writer
+                .close()
+                .await
+                .map_err(|e| SlateDBError::from(e))?;
+            let Err(final_status) = wal_writer.status() else {
+                return Err(crate::Error::internal(
+                    "closed wal writer did not return terminal status".to_string(),
+                ));
+            };
+            wal_writer
+                .close()
+                .await
+                .map_err(|e| SlateDBError::from(e))?;
+            let wal_observer =
+                Box::new(DisabledWalObserver::new(final_status)) as Box<dyn WalObserver>;
+            (None, wal_observer)
         };
 
         let manifest_dirty = manifest.prepare_dirty()?;
@@ -623,7 +637,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 manifest_dirty,
                 Arc::clone(&memtable_flusher),
                 write_tx,
-                wal_writer.observer(),
+                wal_observer,
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),

@@ -109,11 +109,7 @@ impl DbStatusManager {
         }
     }
 
-    pub(crate) fn report_fence_manifest(
-        &self,
-        durable_seq: u64,
-        manifest: VersionedManifest
-    ) {
+    pub(crate) fn report_fence_manifest(&self, durable_seq: u64, manifest: VersionedManifest) {
         self.tx.send_if_modified(|s| {
             s.durable_seq = durable_seq;
             s.current_manifest = manifest;

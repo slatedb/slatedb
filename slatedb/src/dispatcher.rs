@@ -345,7 +345,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         let (run_result, run_maybe_panic) = split_unwind_result(name.clone(), run_unwind_result);
         if let Err(ref err) = run_result {
             error!(
-                "background task panicked unexpectedly. [task_name={}, error={:?}, panic={:?}]",
+                "background task exited unexpectedly. [task_name={}, error={:?}, panic={:?}]",
                 name,
                 err,
                 run_maybe_panic.map(|p| panic_string(&p))
@@ -842,8 +842,7 @@ impl MessageHandlerExecutor {
         Ok(())
     }
 
-    /// Removes a task that has not started yet, or cancels a running task and waits for it to
-    /// complete.
+    /// Cancels a running task and waits for it to complete.
     ///
     /// ## Arguments
     ///
@@ -853,18 +852,34 @@ impl MessageHandlerExecutor {
     ///
     /// The result of the task.
     pub(crate) async fn shutdown_task(&self, name: &str) -> Result<(), SlateDBError> {
+        self.cancel_task(name);
+        self.join_task(name).await
+    }
+
+    /// Removes a task that may not have started yet, or cancels a running task and waits for it to
+    /// complete.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the task to cancel and wait for.
+    ///
+    /// ## Returns
+    ///
+    /// [`Some`] with the result of the task if it was started, [`None`] otherwise
+    pub(crate) async fn shutdown_or_deregister_task(
+        &self,
+        name: &str,
+    ) -> Option<Result<(), SlateDBError>> {
         {
             let mut guard = self.futures.lock();
             if let Some(task_definitions) = guard.as_mut() {
                 if task_definitions.iter().any(|task| task.name == name) {
                     task_definitions.retain(|task| task.name != name);
-                    return Ok(());
+                    return None;
                 }
             }
         }
-
-        self.cancel_task(name);
-        self.join_task(name).await
+        Some(self.shutdown_task(name).await)
     }
 }
 
@@ -1229,7 +1244,10 @@ mod test {
             )
             .unwrap();
 
-        task_executor.shutdown_task("removed").await.unwrap();
+        assert!(task_executor
+            .shutdown_or_deregister_task("removed")
+            .await
+            .is_none());
         assert!(removed_tx.is_closed());
         assert!(removed_cleanup.result_reader().read().is_none());
 
@@ -1237,7 +1255,11 @@ mod test {
         assert!(!task_executor.tokens.contains_key("removed"));
         assert!(task_executor.tokens.contains_key("retained"));
 
-        task_executor.shutdown_task("retained").await.unwrap();
+        task_executor
+            .shutdown_or_deregister_task("retained")
+            .await
+            .unwrap()
+            .unwrap();
         monitor.await.unwrap();
         assert!(retained_cleanup.result_reader().read().is_some());
         assert!(closed_result.result_reader().read().is_some());

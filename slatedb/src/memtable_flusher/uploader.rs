@@ -290,21 +290,21 @@ mod tests {
     use crate::test_utils::FixedThreeBytePrefixExtractor;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::WatchableOnceCell;
-    use crate::wal_buffer::WalBufferManager;
+
+    use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::WalWriter;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
     use tokio::time::timeout;
-    use crate::wal::test_utils::FakeWalWriter;
-    use crate::wal::WalWriter;
 
     async fn setup_db(path: &str, fp_registry: Arc<FailPointRegistry>) -> Arc<DbInner> {
         setup_db_with_extractor(path, fp_registry, None).await

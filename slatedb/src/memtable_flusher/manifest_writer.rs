@@ -907,7 +907,9 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
-    use crate::wal_buffer::WalBufferManager;
+
+    use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::WalWriter;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -915,15 +917,13 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
-    use crate::wal::test_utils::FakeWalWriter;
-    use crate::wal::WalWriter;
 
     struct StartedManifestWriter {
         writer: ManifestWriter,

@@ -1,18 +1,18 @@
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
 use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
+use crate::utils::WatchableOnceCellReader;
+use crate::wal::writer_init::WalWriterInit;
+use crate::wal::{WalWriter, WriterInit};
+use log::error;
+use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::SystemClock;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
-use log::error;
-use slatedb_common::metrics::MetricsRecorderHelper;
-use crate::dispatcher::MessageHandlerExecutor;
-use crate::utils::WatchableOnceCellReader;
-use crate::wal::writer_init::WalWriterInit;
-use crate::wal::{WalWriter, WriterInit};
 
 pub(crate) struct WriterFencer {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
@@ -39,7 +39,7 @@ impl WriterFencer {
         table_store: Arc<TableStore>,
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
-        task_executor: Arc<MessageHandlerExecutor>
+        task_executor: Arc<MessageHandlerExecutor>,
     ) -> Self {
         Self::new_with_fp_handle(
             closed_result_reader,
@@ -48,7 +48,7 @@ impl WriterFencer {
             settings,
             system_clock,
             task_executor,
-            FailPointTx::dummy()
+            FailPointTx::dummy(),
         )
     }
 
@@ -94,9 +94,10 @@ impl WriterFencer {
             stored_manifest.manifest(),
             self.task_executor.clone(),
             self.fp_tx.clone(),
-        ).await?;
+        )
+        .await?;
 
-        let mut manifest = FenceableManifest::init_writer(
+        let manifest = FenceableManifest::init_writer(
             stored_manifest,
             self.manifest_update_timeout,
             self.system_clock.clone(),
@@ -116,16 +117,14 @@ impl WriterFencer {
             Ok(replay_range) => replay_range,
             Err(_) => {
                 error!("replay range must use inclusive lower bound and exclusive upper bound");
-                return Err(SlateDBError::InvalidDBState)
+                return Err(SlateDBError::InvalidDBState);
             }
         };
-        Ok(
-            WriterFenceResult {
-                manifest,
-                wal_writer: result.wal_writer,
-                replay_range,
-            }
-        )
+        Ok(WriterFenceResult {
+            manifest,
+            wal_writer: result.wal_writer,
+            replay_range,
+        })
     }
 }
 
@@ -135,6 +134,7 @@ mod tests {
     use crate::config::{
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     };
+    use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
     use crate::fence::WriterFencer;
     use crate::format::sst::SsTableFormat;
@@ -144,6 +144,7 @@ mod tests {
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
     use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::utils::WatchableOnceCell;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::fail_point_channel;
@@ -152,13 +153,13 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use rstest::rstest;
-    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+    };
     use slatedb_common::{DefaultSystemClock, SystemClock};
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
-    use crate::dispatcher::MessageHandlerExecutor;
-    use crate::utils::WatchableOnceCell;
 
     struct WriterFencerTestHarness {
         object_store: Arc<dyn ObjectStore>,
@@ -196,7 +197,10 @@ mod tests {
             let fp_registry = Arc::new(FailPointRegistry::new());
             let (fp_tx, event_rx) = fail_point_channel(fp_registry.clone());
             let cell = Arc::new(WatchableOnceCell::new());
-            let recorder = MetricsRecorderHelper::new(Arc::new(DefaultMetricsRecorder::new()), MetricLevel::Info);
+            let recorder = MetricsRecorderHelper::new(
+                Arc::new(DefaultMetricsRecorder::new()),
+                MetricLevel::Info,
+            );
             let task_executor = Arc::new(MessageHandlerExecutor::new(
                 cell.clone(),
                 system_clock.clone(),

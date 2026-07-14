@@ -539,7 +539,9 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::{SafeSender, WatchableOnceCell};
-    use crate::wal_buffer::WalBufferManager;
+
+    use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::WalWriter;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -555,8 +557,6 @@ mod tests {
     use std::time::Duration;
     use tokio::runtime::Handle;
     use tokio::time::timeout;
-    use crate::wal::test_utils::FakeWalWriter;
-    use crate::wal::WalWriter;
 
     struct TestHarness {
         inner: Arc<DbInner>,
