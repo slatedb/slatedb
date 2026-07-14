@@ -163,7 +163,7 @@ when accessing the WAL:
 
 ```rust
 /// A range of WAL File IDs
-pub struct WalFileRange(Bound<u64>, Bound<u64>);
+pub struct WalFileRange(pub Bound<u64>, pub Bound<u64>);
 
 /// Defines the types of errors that can be returned by WAL implementations.
 #[derive(Debug, Clone)]
@@ -497,10 +497,10 @@ directly iterating over WAL Files.
 Writes mostly stay the same. The batch writer task takes ownership of `WalWriter` and uses it to 
 append new writes via `WalWriter::append`.
 
-The WAL no longer maintains a durability watcher for each WAL file. Instead, a write that 
-awaits durable blocks on `DbStatus` until the durable sequence number is higher than the write's 
-sequence number. When the WAL is enabled, slatedb propagates updates to the durable sequence
-number via the `WalObserver` subscription.
+The WAL no longer maintains a durability watcher for each WAL file. Instead, a write that
+awaits durable blocks on `DbStatus` until the durable sequence number is greater than or equal to
+the write's sequence number. When the WAL is enabled, slatedb propagates updates to the durable
+sequence number via the `WalObserver` subscription.
 
 **Backpressure**
 
