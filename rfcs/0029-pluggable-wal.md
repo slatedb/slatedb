@@ -24,7 +24,7 @@ benefits (cheap storage, no xfer costs, simple operations, share-ability). On th
 object storage forces inherent latency/cost/durability tradeoffs for writes. You can reduce 
 latency by tuning the WAL's flush interval down, but this drives up the cost from PUTs. There's 
 also a floor for this tradeoff as object store PUTs themselves take 10s of ms on average. 
-Alternatively you can opt not to write with`await_durable` but then you're not guaranteed that 
+Alternatively you can opt not to write with `await_durable` but then you're not guaranteed that 
 the write is durable.
 
 Users also use the WAL for CDC and to populate readers. As with writes, an object-store based 
@@ -83,12 +83,12 @@ Next, the db replays any writes that have not yet made it into L0 (`WalReplayIte
 manifest specifies a WAL ID that L0 is guaranteed to fully cover (`replay_after_wal_id`), along with 
 the last sequence number written to L0 (`last_l0_seq`). `replay_after_wal_id` gives the db the 
 start of the WAL File range it needs to read. Fencing establishes the end of the range. The db 
-replays these WAL files into memtables, filtering out any rows with sequence numbers below 
+replays these WAL files into memtables, filtering out any rows with sequence numbers at or below 
 `last_l0_seq`.
 
 **Writes**
 
-Once its recovered persisted writes, the db hands the WAL (`WalBufferManager`) off to the 
+Once it's recovered persisted writes, the db hands the WAL (`WalBufferManager`) off to the 
 Batch Writer task. This task serializes all writes and buffers them in `WalBufferManager`, 
 which periodically flushes the writes to a new WAL file. `WalBufferManager` notifies blocked 
 write tasks when writes are durably flushed. 
@@ -161,17 +161,20 @@ when accessing the WAL:
 pub struct WalFileRange(Bound<u64>, Bound<u64>);
 
 /// Defines the types of errors that can be returned by WAL implementations.
+#[derive(Debug, Clone)]
 pub enum WalError {
     /// The WAL writer was fenced
     Fenced,
     /// IO error writing/reading the WAL
-    IoError(Box<std::io::Error>),
+    IoError(Arc<std::io::Error>),
     /// Fatal error indicating that the WAL is in some unexpected/unrecoverable state.
-    InternalError(Box<dyn Error + 'static>),
+    InternalError(Arc<dyn Error + Sync + Send + 'static>),
     /// A WalIterator observed that the tail of the WAL was truncated while iterating.
     WalTruncated,
     /// Used internally by SlateDB to propagate its internal error type.
-    SlateDBError(Box<dyn Error + 'static>),
+    SlateDBError(Arc<dyn Error + Sync + Send + 'static>),
+    /// Operation against wal after it was closed
+    Closed,
 }
 
 /// The writer's manifest after fencing. Created by calling [`ManifestFencer::fence`]
@@ -181,19 +184,20 @@ pub struct WriterManifest {
 
 impl WriterManifest {
     /// Returns the current manifest.
-    pub fn manifest(&self) -> &Manifest {
-        self.manifest.manifest()
+    pub fn manifest(&self) -> VersionedManifest {
+        let (id, manifest) = self.manifest.manifest();
+        VersionedManifest::from_manifest(id, manifest.clone())
     }
 
     /// Returns the WAL ID up to which SlateDB has guaranteed to have stored all data in the
     /// LSM tree.
     pub fn replay_after_wal_id(&self) -> u64 {
-        self.manifest().core.replay_after_wal_id
+        self.manifest().core().replay_after_wal_id
     }
 
     /// Returns the writer's epoch
     pub fn epoch(&self) -> u64 {
-        self.manifest().writer_epoch
+        self.manifest().writer_epoch()
     }
 
     /// Refreshes the current manifest. Implementations of `WriterInit::fence_and_init` can
@@ -231,7 +235,7 @@ pub struct WriterInitResult {
 ///
 /// `[WriterInit::fence_and_init]` is responsible for
 /// (1) Fencing the WAL such that no writers with an epoch earlier than [`WriterManifest::epoch`]
-/// (2) Constructing a [`WalWriter`] instance tha the writer uses to append new WAL entries.
+/// (2) Constructing a [`WalWriter`] instance that the writer uses to append new WAL entries.
 /// (3) Resolving the end of the WAL and constructing a [`WalReplayIterator`] that returns all
 ///     rows in WAL files between [`WriterManifest::replay_after_wal_id`] (exclusive) and the
 ///     current end of the WAL.
@@ -241,31 +245,40 @@ pub trait WriterInit {
     /// [`WalReplayIterator`] used to recover writes that have not yet been flushed to the tree.
     async fn fence_and_init(
         &self,
-        manifest: &mut WriterManifest
+        manifest: &mut WriterManifest,
     ) -> Result<WriterInitResult, WalError>;
 }
 
 /// Describes the current status of the WAL
 #[derive(Debug, Clone)]
 pub struct WalStatus {
-    /// The estimated bytes used by the WAL. WAL implementations that implement their own
-    /// backpressure should always set this to 0.
-    pub(crate) estimated_bytes: usize,
-    /// The last WAL File ID that was durably flushed.
-    pub(crate) last_flushed_wal_id: u64,
-    /// The last sequence number that was durably flushed.
-    pub(crate) last_flushed_seq: Option<u64>,
+    /// Set to Some if the WAL has permanently shut down, along with the reason. The reason should
+    /// be [`WalError::Closed`] on a normal shutdown, and some other [`WalError`] variant on
+    /// failure.
+    pub closed_reason: Option<WalError>,
+    /// The estimated in-memory bytes used by the WAL to buffer unflushed writes. Used by
+    /// SlateDB to apply backpressure.
+    pub estimated_bytes: usize,
+    /// The id of the last WAL file that was durably flushed
+    pub last_flushed_wal_id: u64,
+    /// The last sequence number that was durably flushed
+    pub last_flushed_seq: Option<u64>,
+    /// The number of writes currently buffered
+    #[allow(dead_code)]
+    pub buffered_wal_entries_count: usize,
 }
 
 /// An event emitted by a [`WalWriter`] to subscribers.
 #[derive(Debug, Clone)]
 pub enum WalEvent {
     /// Emitted when a WAL file is durably flushed to storage. On receipt of this event, SlateDB
-    /// notifies write tasks blocked on [`crate::config::WriteOptions::await_durable`]
-    WalFlushed(crate::wal_buffer::WalStatus),
-    /// Emitted when the [`WalWriter`] releases buffer memory. WAL implementations that implement
-    /// their own backpressure should not emit this event.
-    MemoryReleased(crate::wal_buffer::WalStatus),
+    /// notifies write tasks blocked on [`crate::config::WriteOptions::await_durable`]. SlateDB
+    /// also uses this to apply backpressure if the implementation sets
+    /// [`WalStatus::estimated_bytes`]. Implementers should update this to reflect clearing the
+    /// memory used for buffering the Wal File before emitting this event.
+    WalFlushed(WalStatus),
+    /// Emitted when the WAL has closed with the final wal status containing the closed reason
+    WalClosed(WalStatus),
 }
 
 /// A listener that's called back on WAL events.
@@ -273,13 +286,16 @@ pub type WalStatusListener = Arc<dyn Fn(WalEvent) + Send + Sync + 'static>;
 
 /// An observer that can read the current [`WalStatus`] and subscribe to event callbacks.
 #[async_trait]
-pub trait WalObserver {
+pub trait WalObserver: Send + Sync + 'static {
     /// Returns the current [`WalStatus`].
-    fn status(&self) -> Result<WalStatus, WalError>;
+    fn status(&self) -> Result<WalStatus, WalStatus>;
 
     /// Adds a listener that subscribes to event callbacks.
     fn subscribe(&self, listener: WalStatusListener) -> Result<(), WalError>;
 }
+
+/// A future that yields the result of flushing the WAL. Returned by [`WalWriter::flush`]
+pub type FlushResultFuture = BoxFuture<'static, Result<(), WalError>>;
 
 /// The WAL's write API. Used by SlateDB to append new WAL writes. Is returned by
 /// [`WalWriterInit::fence_and_init_writer`].
@@ -295,15 +311,23 @@ pub trait WalObserver {
 ///   [`WalIterator`] should either observe all the writes with a given sequence number or none
 ///   of them.
 #[async_trait]
-pub trait WalWriter {
+pub trait WalWriter: Send {
     /// Append a write batch to the WAL.
-    async fn append(&mut self, write_batch: Vec<RowEntry>) -> Result<(), WalError>;
+    async fn append(&mut self, write_batch: &[RowEntry]) -> Result<(), WalError>;
 
-    /// Flush all appended write batches to durable storage.
-    async fn flush(&mut self) -> Result<(), WalError>;
+    /// Triggers a flush of all appended write batches to durable storage. Returns a
+    /// future that receives the result of the flush once it completes.
+    async fn flush(&mut self) -> Result<FlushResultFuture, WalError>;
 
     /// Returns a `WalObserver` for reading [`WalStatus`] and subscribing to events.
-    async fn observer(&self) -> Box<dyn WalObserver>;
+    fn observer(&self) -> Box<dyn WalObserver>;
+
+    /// Returns the current `WalStatus`. If the [`WalWriter`] has failed, then returns Err with the
+    /// final [`WalStatus`] and the reason for the failure in [`WalStatus::closed_reason`]
+    fn status(&self) -> Result<WalStatus, WalStatus>;
+
+    /// Close the `WalWriter` and release resources
+    async fn close(&mut self) -> Result<(), WalError>;
 }
 
 /// Rows returned by [`WalIterator`]
@@ -314,14 +338,19 @@ pub struct WalRows {
     /// The id of the last WAL File containing rows from `rows`. There may still be rows with higher
     /// sequence numbers in the WAL File with this id.
     pub last_wal_file_id: u64,
+    /// True when this batch is the last one in its WAL file. This is an
+    /// optimization, so its harmless to always set to false. Callers can already infer that a
+    /// file is fully applied when they see a batch from a later file, but this flag lets them
+    /// advance their WAL watermark over the current file without waiting for the next one.
+    pub last_in_file: bool,
 }
 
 /// An iterator over rows in some range of the WAL
 #[async_trait]
-pub trait WalIterator {
+pub trait WalIterator: Send + 'static {
     /// Returns the next set of rows. Rows must be returned in sequence and WAL File order.
     /// Returns None when iterator's range is exhausted. Iterators created using an unbounded
-    /// end range that have exhaused the current WAL block until new rows are appended and never
+    /// end range that have exhausted the current WAL block until new rows are appended and neverCollapse annotation
     /// return `None`.
     /// Returns [`WalError::WalTruncated`] if the iterator observes that the WAL was truncated
     /// while iterating.
@@ -465,8 +494,8 @@ append new writes via `WalWriter::append`.
 
 The WAL no longer maintains a durability watcher for each WAL file. Instead, a write that 
 awaits durable blocks on `DbStatus` until the durable sequence number is higher than the write's 
-sequence number. When the WAL is enabled, it propagates updates to the durable sequence number via
-the `WalObserver` subscription.
+sequence number. When the WAL is enabled, slatedb propagates updates to the durable sequence
+number via the `WalObserver` subscription.
 
 **Backpressure**
 
