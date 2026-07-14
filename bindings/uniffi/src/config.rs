@@ -157,6 +157,32 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
     }
 }
 
+/// Determines how a [`crate::DbReader`] chooses and refreshes database state.
+#[derive(Clone, Debug, Default, uniffi::Enum)]
+pub enum ReaderMode {
+    /// Create and maintain checkpoints while following the latest database state.
+    #[default]
+    ManagedCheckpoint,
+    /// Remain pinned to the database state referenced by the supplied checkpoint UUID string.
+    Checkpoint(String),
+    /// Follow the latest manifest without creating or maintaining a checkpoint.
+    FollowLatest,
+}
+
+impl TryFrom<ReaderMode> for slatedb::DbReaderMode {
+    type Error = Error;
+
+    fn try_from(value: ReaderMode) -> Result<Self, Self::Error> {
+        Ok(match value {
+            ReaderMode::ManagedCheckpoint => Self::ManagedCheckpoint,
+            ReaderMode::Checkpoint(checkpoint_id) => {
+                Self::Checkpoint(try_checkpoint_id_from_str(&checkpoint_id)?)
+            }
+            ReaderMode::FollowLatest => Self::FollowLatest,
+        })
+    }
+}
+
 /// Options for opening a [`crate::DbReader`].
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReaderOptions {

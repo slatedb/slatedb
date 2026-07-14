@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::admin::Admin;
-use crate::config::{ReaderOptions, SstBlockSize};
+use crate::config::{ReaderMode, ReaderOptions, SstBlockSize};
 use crate::db::Db;
 use crate::db_cache::DbCache;
 use crate::db_reader::DbReader;
@@ -17,7 +17,6 @@ use crate::settings::Settings;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
-use uuid::Uuid;
 
 /// Builder for opening a writable [`crate::Db`].
 ///
@@ -184,11 +183,10 @@ impl DbReaderBuilder {
         })
     }
 
-    /// Pins the reader to an existing checkpoint UUID string.
-    pub fn with_checkpoint_id(&self, checkpoint_id: String) -> Result<(), Error> {
-        let checkpoint_id = Uuid::parse_str(&checkpoint_id)
-            .map_err(|source| SlateDbError::InvalidCheckpointId { source })?;
-        self.update_builder(|builder| builder.with_checkpoint_id(checkpoint_id))
+    /// Sets how the reader chooses and refreshes database state.
+    pub fn with_reader_mode(&self, mode: ReaderMode) -> Result<(), Error> {
+        let mode = mode.try_into()?;
+        self.update_builder(|builder| builder.with_reader_mode(mode))
             .map_err(Into::into)
     }
 

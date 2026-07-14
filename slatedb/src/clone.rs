@@ -722,7 +722,7 @@ mod tests {
         // A reader pinned to the checkpoint must resolve the external SSTs
         // referenced by the checkpoint's manifest.
         let reader = DbReader::builder(clone_path.clone(), object_store.clone())
-            .with_checkpoint_id(checkpoint_id)
+            .with_reader_mode(crate::DbReaderMode::Checkpoint(checkpoint_id))
             .build()
             .await
             .unwrap();
