@@ -135,6 +135,11 @@ meet the following conditions:
 checkpoint, `DbReader` periodically polls the Manifest and replays WALs referenced by the 
 current Manifest.
 
+**CDC**
+The `wal_reader` module defines a low-level interface to support CDC. Users create a `WalReader`
+to list/get `WalFile` instances. `WalFile#iterator` is used to read the contents of the file.
+Polling/batching is left up to the caller.
+
 </details>
 
 ### Model
@@ -544,6 +549,29 @@ for replaying the WAL when loading a checkpoint.
 writes. It does this by creating its `WalIterator` with an unbounded end range and blocking on 
 `next` from its background polling task. If the reader observes a `WalError::WalTruncated` then it
 immediately refreshes the manifest.
+
+#### CDC
+
+We'll deprecate/remove the current CDC API. Users can use the `WalReader`/`WalIterator` proposed
+in this RFC. SlateDB's native `WalReader` will take a buffer size and a poll interval to use when
+tailing the current WAL:
+
+```rust
+struct ObjectStoreWalReader {
+    pub fn new<P: Into<Path>>(
+        path: P,
+        object_store: Arc<dyn ObjectStore>,
+        /// The number of WAL Files to prefetch and buffer when streaming the WAL
+        buffered_files: usize,
+        /// The interval at which the next WAL file will be polled when streaming the latest updates
+        poll_interval: Duration
+    )
+}
+
+impl WalReader for ObjectStoreWalReader {
+    ...
+}
+```
 
 #### Error Handling
 
