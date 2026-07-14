@@ -1,19 +1,18 @@
 use std::sync::Arc;
 
 use crate::admin::Admin;
-use crate::config::{ReaderOptions, SstBlockSize};
+use crate::config::ReaderOptions;
 use crate::db::Db;
 use crate::db_cache::DbCache;
 use crate::db_reader::DbReader;
 use crate::error::{Error, SlateDbError};
-use crate::filter_policy::{
-    adapt_prefix_extractor, collect_filter_policies, FilterPolicy, PrefixExtractor,
-};
+use crate::filter_policy::{adapt_prefix_extractor, PrefixExtractor};
 use crate::merge_operator::{adapt_merge_operator, MergeOperator};
 use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
 use crate::runtime;
 use crate::settings::Settings;
+use crate::sst_format::SsTableFormat;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
@@ -61,6 +60,13 @@ impl DbBuilder {
             .map_err(Into::into)
     }
 
+    /// Sets the SST format used for newly written tables.
+    pub fn with_sst_format(&self, sst_format: Arc<SsTableFormat>) -> Result<(), Error> {
+        let sst_format = sst_format.inner();
+        self.update_builder(|builder| builder.with_sst_format(sst_format))
+            .map_err(Into::into)
+    }
+
     /// Uses a separate object store for WAL files.
     pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
@@ -85,13 +91,6 @@ impl DbBuilder {
             .map_err(Into::into)
     }
 
-    /// Sets the SSTable block size used for newly written tables.
-    pub fn with_sst_block_size(&self, sst_block_size: SstBlockSize) -> Result<(), Error> {
-        let sst_block_size = sst_block_size.into();
-        self.update_builder(|builder| builder.with_sst_block_size(sst_block_size))
-            .map_err(Into::into)
-    }
-
     /// Installs an application-defined merge operator.
     pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
@@ -109,16 +108,6 @@ impl DbBuilder {
             builder.with_metrics_recorder(adapt_metrics_recorder(metrics_recorder))
         })
         .map_err(Into::into)
-    }
-
-    /// Sets the filter policies used for SST filter construction and evaluation.
-    ///
-    /// Pass an empty vec to disable filters entirely. When unset, the default
-    /// is a single bloom filter with 10 bits per key.
-    pub fn with_filter_policies(&self, policies: Vec<Arc<FilterPolicy>>) -> Result<(), Error> {
-        let policies = collect_filter_policies(policies);
-        self.update_builder(|builder| builder.with_filter_policies(policies))
-            .map_err(Into::into)
     }
 
     /// Sets the segment extractor (RFC-0024). When configured, every write is
@@ -192,6 +181,13 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
+    /// Sets the SST format used to interpret SST metadata and blocks.
+    pub fn with_sst_format(&self, sst_format: Arc<SsTableFormat>) -> Result<(), Error> {
+        let sst_format = sst_format.inner();
+        self.update_builder(|builder| builder.with_sst_format(sst_format))
+            .map_err(Into::into)
+    }
+
     /// Uses a separate object store for WAL files.
     pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
@@ -222,17 +218,6 @@ impl DbReaderBuilder {
             builder.with_metrics_recorder(adapt_metrics_recorder(metrics_recorder))
         })
         .map_err(Into::into)
-    }
-
-    /// Sets the filter policies used when decoding SST filter blocks.
-    ///
-    /// Must match (or be a superset of) the writer's policies so SST filter
-    /// sub-blocks can be decoded; unrecognized policy names are silently
-    /// skipped. Defaults to a single bloom filter with 10 bits per key.
-    pub fn with_filter_policies(&self, policies: Vec<Arc<FilterPolicy>>) -> Result<(), Error> {
-        let policies = collect_filter_policies(policies);
-        self.update_builder(|builder| builder.with_filter_policies(policies))
-            .map_err(Into::into)
     }
 
     /// Sets the segment extractor (RFC-0024). A reader opening a segmented

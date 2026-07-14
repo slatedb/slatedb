@@ -40,7 +40,7 @@ Each stored block ends with a CRC32 checksum. That applies to data blocks and to
 
 ## Data Blocks
 
-SlateDB groups rows into blocks up to the target size configured with [`DbBuilder::with_sst_block_size`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_sst_block_size). When the next row would overflow the current block, the writer closes that block and starts a new one. Compacted SSTs write rows in key order. WAL SSTs write rows in sequence number order.
+SlateDB groups rows into blocks up to the target size configured on [`SsTableFormat::with_sst_block_size`](https://docs.rs/slatedb/latest/slatedb/struct.SsTableFormat.html#method.with_sst_block_size), then applied through `with_sst_format(...)` on the relevant builder. When the next row would overflow the current block, the writer closes that block and starts a new one. Compacted SSTs write rows in key order. WAL SSTs write rows in sequence number order.
 
 Within a data block, each stored row is a `RowEntry`: the logical fields are the key bytes, a `ValueDeletable` payload (`Value`, `Merge`, or `Tombstone`), the sequence number, and the optional `expire_ts` and `create_ts` timestamps.
 
@@ -76,7 +76,7 @@ Readers binary-search the index to find the first block that may contain a targe
 
 ## Filter Blocks
 
-Compacted SSTs can include a Bloom filter. SlateDB writes one when the file has at least [`Settings::min_filter_keys`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.min_filter_keys) rows and sizes it with [`Settings::filter_bits_per_key`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.filter_bits_per_key). Point lookups can skip the whole SST on a negative result. WAL SSTs do not include a filter because SlateDB reads them sequentially during replay.
+Compacted SSTs can include a Bloom filter. SlateDB writes one when the file has at least the number of rows configured by [`SsTableFormat::with_min_filter_keys`](https://docs.rs/slatedb/latest/slatedb/struct.SsTableFormat.html#method.with_min_filter_keys) and sizes it with the configured filter policies, which default to a bloom filter with 10 bits per key. Point lookups can skip the whole SST on a negative result. WAL SSTs do not include a filter because SlateDB reads them sequentially during replay.
 
 ## Stats Block
 

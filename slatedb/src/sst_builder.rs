@@ -730,10 +730,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case::default_sst(SsTableFormat::default(), 0, true)]
+    #[case::default_sst(SsTableFormat::default(), 0, false)]
     #[case::sst_with_no_filter(SsTableFormat { min_filter_keys: 9, ..SsTableFormat::default() }, 0, false)]
-    #[case::sst_builds_filter_with_10_bits_per_key(SsTableFormat { filter_policies: vec![Arc::new(BloomFilterPolicy::new(10))], ..SsTableFormat::default() }, 0, true)]
-    #[case::sst_builds_filter_with_20_bits_per_key(SsTableFormat { filter_policies: vec![Arc::new(BloomFilterPolicy::new(20))], ..SsTableFormat::default() }, 0, true)]
+    #[case::sst_builds_filter_with_10_bits_per_key(SsTableFormat { min_filter_keys: 0, filter_policies: vec![Arc::new(BloomFilterPolicy::new(10))], ..SsTableFormat::default() }, 0, true)]
+    #[case::sst_builds_filter_with_20_bits_per_key(SsTableFormat { min_filter_keys: 0, filter_policies: vec![Arc::new(BloomFilterPolicy::new(20))], ..SsTableFormat::default() }, 0, true)]
     #[tokio::test]
     async fn test_sstable(
         #[case] format: SsTableFormat,
@@ -824,6 +824,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
 
         let format = SsTableFormat {
+            min_filter_keys: 0,
             compression_codec: compression,
             ..SsTableFormat::default()
         };
@@ -892,6 +893,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
+            min_filter_keys: 0,
             compression_codec: compression,
             ..SsTableFormat::default()
         };
@@ -920,6 +922,7 @@ mod tests {
 
         // decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
         let format = SsTableFormat {
+            min_filter_keys: 0,
             compression_codec: dummy_codec,
             ..SsTableFormat::default()
         };
@@ -1278,6 +1281,7 @@ mod tests {
         let transformer = Arc::new(XorTransformer { key: 0x42 });
 
         let format = SsTableFormat {
+            min_filter_keys: 0,
             block_transformer: Some(transformer.clone()),
             ..SsTableFormat::default()
         };

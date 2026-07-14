@@ -265,7 +265,7 @@ mod tests {
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
     use crate::oracle::Oracle;
-    use crate::{Db, Error};
+    use crate::{Db, Error, SsTableFormat};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use std::future::Future;
@@ -303,13 +303,13 @@ mod tests {
                 ..Default::default()
             }),
             max_unflushed_bytes: 16 * 1024,
-            min_filter_keys: 0,
             l0_sst_size_bytes: 4 * 4096,
             ..Default::default()
         };
 
         Db::builder("/tmp/snapshot_test", object_store)
             .with_settings(config)
+            .with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
             .build()
             .await
             .expect("Failed to create test database")
@@ -741,7 +741,6 @@ mod tests {
                 ..Default::default()
             }),
             max_unflushed_bytes: 16 * 1024,
-            min_filter_keys: 0,
             l0_sst_size_bytes: 4 * 4096,
             ..Default::default()
         };
@@ -749,6 +748,7 @@ mod tests {
         let db = Arc::new(
             Db::builder("/tmp/failpoint_test", object_store)
                 .with_settings(config)
+                .with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
                 .with_fp_registry(fp_registry.clone())
                 .build()
                 .await

@@ -713,6 +713,17 @@ impl From<CoreCompressionCodec> for CompressionCodec {
     }
 }
 
+impl From<CompressionCodec> for CoreCompressionCodec {
+    fn from(value: CompressionCodec) -> Self {
+        match value {
+            CompressionCodec::Snappy => Self::Snappy,
+            CompressionCodec::Zlib => Self::Zlib,
+            CompressionCodec::Lz4 => Self::Lz4,
+            CompressionCodec::Zstd => Self::Zstd,
+        }
+    }
+}
+
 /// Physical SSTable type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SstType {

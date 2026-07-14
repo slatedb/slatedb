@@ -26,7 +26,7 @@ use slatedb::config::{
 };
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::SplitCache;
-use slatedb::{BloomFilterPolicy, Db, FilterPolicy, PrefixExtractor, PrefixTarget};
+use slatedb::{BloomFilterPolicy, Db, FilterPolicy, PrefixExtractor, PrefixTarget, SsTableFormat};
 use tokio::runtime::Runtime;
 
 const NUM_PREFIXES: usize = 100;
@@ -105,7 +105,6 @@ fn meta_only_cache() -> Arc<SplitCache> {
 
 fn base_settings() -> Settings {
     Settings {
-        min_filter_keys: 0,
         l0_sst_size_bytes: 256 * 1024 * 1024,
         l0_max_ssts: NUM_FLUSHES + 10,
         // Sentinel keys make every SST's effective range cover every key, so
@@ -204,7 +203,11 @@ async fn build_db(path: &str, filter_policies: Vec<Arc<dyn FilterPolicy>>) -> Be
     let db = Db::builder(path, store.clone())
         .with_settings(base_settings())
         .with_db_cache(meta_only_cache())
-        .with_filter_policies(filter_policies)
+        .with_sst_format(
+            SsTableFormat::default()
+                .with_min_filter_keys(0)
+                .with_filter_policies(filter_policies),
+        )
         .build()
         .await
         .expect("failed to build db");

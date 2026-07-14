@@ -8,7 +8,7 @@ use slatedb::config::{
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,
     SizeTieredCompactionSchedulerOptions,
 };
-use slatedb::{DbRand, Settings};
+use slatedb::{DbRand, Settings, SsTableFormat};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
@@ -27,14 +27,14 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
     None,
 ];
 
-/// Builds a randomized deterministic [`Settings`] value for DST scenarios.
+/// Builds randomized deterministic database settings and SST format for DST scenarios.
 ///
 /// The returned settings are entirely derived from `rand`, except that
 /// object-store caching is always disabled. The cache implementation uses
 /// filesystem and blocking-task wakeups outside the seeded current-thread DST
 /// runtime, which breaks logical-clock determinism for the harness-managed
 /// clock.
-pub async fn build_settings(rand: &DbRand) -> Settings {
+pub async fn build_settings(rand: &DbRand) -> (Settings, SsTableFormat) {
     let mut rng = rand.rng();
     let flush_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(60));
     let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
@@ -55,19 +55,20 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         flush_interval: Some(flush_interval),
         manifest_poll_interval,
         manifest_update_timeout,
-        min_filter_keys,
         l0_sst_size_bytes,
         l0_max_ssts,
         l0_max_ssts_per_key,
         max_unflushed_bytes,
-        compression_codec,
         compactor_options: Some(build_settings_compactor(&mut *rng)),
         garbage_collector_options: Some(build_settings_gc(&mut *rng)),
         #[cfg(feature = "wal_disable")]
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     };
-    settings
+    let sst_format = SsTableFormat::default()
+        .with_min_filter_keys(min_filter_keys)
+        .with_compression_codec(compression_codec);
+    (settings, sst_format)
 }
 
 /// Builds randomized deterministic reader options for DST scenarios.

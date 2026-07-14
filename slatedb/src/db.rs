@@ -5987,7 +5987,7 @@ mod tests {
             .expect_err("close should error out due to WAL IO error");
     }
 
-    async fn do_test_should_read_compacted_db(mut options: Settings) {
+    async fn do_test_should_read_compacted_db(mut options: Settings, sst_format: SsTableFormat) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));
@@ -5999,9 +5999,11 @@ mod tests {
         let compactor_options = options.compactor_options.take();
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
+            .with_sst_format(sst_format.clone())
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())
                     .with_scheduler_supplier(compaction_scheduler.clone())
+                    .with_sst_format(sst_format)
                     .with_options(compactor_options.unwrap()),
             )
             .build()
@@ -6095,41 +6097,47 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db() {
-        do_test_should_read_compacted_db(test_db_options(
-            0,
-            127,
-            Some(CompactorOptions {
-                poll_interval: Duration::from_millis(100),
-                max_concurrent_compactions: 1,
-                manifest_update_timeout: Duration::from_secs(300),
-                worker: Some(CompactionWorkerOptions {
-                    max_sst_size: 256,
-                    compactions_poll_interval: Duration::from_millis(100),
+        do_test_should_read_compacted_db(
+            test_db_options(
+                0,
+                127,
+                Some(CompactorOptions {
+                    poll_interval: Duration::from_millis(100),
+                    max_concurrent_compactions: 1,
+                    manifest_update_timeout: Duration::from_secs(300),
+                    worker: Some(CompactionWorkerOptions {
+                        max_sst_size: 256,
+                        compactions_poll_interval: Duration::from_millis(100),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
-                ..Default::default()
-            }),
-        ))
+            ),
+            SsTableFormat::default(),
+        )
         .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db_no_filters() {
-        do_test_should_read_compacted_db(test_db_options(
-            u32::MAX,
-            127,
-            Some(CompactorOptions {
-                poll_interval: Duration::from_millis(100),
-                manifest_update_timeout: Duration::from_secs(300),
-                max_concurrent_compactions: 1,
-                worker: Some(CompactionWorkerOptions {
-                    max_sst_size: 256,
-                    compactions_poll_interval: Duration::from_millis(100),
+        do_test_should_read_compacted_db(
+            test_db_options(
+                0,
+                127,
+                Some(CompactorOptions {
+                    poll_interval: Duration::from_millis(100),
+                    manifest_update_timeout: Duration::from_secs(300),
+                    max_concurrent_compactions: 1,
+                    worker: Some(CompactionWorkerOptions {
+                        max_sst_size: 256,
+                        compactions_poll_interval: Duration::from_millis(100),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
-                ..Default::default()
-            }),
-        ))
+            ),
+            SsTableFormat::default().with_min_filter_keys(u32::MAX),
+        )
         .await
     }
 
@@ -6882,10 +6890,8 @@ mod tests {
         // Create and load initial database
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let compress = CompressionCodec::from_str("zstd").unwrap();
-        let db_builder = Db::builder("/tmp/test_kv_store", os.clone()).with_settings(Settings {
-            compression_codec: Some(compress),
-            ..Settings::default()
-        });
+        let db_builder = Db::builder("/tmp/test_kv_store", os.clone())
+            .with_sst_format(SsTableFormat::default().with_compression_codec(Some(compress)));
         let db = db_builder.build().await.unwrap();
 
         for i in 0..1000 {
@@ -6904,10 +6910,8 @@ mod tests {
         db.close().await.expect("failed to close db");
 
         // Reload DB and read a value to trigger error
-        let db_builder = Db::builder("/tmp/test_kv_store", os.clone()).with_settings(Settings {
-            compression_codec: Some(compress),
-            ..Settings::default()
-        });
+        let db_builder = Db::builder("/tmp/test_kv_store", os.clone())
+            .with_sst_format(SsTableFormat::default().with_compression_codec(Some(compress)));
         let db = db_builder.build().await.unwrap();
         let v = db.get("k1").await.expect("get failed").unwrap();
         assert_eq!(v.as_ref(), b"v1");
@@ -6955,7 +6959,7 @@ mod tests {
     }
 
     fn test_db_options_with_ttl(
-        min_filter_keys: u32,
+        _min_filter_keys: u32,
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
         ttl: Option<u64>,
@@ -6970,16 +6974,13 @@ mod tests {
             l0_max_ssts: 8,
             l0_max_ssts_per_key: 8,
             l0_flush_parallelism: 1,
-            min_filter_keys,
             l0_sst_size_bytes,
             max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
-            compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
             default_ttl: ttl,
-            block_format: None,
         }
     }
 
@@ -7027,13 +7028,13 @@ mod tests {
         let settings = Settings {
             l0_sst_size_bytes: 4 * 1024,   // Smaller to trigger flush more easily
             max_unflushed_bytes: 2 * 1024, // Smaller to trigger flush more easily
-            min_filter_keys: 0,
             flush_interval: Some(Duration::from_millis(100)),
             ..Default::default()
         };
 
         let db = Db::builder(path, object_store)
             .with_settings(settings)
+            .with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
             .build()
             .await
             .unwrap();
@@ -7134,7 +7135,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor.clone())
-            .with_sst_block_size(SstBlockSize::Other(1))
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(1)))
             .with_fp_registry(fp_registry.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
@@ -7230,7 +7231,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor.clone())
-            .with_sst_block_size(SstBlockSize::Other(1))
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(1)))
             .with_fp_registry(fp_registry.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -7248,7 +7249,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings_without_compactor)
-            .with_sst_block_size(SstBlockSize::Other(1))
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(1)))
             .with_fp_registry(fp_registry)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
@@ -8900,7 +8901,7 @@ mod tests {
         let compactor_options = settings.compactor_options.take().unwrap();
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings)
-            .with_sst_block_size(SstBlockSize::Other(64))
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(64)))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())
@@ -9055,7 +9056,7 @@ mod tests {
         let compactor_options = settings.compactor_options.take().unwrap();
         let db = Db::builder(path, object_store.clone())
             .with_settings(settings)
-            .with_sst_block_size(SstBlockSize::Other(64))
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(64)))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .with_compactor_builder(
                 CompactorBuilder::new(path, object_store.clone())
@@ -11209,6 +11210,7 @@ mod tests {
                 object_store.clone(),
             )
             .with_settings(opts)
+            .with_sst_format(SsTableFormat::default().with_min_filter_keys(0))
             .with_db_cache_disabled()
             .with_metrics_recorder(metrics_recorder.clone())
             .build()

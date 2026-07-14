@@ -259,7 +259,7 @@ mod tests {
     use crate::paths::PathResolver;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
-    use crate::Db;
+    use crate::{Db, SsTableFormat};
     use object_store::memory::InMemory;
 
     /// Helper: create a DB with 10 puts, 3 deletes, and 2 merges, flush to
@@ -273,7 +273,7 @@ mod tests {
         let path = "/test_sst_reader";
         let db = Db::builder(path, object_store.clone())
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
-            .with_sst_block_size(SstBlockSize::Other(64))
+            .with_sst_format(SsTableFormat::default().with_sst_block_size(SstBlockSize::Other(64)))
             .build()
             .await
             .unwrap();
@@ -541,7 +541,7 @@ mod tests {
 
         // Write data with a block transformer
         let db = Db::builder(path, object_store.clone())
-            .with_block_transformer(transformer.clone())
+            .with_sst_format(SsTableFormat::default().with_block_transformer(transformer.clone()))
             .build()
             .await
             .unwrap();

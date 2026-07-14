@@ -141,14 +141,15 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         });
 
         let db_seed = ctx.rand().rng().next_u64();
-        let settings = build_settings(ctx.rand()).await;
+        let (settings, sst_format) = build_settings(ctx.rand()).await;
 
         let mut builder = Db::builder(ctx.path().clone(), ctx.main_object_store())
             .with_wal_object_store(ctx.wal_object_store().expect("configured"))
             .with_system_clock(ctx.system_clock())
             .with_fp_registry(ctx.fp_registry())
             .with_seed(db_seed)
-            .with_settings(settings);
+            .with_settings(settings)
+            .with_sst_format(sst_format);
         if let Some(merge_operator) = ctx.merge_operator() {
             builder = builder.with_merge_operator(merge_operator);
         }
@@ -213,7 +214,7 @@ to the database builder.
 Typical startup responsibilities:
 
 - derive a deterministic SlateDB seed with `ctx.rand().rng().next_u64()`
-- build randomized deterministic settings with `utils::build_settings(...)`
+- build randomized deterministic settings and SST format with `utils::build_settings(...)`
 - open `Db::builder(...)` using the harness-provided object stores and clock
 - pass through the shared failpoint registry
 - pass `ctx.merge_operator()` to `DbBuilder::with_merge_operator(...)` when it
@@ -355,8 +356,8 @@ metadata or stable listing order.
 
 ## `utils` helpers
 
-`utils::build_settings(rand)` produces a randomized deterministic
-`slatedb::Settings` value from a supplied `DbRand`.
+`utils::build_settings(rand)` produces randomized deterministic
+`slatedb::Settings` and `slatedb::SsTableFormat` values from a supplied `DbRand`.
 
 It currently randomizes several useful dimensions of a SlateDB run, including:
 
