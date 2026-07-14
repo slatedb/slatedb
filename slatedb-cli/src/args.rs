@@ -177,9 +177,10 @@ pub(crate) enum CliCommands {
         #[arg(long)]
         count: bool,
 
-        /// Scan an existing checkpoint by its UUID, rather than the database's current
-        /// state. This needs only read access to the store; without it the reader writes
-        /// a transient checkpoint and so needs write access.
+        /// Scan an existing checkpoint by its UUID, rather than following the latest
+        /// manifest. This provides a point-in-time view protected from garbage collection.
+        /// Without it, the scan remains read-only but concurrent garbage collection may
+        /// delete objects referenced by the scan.
         #[arg(long)]
         #[clap(value_parser = uuid::Uuid::parse_str)]
         checkpoint: Option<Uuid>,

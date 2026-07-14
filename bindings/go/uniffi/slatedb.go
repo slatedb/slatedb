@@ -725,15 +725,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id()
-		})
-		if checksum != 41016 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_filter_policies()
 		})
 		if checksum != 12871 {
@@ -766,6 +757,15 @@ func uniffiCheckChecksums() {
 		if checksum != 46155 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_reader_mode()
+		})
+		if checksum != 45455 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_reader_mode: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -5206,8 +5206,6 @@ func (_ FfiDestroyerDbReader) Destroy(value *DbReader) {
 type DbReaderBuilderInterface interface {
 	// Opens the reader and consumes this builder.
 	Build() (*DbReader, error)
-	// Pins the reader to an existing checkpoint UUID string.
-	WithCheckpointId(checkpointId string) error
 	// Sets the filter policies used when decoding SST filter blocks.
 	//
 	// Must match (or be a superset of) the writer's policies so SST filter
@@ -5220,6 +5218,8 @@ type DbReaderBuilderInterface interface {
 	WithMetricsRecorder(metricsRecorder MetricsRecorder) error
 	// Applies custom reader options.
 	WithOptions(options ReaderOptions) error
+	// Sets how the reader chooses and refreshes database state.
+	WithReaderMode(mode ReaderMode) error
 	// Sets the segment extractor (RFC-0024). A reader opening a segmented
 	// database must configure an extractor matching the one the database
 	// was created with.
@@ -5276,18 +5276,6 @@ func (_self *DbReaderBuilder) Build() (*DbReader, error) {
 	return res, err
 }
 
-// Pins the reader to an existing checkpoint UUID string.
-func (_self *DbReaderBuilder) WithCheckpointId(checkpointId string) error {
-	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(
-			_pointer, FfiConverterStringINSTANCE.Lower(checkpointId), _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
-}
-
 // Sets the filter policies used when decoding SST filter blocks.
 //
 // Must match (or be a superset of) the writer's policies so SST filter
@@ -5335,6 +5323,18 @@ func (_self *DbReaderBuilder) WithOptions(options ReaderOptions) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options(
 			_pointer, FfiConverterReaderOptionsINSTANCE.Lower(options), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets how the reader chooses and refreshes database state.
+func (_self *DbReaderBuilder) WithReaderMode(mode ReaderMode) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_reader_mode(
+			_pointer, FfiConverterReaderModeINSTANCE.Lower(mode), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -12258,6 +12258,86 @@ func (FfiConverterPrefixTarget) Write(writer io.Writer, value PrefixTarget) {
 type FfiDestroyerPrefixTarget struct{}
 
 func (_ FfiDestroyerPrefixTarget) Destroy(value PrefixTarget) {
+	value.Destroy()
+}
+
+// Determines how a [`crate::DbReader`] chooses and refreshes database state.
+type ReaderMode interface {
+	Destroy()
+}
+
+// Create and maintain checkpoints while following the latest database state.
+type ReaderModeManagedCheckpoint struct {
+}
+
+func (e ReaderModeManagedCheckpoint) Destroy() {
+}
+
+// Remain pinned to the database state referenced by the supplied checkpoint UUID string.
+type ReaderModeCheckpoint struct {
+	Field0 string
+}
+
+func (e ReaderModeCheckpoint) Destroy() {
+	FfiDestroyerString{}.Destroy(e.Field0)
+}
+
+// Follow the latest manifest without creating or maintaining a checkpoint.
+type ReaderModeFollowLatest struct {
+}
+
+func (e ReaderModeFollowLatest) Destroy() {
+}
+
+type FfiConverterReaderMode struct{}
+
+var FfiConverterReaderModeINSTANCE = FfiConverterReaderMode{}
+
+func (c FfiConverterReaderMode) Lift(rb RustBufferI) ReaderMode {
+	return LiftFromRustBuffer[ReaderMode](c, rb)
+}
+
+func (c FfiConverterReaderMode) Lower(value ReaderMode) C.RustBuffer {
+	return LowerIntoRustBuffer[ReaderMode](c, value)
+}
+
+func (c FfiConverterReaderMode) LowerExternal(value ReaderMode) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReaderMode](c, value))
+}
+func (FfiConverterReaderMode) Read(reader io.Reader) ReaderMode {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return ReaderModeManagedCheckpoint{}
+	case 2:
+		return ReaderModeCheckpoint{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	case 3:
+		return ReaderModeFollowLatest{}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterReaderMode.Read()", id))
+	}
+}
+
+func (FfiConverterReaderMode) Write(writer io.Writer, value ReaderMode) {
+	switch variant_value := value.(type) {
+	case ReaderModeManagedCheckpoint:
+		writeInt32(writer, 1)
+	case ReaderModeCheckpoint:
+		writeInt32(writer, 2)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
+	case ReaderModeFollowLatest:
+		writeInt32(writer, 3)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterReaderMode.Write", value))
+	}
+}
+
+type FfiDestroyerReaderMode struct{}
+
+func (_ FfiDestroyerReaderMode) Destroy(value ReaderMode) {
 	value.Destroy()
 }
 

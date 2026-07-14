@@ -451,9 +451,9 @@ impl Admin {
     /// If you have a [`crate::Db`] instance open, you can use the [`crate::Db::create_checkpoint`]
     /// method instead. That method will flush the memtables and WALs before creating the checkpoint.
     ///
-    /// If you're using a [`crate::DbReader`], you might wish to have the reader manage the checkpoint
-    /// for you by calling [`crate::DbReader::open`] with no `checkpoint_id` set. The reader will
-    /// create a checkpoint for you and periodically refresh it.
+    /// If you're using a [`crate::DbReader`], you might wish to use
+    /// [`crate::DbReaderMode::ManagedCheckpoint`]. The reader will create a checkpoint for you and
+    /// periodically refresh it.
     ///
     /// # Examples
     ///

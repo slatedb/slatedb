@@ -87,9 +87,9 @@
 // insertion, and scan fetch parallelism.
 //
 // For long-lived read-only access, open a [DbReader] with
-// [NewDbReaderBuilder]. A reader can be pinned to an existing checkpoint with
-// [DbReaderBuilder.WithCheckpointId], configured with [ReaderOptions], and
-// given a [MergeOperator] for merge-aware reads.
+// [NewDbReaderBuilder]. A reader's state selection can be configured with
+// [DbReaderBuilder.WithReaderMode] and [ReaderMode]. It can also be configured
+// with [ReaderOptions] and given a [MergeOperator] for merge-aware reads.
 //
 // [Db.Snapshot] creates a consistent read-only [DbSnapshot] from a writable
 // database handle.
