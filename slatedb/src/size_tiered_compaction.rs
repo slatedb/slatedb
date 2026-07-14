@@ -191,7 +191,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         // reservation, but do not count it against execution capacity.
         let compaction_slots_in_use = active_compactions
             .iter()
-            .filter(|c| c.status().consumes_compaction_slot())
+            .filter(|c| c.status().counts_against_max_concurrent())
             .count();
         let mut next_fresh_sr_id = next_global_sr_id(db_state, &active_compactions);
 
