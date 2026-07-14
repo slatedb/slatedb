@@ -183,7 +183,8 @@ class SlateDbAdminTest {
                             directoryOptions,
                             null,
                             null,
-                            scheduleOptions);
+                            scheduleOptions,
+                            true);
 
             TestSupport.await(admin.runGcOnce(options));
         }

@@ -450,6 +450,10 @@ pub struct GarbageCollectorOptions {
     /// Options for detaching clone references. `None` disables detach garbage collection.
     #[uniffi(default = None)]
     pub detach_options: Option<GarbageCollectorScheduleOptions>,
+    /// Whether GC should delete eligible manifest/compactions metadata without advancing boundary
+    /// files.
+    #[uniffi(default = false)]
+    pub disable_boundary_files: bool,
 }
 
 impl Default for GarbageCollectorOptions {
@@ -462,6 +466,7 @@ impl Default for GarbageCollectorOptions {
             compacted_options: core.compacted_options.map(Into::into),
             compactions_options: core.compactions_options.map(Into::into),
             detach_options: core.detach_options.map(Into::into),
+            disable_boundary_files: !core.boundary_files_enabled,
         }
     }
 }
@@ -494,7 +499,32 @@ impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions 
             compactions_options: value.compactions_options.map(Into::into),
             detach_options: value.detach_options.map(Into::into),
             metric_level: None,
+            boundary_files_enabled: !value.disable_boundary_files,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GarbageCollectorOptions;
+
+    #[test]
+    fn boundary_files_are_enabled_by_default() {
+        let gc: slatedb::config::GarbageCollectorOptions =
+            GarbageCollectorOptions::default().into();
+
+        assert!(gc.boundary_files_enabled);
+    }
+
+    #[test]
+    fn boundary_files_can_be_disabled() {
+        let gc: slatedb::config::GarbageCollectorOptions = GarbageCollectorOptions {
+            disable_boundary_files: true,
+            ..GarbageCollectorOptions::default()
+        }
+        .into();
+
+        assert!(!gc.boundary_files_enabled);
     }
 }
 

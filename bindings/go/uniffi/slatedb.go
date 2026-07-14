@@ -682,7 +682,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_segment_extractor()
 		})
-		if checksum != 14261 {
+		if checksum != 12566 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_segment_extractor: UniFFI API checksum mismatch")
 		}
@@ -4225,7 +4225,10 @@ type DbBuilderInterface interface {
 	// Sets the segment extractor (RFC-0024). When configured, every write is
 	// routed through the extractor and the database tracks per-segment LSM
 	// state. The extractor must be configured at database creation time and
-	// cannot be changed thereafter.
+	// remain configured thereafter. Its name must remain stable; its
+	// implementation may evolve only if it preserves routing for all existing
+	// key schemas and keeps segment prefixes across schema versions an
+	// antichain (no prefix may be a proper prefix of another).
 	WithSegmentExtractor(extractor PrefixExtractor) error
 	// Applies a [`crate::Settings`] object to the builder.
 	WithSettings(settings *Settings) error
@@ -4361,7 +4364,10 @@ func (_self *DbBuilder) WithSeed(seed uint64) error {
 // Sets the segment extractor (RFC-0024). When configured, every write is
 // routed through the extractor and the database tracks per-segment LSM
 // state. The extractor must be configured at database creation time and
-// cannot be changed thereafter.
+// remain configured thereafter. Its name must remain stable; its
+// implementation may evolve only if it preserves routing for all existing
+// key schemas and keeps segment prefixes across schema versions an
+// antichain (no prefix may be a proper prefix of another).
 func (_self *DbBuilder) WithSegmentExtractor(extractor PrefixExtractor) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
@@ -7730,7 +7736,7 @@ func (_ FfiDestroyerObjectStore) Destroy(value *ObjectStore) {
 }
 
 // Application-provided prefix extractor used to configure prefix-based
-// bloom filters.
+// bloom filters and segmented compaction.
 type PrefixExtractor interface {
 	// Stable identifier for this extractor's configuration. Included in the
 	// bloom filter policy name so filters built with different extractors
@@ -7742,7 +7748,7 @@ type PrefixExtractor interface {
 }
 
 // Application-provided prefix extractor used to configure prefix-based
-// bloom filters.
+// bloom filters and segmented compaction.
 type PrefixExtractorImpl struct {
 	ffiObject FfiObject
 }
@@ -9457,6 +9463,9 @@ type GarbageCollectorOptions struct {
 	CompactionsOptions *GarbageCollectorDirectoryOptions
 	// Options for detaching clone references. `None` disables detach garbage collection.
 	DetachOptions *GarbageCollectorScheduleOptions
+	// Whether GC should delete eligible manifest/compactions metadata without advancing boundary
+	// files.
+	DisableBoundaryFiles bool
 }
 
 func (r *GarbageCollectorOptions) Destroy() {
@@ -9466,6 +9475,7 @@ func (r *GarbageCollectorOptions) Destroy() {
 	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.CompactedOptions)
 	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.CompactionsOptions)
 	FfiDestroyerOptionalGarbageCollectorScheduleOptions{}.Destroy(r.DetachOptions)
+	FfiDestroyerBool{}.Destroy(r.DisableBoundaryFiles)
 }
 
 type FfiConverterGarbageCollectorOptions struct{}
@@ -9484,6 +9494,7 @@ func (c FfiConverterGarbageCollectorOptions) Read(reader io.Reader) GarbageColle
 		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
 		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
 		FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
 
@@ -9502,6 +9513,7 @@ func (c FfiConverterGarbageCollectorOptions) Write(writer io.Writer, value Garba
 	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.CompactedOptions)
 	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.CompactionsOptions)
 	FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Write(writer, value.DetachOptions)
+	FfiConverterBoolINSTANCE.Write(writer, value.DisableBoundaryFiles)
 }
 
 type FfiDestroyerGarbageCollectorOptions struct{}

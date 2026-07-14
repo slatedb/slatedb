@@ -196,6 +196,10 @@ pub(crate) enum CliCommands {
         #[arg(short, long)]
         #[clap(value_parser = humantime::parse_duration)]
         min_age: Duration,
+
+        /// Delete eligible metadata without advancing boundary files.
+        #[arg(long, default_value_t = false)]
+        disable_boundary_files: bool,
     },
 
     /// Runs the compactor coordinator until interrupted (Ctrl-C).
@@ -312,6 +316,10 @@ pub(crate) enum CliCommands {
         /// the period is how often to attempt a GC
         #[arg(long, value_parser = parse_gc_schedule)]
         compactions: Option<GcSchedule>,
+
+        /// Delete eligible metadata without advancing boundary files.
+        #[arg(long, default_value_t = false)]
+        disable_boundary_files: bool,
     },
 }
 
@@ -455,9 +463,14 @@ mod tests {
         .unwrap();
 
         match args.command {
-            CliCommands::RunGarbageCollection { resource, min_age } => {
+            CliCommands::RunGarbageCollection {
+                resource,
+                min_age,
+                disable_boundary_files,
+            } => {
                 assert!(matches!(resource, GcResource::WalFence));
                 assert_eq!(min_age, Duration::from_secs(60));
+                assert!(!disable_boundary_files);
             }
             command => panic!("unexpected command: {command:?}"),
         }

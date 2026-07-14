@@ -52,6 +52,12 @@ You can also embed the garbage collector in your own process using `GarbageColle
 
 With `GarbageCollectorOptions::default()`, garbage collection runs every 60 seconds and uses a 5 minute minimum age for managed directories. WAL fence deletion stays in dry-run mode by default.
 
+To delete manifest and compactions metadata without advancing boundary files, set
+`GarbageCollectorOptions::boundary_files_enabled` to `false` on every garbage collector for the
+database. Metadata readers and writers continue to honor any existing boundary. Increase the
+manifest and compactions `min_age` values beyond the longest time a stale process could remain
+alive before using this mode.
+
 :::note
 
 The standalone garbage collector expects the database to already exist (a manifest must be present).

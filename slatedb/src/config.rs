@@ -210,6 +210,10 @@ use crate::error::SlateDBError;
 
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
+fn default_boundary_files_enabled() -> bool {
+    true
+}
+
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub enum PreloadLevel {
@@ -1431,6 +1435,13 @@ pub struct GarbageCollectorOptions {
     /// a garbage collector is owned by a [`Settings`] configured DB, unset means
     /// inherit [`Settings::metric_level`].
     pub metric_level: Option<MetricLevel>,
+
+    /// Whether manifest and compactions boundary files are advanced before deletion.
+    ///
+    /// When disabled, garbage collection still deletes eligible metadata but does not update the
+    /// durable boundary. Every garbage collector for the database must use the same policy.
+    #[serde(default = "default_boundary_files_enabled")]
+    pub boundary_files_enabled: bool,
 }
 
 impl GarbageCollectorOptions {
@@ -1531,6 +1542,7 @@ impl Default for GarbageCollectorOptions {
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
             detach_options: Some(GarbageCollectorScheduleOptions::default()),
             metric_level: None,
+            boundary_files_enabled: true,
         }
     }
 }
@@ -1555,9 +1567,17 @@ pub struct ObjectStoreCacheOptions {
     /// its default value is 4mb.
     pub part_size_bytes: usize,
 
-    /// Whether to cache PUT operations to disk. When enabled, data written via PUT operations
-    /// will be cached locally for faster subsequent reads. Default is false.
-    pub cache_puts: bool,
+    /// Whether to cache compacted SSTs produced by memtable flushes to the
+    /// local disk cache, for faster subsequent reads.
+    ///
+    /// Default is false.
+    pub cache_on_flush: bool,
+
+    /// Whether to cache compacted SSTs produced by compaction to the local
+    /// disk cache, for faster subsequent reads.
+    ///
+    /// Default is false.
+    pub cache_on_compaction: bool,
 
     /// Whether to preload SST files into cache during database startup. When enabled,
     /// the database will load SST files into the cache up to the cache size limit
@@ -1589,7 +1609,8 @@ impl Default for ObjectStoreCacheOptions {
             #[cfg(not(target_pointer_width = "32"))]
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
-            cache_puts: false,
+            cache_on_flush: false,
+            cache_on_compaction: false,
             preload_disk_cache_on_startup: None,
             scan_interval: Some(Duration::from_secs(3600)),
             max_open_file_handles: 1000,
@@ -1692,6 +1713,24 @@ mod tests {
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
+    }
+
+    #[test]
+    fn test_gc_boundary_files_are_enabled_by_default_when_omitted() {
+        fn without_boundary_setting<T: Serialize>(value: T) -> serde_json::Value {
+            let mut value = serde_json::to_value(value).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("boundary_files_enabled");
+            value
+        }
+
+        let gc: GarbageCollectorOptions =
+            serde_json::from_value(without_boundary_setting(GarbageCollectorOptions::default()))
+                .unwrap();
+
+        assert!(gc.boundary_files_enabled);
     }
 
     #[test]

@@ -144,6 +144,7 @@ async def test_admin_run_gc_once_accepts_default_and_custom_options() -> None:
             compacted_options=None,
             compactions_options=None,
             detach_options=schedule_options,
+            disable_boundary_files=True,
         )
 
         await admin.run_gc_once(options)

@@ -16,12 +16,14 @@ pub(crate) struct ManifestGcTask {
     stats: Arc<GcStats>,
     manifest_options: GarbageCollectorDirectoryOptions,
     gc_filter: Option<Arc<dyn GcFilter>>,
+    boundary_files_enabled: bool,
 }
 
 impl std::fmt::Debug for ManifestGcTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ManifestGcTask")
             .field("manifest_options", &self.manifest_options)
+            .field("boundary_files_enabled", &self.boundary_files_enabled)
             .finish()
     }
 }
@@ -32,17 +34,47 @@ impl ManifestGcTask {
         stats: Arc<GcStats>,
         manifest_options: GarbageCollectorDirectoryOptions,
         gc_filter: Option<Arc<dyn GcFilter>>,
+        boundary_files_enabled: bool,
     ) -> Self {
         ManifestGcTask {
             manifest_store,
             stats,
             manifest_options,
             gc_filter,
+            boundary_files_enabled,
         }
     }
 
     fn manifest_min_age(&self) -> chrono::Duration {
         chrono::Duration::from_std(self.manifest_options.min_age).expect("invalid duration")
+    }
+
+    /// Deletes the given manifests from the manifest store.
+    ///
+    /// In case of dryrun, the actual deletion doesn't happen.
+    async fn maybe_delete_manifests(&self, manifest_ids: Vec<u64>) {
+        if self.manifest_options.dry_run {
+            if !manifest_ids.is_empty() {
+                log::info!(
+                    "dry run: skipping manifest deletion [count={}]",
+                    manifest_ids.len()
+                );
+            }
+            for id in manifest_ids {
+                log::debug!("dry run: would delete manifest but skipped [id={:?}]", id);
+            }
+            return;
+        }
+
+        futures::stream::iter(manifest_ids)
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
+                if let Err(e) = self.manifest_store.delete_manifest_unchecked(id).await {
+                    error!("error deleting manifest [id={:?}, error={}]", id, e);
+                } else {
+                    self.stats.gc_manifest_count.increment(1);
+                }
+            })
+            .await;
     }
 }
 
@@ -83,46 +115,23 @@ impl GcTask for ManifestGcTask {
 
         // Advance the boundary to the latest manifest selected by the GC model. The optional GC
         // filter only gates the final deletion pass.
-        if let Some(boundary) = manifests_to_delete
-            .iter()
-            .map(|manifest_metadata| manifest_metadata.id)
-            .max()
-        {
-            self.manifest_store.advance_boundary(boundary).await?;
+        if self.boundary_files_enabled {
+            if let Some(boundary) = manifests_to_delete
+                .iter()
+                .map(|manifest_metadata| manifest_metadata.id)
+                .max()
+            {
+                self.manifest_store.advance_boundary(boundary).await?;
+            }
         }
         let manifests_to_delete =
             retain_allowed_by_gc_filter(&self.gc_filter, manifests_to_delete).await;
-        if self.manifest_options.dry_run {
-            if !manifests_to_delete.is_empty() {
-                log::info!(
-                    "dry run: skipping manifest deletion [count={}]",
-                    manifests_to_delete.len()
-                );
-            }
-            for manifest_metadata in manifests_to_delete {
-                log::debug!(
-                    "dry run: would delete manifest but skipped [id={:?}]",
-                    manifest_metadata.id
-                );
-            }
-            return Ok(());
-        }
-        futures::stream::iter(manifests_to_delete)
-            .for_each_concurrent(GC_DELETE_CONCURRENCY, |manifest_metadata| async move {
-                if let Err(e) = self
-                    .manifest_store
-                    .delete_manifest_unchecked(manifest_metadata.id)
-                    .await
-                {
-                    error!(
-                        "error deleting manifest [id={:?}, error={}]",
-                        manifest_metadata.id, e
-                    );
-                } else {
-                    self.stats.gc_manifest_count.increment(1);
-                }
-            })
-            .await;
+        let manifest_ids_to_delete = manifests_to_delete
+            .into_iter()
+            .map(|manifest_metadata| manifest_metadata.id)
+            .collect::<Vec<_>>();
+
+        self.maybe_delete_manifests(manifest_ids_to_delete).await;
 
         Ok(())
     }
@@ -189,6 +198,7 @@ mod tests {
                 dry_run: false,
             },
             None,
+            true,
         );
         task.collect(Utc::now() + TimeDelta::hours(1))
             .await
@@ -203,6 +213,61 @@ mod tests {
             .unwrap();
         assert_eq!("2", std::str::from_utf8(&raw_boundary).unwrap());
 
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(
+            vec![3],
+            manifests
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_without_boundary_advancement_deletes_without_creating_boundary() {
+        let object_store = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from("/root"),
+            object_store.clone(),
+        ));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let recorder = MetricsRecorderHelper::noop();
+        let task = ManifestGcTask::new(
+            manifest_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(1),
+                interval: None,
+                dry_run: false,
+            },
+            None,
+            false,
+        );
+        task.collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            object_store
+                .get(&Path::from("/root/gc/manifest.boundary"))
+                .await,
+            Err(object_store::Error::NotFound { .. })
+        ));
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(
             vec![3],
@@ -246,6 +311,7 @@ mod tests {
                 dry_run: false,
             },
             Some(Arc::new(DenyAllGcFilter) as Arc<dyn GcFilter>),
+            true,
         );
         task.collect(Utc::now() + TimeDelta::hours(1))
             .await
