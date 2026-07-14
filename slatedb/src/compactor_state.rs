@@ -274,6 +274,14 @@ impl CompactionStatus {
         )
     }
 
+    /// Returns whether this compaction still consumes scheduler capacity.
+    pub(crate) fn consumes_compaction_slot(self) -> bool {
+        matches!(
+            self,
+            CompactionStatus::Submitted | CompactionStatus::Scheduled | CompactionStatus::Running
+        )
+    }
+
     fn finished(self) -> bool {
         matches!(self, CompactionStatus::Completed | CompactionStatus::Failed)
     }
@@ -1365,14 +1373,25 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_status_active_and_finished() {
+    fn test_compaction_status_classifications() {
         assert!(CompactionStatus::Submitted.active());
+        assert!(CompactionStatus::Scheduled.active());
         assert!(CompactionStatus::Running.active());
+        assert!(CompactionStatus::Compacted.active());
         assert!(!CompactionStatus::Completed.active());
         assert!(!CompactionStatus::Failed.active());
 
+        assert!(CompactionStatus::Submitted.consumes_compaction_slot());
+        assert!(CompactionStatus::Scheduled.consumes_compaction_slot());
+        assert!(CompactionStatus::Running.consumes_compaction_slot());
+        assert!(!CompactionStatus::Compacted.consumes_compaction_slot());
+        assert!(!CompactionStatus::Completed.consumes_compaction_slot());
+        assert!(!CompactionStatus::Failed.consumes_compaction_slot());
+
         assert!(!CompactionStatus::Submitted.finished());
+        assert!(!CompactionStatus::Scheduled.finished());
         assert!(!CompactionStatus::Running.finished());
+        assert!(!CompactionStatus::Compacted.finished());
         assert!(CompactionStatus::Completed.finished());
         assert!(CompactionStatus::Failed.finished());
     }
