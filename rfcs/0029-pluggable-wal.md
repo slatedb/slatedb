@@ -583,7 +583,9 @@ framework.
 
 #### Kafka
 
-TODO
+The prototype branch has an example implementation of the WAL traits that writes records to
+a Kafka topic and implements fencing using Kafka transactions:
+https://github.com/slatedb/slatedb/tree/wal-rfc-prototype/slatedb/src/wal/kafka
 
 ## Impact Analysis
 
