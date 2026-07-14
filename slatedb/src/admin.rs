@@ -50,6 +50,8 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
+    /// The retry policy applied to admin object-store operations.
+    pub(crate) object_store_max_retries: Option<u32>,
     #[cfg(feature = "compaction_filters")]
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
@@ -612,6 +614,7 @@ impl Admin {
             self.object_stores.store_of(store_type).clone(),
             self.rand.clone(),
             self.system_clock.clone(),
+            self.object_store_max_retries,
         ))
     }
 
