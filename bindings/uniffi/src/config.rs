@@ -451,7 +451,12 @@ pub struct GarbageCollectorOptions {
     #[uniffi(default = None)]
     pub detach_options: Option<GarbageCollectorScheduleOptions>,
     /// Whether GC should delete eligible manifest/compactions metadata without advancing boundary
-    /// files.
+    /// files. This supports object stores without conditional overwrites (`If-Match`), but allows a
+    /// SlateDB client or compactor to begin updating a manifest or compactions file, stop making
+    /// progress (for example, because its process or host is suspended), then resume after GC's
+    /// `min_age`. It can then recreate a deleted metadata ID and incorrectly report its stale update
+    /// as successful. Set `min_age` longer than the maximum lifetime of a stale process, and use the
+    /// same setting for every GC operating on the database.
     #[uniffi(default = false)]
     pub disable_boundary_files: bool,
 }

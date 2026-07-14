@@ -1438,8 +1438,13 @@ pub struct GarbageCollectorOptions {
 
     /// Whether manifest and compactions boundary files are advanced before deletion.
     ///
-    /// When disabled, garbage collection still deletes eligible metadata but does not update the
-    /// durable boundary. Every garbage collector for the database must use the same policy.
+    /// Disable this only for object stores that do not support conditional overwrites (`If-Match`).
+    /// Without boundary advancement, a SlateDB client or compactor can begin updating a manifest or
+    /// compactions file, stop making progress (for example, because its process or host is
+    /// suspended), then resume after the garbage collector's `min_age`. It can then recreate a
+    /// deleted metadata ID and incorrectly report its stale update as successful. Set `min_age`
+    /// longer than the maximum lifetime of a stale process, and use the same setting for every
+    /// garbage collector operating on the database.
     #[serde(default = "default_boundary_files_enabled")]
     pub boundary_files_enabled: bool,
 }
