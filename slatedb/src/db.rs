@@ -23,7 +23,6 @@
 pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache_manager::{self, CacheTarget};
-use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -56,7 +55,6 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{collect_touched_segments, DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::iter::IterationOrder;
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::mem_table::KVTableMetadata;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
@@ -66,7 +64,6 @@ use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
-use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
@@ -79,7 +76,7 @@ use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
-use crate::wal::{WalEvent, WalObserver, WalStatus};
+use crate::wal::{WalEvent, WalIterator, WalObserver, WalStatus};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -471,7 +468,7 @@ impl DbInner {
         }
     }
 
-    async fn replay_wal(&self, wal_id_range: Range<u64>) -> Result<(), SlateDBError> {
+    async fn replay_wal(&self, wal_iterator: Box<dyn WalIterator>) -> Result<(), SlateDBError> {
         let mut current_memtable_wal_id = self
             .state
             .read()
@@ -488,32 +485,18 @@ impl DbInner {
             |_| -> Result<(), SlateDBError> { Ok(()) }
         );
 
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: 256,
-            cache_blocks: false,
-            cache_metadata: false,
-            eager_spawn: true,
-            order: IterationOrder::Ascending,
-            prefix: None,
-            filter_context: None,
-        };
-
         let replay_options = WalReplayOptions {
-            sst_batch_size: 4,
             max_memtable_bytes: self.settings.l0_sst_size_bytes,
-            sst_iter_options,
-            min_seq: None,
+            ..Default::default()
         };
 
         let db_state = self.state.read().state().core().clone();
-        let mut replay_iter = WalReplayIterator::range(
-            wal_id_range,
+        let mut replay_iter = WalReplayIterator::for_wal_iterator(
+            wal_iterator,
             &db_state,
             replay_options,
             Arc::clone(&self.table_store),
-        )
-        .await?;
+        )?;
 
         loop {
             let replayed_table = match replay_iter.next().await {
@@ -2159,7 +2142,7 @@ mod tests {
         REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT,
         REQUEST_DURATION_SECONDS as OBJECT_STORE_REQUEST_DURATION_SECONDS,
     };
-    use crate::iter::RowEntryIterator;
+    use crate::iter::{IterationOrder, RowEntryIterator};
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{ManifestCore, VersionedManifest};
     use crate::merge_operator::{

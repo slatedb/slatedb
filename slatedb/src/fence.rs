@@ -6,11 +6,9 @@ use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
 use crate::utils::WatchableOnceCellReader;
 use crate::wal::writer_init::WalWriterInit;
-use crate::wal::{WalWriter, WriterInit};
-use log::error;
+use crate::wal::{WalIterator, WalWriter, WriterInit};
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::SystemClock;
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,7 +26,7 @@ pub(crate) struct WriterFencer {
 
 pub(crate) struct WriterFenceResult {
     pub(crate) manifest: FenceableManifest,
-    pub(crate) replay_range: Range<u64>,
+    pub(crate) replay_iterator: Box<dyn WalIterator>,
     pub(crate) wal_writer: Box<dyn WalWriter>,
 }
 
@@ -80,8 +78,8 @@ impl WriterFencer {
     /// Fences all writers with an older epoch than the provided `stored_manifest` by (1) writing
     /// a new `FenceableManifest` with a bumped epoch, and (2) writing an empty WAL file that acts
     /// as a barrier. Any parallel old writers will fail with `SlateDBError::Fenced` when trying
-    /// to "re-write" this file. Returns a `WriterFence` with the `FenceableManifest` and range
-    /// that must be replayed to recover up to the current epoch
+    /// to "re-write" this file. Returns a `WriterFence` with the `FenceableManifest` and iterator
+    /// that must be replayed to recover up to the current epoch.
     pub(crate) async fn fence(
         self,
         stored_manifest: StoredManifest,
@@ -113,17 +111,10 @@ impl WriterFencer {
         manifest.refresh().await?;
         fail_point_send!(self.fp_tx, "FinalRefreshManifest");
 
-        let replay_range = match result.replay_range.try_into() {
-            Ok(replay_range) => replay_range,
-            Err(_) => {
-                error!("replay range must use inclusive lower bound and exclusive upper bound");
-                return Err(SlateDBError::InvalidDBState);
-            }
-        };
         Ok(WriterFenceResult {
             manifest,
             wal_writer: result.wal_writer,
-            replay_range,
+            replay_iterator: result.replay_iterator,
         })
     }
 }
@@ -584,10 +575,19 @@ mod tests {
         // unpause WriterFencer
         fail_parallel::cfg(h.fp_registry.clone(), case.event, "off").unwrap();
         // verify it returns successfully
-        let result = jh.await.unwrap().unwrap();
+        let mut result = jh.await.unwrap().unwrap();
         // The fencer's stale empty_wal_id was retried above the fenced writer's possibly
         // advanced replay_after_wal_id.
-        assert_eq!(result.replay_range.start, replay_after_wal_id + 1);
+        let first_replayed_wal = result
+            .replay_iterator
+            .next()
+            .await
+            .unwrap()
+            .expect("expected the replay iterator to contain the fencing WAL");
+        assert_eq!(
+            first_replayed_wal.last_wal_file_id,
+            replay_after_wal_id + 1
+        );
 
         // verify that fenced db is fenced (new write fails)
         use crate::error::{CloseReason, ErrorKind};

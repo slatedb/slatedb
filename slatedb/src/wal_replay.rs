@@ -6,7 +6,6 @@ use crate::manifest::SsTableView;
 use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
 use crate::utils::panic_string;
 use log::error;
 use std::collections::VecDeque;
@@ -15,7 +14,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::task;
 use tokio::task::JoinHandle;
-use crate::wal;
 use crate::wal::{WalError, WalIterator as WalIteratorTrait, WalRows};
 
 pub(crate) struct WalReplayOptions {
@@ -246,7 +244,7 @@ pub(crate) struct WalIterator {
 }
 
 impl WalIterator {
-    async fn range(
+    pub(crate) async fn range(
         wal_id_range: Range<u64>,
         sst_batch_size: usize,
         sst_iter_options: SstIteratorOptions,

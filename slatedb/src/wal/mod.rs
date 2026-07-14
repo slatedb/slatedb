@@ -97,10 +97,9 @@ impl WriterManifest {
 
 /// The result returned by [`WriterInit::fence_and_init`]
 pub struct WriterInitResult {
-    // TODO: change me to an iterator
     /// An iterator that returns writes that must be replayed before starting SlateDB to recover
     /// data from the WAL.
-    pub replay_range: WalFileRange,
+    pub replay_iterator: Box<dyn WalIterator>,
     /// The WAL writer that will be used to append new writes to the WAL
     pub wal_writer: Box<dyn WalWriter>,
 }
