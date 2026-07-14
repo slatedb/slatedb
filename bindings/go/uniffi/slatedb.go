@@ -9465,9 +9465,11 @@ type GarbageCollectorOptions struct {
 	DetachOptions *GarbageCollectorScheduleOptions
 	// Whether GC should delete eligible manifest/compactions metadata without advancing boundary
 	// files. This supports object stores without conditional overwrites (`If-Match`), but allows a
-	// metadata writer paused longer than GC's `min_age` to recreate a deleted metadata ID and
-	// incorrectly report its stale update as successful. Set `min_age` longer than the maximum
-	// lifetime of a stale process, and use the same setting for every GC operating on the database.
+	// SlateDB client or compactor to begin updating a manifest or compactions file, stop making
+	// progress (for example, because its process or host is suspended), then resume after GC's
+	// `min_age`. It can then recreate a deleted metadata ID and incorrectly report its stale update
+	// as successful. Set `min_age` longer than the maximum lifetime of a stale process, and use the
+	// same setting for every GC operating on the database.
 	DisableBoundaryFiles bool
 }
 
