@@ -9464,7 +9464,10 @@ type GarbageCollectorOptions struct {
 	// Options for detaching clone references. `None` disables detach garbage collection.
 	DetachOptions *GarbageCollectorScheduleOptions
 	// Whether GC should delete eligible manifest/compactions metadata without advancing boundary
-	// files.
+	// files. This supports object stores without conditional overwrites (`If-Match`), but allows a
+	// metadata writer paused longer than GC's `min_age` to recreate a deleted metadata ID and
+	// incorrectly report its stale update as successful. Set `min_age` longer than the maximum
+	// lifetime of a stale process, and use the same setting for every GC operating on the database.
 	DisableBoundaryFiles bool
 }
 

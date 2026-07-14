@@ -19,9 +19,11 @@ Boundary advancement can be disabled with
 `GarbageCollectorOptions::boundary_files_enabled`. This supports object stores without conditional
 overwrite (`If-Match`) while allowing GC to continue deleting eligible metadata. Metadata readers
 and writers still check any existing boundary; on a new database, no boundary file is created while
-all garbage collectors use this mode. Disabling advancement removes the stale-writer fail-safe, so
-every garbage collector must use a compatible setting and the manifest and compactions `min_age`
-values must exceed the maximum lifetime of a stale process.
+all garbage collectors use this mode. Without a boundary, a metadata writer paused longer than
+`min_age` can resume after GC deletes the ID it intended to create. The create-if-absent operation
+can then reuse that ID, causing SlateDB to report a stale metadata update as successful even though
+newer metadata has superseded it. Every garbage collector must use a compatible setting, and the
+manifest and compactions `min_age` values must exceed the maximum lifetime of a stale process.
 
 ## Filtering Deletion Candidates
 
