@@ -8,6 +8,7 @@ use std::error::Error;
 use std::ops::{Bound, Range};
 use std::sync::Arc;
 
+pub mod kafka;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub(crate) mod wal_disabled;

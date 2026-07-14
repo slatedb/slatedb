@@ -38,6 +38,7 @@ object_store = { workspace = true }
 ouroboros = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
+rdkafka = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
