@@ -12,8 +12,11 @@ use log::error;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
+use async_trait::async_trait;
 use tokio::task;
 use tokio::task::JoinHandle;
+use crate::wal;
+use crate::wal::{WalError, WalIterator as WalIteratorTrait, WalRows};
 
 pub(crate) struct WalReplayOptions {
     /// The number of SSTs to preload while replaying
@@ -53,7 +56,7 @@ pub(crate) struct ReplayedMemtable {
 pub(crate) struct WalReplayIterator {
     options: WalReplayOptions,
     table_store: Arc<TableStore>,
-    wal_iter: WalIterator,
+    wal_iter: Box<dyn WalIteratorTrait>,
     /// An error from the underlying WAL iterator, held back so that write batches
     /// already applied to the current table are returned first. `DbReader` treats a
     /// missing WAL file as the end of the WAL, so rows replayed before the error
@@ -79,15 +82,27 @@ impl WalReplayIterator {
     ) -> Result<Self, SlateDBError> {
         // Everything before the replay range is already covered by the manifest,
         // so the conservative WAL watermark starts just below the range.
-        let last_completed_wal_id = wal_id_range.start.saturating_sub(1);
         let wal_iter = WalIterator::range(
             wal_id_range,
             options.sst_batch_size,
             options.sst_iter_options.clone(),
             Arc::clone(&table_store),
         )
-        .await?;
+            .await?;
+        Self::for_wal_iterator(
+            Box::new(wal_iter),
+            db_state,
+            options,
+            table_store,
+        )
+    }
 
+    pub(crate) fn for_wal_iterator(
+        wal_iter: Box<dyn WalIteratorTrait>,
+        db_state: &ManifestCore,
+        options: WalReplayOptions,
+        table_store: Arc<TableStore>,
+    ) -> Result<Self, SlateDBError> {
         // load the last seq number from manifest, and use it as the starting seq number to avoid
         // replaying the entries that are already in the L0 SST. while replaying the WALs, we'll
         // update the last seq number to the max seq number, and this final `last_seq` will be passed
@@ -101,7 +116,7 @@ impl WalReplayIterator {
             table_store,
             wal_iter,
             pending_error: None,
-            last_completed_wal_id,
+            last_completed_wal_id: db_state.replay_after_wal_id,
             last_tick,
             last_seq,
             min_seq,
@@ -140,10 +155,10 @@ impl WalReplayIterator {
                 // the end of the WAL, so rows replayed before the error must not be
                 // dropped with it.
                 Err(err) if applied_any => {
-                    self.pending_error = Some(err);
+                    self.pending_error = Some(err.into());
                     break;
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             };
 
             applied_any = true;
@@ -155,10 +170,10 @@ impl WalReplayIterator {
             // one file behind, retaining at most one extra WAL file on recovery.
             self.last_completed_wal_id = self
                 .last_completed_wal_id
-                .max(writes.wal_id.saturating_sub(1));
+                .max(writes.last_wal_file_id.saturating_sub(1));
             if writes.last_in_file {
-                assert!(writes.wal_id > self.last_completed_wal_id);
-                self.last_completed_wal_id = writes.wal_id;
+                assert!(writes.last_wal_file_id > self.last_completed_wal_id);
+                self.last_completed_wal_id = writes.last_wal_file_id;
             }
 
             for row_entry in writes.rows {
@@ -198,24 +213,6 @@ impl WalReplayIterator {
     }
 }
 
-/// A set of writes along with the id of the WAL file they were read from. Two
-/// guarantees hold across the batches returned by [`WalIterator`]: all rows of a
-/// committed write batch (which share one commit seq) are contained in a single
-/// `ReplayedWrites`, and successive batches carry strictly increasing seq ranges.
-/// For now each batch simply holds all rows of one WAL file, in file order, which
-/// satisfies both (a commit never spans WAL files). `rows` is empty when the WAL
-/// file contains no rows (an empty WAL or a zero-byte fence marker); such batches
-/// are still returned so callers can account for the file's WAL ID.
-struct ReplayedWrites {
-    rows: Vec<RowEntry>,
-    wal_id: u64,
-    /// True when this batch is the last one in its WAL file. This is an
-    /// optimization: callers can already infer that a file is fully applied when
-    /// they see a batch from a later file, but this flag lets them advance their
-    /// WAL watermark over the current file without waiting for the next one.
-    last_in_file: bool,
-}
-
 /// A WAL file's id along with an iterator over its rows.
 struct WalFileIter {
     wal_id: u64,
@@ -224,13 +221,13 @@ struct WalFileIter {
 
 /// Iterates over the writes in a range of WAL files, preloading up to
 /// `sst_batch_size` WAL SSTs concurrently. Returns the rows of one WAL file per
-/// [`ReplayedWrites`], and verifies that files carry strictly increasing seq
+/// [`WalRows`], and verifies that files carry strictly increasing seq
 /// ranges — the ordering callers rely on to split and tag memtables safely.
 ///
 /// Preloading only opens each WAL SST (footer, index, and any eagerly fetched
 /// blocks); a file's rows are read out only when it is returned from
 /// [`Self::next`], so at most one file's rows are materialized at a time.
-struct WalIterator {
+pub(crate) struct WalIterator {
     /// The number of SSTs to preload while replaying
     sst_batch_size: usize,
     /// Options to pass through to underlying SST iterators
@@ -260,7 +257,7 @@ impl WalIterator {
         }
 
         let next_wal_id = wal_id_range.start;
-        let mut wal_iter = WalIterator {
+        Ok(WalIterator {
             sst_batch_size,
             sst_iter_options,
             wal_id_range,
@@ -269,15 +266,7 @@ impl WalIterator {
             next_wal_id,
             last_seq: None,
             finished: false,
-        };
-
-        for _ in 0..sst_batch_size {
-            if !wal_iter.maybe_load_next_file() {
-                break;
-            }
-        }
-
-        Ok(wal_iter)
+        })
     }
 
     fn maybe_load_next_file(&mut self) -> bool {
@@ -313,7 +302,7 @@ impl WalIterator {
                 Arc::clone(&table_store),
                 sst_iter_options,
             )
-            .await?;
+                .await?;
             // An unbounded, unfiltered scan over a WAL SST always yields an
             // iterator. `None` means the file cannot be read, and replay must
             // fail rather than silently end early and drop the remaining WALs.
@@ -361,19 +350,22 @@ impl WalIterator {
             }
         }
     }
+}
 
+#[async_trait]
+impl WalIteratorTrait for WalIterator {
     /// Get the next set of writes from the WAL files in the range. Each returned
-    /// [`ReplayedWrites`] holds the rows of one WAL file; a WAL file with no rows
+    /// [`WalRows`] holds the rows of one WAL file; a WAL file with no rows
     /// yields a batch with empty `rows`. Returns `None` once all WAL files in the
     /// range have been read. It is an error if a WAL file in the range is not
     /// present. Errors are returned only on calls that return no batch, so rows
     /// read from earlier WAL files are never dropped with a later file's error.
-    async fn next(&mut self) -> Result<Option<ReplayedWrites>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<WalRows>, WalError> {
         if self.finished {
             return Ok(None);
         }
 
-        self.maybe_load_next_file();
+        while self.maybe_load_next_file() {}
         let mut file_iter = match self.take_next_file().await {
             Ok(Some(file_iter)) => file_iter,
             Ok(None) => {
@@ -382,7 +374,7 @@ impl WalIterator {
             }
             Err(err) => {
                 self.finished = true;
-                return Err(err);
+                return Err(err.into());
             }
         };
 
@@ -395,7 +387,7 @@ impl WalIterator {
                 Ok(None) => break,
                 Err(err) => {
                     self.finished = true;
-                    return Err(err);
+                    return Err(err.into());
                 }
             }
         }
@@ -413,7 +405,7 @@ impl WalIterator {
                         file_iter.wal_id, min_seq, last_seq,
                     );
                     self.finished = true;
-                    return Err(SlateDBError::InvalidDBState);
+                    return Err(WalError::SlateDBError(Arc::new(SlateDBError::InvalidDBState)));
                 }
             }
             let max_seq = rows
@@ -424,9 +416,9 @@ impl WalIterator {
             self.last_seq = Some(max_seq);
         }
 
-        Ok(Some(ReplayedWrites {
+        Ok(Some(WalRows {
             rows,
-            wal_id: file_iter.wal_id,
+            last_wal_file_id: file_iter.wal_id,
             last_in_file: true,
         }))
     }

@@ -212,6 +212,46 @@ pub trait WalWriter: Send {
     async fn close(&mut self) -> Result<(), WalError>;
 }
 
+/// Rows returned by [`WalIterator`]
+pub struct WalRows {
+    /// The rows read from the WAL File. All the rows with a given sequence number must be present
+    /// in th same [`WalRows`].
+    pub rows: Vec<RowEntry>,
+    /// The id of the last WAL File containing rows from `rows`. There may still be rows with higher
+    /// sequence numbers in the WAL File with this id.
+    pub last_wal_file_id: u64,
+    /// True when this batch is the last one in its WAL file. This is an
+    /// optimization, so its harmless to always set to false. Callers can already infer that a
+    /// file is fully applied when they see a batch from a later file, but this flag lets them
+    /// advance their WAL watermark over the current file without waiting for the next one.
+    pub last_in_file: bool,
+}
+
+/// An iterator over rows in some range of the WAL
+#[async_trait]
+pub trait WalIterator: Send + 'static {
+    /// Returns the next set of rows. Rows must be returned in sequence and WAL File order.
+    /// Returns None when iterator's range is exhausted. Iterators created using an unbounded
+    /// end range that have exhausted the current WAL block until new rows are appended and neverCollapse annotation
+    /// return `None`.
+    /// Returns [`WalError::WalTruncated`] if the iterator observes that the WAL was truncated
+    /// while iterating.
+    async fn next(&mut self) -> Result<Option<WalRows>, WalError>;
+}
+
+/// API for reading from the WAL. Used by the Reader/
+#[async_trait]
+pub trait WalReader {
+    /// Returns an iterator over the specified range of WAL File IDs. The start of the range must
+    /// not be `Unbounded`. If the end of the range is `Unbounded` then the returned iterator
+    /// continues returning writes as new writes are appended to the WAL. Otherwise, it returns
+    /// `None` upon reaching the end of he range.
+    async fn iterator(
+        &self,
+        wal_file_id_range: WalFileRange,
+    ) -> Result<Box<dyn WalIterator>, WalError>;
+}
+
 impl From<WalStatus> for WalError {
     fn from(status: WalStatus) -> Self {
         status
