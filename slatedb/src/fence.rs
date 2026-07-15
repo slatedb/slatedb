@@ -2,11 +2,11 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
 use crate::Settings;
+use fail_parallel::{fail_point_send, FailPointTx};
 use slatedb_common::SystemClock;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
-use fail_parallel::{fail_point_send, FailPointTx};
 
 pub(crate) struct WriterFencer {
     table_store: Arc<TableStore>,
@@ -27,12 +27,7 @@ impl WriterFencer {
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
     ) -> Self {
-        Self::new_with_fp_handle(
-            table_store,
-            settings,
-            system_clock,
-            FailPointTx::dummy()
-        )
+        Self::new_with_fp_handle(table_store, settings, system_clock, FailPointTx::dummy())
     }
 
     fn new_with_fp_handle(
@@ -136,7 +131,7 @@ mod tests {
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     };
     use crate::error::SlateDBError;
-    use crate::fence::{WriterFencer};
+    use crate::fence::WriterFencer;
     use crate::format::sst::SsTableFormat;
     use crate::garbage_collector::GarbageCollector;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -146,6 +141,7 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
+    use fail_parallel::fail_point_channel;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -156,7 +152,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
-    use fail_parallel::fail_point_channel;
 
     struct WriterFencerTestHarness {
         object_store: Arc<dyn ObjectStore>,
@@ -197,7 +192,7 @@ mod tests {
                 table_store.clone(),
                 &settings,
                 system_clock.clone(),
-                fp_tx
+                fp_tx,
             );
             Self {
                 object_store,
